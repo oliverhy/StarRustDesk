@@ -1,0 +1,14 @@
+export const APP_NAME: string = 'StarRustDesk'
+export const DEFAULT_REMOTE_ID: string = ''
+export const CONNECTION_TIMEOUT_MS: number = 10000
+export const TOOLBAR_AUTO_HIDE_MS: number = 5000
+export const ID_GROUP_SIZE: number = 3
+export const MAX_PEER_LIST_ITEMS: number = 100
+export const K_MOBILE_PAGE_MAX_WIDTH: number = 600
+export const K_APP_TYPE_MAIN: string = 'main'
+export const K_APP_TYPE_DESKTOP_REMOTE: string = 'desktop_remote'
+export const K_APP_TYPE_DESKTOP_FILE_TRANSFER: string = 'desktop_file_transfer'
+export const K_APP_TYPE_DESKTOP_VIEW_CAMERA: string = 'desktop_view_camera'
+export const K_APP_TYPE_DESKTOP_PORT_FORWARD: string = 'desktop_port_forward'
+export const K_APP_TYPE_DESKTOP_TERMINAL: string = 'desktop_terminal'
+export const K_WINDOW_MAIN_ID: number = 0

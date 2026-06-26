@@ -1,0 +1,11 @@
+{
+  "app": {
+    "bundleName": "com.example.starrustdesk",
+    "vendor": "example",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "buildVersion": "1",
+    "icon": "$media:starrustdesk_app_icon_1024",
+    "label": "$string:app_name"
+  }
+}

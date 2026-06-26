@@ -1,0 +1,60 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "rustdesk_accent",
+      "value": "#1976D2"
+    },
+    {
+      "name": "rustdesk_id_color",
+      "value": "#FF5722"
+    },
+    {
+      "name": "rustdesk_bg_light",
+      "value": "#F5F5F5"
+    },
+    {
+      "name": "rustdesk_bg_dark",
+      "value": "#1A1A2E"
+    },
+    {
+      "name": "rustdesk_card_light",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "rustdesk_card_dark",
+      "value": "#2D2D44"
+    },
+    {
+      "name": "rustdesk_tab_selected",
+      "value": "#1976D2"
+    },
+    {
+      "name": "rustdesk_tab_unselected",
+      "value": "#9E9E9E"
+    },
+    {
+      "name": "rustdesk_dark_gray",
+      "value": "#9E9E9E"
+    },
+    {
+      "name": "rustdesk_connected_green",
+      "value": "#85F6C7"
+    },
+    {
+      "name": "rustdesk_success",
+      "value": "#4CAF50"
+    },
+    {
+      "name": "rustdesk_error",
+      "value": "#F44336"
+    },
+    {
+      "name": "rustdesk_warning",
+      "value": "#FF9800"
+    }
+  ]
+}

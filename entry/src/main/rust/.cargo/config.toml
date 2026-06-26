@@ -1,0 +1,31 @@
+[target.aarch64-unknown-linux-ohos]
+linker = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/clang"
+ar = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/llvm-ar"
+rustflags = [
+    "-C", "link-arg=--target=aarch64-linux-ohos",
+    "-C", "link-arg=--sysroot=D:/work/DEVECO~1/sdk/default/OPENHA~1/native/sysroot",
+    "-C", "link-arg=-L",
+    "-C", "link-arg=D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/lib/aarch64-linux-ohos",
+    "-C", "link-arg=-lc++_static",
+    "-C", "link-arg=-lc++abi",
+]
+
+[target.x86_64-unknown-linux-ohos]
+linker = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/clang"
+ar = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/llvm-ar"
+rustflags = [
+    "-C", "link-arg=--target=x86_64-linux-ohos",
+    "-C", "link-arg=--sysroot=D:/work/DEVECO~1/sdk/default/OPENHA~1/native/sysroot",
+    "-C", "link-arg=-L",
+    "-C", "link-arg=D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/lib/x86_64-linux-ohos",
+    "-C", "link-arg=-lc++_static",
+    "-C", "link-arg=-lc++abi",
+]
+
+[env]
+CC_aarch64-unknown-linux-ohos = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/clang"
+AR_aarch64-unknown-linux-ohos = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/llvm-ar"
+CFLAGS_aarch64-unknown-linux-ohos = "--sysroot=D:/work/DEVECO~1/sdk/default/OPENHA~1/native/sysroot --target=aarch64-linux-ohos"
+CC_x86_64-unknown-linux-ohos = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/clang"
+AR_x86_64-unknown-linux-ohos = "D:/work/DEVECO~1/sdk/default/openharmony/native/llvm/bin/llvm-ar"
+CFLAGS_x86_64-unknown-linux-ohos = "--sysroot=D:/work/DEVECO~1/sdk/default/OPENHA~1/native/sysroot --target=x86_64-linux-ohos"

@@ -1,0 +1,16 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+/.agents
+/.codex
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+/signing
+*.log

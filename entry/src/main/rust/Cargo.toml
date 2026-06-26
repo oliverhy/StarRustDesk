@@ -1,0 +1,26 @@
+[package]
+name = "rustdesk_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustdesk_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+hbb_common = { path = "C:/Users/YIN/AppData/Local/Temp/rustdesk_full/libs/hbb_common" }
+libc = "0.2"
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+log = "0.4"
+protobuf = "3"
+
+[patch.crates-io]
+machine-uid = { path = "C:/Users/YIN/AppData/Local/Temp/machine_uid_replace" }
+sodiumoxide = { path = "C:/Users/YIN/AppData/Local/Temp/sodiumoxide_replace" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

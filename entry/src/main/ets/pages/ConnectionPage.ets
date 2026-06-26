@@ -1,0 +1,583 @@
+import { router } from '@kit.ArkUI'
+import { RustDeskTheme } from '../theme/RustDeskTheme'
+import { translate } from '../utils/I18n'
+import { ConnectionService } from '../service/ConnectionService'
+import { ConnectionStatus } from '../model/ConnectionModel'
+import { RustDeskNapi } from '../service/RustDeskNapi'
+
+interface SavedConnectionInfo {
+  id: string
+  name: string
+  remoteId: string
+  password: string
+  performancePreset: string
+}
+
+@Component
+export struct ConnectionPage {
+  @State connectionName: string = ''
+  @State remoteId: string = ''
+  @State password: string = ''
+  @State isIdEmpty: boolean = true
+  @State isConnecting: boolean = false
+  @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
+  @State showUpdateBanner: boolean = false
+  @State isUsingPublicServer: boolean = true
+  @State customServerHint: string = ''
+  @State connectionStatusText: string = ''
+  @State connectionStatusColor: ResourceColor = Color.Transparent
+  @State connectionStatusValue: number = 0
+  @State performancePreset: string = 'smooth'
+  @State hasOpenedRemotePage: boolean = false
+  @State pageWidth: number = 0
+  @State savedConnections: SavedConnectionInfo[] = []
+  @State selectedConnectionId: string = ''
+  @State savedConnectionsVersion: number = 0
+  private statusTimer: number = -1
+
+  aboutToAppear(): void {
+    this.checkServerConfig()
+    this.loadSavedConnections()
+    this.startStatusPolling()
+  }
+
+  aboutToDisappear(): void {
+    if (this.statusTimer !== -1) {
+      clearTimeout(this.statusTimer)
+    }
+  }
+
+  checkServerConfig(): void {
+    this.isUsingPublicServer = RustDeskNapi.isUsingPublicServer()
+    let idServer: string = RustDeskNapi.getOption('custom-rendezvous-server')
+    if (idServer.length > 0) {
+      this.customServerHint = idServer
+    } else {
+      this.customServerHint = ''
+    }
+  }
+
+  startStatusPolling(): void {
+    let poll = () => {
+      let status: number = RustDeskNapi.getConnectionStatus()
+      this.connectionStatusValue = status
+      if (status === ConnectionStatus.CONNECTING) {
+        this.connectionStatusText = translate('Connecting...')
+        this.connectionStatusColor = RustDeskTheme.WARNING
+        this.isConnecting = true
+      } else if (status === ConnectionStatus.CONNECTED) {
+        this.connectionStatusText = translate('Connected')
+        this.connectionStatusColor = RustDeskTheme.SUCCESS
+        this.isConnecting = false
+        if (!this.hasOpenedRemotePage) {
+          this.hasOpenedRemotePage = true
+          router.pushUrl({ url: 'pages/RemotePage' })
+          return
+        }
+      } else if (status === ConnectionStatus.FAILED) {
+        let error: string = ConnectionService.getLastConnectionError()
+        this.connectionStatusText = error.length > 0 ? error : translate('Connection failed')
+        this.connectionStatusColor = RustDeskTheme.ERROR
+        this.isConnecting = false
+      } else {
+        this.connectionStatusText = ''
+        this.connectionStatusColor = Color.Transparent
+        this.isConnecting = false
+        this.hasOpenedRemotePage = false
+      }
+      this.statusTimer = setTimeout(poll, 1000)
+    }
+    poll()
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Top }) {
+      Column() {
+        if (this.showUpdateBanner) {
+          this.buildUpdateBanner()
+        }
+        Scroll() {
+          Column({ space: 16 }) {
+            this.buildSavedConnections()
+            this.buildRemoteIdInput()
+            this.buildConnectionNameInput()
+            this.buildPasswordInput()
+            this.buildPerformancePresetSelector()
+            this.buildConnectionEditActions()
+            if (this.connectionStatusText.length > 0) {
+              this.buildConnectionStatus()
+            }
+            if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
+              this.buildCustomServerIndicator()
+            }
+            this.buildQuickActions()
+          }
+          .width(this.pageWidth >= 720 ? 520 : '100%')
+          .padding({ top: this.pageWidth >= 720 ? 32 : 8 })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ left: this.pageWidth >= 720 ? 24 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 720 ? 24 : RustDeskTheme.PAGE_PADDING })
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width('100%')
+    .height('100%')
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.pageWidth = newValue.width as number
+    })
+  }
+
+  @Builder
+  buildUpdateBanner() {
+    Row() {
+      Text(translate('Download new version'))
+        .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+        .fontColor(Color.White)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#FF4081')
+    .alignItems(VerticalAlign.Center)
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      router.pushUrl({ url: 'pages/SettingsPage' })
+    })
+  }
+
+  @Builder
+  buildConnectionStatus() {
+    Row() {
+      Circle()
+        .width(8)
+        .height(8)
+        .fill(this.connectionStatusColor)
+      Text(this.connectionStatusText)
+        .fontSize(14)
+        .fontColor(this.connectionStatusColor)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .margin({ left: 6 })
+
+      if (this.connectionStatusValue === ConnectionStatus.FAILED) {
+        Button(translate('Retry'))
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ACCENT)
+          .backgroundColor(Color.Transparent)
+          .margin({ left: 12 })
+          .onClick(() => {
+            this.onConnect()
+          })
+      }
+
+      if (this.connectionStatusValue === ConnectionStatus.CONNECTED) {
+        Button(translate('Disconnect'))
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .backgroundColor(Color.Transparent)
+          .margin({ left: 12 })
+          .onClick(() => {
+            ConnectionService.disconnect()
+          })
+      }
+    }
+    .width('100%')
+    .padding({ left: 4, top: 8, bottom: 4 })
+  }
+
+  @Builder
+  buildRemoteIdInput() {
+    Column() {
+      Row() {
+        TextInput({ placeholder: translate('Remote ID'), text: this.remoteId })
+          .type(InputType.Normal)
+          .maxLength(12)
+          .fontSize(RustDeskTheme.FONT_SIZE_ID)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+          .fontColor(RustDeskTheme.ID_COLOR)
+          .layoutWeight(1)
+          .onChange((value: string) => {
+            this.remoteId = value
+            this.isIdEmpty = value.length === 0
+          })
+
+        if (!this.isIdEmpty) {
+          Button({ type: ButtonType.Circle }) {
+            Text('✕')
+              .fontSize(14)
+              .fontColor(Color.White)
+          }
+          .width(24)
+          .height(24)
+          .backgroundColor(RustDeskTheme.DARK_GRAY)
+          .onClick(() => {
+            this.remoteId = ''
+            this.isIdEmpty = true
+          })
+          .transition(TransitionEffect.OPACITY)
+        }
+
+        Button({ type: ButtonType.Circle }) {
+          Text('→')
+            .fontSize(28)
+            .fontColor(RustDeskTheme.DARK_GRAY)
+        }
+        .width(48)
+        .height(48)
+        .backgroundColor(Color.Transparent)
+        .onClick(() => {
+          this.onConnect()
+        })
+      }
+      .padding({ left: 16, right: 8 })
+      .height(64)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .alignItems(VerticalAlign.Center)
+      .shadow({
+        radius: 4,
+        color: this.isDarkMode ? '#00000040' : '#0000001A',
+        offsetX: 0,
+        offsetY: 2
+      })
+    }
+    .width('100%')
+    .margin({ top: 8 })
+  }
+
+  @Builder
+  buildConnectionNameInput() {
+    TextInput({ placeholder: '连接名称（可选）', text: this.connectionName })
+      .type(InputType.Normal)
+      .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+      .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      .width('100%')
+      .height(48)
+      .padding({ left: 16, right: 16 })
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .onChange((value: string) => {
+        this.connectionName = value
+      })
+  }
+
+  @Builder
+  buildPasswordInput() {
+    TextInput({ placeholder: translate('Password'), text: this.password })
+      .type(InputType.Password)
+      .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+      .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      .width('100%')
+      .height(48)
+      .padding({ left: 16, right: 16 })
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .onChange((value: string) => {
+        this.password = value
+      })
+  }
+
+  @Builder
+  buildSavedConnections() {
+    if (this.savedConnections.length > 0) {
+      Column({ space: 8 }) {
+        Row() {
+          Text('已保存连接')
+            .fontSize(15)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          Blank()
+          Text(`${this.savedConnections.length} 个`)
+            .fontSize(12)
+            .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        }
+        .width('100%')
+
+        ForEach(this.savedConnections, (item: SavedConnectionInfo) => {
+          Row({ space: 8 }) {
+            Column({ space: 3 }) {
+              Text(item.name.length > 0 ? item.name : item.remoteId)
+                .fontSize(14)
+                .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+                .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+                .width('100%')
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .maxLines(1)
+              Text(item.remoteId)
+                .fontSize(12)
+                .fontColor(RustDeskTheme.TEXT_SECONDARY)
+                .width('100%')
+            }
+            .layoutWeight(1)
+
+            Button('使用')
+              .height(32)
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor(item.id === this.selectedConnectionId ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
+              .borderRadius(8)
+              .onClick(() => {
+                this.applySavedConnection(item)
+              })
+
+            Button('删除')
+              .height(32)
+              .fontSize(12)
+              .fontColor(RustDeskTheme.ERROR)
+              .backgroundColor(Color.Transparent)
+              .onClick(() => {
+                this.deleteSavedConnection(item.id)
+              })
+          }
+          .width('100%')
+          .padding({ left: 12, right: 8, top: 10, bottom: 10 })
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+          .borderRadius(8)
+        }, (item: SavedConnectionInfo) => `${item.id}-${this.savedConnectionsVersion}`)
+      }
+      .width('100%')
+    }
+  }
+
+  @Builder
+  buildConnectionEditActions() {
+    Row({ space: 10 }) {
+      Button(this.selectedConnectionId.length > 0 ? '保存修改' : '保存连接')
+        .height(40)
+        .layoutWeight(1)
+        .fontSize(14)
+        .fontColor(Color.White)
+        .backgroundColor(this.remoteId.trim().length > 0 ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
+        .borderRadius(8)
+        .onClick(() => {
+          this.saveCurrentConnection()
+        })
+
+      Button('新建')
+        .height(40)
+        .fontSize(14)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+        .borderRadius(8)
+        .onClick(() => {
+          this.clearConnectionForm()
+        })
+    }
+    .width('100%')
+  }
+
+  @Builder
+  buildCustomServerIndicator() {
+    Row() {
+      Circle()
+        .width(6)
+        .height(6)
+        .fill(RustDeskTheme.SUCCESS)
+      Text(translate('Custom Server') + ': ' + this.customServerHint)
+        .fontSize(12)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .margin({ left: 6 })
+    }
+    .width('100%')
+    .padding({ left: 4, top: 4, bottom: 4 })
+  }
+
+  @Builder
+  buildPerformancePresetSelector() {
+    Column({ space: 8 }) {
+      Text('连接模式')
+        .fontSize(13)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+
+      Row({ space: 8 }) {
+        this.buildPresetButton('稳定', 'stable')
+        this.buildPresetButton('高帧率', 'high_fps')
+        this.buildPresetButton('高流畅', 'smooth')
+        this.buildPresetButton('高丝滑', 'silky')
+      }
+      .width('100%')
+    }
+    .width('100%')
+  }
+
+  @Builder
+  buildPresetButton(label: string, preset: string) {
+    Button(label)
+      .height(36)
+      .layoutWeight(1)
+      .fontSize(12)
+      .fontColor(this.performancePreset === preset ? Color.White : RustDeskTheme.TEXT_SECONDARY)
+      .backgroundColor(this.performancePreset === preset ? RustDeskTheme.ACCENT : (this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT))
+      .borderRadius(8)
+      .onClick(() => {
+        this.performancePreset = preset
+      })
+  }
+
+  @Builder
+  buildQuickActions() {
+      Row({ space: 12 }) {
+        this.buildActionButton(translate('Scan QR Code'), '▦', 'pages/ScanPage')
+        this.buildActionButton(translate('File Transfer'), '📁', 'pages/FileManagerPage')
+        this.buildActionButton(translate('Terminal'), '⌨', 'pages/TerminalPage')
+      }
+      .width('100%')
+      .padding({ top: 8 })
+  }
+
+  @Builder
+  buildActionButton(label: string, icon: string, targetPage: string) {
+    Column({ space: 6 }) {
+      Button({ type: ButtonType.Circle }) {
+        Text(icon)
+          .fontSize(22)
+      }
+      .width(52)
+      .height(52)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : '#E8F0FE')
+      .borderRadius(26)
+
+      Text(label)
+        .fontSize(12)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+    .onClick(() => {
+      router.pushUrl({ url: targetPage })
+    })
+  }
+
+  onConnect(): void {
+    let peerId: string = this.remoteId.trim()
+    if (peerId.length > 0 && !this.isConnecting) {
+      this.isConnecting = true
+      this.connectionStatusText = translate('Connecting...')
+      this.connectionStatusColor = RustDeskTheme.WARNING
+      AppStorage.set<string>('connectedPeerId', peerId)
+      ConnectionService.connect(peerId, this.password, this.performancePreset)
+      this.hasOpenedRemotePage = true
+      router.pushUrl({ url: 'pages/RemotePage' })
+    }
+  }
+
+  loadSavedConnections(): void {
+    let raw: string = RustDeskNapi.getOption('saved-connections')
+    if (raw.length <= 0) {
+      this.savedConnections = []
+      this.savedConnectionsVersion++
+      return
+    }
+    try {
+      let rows: Record<string, string>[] = JSON.parse(raw) as Record<string, string>[]
+      let list: SavedConnectionInfo[] = []
+      rows.forEach((row: Record<string, string>) => {
+        let remoteId: string = (row['remoteId'] ?? '').trim()
+        if (remoteId.length > 0) {
+          list.push({
+            id: row['id'] ?? this.makeConnectionId(remoteId),
+            name: row['name'] ?? '',
+            remoteId: remoteId,
+            password: row['password'] ?? '',
+            performancePreset: row['performancePreset'] ?? 'smooth'
+          })
+        }
+      })
+      this.savedConnections = this.cloneSavedConnections(list)
+      this.savedConnectionsVersion++
+    } catch (_e) {
+      this.savedConnections = []
+      this.savedConnectionsVersion++
+    }
+  }
+
+  persistSavedConnections(list: SavedConnectionInfo[]): void {
+    RustDeskNapi.setOption('saved-connections', JSON.stringify(list))
+  }
+
+  applySavedConnection(item: SavedConnectionInfo): void {
+    this.selectedConnectionId = item.id
+    this.connectionName = item.name
+    this.remoteId = item.remoteId
+    this.password = item.password
+    this.performancePreset = item.performancePreset.length > 0 ? item.performancePreset : 'smooth'
+    this.isIdEmpty = this.remoteId.length === 0
+  }
+
+  saveCurrentConnection(): void {
+    let peerId: string = this.remoteId.trim()
+    if (peerId.length <= 0) {
+      return
+    }
+    let savedName: string = this.connectionName.trim()
+    let targetId: string = this.selectedConnectionId.length > 0 ? this.selectedConnectionId : this.makeConnectionId(peerId)
+    let next: SavedConnectionInfo = {
+      id: targetId,
+      name: savedName.length > 0 ? savedName : peerId,
+      remoteId: peerId,
+      password: this.password,
+      performancePreset: this.performancePreset
+    }
+    let list: SavedConnectionInfo[] = []
+    let updated: boolean = false
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      if (item.id === targetId) {
+        list.push(next)
+        updated = true
+      } else {
+        list.push(item)
+      }
+    })
+    if (!updated) {
+      list.unshift(next)
+    }
+    this.savedConnections = this.cloneSavedConnections(list)
+    this.savedConnectionsVersion++
+    this.selectedConnectionId = targetId
+    this.persistSavedConnections(list)
+  }
+
+  deleteSavedConnection(id: string): void {
+    let list: SavedConnectionInfo[] = []
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      if (item.id !== id) {
+        list.push(item)
+      }
+    })
+    this.savedConnections = this.cloneSavedConnections(list)
+    this.savedConnectionsVersion++
+    if (this.selectedConnectionId === id) {
+      this.clearConnectionForm()
+    }
+    this.persistSavedConnections(list)
+  }
+
+  clearConnectionForm(): void {
+    this.selectedConnectionId = ''
+    this.connectionName = ''
+    this.remoteId = ''
+    this.password = ''
+    this.performancePreset = 'smooth'
+    this.isIdEmpty = true
+  }
+
+  makeConnectionId(remoteId: string): string {
+    return `${remoteId}-${Date.now()}`
+  }
+
+  cloneSavedConnections(list: SavedConnectionInfo[]): SavedConnectionInfo[] {
+    let cloned: SavedConnectionInfo[] = []
+    list.forEach((item: SavedConnectionInfo) => {
+      cloned.push({
+        id: item.id,
+        name: item.name,
+        remoteId: item.remoteId,
+        password: item.password,
+        performancePreset: item.performancePreset
+      })
+    })
+    return cloned
+  }
+}

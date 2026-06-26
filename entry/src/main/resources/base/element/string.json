@@ -1,0 +1,108 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "StarRustDesk - Remote Desktop Client"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Remote Desktop Application"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "StarRustDesk"
+    },
+    {
+      "name": "app_name",
+      "value": "StarRustDesk"
+    },
+    {
+      "name": "tab_connection",
+      "value": "Connection"
+    },
+    {
+      "name": "tab_server",
+      "value": "Server"
+    },
+    {
+      "name": "tab_settings",
+      "value": "Settings"
+    },
+    {
+      "name": "remote_id_hint",
+      "value": "Remote ID"
+    },
+    {
+      "name": "connect",
+      "value": "Connect"
+    },
+    {
+      "name": "disconnect",
+      "value": "Disconnect"
+    },
+    {
+      "name": "start_service",
+      "value": "Start Service"
+    },
+    {
+      "name": "stop_service",
+      "value": "Stop Service"
+    },
+    {
+      "name": "device_id",
+      "value": "Device ID"
+    },
+    {
+      "name": "password",
+      "value": "Password"
+    },
+    {
+      "name": "online",
+      "value": "Online"
+    },
+    {
+      "name": "offline",
+      "value": "Offline"
+    },
+    {
+      "name": "download_new_version",
+      "value": "Download new version"
+    },
+    {
+      "name": "no_devices",
+      "value": "No devices"
+    },
+    {
+      "name": "connecting",
+      "value": "Connecting..."
+    },
+    {
+      "name": "connected",
+      "value": "Connected"
+    },
+    {
+      "name": "connection_failed",
+      "value": "Connection failed"
+    },
+    {
+      "name": "recent",
+      "value": "Recent"
+    },
+    {
+      "name": "address_book",
+      "value": "Address Book"
+    },
+    {
+      "name": "favorites",
+      "value": "Favorites"
+    },
+    {
+      "name": "permission_camera_reason",
+      "value": "Camera is used for QR code scanning to connect to remote devices"
+    },
+    {
+      "name": "permission_microphone_reason",
+      "value": "Microphone is used for audio communication during remote sessions"
+    }
+  ]
+}
