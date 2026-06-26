@@ -1,5 +1,9 @@
 # StarRustDesk
 
+Thanks to Codex and Huawei's DevEco CLI. They made it possible for a beginner like me to build the HarmonyOS app I wanted.
+
+感谢 Codex 和华为研发的 DevEco CLI，让我这样的小白也能做一个自己想要的鸿蒙 APP。
+
 StarRustDesk is a HarmonyOS remote desktop client inspired by RustDesk. It is built with ArkTS/ArkUI, C++ NAPI, and a Rust networking core, targeting HarmonyOS phones, tablets, and 2-in-1 devices.
 
 StarRustDesk 是一个受 RustDesk 启发的鸿蒙远程桌面客户端，基于 ArkTS/ArkUI、C++ NAPI 和 Rust 网络核心实现，适配 HarmonyOS 手机、平板和二合一设备。
