@@ -26,6 +26,12 @@ typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int
 void rust_set_frame_callback(rust_frame_callback_t callback);
 typedef void (*rust_event_callback_t)(const char* message);
 void rust_set_event_callback(rust_event_callback_t callback);
+typedef int (*rust_audio_start_callback_t)(int sample_rate, int channels);
+typedef void (*rust_audio_stop_callback_t)(void);
+typedef void (*rust_audio_frame_callback_t)(const unsigned char* data, int length);
+void rust_set_audio_callbacks(rust_audio_start_callback_t start_callback,
+                              rust_audio_stop_callback_t stop_callback,
+                              rust_audio_frame_callback_t frame_callback);
 char* rust_get_device_id(void);
 void rust_free_string(char* s);
 

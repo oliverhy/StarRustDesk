@@ -8,14 +8,18 @@ if(DEFINED PACKAGE_FIND_FILE)
     include(${PACKAGE_FIND_FILE})
 endif()
 
-include_directories(${NATIVERENDER_ROOT_PATH}
-                    ${NATIVERENDER_ROOT_PATH}/include
-                    ${NATIVERENDER_ROOT_PATH}/core
-                    ${NATIVERENDER_ROOT_PATH}/crypto)
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/opus EXCLUDE_FROM_ALL)
+target_compile_options(opus PRIVATE -O2)
 
 add_library(entry SHARED napi_init.cpp
                        core/config.cpp
                        core/service.cpp
+                       core/audio_player.cpp
                        core/video_render.cpp
                        core/xcomponent_render.cpp
                        core/h264_decoder.cpp
@@ -27,7 +31,13 @@ add_library(entry SHARED napi_init.cpp
                        crypto/chacha20.cpp
                        crypto/poly1305.cpp)
 
-set(NATIVE_LIBS libace_napi.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec)
+target_include_directories(entry PRIVATE
+                    ${NATIVERENDER_ROOT_PATH}
+                    ${NATIVERENDER_ROOT_PATH}/include
+                    ${NATIVERENDER_ROOT_PATH}/core
+                    ${NATIVERENDER_ROOT_PATH}/crypto)
+
+set(NATIVE_LIBS libace_napi.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec -lohaudio Opus::opus)
 
 target_link_libraries(entry PUBLIC ${NATIVE_LIBS})
 

@@ -9,10 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hbb_common::config::{CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT, RS_PUB_KEY};
 use hbb_common::message_proto::{
-    key_event, login_response, message, supported_decoding, video_frame, Clipboard,
-    ClipboardFormat, CodecAbility, ControlKey, EncodedVideoFrames, Hash, ImageQuality, KeyEvent,
-    IdPk, KeyboardMode, LoginRequest, Message as PeerMessage, Misc, MouseEvent, MultiClipboards,
-    OSLogin, OptionMessage, PublicKey, SupportedDecoding, SwitchDisplay, TestDelay, VideoFrame,
+    key_event, login_response, message, misc, supported_decoding, video_frame, AudioFormat,
+    Clipboard, ClipboardFormat, CodecAbility, ControlKey, EncodedVideoFrames, Hash, ImageQuality,
+    KeyEvent, IdPk, KeyboardMode, LoginRequest, Message as PeerMessage, Misc, MouseEvent,
+    MultiClipboards, OSLogin, OptionMessage, PublicKey, SupportedDecoding, SwitchDisplay,
+    TestDelay, VideoFrame,
 };
 use hbb_common::rendezvous_proto::{
     punch_hole_response, rendezvous_message, ConnType, NatType, PunchHoleRequest, RequestRelay,
@@ -32,10 +33,16 @@ use tokio::runtime::Runtime;
 
 type FrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32);
 type EventCallback = extern "C" fn(*const c_char);
+type AudioStartCallback = extern "C" fn(i32, i32) -> i32;
+type AudioStopCallback = extern "C" fn();
+type AudioFrameCallback = extern "C" fn(*const c_uchar, i32);
 
 static CONNECTION: Mutex<Option<Stream>> = Mutex::new(None);
 static FRAME_CALLBACK: Mutex<Option<FrameCallback>> = Mutex::new(None);
 static EVENT_CALLBACK: Mutex<Option<EventCallback>> = Mutex::new(None);
+static AUDIO_START_CALLBACK: Mutex<Option<AudioStartCallback>> = Mutex::new(None);
+static AUDIO_STOP_CALLBACK: Mutex<Option<AudioStopCallback>> = Mutex::new(None);
+static AUDIO_FRAME_CALLBACK: Mutex<Option<AudioFrameCallback>> = Mutex::new(None);
 static PASSWORD_HASH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static CURRENT_PEER_ID: Mutex<String> = Mutex::new(String::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
@@ -81,6 +88,23 @@ pub extern "C" fn rust_set_event_callback(cb: Option<EventCallback>) {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_set_audio_callbacks(
+    start_cb: Option<AudioStartCallback>,
+    stop_cb: Option<AudioStopCallback>,
+    frame_cb: Option<AudioFrameCallback>,
+) {
+    if let Ok(mut guard) = AUDIO_START_CALLBACK.lock() {
+        *guard = start_cb;
+    }
+    if let Ok(mut guard) = AUDIO_STOP_CALLBACK.lock() {
+        *guard = stop_cb;
+    }
+    if let Ok(mut guard) = AUDIO_FRAME_CALLBACK.lock() {
+        *guard = frame_cb;
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn rust_connect(
     peer_id: *const c_char,
     password: *const c_char,
@@ -99,6 +123,7 @@ pub extern "C" fn rust_connect(
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    reset_audio();
     if let Ok(mut guard) = CONNECTION.lock() {
         *guard = None;
     }
@@ -383,6 +408,7 @@ pub extern "C" fn rust_disconnect() -> i32 {
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    reset_audio();
     if let Ok(mut guard) = CONNECTION.try_lock() {
         *guard = None;
     }
@@ -892,12 +918,14 @@ fn spawn_receive_loop(session_id: u64) {
                 emit_event("stale receive loop ended");
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+                reset_audio();
                 return;
             }
             emit_event("receive loop ended");
             if SESSION_ID.load(Ordering::SeqCst) == session_id {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+                reset_audio();
                 if let Ok(mut guard) = CONNECTION.lock() {
                     *guard = None;
                 }
@@ -967,12 +995,56 @@ async fn handle_peer_bytes(bytes: &[u8]) {
         Some(message::Union::MultiClipboards(multi_clipboards)) => {
             handle_remote_clipboards(multi_clipboards.clipboards);
         }
-        Some(message::Union::Misc(_)) => emit_event("peer message: Misc"),
+        Some(message::Union::Misc(misc_msg)) => handle_misc_message(misc_msg),
+        Some(message::Union::AudioFrame(frame)) => handle_audio_frame(&frame.data),
         Some(message::Union::CursorData(_)) => emit_event("peer message: CursorData"),
         Some(message::Union::CursorPosition(_)) => {}
         Some(message::Union::CursorId(_)) => emit_event("peer message: CursorId"),
         Some(_) => {}
         None => emit_event("peer message: empty"),
+    }
+}
+
+fn handle_misc_message(misc_msg: Misc) {
+    match misc_msg.union {
+        Some(misc::Union::AudioFormat(format)) => handle_audio_format(format),
+        _ => emit_event("peer message: Misc"),
+    }
+}
+
+fn handle_audio_format(format: AudioFormat) {
+    let sample_rate = format.sample_rate as i32;
+    let channels = format.channels.clamp(1, 2) as i32;
+    let start_result = match AUDIO_START_CALLBACK.lock() {
+        Ok(guard) => guard.map(|cb| cb(sample_rate, channels)).unwrap_or(-1),
+        Err(_) => -1,
+    };
+    emit_event(&format!(
+        "audio format received sample_rate={} channels={} start_result={}",
+        sample_rate, channels, start_result
+    ));
+}
+
+fn handle_audio_frame(data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    let frame_cb = match AUDIO_FRAME_CALLBACK.lock() {
+        Ok(guard) => *guard,
+        Err(_) => None,
+    };
+    if let Some(cb) = frame_cb {
+        cb(data.as_ptr(), data.len() as i32);
+    }
+}
+
+fn reset_audio() {
+    let stop_cb = match AUDIO_STOP_CALLBACK.lock() {
+        Ok(guard) => *guard,
+        Err(_) => None,
+    };
+    if let Some(cb) = stop_cb {
+        cb();
     }
 }
 
@@ -1061,7 +1133,7 @@ async fn send_login(hash: Hash) {
             }),
             image_quality: performance.quality.into(),
             custom_fps: performance.fps,
-            disable_audio: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+            disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
             show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
             ..Default::default()
         }),
@@ -1096,7 +1168,7 @@ async fn send_performance_options(refresh_video: bool) {
             }),
             ..Default::default()
         }),
-        disable_audio: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+        disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
         show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
         ..Default::default()
     });
@@ -1282,6 +1354,7 @@ fn mark_connection_lost(reason: &str) {
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    reset_audio();
     if let Ok(mut guard) = CONNECTION.lock() {
         *guard = None;
     }

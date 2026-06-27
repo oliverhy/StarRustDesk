@@ -6,6 +6,7 @@
 #include "core/file_transfer.h"
 #include "core/connection.h"
 #include "core/service.h"
+#include "core/audio_player.h"
 #include <cstring>
 #include <cstdio>
 #include <string>
@@ -80,6 +81,18 @@ static void OnRustEvent(const char* message) {
         g_lastConnectionResult.store(-18);
         g_connectionStatus.store(3);
     }
+}
+
+static int OnRustAudioStart(int sampleRate, int channels) {
+    return audio_player_start(sampleRate, channels);
+}
+
+static void OnRustAudioStop() {
+    audio_player_stop();
+}
+
+static void OnRustAudioFrame(const unsigned char* data, int length) {
+    audio_player_push_opus_frame(data, length);
 }
 
 static std::string ConnectionResultToMessage(int result) {
@@ -767,6 +780,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     Config::instance().load();
     rust_set_frame_callback(OnRustVideoFrame);
     rust_set_event_callback(OnRustEvent);
+    rust_set_audio_callbacks(OnRustAudioStart, OnRustAudioStop, OnRustAudioFrame);
 
     napi_property_descriptor desc[] = {
         {"connect", nullptr, Connect, nullptr, nullptr, nullptr, napi_default, nullptr},
