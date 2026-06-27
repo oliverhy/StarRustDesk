@@ -5,6 +5,11 @@ import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
 import { RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 
+interface RemotePoint {
+  x: number;
+  y: number;
+}
+
 @Entry
 @Component
 struct RemotePage {
@@ -33,6 +38,7 @@ struct RemotePage {
   @State currentDisplay: number = 0;
   @State fpsText: string = '0 fps';
   @State speedText: string = '0 KB/s';
+  @State routeText: string = '未知';
   @State pageWidth: number = 0;
   @State clipboardSyncEnabled: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
@@ -61,6 +67,7 @@ struct RemotePage {
   private smoothFps: number = 0;
   private smoothKbps: number = 0;
   private lastMoveSentAt: number = 0;
+  private lastMouseEventAt: number = 0;
   private lastPinchUpdateAt: number = 0;
   private lastDisplayPollAt: number = 0;
   private lastSurfaceWidth: number = 0;
@@ -97,9 +104,11 @@ struct RemotePage {
         this.lastDisplayPollAt = now;
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());
         this.currentDisplay = RustDeskNapi.getCurrentDisplay();
+        this.updateConnectionRoute();
       }
       if (status !== ConnectionStatus.CONNECTED) {
         this.hasVideo = false;
+        this.routeText = '未连接';
       }
       this.statusTimer = setTimeout(poll, 1000);
     };
@@ -164,6 +173,10 @@ struct RemotePage {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    .focusable(true)
+    .onKeyEventDispatch((event: KeyEvent) => {
+      return this.handleRemoteKey(event);
+    })
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.pageWidth = newValue.width as number;
       this.scheduleSurfaceRebindIfSizeChanged();
@@ -242,14 +255,33 @@ struct RemotePage {
           .onTouch((event: TouchEvent) => {
             this.handleRemoteTouch(event);
           })
+          .onMouse((event: MouseEvent) => {
+            this.handleRemoteMouse(event);
+          })
       }
 
       Stack()
+        .id('remoteInputCapture')
         .width(this.getDisplayWidth())
         .height(this.getDisplayHeight())
         .backgroundColor('#01000000')
+        .focusable(true)
+        .defaultFocus(true)
+        .focusOnTouch(true)
+        .onClick(() => {
+          this.requestRemoteInputFocus();
+        })
         .onTouch((event: TouchEvent) => {
           this.handleRemoteTouch(event);
+        })
+        .onMouse((event: MouseEvent) => {
+          this.handleRemoteMouse(event);
+        })
+        .onKeyEvent((event: KeyEvent) => {
+          return this.handleRemoteKey(event);
+        })
+        .onKeyEventDispatch((event: KeyEvent) => {
+          return this.handleRemoteKey(event);
         })
 
       if (!this.hasVideo) {
@@ -496,10 +528,13 @@ struct RemotePage {
       Text(`帧率 ${this.fpsText}`)
         .fontSize(11)
         .fontColor(Color.White)
+      Text(`状态 ${this.routeText}`)
+        .fontSize(11)
+        .fontColor(Color.White)
     }
     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .width('100%')
-    .height(40)
+    .height(56)
     .backgroundColor('#CC000000')
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Start);
@@ -578,6 +613,10 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
+    if (Date.now() - this.lastMouseEventAt < 120) {
+      return;
+    }
+
     if (event.touches.length <= 0) {
       if (this.isPinching || this.pinchStartDistance > 0) {
         this.endPinchTouch();
@@ -608,17 +647,12 @@ struct RemotePage {
     }
 
     let touch = event.touches[0];
-    let displayWidth: number = this.getDisplayWidth();
-    let displayHeight: number = this.getDisplayHeight();
-    let remoteX: number = Math.max(0, Math.min(this.remoteWidth - 1, touch.x * this.remoteWidth / displayWidth));
-    let remoteY: number = Math.max(0, Math.min(this.remoteHeight - 1, touch.y * this.remoteHeight / displayHeight));
-    this.lastAbsX = remoteX;
-    this.lastAbsY = remoteY;
-    this.cursorX = this.getDisplayLeft() + Math.max(0, Math.min(displayWidth, touch.x));
-    this.cursorY = this.getDisplayTop() + Math.max(0, Math.min(displayHeight, touch.y));
-    this.showCursor = true;
+    let remotePoint: RemotePoint = this.updatePointerFromLocal(touch.x, touch.y);
+    let remoteX: number = remotePoint.x;
+    let remoteY: number = remotePoint.y;
 
     if (event.type === TouchType.Down) {
+      this.requestRemoteInputFocus();
       this.touchStartX = touch.x;
       this.touchStartY = touch.y;
       this.longPressTriggered = false;
@@ -705,6 +739,181 @@ struct RemotePage {
   sendLeftClick(remoteX: number, remoteY: number): void {
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
+  }
+
+  handleRemoteMouse(event: MouseEvent): void {
+    this.lastMouseEventAt = Date.now();
+    this.clearLongPressTimer();
+    this.clearTapTimer();
+    this.requestRemoteInputFocus();
+
+    let remotePoint: RemotePoint = this.updatePointerFromLocal(event.x, event.y);
+    let action: number = this.mapMouseAction(event);
+    if (action < 0) {
+      return;
+    }
+
+    let now: number = Date.now();
+    if (action === 0 && now - this.lastMoveSentAt <= 8) {
+      return;
+    }
+    if (action === 0) {
+      this.lastMoveSentAt = now;
+    }
+    ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, action);
+    event.stopPropagation();
+  }
+
+  mapMouseAction(event: MouseEvent): number {
+    if (event.action === MouseAction.Move) {
+      return 0;
+    }
+    if (event.button === MouseButton.Left) {
+      if (event.action === MouseAction.Press) {
+        return 1;
+      }
+      if (event.action === MouseAction.Release) {
+        return 2;
+      }
+    }
+    if (event.button === MouseButton.Right) {
+      if (event.action === MouseAction.Press) {
+        return 3;
+      }
+      if (event.action === MouseAction.Release) {
+        return 4;
+      }
+    }
+    return -1;
+  }
+
+  updatePointerFromLocal(localX: number, localY: number): RemotePoint {
+    let displayWidth: number = this.getDisplayWidth();
+    let displayHeight: number = this.getDisplayHeight();
+    let clampedX: number = Math.max(0, Math.min(displayWidth, localX));
+    let clampedY: number = Math.max(0, Math.min(displayHeight, localY));
+    let remoteX: number = Math.max(0, Math.min(this.remoteWidth - 1, clampedX * this.remoteWidth / displayWidth));
+    let remoteY: number = Math.max(0, Math.min(this.remoteHeight - 1, clampedY * this.remoteHeight / displayHeight));
+    this.lastAbsX = remoteX;
+    this.lastAbsY = remoteY;
+    this.cursorX = this.getDisplayLeft() + clampedX;
+    this.cursorY = this.getDisplayTop() + clampedY;
+    this.showCursor = true;
+    return { x: remoteX, y: remoteY };
+  }
+
+  handleRemoteKey(event: KeyEvent): boolean {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+      return false;
+    }
+
+    let controlCode: number = this.mapControlKeyCode(event.keyCode);
+    if (controlCode > 0) {
+      ConnectionService.sendKeyEvent(controlCode, event.type === KeyType.Down ? 0 : 1);
+      return true;
+    }
+
+    let text: string = this.getKeyEventText(event);
+    if (text.length > 0) {
+      let scanCode: number = this.mapAsciiToWindowsScanCode(text);
+      if (scanCode > 0) {
+        ConnectionService.sendPhysicalKeyEvent(scanCode, event.type === KeyType.Down ? 0 : 1);
+      } else if (event.type === KeyType.Down) {
+        ConnectionService.sendText(text);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  requestRemoteInputFocus(): void {
+    try {
+      this.getUIContext()?.getFocusController().requestFocus('remoteInputCapture');
+    } catch (_e) {
+      // Some windows reject focus while relayout or navigation is in progress.
+    }
+  }
+
+  getKeyEventText(event: KeyEvent): string {
+    if (event.keyText.length === 1) {
+      return event.keyText;
+    }
+    if (event.unicode !== undefined && event.unicode > 0) {
+      return String.fromCharCode(event.unicode);
+    }
+    return '';
+  }
+
+  mapAsciiToWindowsScanCode(text: string): number {
+    if (text.length !== 1) {
+      return 0;
+    }
+    switch (text.toLowerCase()) {
+      case 'a': return 0x1E;
+      case 'b': return 0x30;
+      case 'c': return 0x2E;
+      case 'd': return 0x20;
+      case 'e': return 0x12;
+      case 'f': return 0x21;
+      case 'g': return 0x22;
+      case 'h': return 0x23;
+      case 'i': return 0x17;
+      case 'j': return 0x24;
+      case 'k': return 0x25;
+      case 'l': return 0x26;
+      case 'm': return 0x32;
+      case 'n': return 0x31;
+      case 'o': return 0x18;
+      case 'p': return 0x19;
+      case 'q': return 0x10;
+      case 'r': return 0x13;
+      case 's': return 0x1F;
+      case 't': return 0x14;
+      case 'u': return 0x16;
+      case 'v': return 0x2F;
+      case 'w': return 0x11;
+      case 'x': return 0x2D;
+      case 'y': return 0x15;
+      case 'z': return 0x2C;
+      case '1': return 0x02;
+      case '2': return 0x03;
+      case '3': return 0x04;
+      case '4': return 0x05;
+      case '5': return 0x06;
+      case '6': return 0x07;
+      case '7': return 0x08;
+      case '8': return 0x09;
+      case '9': return 0x0A;
+      case '0': return 0x0B;
+      default: return 0;
+    }
+  }
+
+  mapControlKeyCode(keyCode: number): number {
+    switch (keyCode) {
+      case 2012:
+        return 38;
+      case 2013:
+        return 40;
+      case 2014:
+        return 37;
+      case 2015:
+        return 39;
+      case 2049:
+        return 9;
+      case 2050:
+        return 32;
+      case 2054:
+        return 13;
+      case 2055:
+        return 8;
+      case 2070:
+        return 27;
+      case 2071:
+        return 46;
+      default:
+        return 0;
+    }
   }
 
   handlePinchTouch(event: TouchEvent): void {
@@ -1006,5 +1215,16 @@ struct RemotePage {
     this.lastStatsTime = now;
     this.lastStatsFrames = totalFrames;
     this.lastStatsBytes = totalBytes;
+  }
+
+  updateConnectionRoute(): void {
+    let route: number = ConnectionService.getConnectionRoute();
+    if (route === 1) {
+      this.routeText = '直连';
+    } else if (route === 2) {
+      this.routeText = '中继';
+    } else {
+      this.routeText = '未知';
+    }
   }
 }

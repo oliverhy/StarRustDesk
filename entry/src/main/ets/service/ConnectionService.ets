@@ -24,6 +24,10 @@ export class ConnectionService {
     RustDeskNapi.sendKeyEvent(keyCode, action)
   }
 
+  static sendPhysicalKeyEvent(scanCode: number, action: number): void {
+    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action)
+  }
+
   static sendText(text: string): void {
     RustDeskNapi.sendText(text)
   }
@@ -35,6 +39,10 @@ export class ConnectionService {
   static getConnectionStatus(): ConnectionStatus {
     let status: number = RustDeskNapi.getConnectionStatus()
     return status as ConnectionStatus
+  }
+
+  static getConnectionRoute(): number {
+    return RustDeskNapi.getConnectionRoute()
   }
 
   static getPeerId(): string {

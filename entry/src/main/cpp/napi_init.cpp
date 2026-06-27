@@ -205,6 +205,22 @@ static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value SendPhysicalKeyEvent(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t scanCode = 0, action = 0;
+    napi_get_value_int32(env, args[0], &scanCode);
+    napi_get_value_int32(env, args[1], &action);
+    int result = rust_send_physical_key_event(scanCode, action);
+    if (result != 0) {
+        OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent scan=%{public}d action=%{public}d result=%{public}d", scanCode, action, result);
+    }
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static napi_value SendText(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -352,6 +368,12 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
     }
     napi_value ret;
     napi_create_int32(env, status, &ret);
+    return ret;
+}
+
+static napi_value GetConnectionRoute(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_create_int32(env, rust_get_connection_route(), &ret);
     return ret;
 }
 
@@ -751,6 +773,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setPerformancePreset", nullptr, SetPerformancePreset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"disconnect", nullptr, Disconnect, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent", nullptr, SendKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendPhysicalKeyEvent", nullptr, SendPhysicalKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseEvent", nullptr, SendMouseEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -762,6 +785,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getActiveSessions", nullptr, GetActiveSessions, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPeerList", nullptr, GetPeerList, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionStatus", nullptr, GetConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getConnectionRoute", nullptr, GetConnectionRoute, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLastConnectionError", nullptr, GetLastConnectionError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDeviceId", nullptr, GetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDeviceName", nullptr, GetDeviceName, nullptr, nullptr, nullptr, napi_default, nullptr},

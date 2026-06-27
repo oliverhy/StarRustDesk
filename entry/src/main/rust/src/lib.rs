@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::net::SocketAddr;
 use std::os::raw::{c_char, c_uchar};
 use std::sync::mpsc::{self, Sender};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,6 +49,7 @@ static SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 
 #[derive(Clone, Copy)]
 struct PerformanceConfig {
@@ -97,6 +98,7 @@ pub extern "C" fn rust_connect(
     };
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+    CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     if let Ok(mut guard) = CONNECTION.lock() {
         *guard = None;
     }
@@ -261,6 +263,7 @@ pub extern "C" fn rust_connect(
                     *guard = Some(stream);
                 }
                 CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+                CONNECTION_ROUTE.store(2, Ordering::SeqCst);
 
                 spawn_receive_loop(session_id);
                 emit_event("receive loop spawned");
@@ -280,6 +283,7 @@ pub extern "C" fn rust_connect(
             match connect_tcp_local(addr, Some(local_addr), 6000).await {
                 Ok(s) => {
                     emit_event("direct peer connected");
+                    CONNECTION_ROUTE.store(1, Ordering::SeqCst);
                     s
                 }
                 Err(_) if !relay_from_server.is_empty() => {
@@ -287,6 +291,7 @@ pub extern "C" fn rust_connect(
                     match request_relay(&peer, &relay_from_server, &rendezvous_addr, &key).await {
                         Ok(s) => {
                             emit_event("relay connected");
+                            CONNECTION_ROUTE.store(2, Ordering::SeqCst);
                             s
                         }
                         Err(e) => {
@@ -305,6 +310,7 @@ pub extern "C" fn rust_connect(
             match request_relay(&peer, &relay_from_server, &rendezvous_addr, &key).await {
                 Ok(s) => {
                     emit_event("relay connected");
+                    CONNECTION_ROUTE.store(2, Ordering::SeqCst);
                     s
                 }
                 Err(e) => {
@@ -376,6 +382,7 @@ pub extern "C" fn rust_set_performance_preset(preset: *const c_char) -> i32 {
 pub extern "C" fn rust_disconnect() -> i32 {
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+    CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     if let Ok(mut guard) = CONNECTION.try_lock() {
         *guard = None;
     }
@@ -387,6 +394,15 @@ pub extern "C" fn rust_disconnect() -> i32 {
 pub extern "C" fn rust_get_connection_status() -> i32 {
     if CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         2
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_connection_route() -> i32 {
+    if CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        CONNECTION_ROUTE.load(Ordering::SeqCst)
     } else {
         0
     }
@@ -425,6 +441,20 @@ pub extern "C" fn rust_send_key_event(key_code: i32, action: i32) -> i32 {
         Some(ctrl) => event.set_control_key(ctrl),
         None => event.union = Some(key_event::Union::Chr(key_code.max(0) as u32)),
     }
+    let mut msg = PeerMessage::new();
+    msg.set_key_event(event);
+    queue_peer_message(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_send_physical_key_event(scan_code: i32, action: i32) -> i32 {
+    let mut event = KeyEvent {
+        down: action == 0,
+        press: action == 2,
+        mode: KeyboardMode::Map.into(),
+        ..Default::default()
+    };
+    event.union = Some(key_event::Union::Chr(scan_code.max(0) as u32));
     let mut msg = PeerMessage::new();
     msg.set_key_event(event);
     queue_peer_message(msg)
@@ -861,11 +891,13 @@ fn spawn_receive_loop(session_id: u64) {
             if stale {
                 emit_event("stale receive loop ended");
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+                CONNECTION_ROUTE.store(0, Ordering::SeqCst);
                 return;
             }
             emit_event("receive loop ended");
             if SESSION_ID.load(Ordering::SeqCst) == session_id {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+                CONNECTION_ROUTE.store(0, Ordering::SeqCst);
                 if let Ok(mut guard) = CONNECTION.lock() {
                     *guard = None;
                 }
@@ -1249,6 +1281,7 @@ fn mark_connection_lost(reason: &str) {
     emit_event(&format!("connection lost: {reason}"));
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+    CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     if let Ok(mut guard) = CONNECTION.lock() {
         *guard = None;
     }

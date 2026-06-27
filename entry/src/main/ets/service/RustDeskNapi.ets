@@ -54,6 +54,10 @@ export class RustDeskNapi {
     return rustdeskNapi.sendKeyEvent(keyCode, action)
   }
 
+  static sendPhysicalKeyEvent(scanCode: number, action: number): number {
+    return (rustdeskNapi as ESObject).sendPhysicalKeyEvent(scanCode, action)
+  }
+
   static sendText(text: string): number {
     return (rustdeskNapi as ESObject).sendText(text)
   }
@@ -96,6 +100,10 @@ export class RustDeskNapi {
 
   static getConnectionStatus(): number {
     return rustdeskNapi.getConnectionStatus()
+  }
+
+  static getConnectionRoute(): number {
+    return (rustdeskNapi as ESObject).getConnectionRoute()
   }
 
   static getLastConnectionError(): string {

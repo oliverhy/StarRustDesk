@@ -11,8 +11,10 @@ int rust_connect(const char* peer_id, const char* password,
 int rust_set_performance_preset(const char* preset);
 int rust_disconnect(void);
 int rust_get_connection_status(void);
+int rust_get_connection_route(void);
 int rust_send_mouse_event(double x, double y, int action);
 int rust_send_key_event(int key_code, int action);
+int rust_send_physical_key_event(int scan_code, int action);
 int rust_send_text(const char* text);
 int rust_send_clipboard_text(const char* text);
 char* rust_take_remote_clipboard_text(void);

@@ -31,6 +31,7 @@ export interface VideoFrameInfo {
 export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string) => number;
 export const disconnect: () => number;
 export const sendKeyEvent: (keyCode: number, action: number) => number;
+export const sendPhysicalKeyEvent: (scanCode: number, action: number) => number;
 export const sendText: (text: string) => number;
 export const sendMouseEvent: (x: number, y: number, action: number) => number;
 export const getDisplayCount: () => number;
@@ -42,6 +43,7 @@ export const stopService: () => number;
 export const getActiveSessions: () => SessionInfo[];
 export const getPeerList: () => PeerInfo[];
 export const getConnectionStatus: () => number;
+export const getConnectionRoute: () => number;
 export const getLastConnectionError: () => string;
 export const getDeviceId: () => string;
 export const getDeviceName: () => string;
