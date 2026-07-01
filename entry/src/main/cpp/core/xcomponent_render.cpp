@@ -17,6 +17,10 @@ XComponentRender& XComponentRender::instance() {
 
 void XComponentRender::setSurface(const std::string& surfaceId) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!surfaceId.empty() && surfaceId == surfaceId_ && nativeWindow_ != nullptr) {
+        return;
+    }
+
     destroyWindowLocked();
     surfaceId_ = surfaceId;
     if (surfaceId_.empty()) return;

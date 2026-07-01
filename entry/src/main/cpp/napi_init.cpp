@@ -218,7 +218,11 @@ static napi_value Disconnect(napi_env env, napi_callback_info info) {
     g_connectionStartedAtMs.store(0);
     std::thread([disconnectGeneration]() {
         if (g_connectionGeneration.load() == disconnectGeneration) {
+            OH_LOG_INFO(LOG_APP, "disconnect cleanup started generation=%{public}llu",
+                        static_cast<unsigned long long>(disconnectGeneration));
             rust_disconnect();
+            OH_LOG_INFO(LOG_APP, "disconnect cleanup rust finished generation=%{public}llu",
+                        static_cast<unsigned long long>(disconnectGeneration));
             VideoRender::instance().resetSession();
         } else {
             OH_LOG_INFO(LOG_APP, "Skip stale disconnect cleanup generation=%{public}llu current=%{public}llu",

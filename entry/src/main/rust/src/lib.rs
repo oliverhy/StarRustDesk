@@ -51,12 +51,13 @@ static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
 static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static PEER_MESSAGE_SENDER: OnceLock<Sender<QueuedPeerMessage>> = OnceLock::new();
+static PEER_MESSAGE_SENDER: Mutex<Option<Sender<QueuedPeerMessage>>> = Mutex::new(None);
 static SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
+static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy)]
 struct PerformanceConfig {
@@ -91,6 +92,7 @@ fn reset_display_state() {
 }
 
 fn clear_connection_for_session(session_id: u64) -> bool {
+    clear_peer_message_sender();
     if let Ok(mut guard) = CONNECTION.try_lock() {
         if SESSION_ID.load(Ordering::SeqCst) == session_id {
             *guard = None;
@@ -99,6 +101,12 @@ fn clear_connection_for_session(session_id: u64) -> bool {
     }
     emit_event("connection cleanup skipped: connection busy");
     false
+}
+
+fn clear_peer_message_sender() {
+    if let Ok(mut guard) = PEER_MESSAGE_SENDER.try_lock() {
+        *guard = None;
+    }
 }
 
 #[no_mangle]
@@ -321,13 +329,10 @@ pub extern "C" fn rust_connect(
                     return -19;
                 }
                 stream.set_send_timeout(5000);
-                if let Ok(mut guard) = CONNECTION.lock() {
-                    *guard = Some(stream);
-                }
                 CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(2, Ordering::SeqCst);
 
-                spawn_receive_loop(session_id);
+                spawn_receive_loop(session_id, stream);
                 emit_event("receive loop spawned");
                 return 0;
             }
@@ -399,12 +404,9 @@ pub extern "C" fn rust_connect(
             return -19;
         }
         stream.set_send_timeout(5000);
-        if let Ok(mut guard) = CONNECTION.lock() {
-            *guard = Some(stream);
-        }
         CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
 
-        spawn_receive_loop(session_id);
+        spawn_receive_loop(session_id, stream);
         emit_event("receive loop spawned");
         0
     })
@@ -446,7 +448,7 @@ pub extern "C" fn rust_disconnect() -> i32 {
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
-    reset_audio();
+    reset_audio_async();
     reset_display_state();
     let _ = clear_connection_for_session(session_id);
     clear_clipboard_state();
@@ -922,7 +924,11 @@ fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (hbb_common::bytes::Bytes, 
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
 }
 
-fn spawn_receive_loop(session_id: u64) {
+fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
+    let (tx, rx) = mpsc::channel::<QueuedPeerMessage>();
+    if let Ok(mut guard) = PEER_MESSAGE_SENDER.lock() {
+        *guard = Some(tx);
+    }
     thread::spawn(move || {
         let rt = runtime();
         rt.block_on(async {
@@ -932,17 +938,22 @@ fn spawn_receive_loop(session_id: u64) {
                     stale = true;
                     break;
                 }
-                let bytes = {
-                    let mut guard = match CONNECTION.lock() {
-                        Ok(g) => g,
-                        Err(_) => return,
-                    };
-                    let stream = match guard.as_mut() {
-                        Some(s) => s,
-                        None => return,
-                    };
-                    stream.next_timeout(20).await
-                };
+                while let Ok(queued) = rx.try_recv() {
+                    if SESSION_ID.load(Ordering::SeqCst) != queued.session_id {
+                        emit_event("skip stale peer message");
+                        continue;
+                    }
+                    if let Err(e) = stream.send(&queued.message).await {
+                        emit_event(&format!("peer message send failed: {e}"));
+                        mark_connection_lost(queued.session_id, &e.to_string());
+                        return;
+                    }
+                }
+                let bytes = stream.next_timeout(20).await;
+                if SESSION_ID.load(Ordering::SeqCst) != session_id {
+                    stale = true;
+                    break;
+                }
 
                 match bytes {
                     Some(Ok(bytes)) => handle_peer_bytes(&bytes).await,
@@ -961,11 +972,9 @@ fn spawn_receive_loop(session_id: u64) {
             if SESSION_ID.load(Ordering::SeqCst) == session_id {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
-                reset_audio();
+                reset_audio_async();
                 reset_display_state();
-                if let Ok(mut guard) = CONNECTION.lock() {
-                    *guard = None;
-                }
+                clear_peer_message_sender();
             }
         });
     });
@@ -1083,6 +1092,16 @@ fn reset_audio() {
     if let Some(cb) = stop_cb {
         cb();
     }
+}
+
+fn reset_audio_async() {
+    if AUDIO_RESET_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(|| {
+        reset_audio();
+        AUDIO_RESET_IN_PROGRESS.store(false, Ordering::SeqCst);
+    });
 }
 
 fn handle_remote_clipboards(clipboards: Vec<Clipboard>) {
@@ -1365,36 +1384,10 @@ fn queue_peer_message(msg: PeerMessage) -> i32 {
         emit_event("peer message send failed: not connected");
         return -1;
     }
-    let session_id = SESSION_ID.load(Ordering::SeqCst);
-
-    let sender = PEER_MESSAGE_SENDER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<QueuedPeerMessage>();
-        thread::spawn(move || {
-            while let Ok(queued) = rx.recv() {
-                if SESSION_ID.load(Ordering::SeqCst) != queued.session_id {
-                    emit_event("skip stale peer message");
-                    continue;
-                }
-                if let Err(e) = runtime().block_on(send_peer_message_async(queued.message)) {
-                    emit_event(&format!("peer message send failed: {e}"));
-                    mark_connection_lost(queued.session_id, &e.to_string());
-                }
-            }
-        });
-        tx
-    });
-
-    if sender
-        .send(QueuedPeerMessage {
-            session_id,
-            message: msg,
-        })
-        .is_err()
-    {
-        emit_event("peer message send failed: sender closed");
-        return -2;
-    }
-    0
+    enqueue_peer_message(msg).map(|_| 0).unwrap_or_else(|e| {
+        emit_event(&format!("peer message send failed: {e}"));
+        -2
+    })
 }
 
 fn mark_connection_lost(session_id: u64, reason: &str) {
@@ -1406,19 +1399,31 @@ fn mark_connection_lost(session_id: u64, reason: &str) {
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
-    reset_audio();
+    reset_audio_async();
     reset_display_state();
+    clear_peer_message_sender();
     if let Ok(mut guard) = CONNECTION.try_lock() {
         *guard = None;
     }
 }
 
 async fn send_peer_message_async(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Error> {
-    let mut guard = CONNECTION.lock().map_err(|_| hbb_common::anyhow::anyhow!("lock poisoned"))?;
-    let stream = guard
-        .as_mut()
+    enqueue_peer_message(msg)
+}
+
+fn enqueue_peer_message(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Error> {
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
+    let sender = PEER_MESSAGE_SENDER
+        .lock()
+        .map_err(|_| hbb_common::anyhow::anyhow!("sender lock poisoned"))?
+        .clone()
         .ok_or_else(|| hbb_common::anyhow::anyhow!("not connected"))?;
-    stream.send(&msg).await
+    sender
+        .send(QueuedPeerMessage {
+            session_id,
+            message: msg,
+        })
+        .map_err(|_| hbb_common::anyhow::anyhow!("sender closed"))
 }
 
 fn key_code_to_control(key_code: i32) -> Option<ControlKey> {

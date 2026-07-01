@@ -32,6 +32,7 @@ private:
     void renderFrameNow(const uint8_t* data, int length, int width, int height);
     void queuePendingFrame(const uint8_t* data, int length, int width, int height);
     void flushPendingFrames();
+    void flushPendingFramesAsync();
 
     std::mutex mutex_;
     std::deque<PendingFrame> pendingFrames_;

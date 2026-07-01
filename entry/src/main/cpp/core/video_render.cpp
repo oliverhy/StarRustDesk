@@ -4,7 +4,9 @@
 #include "xcomponent_render.h"
 #include <cstring>
 #include <hilog/log.h>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #undef LOG_DOMAIN
@@ -21,6 +23,8 @@ enum class ActiveDecoder {
 
 std::mutex g_decoderMutex;
 ActiveDecoder g_activeDecoder = ActiveDecoder::None;
+std::atomic<bool> g_releaseInProgress{false};
+std::atomic<bool> g_flushInProgress{false};
 
 bool hasRustDeskFrameTag(const uint8_t* data, int length) {
     return length > 5 && data[0] == 'S' && data[1] == 'R' && data[2] == 'D' && data[3] == '0';
@@ -57,6 +61,18 @@ void releaseActiveDecoder() {
     H264Decoder::instance().release();
     VP9Decoder::instance().release();
     g_activeDecoder = ActiveDecoder::None;
+}
+
+void releaseActiveDecoderAsync() {
+    bool expected = false;
+    if (!g_releaseInProgress.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    std::thread([]() {
+        releaseActiveDecoder();
+        g_releaseInProgress.store(false);
+    }).detach();
 }
 }
 
@@ -109,13 +125,17 @@ bool VideoRender::getLatestFrame(uint8_t*& data, int& length, int& width, int& h
 }
 
 void VideoRender::setSurfaceId(const std::string& surfaceId) {
+    if (!surfaceId.empty() && surfaceId == surfaceId_ && XComponentRender::instance().window() != nullptr) {
+        flushPendingFramesAsync();
+        return;
+    }
+
     surfaceId_ = surfaceId;
     if (!surfaceId.empty()) {
-        releaseActiveDecoder();
         XComponentRender::instance().setSurface(surfaceId);
-        flushPendingFrames();
+        flushPendingFramesAsync();
     } else {
-        releaseActiveDecoder();
+        releaseActiveDecoderAsync();
         XComponentRender::instance().release();
     }
 }
@@ -125,7 +145,7 @@ std::string VideoRender::getSurfaceId() {
 }
 
 void VideoRender::resetSession() {
-    releaseActiveDecoder();
+    releaseActiveDecoderAsync();
     std::lock_guard<std::mutex> lock(mutex_);
     pendingFrames_.clear();
     frameWidth_ = 0;
@@ -188,4 +208,16 @@ void VideoRender::flushPendingFrames() {
     for (const PendingFrame& frame : frames) {
         renderFrameNow(frame.data.data(), static_cast<int>(frame.data.size()), frame.width, frame.height);
     }
+}
+
+void VideoRender::flushPendingFramesAsync() {
+    bool expected = false;
+    if (!g_flushInProgress.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    std::thread([]() {
+        VideoRender::instance().flushPendingFrames();
+        g_flushInProgress.store(false);
+    }).detach();
 }
