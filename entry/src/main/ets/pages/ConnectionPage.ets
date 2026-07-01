@@ -13,6 +13,14 @@ interface SavedConnectionInfo {
   performancePreset: string
 }
 
+interface SavedConnectionRow {
+  id: string
+  name: string
+  remoteId: string
+  passwordEnc: string
+  performancePreset: string
+}
+
 @Component
 export struct ConnectionPage {
   @State connectionName: string = ''
@@ -38,12 +46,14 @@ export struct ConnectionPage {
   aboutToAppear(): void {
     this.checkServerConfig()
     this.loadSavedConnections()
+    this.syncConnectionState()
     this.startStatusPolling()
   }
 
   aboutToDisappear(): void {
     if (this.statusTimer !== -1) {
       clearTimeout(this.statusTimer)
+      this.statusTimer = -1
     }
   }
 
@@ -59,35 +69,43 @@ export struct ConnectionPage {
 
   startStatusPolling(): void {
     let poll = () => {
-      let status: number = RustDeskNapi.getConnectionStatus()
-      this.connectionStatusValue = status
-      if (status === ConnectionStatus.CONNECTING) {
-        this.connectionStatusText = translate('Connecting...')
-        this.connectionStatusColor = RustDeskTheme.WARNING
-        this.isConnecting = true
-      } else if (status === ConnectionStatus.CONNECTED) {
-        this.connectionStatusText = translate('Connected')
-        this.connectionStatusColor = RustDeskTheme.SUCCESS
-        this.isConnecting = false
+      let status: ConnectionStatus = this.syncConnectionState()
+      if (status === ConnectionStatus.CONNECTED) {
         if (!this.hasOpenedRemotePage) {
           this.hasOpenedRemotePage = true
           router.pushUrl({ url: 'pages/RemotePage' })
           return
         }
-      } else if (status === ConnectionStatus.FAILED) {
-        let error: string = ConnectionService.getLastConnectionError()
-        this.connectionStatusText = error.length > 0 ? error : translate('Connection failed')
-        this.connectionStatusColor = RustDeskTheme.ERROR
-        this.isConnecting = false
-      } else {
-        this.connectionStatusText = ''
-        this.connectionStatusColor = Color.Transparent
-        this.isConnecting = false
-        this.hasOpenedRemotePage = false
       }
       this.statusTimer = setTimeout(poll, 1000)
     }
     poll()
+  }
+
+  syncConnectionState(): ConnectionStatus {
+    let status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus
+    this.connectionStatusValue = status
+    if (status === ConnectionStatus.CONNECTING) {
+      this.connectionStatusText = translate('Connecting...')
+      this.connectionStatusColor = RustDeskTheme.WARNING
+      this.isConnecting = true
+    } else if (status === ConnectionStatus.CONNECTED) {
+      this.connectionStatusText = translate('Connected')
+      this.connectionStatusColor = RustDeskTheme.SUCCESS
+      this.isConnecting = false
+    } else if (status === ConnectionStatus.FAILED) {
+      let error: string = ConnectionService.getLastConnectionError()
+      this.connectionStatusText = error.length > 0 ? error : translate('Connection failed')
+      this.connectionStatusColor = RustDeskTheme.ERROR
+      this.isConnecting = false
+      this.hasOpenedRemotePage = false
+    } else {
+      this.connectionStatusText = ''
+      this.connectionStatusColor = Color.Transparent
+      this.isConnecting = false
+      this.hasOpenedRemotePage = false
+    }
+    return status
   }
 
   build() {
@@ -452,12 +470,34 @@ export struct ConnectionPage {
 
   onConnect(): void {
     let peerId: string = this.remoteId.trim()
+    let password: string = this.password.trim()
+    let nativeStatus: ConnectionStatus = this.syncConnectionState()
+    if (nativeStatus === ConnectionStatus.CONNECTED) {
+      if (!this.hasOpenedRemotePage) {
+        this.hasOpenedRemotePage = true
+        router.pushUrl({ url: 'pages/RemotePage' })
+      }
+      return
+    }
+    if (password.length <= 0) {
+      this.connectionStatusText = translate('Password is required')
+      this.connectionStatusColor = RustDeskTheme.ERROR
+      return
+    }
     if (peerId.length > 0 && !this.isConnecting) {
       this.isConnecting = true
       this.connectionStatusText = translate('Connecting...')
       this.connectionStatusColor = RustDeskTheme.WARNING
       AppStorage.set<string>('connectedPeerId', peerId)
-      ConnectionService.connect(peerId, this.password, this.performancePreset)
+      let status: ConnectionStatus = ConnectionService.connect(peerId, password, this.performancePreset)
+      if (status !== ConnectionStatus.CONNECTING) {
+        let error: string = ConnectionService.getLastConnectionError()
+        this.connectionStatusText = error
+        this.connectionStatusColor = RustDeskTheme.ERROR
+        this.isConnecting = false
+        this.hasOpenedRemotePage = false
+        return
+      }
       this.hasOpenedRemotePage = true
       router.pushUrl({ url: 'pages/RemotePage' })
     }
@@ -476,11 +516,12 @@ export struct ConnectionPage {
       rows.forEach((row: Record<string, string>) => {
         let remoteId: string = (row['remoteId'] ?? '').trim()
         if (remoteId.length > 0) {
+          let savedPassword: string = row['passwordEnc'] ?? row['password'] ?? ''
           list.push({
             id: row['id'] ?? this.makeConnectionId(remoteId),
             name: row['name'] ?? '',
             remoteId: remoteId,
-            password: row['password'] ?? '',
+            password: savedPassword,
             performancePreset: row['performancePreset'] ?? 'smooth'
           })
         }
@@ -494,7 +535,17 @@ export struct ConnectionPage {
   }
 
   persistSavedConnections(list: SavedConnectionInfo[]): void {
-    RustDeskNapi.setOption('saved-connections', JSON.stringify(list))
+    let rows: SavedConnectionRow[] = []
+    list.forEach((item: SavedConnectionInfo) => {
+      rows.push({
+        id: item.id,
+        name: item.name,
+        remoteId: item.remoteId,
+        passwordEnc: item.password,
+        performancePreset: item.performancePreset
+      })
+    })
+    RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
   }
 
   applySavedConnection(item: SavedConnectionInfo): void {
@@ -508,6 +559,7 @@ export struct ConnectionPage {
 
   saveCurrentConnection(): void {
     let peerId: string = this.remoteId.trim()
+    let password: string = this.password.trim()
     if (peerId.length <= 0) {
       return
     }
@@ -517,7 +569,7 @@ export struct ConnectionPage {
       id: targetId,
       name: savedName.length > 0 ? savedName : peerId,
       remoteId: peerId,
-      password: this.password,
+      password: password,
       performancePreset: this.performancePreset
     }
     let list: SavedConnectionInfo[] = []

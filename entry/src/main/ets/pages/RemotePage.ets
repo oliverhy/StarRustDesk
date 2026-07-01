@@ -70,6 +70,7 @@ struct RemotePage {
   private lastMouseEventAt: number = 0;
   private lastPinchUpdateAt: number = 0;
   private lastDisplayPollAt: number = 0;
+  private connectingStartedAt: number = 0;
   private lastSurfaceWidth: number = 0;
   private lastSurfaceHeight: number = 0;
   private touchStartX: number = 0;
@@ -82,6 +83,7 @@ struct RemotePage {
   aboutToAppear(): void {
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
+    this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
     this.startPolling();
   }
 
@@ -98,8 +100,18 @@ struct RemotePage {
   startPolling(): void {
     let poll = () => {
       let status: number = RustDeskNapi.getConnectionStatus();
-      this.connectionStatus = status as ConnectionStatus;
       let now: number = Date.now();
+      if (status === ConnectionStatus.CONNECTING) {
+        if (this.connectingStartedAt === 0) {
+          this.connectingStartedAt = now;
+        } else if (now - this.connectingStartedAt > 30000) {
+          ConnectionService.disconnect();
+          status = ConnectionStatus.FAILED;
+        }
+      } else {
+        this.connectingStartedAt = 0;
+      }
+      this.connectionStatus = status as ConnectionStatus;
       if (status === ConnectionStatus.CONNECTED && now - this.lastDisplayPollAt > 2000) {
         this.lastDisplayPollAt = now;
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());

@@ -12,7 +12,7 @@ use hbb_common::message_proto::{
     key_event, login_response, message, misc, supported_decoding, video_frame, AudioFormat,
     Clipboard, ClipboardFormat, CodecAbility, ControlKey, EncodedVideoFrames, Hash, ImageQuality,
     KeyEvent, IdPk, KeyboardMode, LoginRequest, Message as PeerMessage, Misc, MouseEvent,
-    MultiClipboards, OSLogin, OptionMessage, PublicKey, SupportedDecoding, SwitchDisplay,
+    MultiClipboards, OptionMessage, OSLogin, PublicKey, SupportedDecoding, SwitchDisplay,
     TestDelay, VideoFrame,
 };
 use hbb_common::rendezvous_proto::{
@@ -51,7 +51,7 @@ static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
 static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static PEER_MESSAGE_SENDER: OnceLock<Sender<PeerMessage>> = OnceLock::new();
+static PEER_MESSAGE_SENDER: OnceLock<Sender<QueuedPeerMessage>> = OnceLock::new();
 static SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
@@ -64,6 +64,11 @@ struct PerformanceConfig {
     quality: ImageQuality,
 }
 
+struct QueuedPeerMessage {
+    session_id: u64,
+    message: PeerMessage,
+}
+
 static PERFORMANCE_CONFIG: Mutex<PerformanceConfig> = Mutex::new(PerformanceConfig {
     fps: 45,
     quality: ImageQuality::Low,
@@ -71,6 +76,29 @@ static PERFORMANCE_CONFIG: Mutex<PerformanceConfig> = Mutex::new(PerformanceConf
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
+}
+
+fn reset_display_state() {
+    if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
+        *guard = 1;
+    }
+    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
+        *guard = 0;
+    }
+    if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
+        guard.clear();
+    }
+}
+
+fn clear_connection_for_session(session_id: u64) -> bool {
+    if let Ok(mut guard) = CONNECTION.try_lock() {
+        if SESSION_ID.load(Ordering::SeqCst) == session_id {
+            *guard = None;
+        }
+        return true;
+    }
+    emit_event("connection cleanup skipped: connection busy");
+    false
 }
 
 #[no_mangle]
@@ -120,24 +148,32 @@ pub extern "C" fn rust_connect(
         Some(s) if !s.is_empty() => s,
         _ => return -1,
     };
+    emit_event("rust_connect entered");
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
-    reset_audio();
-    if let Ok(mut guard) = CONNECTION.lock() {
-        *guard = None;
-    }
+    reset_display_state();
+    let _ = clear_connection_for_session(session_id);
+    emit_event("previous connection cleared");
     let pass = cstr_to_string(password).unwrap_or_default();
     let rv = cstr_to_string(rendezvous_server).unwrap_or_default();
     let relay_override = cstr_to_string(relay_server).unwrap_or_default();
     let key = cstr_to_string(server_key).unwrap_or_default();
 
-    if let Ok(mut guard) = PASSWORD_HASH.lock() {
-        *guard = pass.as_bytes().to_vec();
-    }
-    if let Ok(mut guard) = CURRENT_PEER_ID.lock() {
-        *guard = peer.clone();
-    }
+    let Ok(mut password_guard) = PASSWORD_HASH.try_lock() else {
+        emit_event("connect failed: credential lock busy");
+        return -22;
+    };
+    *password_guard = pass.as_bytes().to_vec();
+    drop(password_guard);
+
+    let Ok(mut peer_guard) = CURRENT_PEER_ID.try_lock() else {
+        emit_event("connect failed: peer lock busy");
+        return -22;
+    };
+    *peer_guard = peer.clone();
+    drop(peer_guard);
+
     clear_clipboard_state();
 
     let rendezvous_addr = with_port(if rv.is_empty() { "rustdesk.com" } else { &rv }, 21116);
@@ -284,6 +320,7 @@ pub extern "C" fn rust_connect(
                     emit_event("connect session stale before store");
                     return -19;
                 }
+                stream.set_send_timeout(5000);
                 if let Ok(mut guard) = CONNECTION.lock() {
                     *guard = Some(stream);
                 }
@@ -361,6 +398,7 @@ pub extern "C" fn rust_connect(
             emit_event("connect session stale before store");
             return -19;
         }
+        stream.set_send_timeout(5000);
         if let Ok(mut guard) = CONNECTION.lock() {
             *guard = Some(stream);
         }
@@ -405,13 +443,12 @@ pub extern "C" fn rust_set_performance_preset(preset: *const c_char) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_disconnect() -> i32 {
-    SESSION_ID.fetch_add(1, Ordering::SeqCst);
+    let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     reset_audio();
-    if let Ok(mut guard) = CONNECTION.try_lock() {
-        *guard = None;
-    }
+    reset_display_state();
+    let _ = clear_connection_for_session(session_id);
     clear_clipboard_state();
     0
 }
@@ -549,7 +586,7 @@ pub extern "C" fn rust_send_clipboard_text(text: *const c_char) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_take_remote_clipboard_text() -> *mut c_char {
-    let text = match REMOTE_CLIPBOARD_TEXT.lock() {
+    let text = match REMOTE_CLIPBOARD_TEXT.try_lock() {
         Ok(mut guard) => guard.take().unwrap_or_default(),
         Err(_) => String::new(),
     };
@@ -560,12 +597,12 @@ pub extern "C" fn rust_take_remote_clipboard_text() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn rust_get_display_count() -> i32 {
-    DISPLAY_COUNT.lock().map(|guard| *guard).unwrap_or(1).max(1)
+    DISPLAY_COUNT.try_lock().map(|guard| *guard).unwrap_or(1).max(1)
 }
 
 #[no_mangle]
 pub extern "C" fn rust_get_current_display() -> i32 {
-    CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(0)
+    CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -573,7 +610,7 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     if display < 0 {
         return -1;
     }
-    if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
+    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
         *guard = display;
     }
     let mut misc = Misc::new();
@@ -588,7 +625,7 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_refresh_video() -> i32 {
-    let display = CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(0);
+    let display = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
     let mut switch_misc = Misc::new();
     switch_misc.set_switch_display(SwitchDisplay {
         display,
@@ -640,11 +677,13 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 }
 
 fn emit_event(message: &str) {
-    if let Ok(guard) = EVENT_CALLBACK.lock() {
-        if let Some(cb) = *guard {
-            if let Ok(c_message) = CString::new(message) {
-                cb(c_message.as_ptr());
-            }
+    let cb = match EVENT_CALLBACK.try_lock() {
+        Ok(guard) => *guard,
+        Err(_) => return,
+    };
+    if let Some(cb) = cb {
+        if let Ok(c_message) = CString::new(message) {
+            cb(c_message.as_ptr());
         }
     }
 }
@@ -916,9 +955,6 @@ fn spawn_receive_loop(session_id: u64) {
             }
             if stale {
                 emit_event("stale receive loop ended");
-                CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
-                CONNECTION_ROUTE.store(0, Ordering::SeqCst);
-                reset_audio();
                 return;
             }
             emit_event("receive loop ended");
@@ -926,6 +962,7 @@ fn spawn_receive_loop(session_id: u64) {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
                 reset_audio();
+                reset_display_state();
                 if let Ok(mut guard) = CONNECTION.lock() {
                     *guard = None;
                 }
@@ -961,13 +998,13 @@ async fn handle_peer_bytes(bytes: &[u8]) {
                         .iter()
                         .map(|display| (display.x, display.y, display.width, display.height))
                         .collect();
-                    if let Ok(mut guard) = DISPLAY_COUNT.lock() {
+                    if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
                         *guard = display_count;
                     }
-                    if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
+                    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
                         *guard = info.current_display;
                     }
-                    if let Ok(mut guard) = DISPLAY_INFOS.lock() {
+                    if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
                         *guard = displays;
                     }
                     emit_event(&format!(
@@ -1015,7 +1052,7 @@ fn handle_misc_message(misc_msg: Misc) {
 fn handle_audio_format(format: AudioFormat) {
     let sample_rate = format.sample_rate as i32;
     let channels = format.channels.clamp(1, 2) as i32;
-    let start_result = match AUDIO_START_CALLBACK.lock() {
+    let start_result = match AUDIO_START_CALLBACK.try_lock() {
         Ok(guard) => guard.map(|cb| cb(sample_rate, channels)).unwrap_or(-1),
         Err(_) => -1,
     };
@@ -1029,7 +1066,7 @@ fn handle_audio_frame(data: &[u8]) {
     if data.is_empty() {
         return;
     }
-    let frame_cb = match AUDIO_FRAME_CALLBACK.lock() {
+    let frame_cb = match AUDIO_FRAME_CALLBACK.try_lock() {
         Ok(guard) => *guard,
         Err(_) => None,
     };
@@ -1039,7 +1076,7 @@ fn handle_audio_frame(data: &[u8]) {
 }
 
 fn reset_audio() {
-    let stop_cb = match AUDIO_STOP_CALLBACK.lock() {
+    let stop_cb = match AUDIO_STOP_CALLBACK.try_lock() {
         Ok(guard) => *guard,
         Err(_) => None,
     };
@@ -1068,23 +1105,23 @@ fn handle_remote_clipboards(clipboards: Vec<Clipboard>) {
         return;
     }
     if LAST_SENT_CLIPBOARD_TEXT
-        .lock()
+        .try_lock()
         .map(|guard| *guard == text)
         .unwrap_or(false)
     {
         return;
     }
-    if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.lock() {
+    if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.try_lock() {
         *guard = Some(text);
     }
     emit_event("remote clipboard text received");
 }
 
 fn clear_clipboard_state() {
-    if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.lock() {
+    if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.try_lock() {
         *guard = None;
     }
-    if let Ok(mut guard) = LAST_SENT_CLIPBOARD_TEXT.lock() {
+    if let Ok(mut guard) = LAST_SENT_CLIPBOARD_TEXT.try_lock() {
         guard.clear();
     }
 }
@@ -1138,7 +1175,7 @@ async fn send_login(hash: Hash) {
             ..Default::default()
         }),
         version: "1.2.0".to_string(),
-        os_login: Some(OSLogin::new()).into(),
+        os_login: MessageField::some(OSLogin::new()),
         ..Default::default()
     };
 
@@ -1300,10 +1337,10 @@ fn queue_video_received_if_due() {
 }
 
 fn current_display_rect() -> (i32, i32, i32, i32) {
-    let current = CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(0);
+    let current = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
     let index = current.max(0) as usize;
     DISPLAY_INFOS
-        .lock()
+        .try_lock()
         .ok()
         .and_then(|guard| guard.get(index).copied())
         .unwrap_or((0, 0, 1920, 1080))
@@ -1328,34 +1365,50 @@ fn queue_peer_message(msg: PeerMessage) -> i32 {
         emit_event("peer message send failed: not connected");
         return -1;
     }
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
 
     let sender = PEER_MESSAGE_SENDER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<PeerMessage>();
+        let (tx, rx) = mpsc::channel::<QueuedPeerMessage>();
         thread::spawn(move || {
-            while let Ok(msg) = rx.recv() {
-                if let Err(e) = runtime().block_on(send_peer_message_async(msg)) {
+            while let Ok(queued) = rx.recv() {
+                if SESSION_ID.load(Ordering::SeqCst) != queued.session_id {
+                    emit_event("skip stale peer message");
+                    continue;
+                }
+                if let Err(e) = runtime().block_on(send_peer_message_async(queued.message)) {
                     emit_event(&format!("peer message send failed: {e}"));
-                    mark_connection_lost(&e.to_string());
+                    mark_connection_lost(queued.session_id, &e.to_string());
                 }
             }
         });
         tx
     });
 
-    if sender.send(msg).is_err() {
+    if sender
+        .send(QueuedPeerMessage {
+            session_id,
+            message: msg,
+        })
+        .is_err()
+    {
         emit_event("peer message send failed: sender closed");
         return -2;
     }
     0
 }
 
-fn mark_connection_lost(reason: &str) {
+fn mark_connection_lost(session_id: u64, reason: &str) {
+    if SESSION_ID.load(Ordering::SeqCst) != session_id {
+        emit_event("skip stale connection lost");
+        return;
+    }
     emit_event(&format!("connection lost: {reason}"));
     SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     reset_audio();
-    if let Ok(mut guard) = CONNECTION.lock() {
+    reset_display_state();
+    if let Ok(mut guard) = CONNECTION.try_lock() {
         *guard = None;
     }
 }

@@ -25,6 +25,7 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <chrono>
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
@@ -37,6 +38,8 @@
 static std::atomic<int> g_connectionStatus{0};
 static std::atomic<int> g_lastConnectionResult{0};
 static std::atomic<uint64_t> g_connectionGeneration{0};
+static std::atomic<int64_t> g_connectionStartedAtMs{0};
+static std::atomic<bool> g_disconnectInProgress{false};
 static std::atomic<uint64_t> g_videoFrameCount{0};
 static std::atomic<uint64_t> g_videoByteCount{0};
 static std::mutex g_lastConnectionMessageMutex;
@@ -50,6 +53,11 @@ static void SetLastConnectionMessage(const std::string& message) {
 static std::string GetLastConnectionMessage() {
     std::lock_guard<std::mutex> lock(g_lastConnectionMessageMutex);
     return g_lastConnectionMessage;
+}
+
+static int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 static void OnRustVideoFrame(const unsigned char* data, int length, int width, int height) {
@@ -116,6 +124,9 @@ static std::string ConnectionResultToMessage(int result) {
         case -17: return "Remote login failed";
         case -18: return "Peer connection closed";
         case -19: return "Connection was replaced";
+        case -20: return "Connection timed out";
+        case -21: return "Previous connection is still closing";
+        case -22: return "Connection state is busy";
         default: return "Connection failed (" + std::to_string(result) + ")";
     }
 }
@@ -125,7 +136,7 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     napi_value args[4] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
-    char peerId[64] = {0}, password[64] = {0};
+    char peerId[128] = {0}, password[512] = {0};
     char rendezvousServer[256] = {0}, relayServer[256] = {0};
     size_t peerIdLen = 0, passwordLen = 0, rendezvousLen = 0, relayLen = 0;
 
@@ -147,15 +158,21 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         napi_create_int32(env, -1, &ret);
         return ret;
     }
+    if (g_disconnectInProgress.load()) {
+        OH_LOG_INFO(LOG_APP, "Previous disconnect still marked; reconnecting immediately; stale cleanup will be ignored");
+        g_disconnectInProgress.store(false);
+    }
 
     uint64_t generation = g_connectionGeneration.fetch_add(1) + 1;
     g_connectionStatus.store(1);
     g_lastConnectionResult.store(0);
+    g_connectionStartedAtMs.store(NowMs());
     SetLastConnectionMessage("");
     VideoRender::instance().resetSession();
-    OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{public}s server=%{public}s key=%{public}s",
-                peer.c_str(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
+    OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{public}s password_len=%{public}zu server=%{public}s key=%{public}s",
+                peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
     std::thread([peer, pass, rendezvous, relay, serverKey, generation]() {
+        OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
         int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(), serverKey.c_str());
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
         if (g_connectionGeneration.load() != generation) {
@@ -163,6 +180,7 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
             return;
         }
         g_lastConnectionResult.store(result);
+        g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(result == 0 ? 2 : 3);
     }).detach();
 
@@ -189,11 +207,28 @@ static napi_value SetPerformancePreset(napi_env env, napi_callback_info info) {
 }
 
 static napi_value Disconnect(napi_env env, napi_callback_info info) {
-    g_connectionGeneration.fetch_add(1);
+    bool expected = false;
+    if (!g_disconnectInProgress.compare_exchange_strong(expected, true)) {
+        napi_value ret;
+        napi_create_int32(env, 0, &ret);
+        return ret;
+    }
+    uint64_t disconnectGeneration = g_connectionGeneration.fetch_add(1) + 1;
     g_connectionStatus.store(0);
-    std::thread([]() {
-        rust_disconnect();
-        VideoRender::instance().resetSession();
+    g_connectionStartedAtMs.store(0);
+    std::thread([disconnectGeneration]() {
+        if (g_connectionGeneration.load() == disconnectGeneration) {
+            rust_disconnect();
+            VideoRender::instance().resetSession();
+        } else {
+            OH_LOG_INFO(LOG_APP, "Skip stale disconnect cleanup generation=%{public}llu current=%{public}llu",
+                        static_cast<unsigned long long>(disconnectGeneration),
+                        static_cast<unsigned long long>(g_connectionGeneration.load()));
+        }
+        g_disconnectInProgress.store(false);
+        if (g_connectionGeneration.load() == disconnectGeneration && g_connectionStatus.load() != 1) {
+            g_connectionStatus.store(0);
+        }
     }).detach();
     napi_value ret;
     napi_create_int32(env, 0, &ret);
@@ -371,6 +406,21 @@ static napi_value GetDeviceName(napi_env env, napi_callback_info info) {
 
 static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
     int status = g_connectionStatus.load();
+    if (status == 1) {
+        int64_t startedAt = g_connectionStartedAtMs.load();
+        if (startedAt > 0 && NowMs() - startedAt > 30000) {
+            g_connectionGeneration.fetch_add(1);
+            g_connectionStartedAtMs.store(0);
+            g_lastConnectionResult.store(-20);
+            SetLastConnectionMessage("Connection timed out");
+            g_connectionStatus.store(3);
+            std::thread([]() {
+                rust_disconnect();
+                VideoRender::instance().resetSession();
+            }).detach();
+            status = 3;
+        }
+    }
     if (status == 2 && rust_get_connection_status() == 0) {
         status = 3;
         g_connectionStatus.store(status);
