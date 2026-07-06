@@ -84,6 +84,7 @@ struct RemotePage {
   private lastLocalClipboardText: string = '';
   private lastRemoteClipboardText: string = '';
   private suppressClipboardText: string = '';
+  private isLeavingAfterDisconnect: boolean = false;
 
   aboutToAppear(): void {
     let status: number = RustDeskNapi.getConnectionStatus();
@@ -1096,7 +1097,10 @@ struct RemotePage {
   }
 
   disconnectSession(): void {
-    this.connectionStatus = ConnectionStatus.DISCONNECTED;
+    if (this.isLeavingAfterDisconnect) {
+      return;
+    }
+    this.isLeavingAfterDisconnect = true;
     this.hasVideo = false;
     this.showKeyboardPanel = false;
     this.showCursor = false;
@@ -1107,6 +1111,12 @@ struct RemotePage {
     this.isPinching = false;
     RustDeskNapi.setSurfaceId('');
     ConnectionService.disconnect();
+    try {
+      router.back();
+    } catch (_e) {
+      this.connectionStatus = ConnectionStatus.DISCONNECTED;
+      this.isLeavingAfterDisconnect = false;
+    }
   }
 
   toggleClipboardSync(): void {

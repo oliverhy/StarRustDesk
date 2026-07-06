@@ -128,7 +128,6 @@ export struct ConnectionPage {
             if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
               this.buildCustomServerIndicator()
             }
-            this.buildQuickActions()
           }
           .width(this.pageWidth >= 720 ? 520 : '100%')
           .padding({ top: this.pageWidth >= 720 ? 32 : 8 })
@@ -432,40 +431,6 @@ export struct ConnectionPage {
       .onClick(() => {
         this.performancePreset = preset
       })
-  }
-
-  @Builder
-  buildQuickActions() {
-      Row({ space: 12 }) {
-        this.buildActionButton(translate('Scan QR Code'), '▦', 'pages/ScanPage')
-        this.buildActionButton(translate('File Transfer'), '📁', 'pages/FileManagerPage')
-        this.buildActionButton(translate('Terminal'), '⌨', 'pages/TerminalPage')
-      }
-      .width('100%')
-      .padding({ top: 8 })
-  }
-
-  @Builder
-  buildActionButton(label: string, icon: string, targetPage: string) {
-    Column({ space: 6 }) {
-      Button({ type: ButtonType.Circle }) {
-        Text(icon)
-          .fontSize(22)
-      }
-      .width(52)
-      .height(52)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : '#E8F0FE')
-      .borderRadius(26)
-
-      Text(label)
-        .fontSize(12)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
-    }
-    .layoutWeight(1)
-    .alignItems(HorizontalAlign.Center)
-    .onClick(() => {
-      router.pushUrl({ url: targetPage })
-    })
   }
 
   onConnect(): void {
