@@ -311,6 +311,22 @@ static napi_value SendMouseEvent(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value SendMouseWheel(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double deltaX = 0, deltaY = 0;
+    napi_get_value_double(env, args[0], &deltaX);
+    napi_get_value_double(env, args[1], &deltaY);
+    int result = rust_send_mouse_wheel(deltaX, deltaY);
+    if (result != 0) {
+        OH_LOG_WARN(LOG_APP, "SendMouseWheel x=%{public}.1f y=%{public}.1f result=%{public}d", deltaX, deltaY, result);
+    }
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static napi_value GetDisplayCount(napi_env env, napi_callback_info info) {
     napi_value ret;
     napi_create_int32(env, rust_get_display_count(), &ret);
@@ -844,6 +860,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"sendPhysicalKeyEvent", nullptr, SendPhysicalKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseEvent", nullptr, SendMouseEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendMouseWheel", nullptr, SendMouseWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getCurrentDisplay", nullptr, GetCurrentDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},

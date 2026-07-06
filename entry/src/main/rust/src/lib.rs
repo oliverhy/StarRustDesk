@@ -495,6 +495,18 @@ pub extern "C" fn rust_send_mouse_event(x: f64, y: f64, action: i32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_send_mouse_wheel(delta_x: f64, delta_y: f64) -> i32 {
+    let mut msg = PeerMessage::new();
+    msg.set_mouse_event(MouseEvent {
+        mask: 3,
+        x: delta_x.round() as i32,
+        y: delta_y.round() as i32,
+        ..Default::default()
+    });
+    queue_peer_message(msg)
+}
+
+#[no_mangle]
 pub extern "C" fn rust_send_key_event(key_code: i32, action: i32) -> i32 {
     let mut event = KeyEvent {
         down: action == 0,

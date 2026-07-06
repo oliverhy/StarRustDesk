@@ -10,6 +10,8 @@ interface RemotePoint {
   y: number;
 }
 
+const REMOTE_WHEEL_SCALE: number = 0.08;
+
 @Entry
 @Component
 struct RemotePage {
@@ -69,6 +71,9 @@ struct RemotePage {
   private lastMoveSentAt: number = 0;
   private lastMouseEventAt: number = 0;
   private lastPinchUpdateAt: number = 0;
+  private lastWheelSentAt: number = 0;
+  private wheelRemainderX: number = 0;
+  private wheelRemainderY: number = 0;
   private lastDisplayPollAt: number = 0;
   private connectingStartedAt: number = 0;
   private lastSurfaceWidth: number = 0;
@@ -267,9 +272,12 @@ struct RemotePage {
           .onTouch((event: TouchEvent) => {
             this.handleRemoteTouch(event);
           })
-          .onMouse((event: MouseEvent) => {
-            this.handleRemoteMouse(event);
-          })
+        .onMouse((event: MouseEvent) => {
+          this.handleRemoteMouse(event);
+        })
+        .onAxisEvent((event: AxisEvent) => {
+          this.handleRemoteAxis(event);
+        })
       }
 
       Stack()
@@ -288,6 +296,9 @@ struct RemotePage {
         })
         .onMouse((event: MouseEvent) => {
           this.handleRemoteMouse(event);
+        })
+        .onAxisEvent((event: AxisEvent) => {
+          this.handleRemoteAxis(event);
         })
         .onKeyEvent((event: KeyEvent) => {
           return this.handleRemoteKey(event);
@@ -774,6 +785,61 @@ struct RemotePage {
     }
     ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, action);
     event.stopPropagation();
+  }
+
+  handleRemoteAxis(event: AxisEvent): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+      return;
+    }
+    if (event.action !== AxisAction.UPDATE && event.action !== AxisAction.BEGIN) {
+      return;
+    }
+
+    let deltaX: number = this.scaleRemoteWheelDeltaX(event.getHorizontalAxisValue());
+    let deltaY: number = this.scaleRemoteWheelDeltaY(event.getVerticalAxisValue());
+    if (Math.abs(deltaX) < 0.01 && Math.abs(deltaY) < 0.01) {
+      return;
+    }
+
+    let now: number = Date.now();
+    if (now - this.lastWheelSentAt < 8) {
+      this.wheelRemainderX += deltaX;
+      this.wheelRemainderY += deltaY;
+      return;
+    }
+    this.lastWheelSentAt = now;
+    this.clearLongPressTimer();
+    this.clearTapTimer();
+    this.requestRemoteInputFocus();
+    this.showCursor = false;
+    ConnectionService.sendMouseWheel(deltaX, deltaY);
+  }
+
+  scaleRemoteWheelDeltaX(delta: number): number {
+    this.wheelRemainderX += delta * REMOTE_WHEEL_SCALE;
+    let step: number = this.takeWholeWheelStep(this.wheelRemainderX);
+    this.wheelRemainderX -= step;
+    return step;
+  }
+
+  scaleRemoteWheelDeltaY(delta: number): number {
+    this.wheelRemainderY += delta * REMOTE_WHEEL_SCALE;
+    let step: number = this.takeWholeWheelStep(this.wheelRemainderY);
+    this.wheelRemainderY -= step;
+    return step;
+  }
+
+  takeWholeWheelStep(delta: number): number {
+    if (Math.abs(delta) < 0.01) {
+      return 0;
+    }
+    if (delta >= 1) {
+      return Math.floor(delta);
+    }
+    if (delta <= -1) {
+      return Math.ceil(delta);
+    }
+    return 0;
   }
 
   mapMouseAction(event: MouseEvent): number {

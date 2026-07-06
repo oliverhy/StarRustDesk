@@ -66,6 +66,10 @@ export class RustDeskNapi {
     return rustdeskNapi.sendMouseEvent(x, y, action)
   }
 
+  static sendMouseWheel(deltaX: number, deltaY: number): number {
+    return (rustdeskNapi as ESObject).sendMouseWheel(deltaX, deltaY)
+  }
+
   static getDisplayCount(): number {
     return (rustdeskNapi as ESObject).getDisplayCount()
   }

@@ -36,6 +36,10 @@ export class ConnectionService {
     RustDeskNapi.sendMouseEvent(x, y, action)
   }
 
+  static sendMouseWheel(deltaX: number, deltaY: number): void {
+    RustDeskNapi.sendMouseWheel(deltaX, deltaY)
+  }
+
   static getConnectionStatus(): ConnectionStatus {
     let status: number = RustDeskNapi.getConnectionStatus()
     return status as ConnectionStatus

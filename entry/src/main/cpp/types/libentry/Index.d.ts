@@ -34,6 +34,7 @@ export const sendKeyEvent: (keyCode: number, action: number) => number;
 export const sendPhysicalKeyEvent: (scanCode: number, action: number) => number;
 export const sendText: (text: string) => number;
 export const sendMouseEvent: (x: number, y: number, action: number) => number;
+export const sendMouseWheel: (deltaX: number, deltaY: number) => number;
 export const getDisplayCount: () => number;
 export const getCurrentDisplay: () => number;
 export const switchDisplay: (display: number) => number;
