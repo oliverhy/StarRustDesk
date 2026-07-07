@@ -824,7 +824,7 @@ struct RemotePage {
   }
 
   scaleRemoteWheelDeltaY(delta: number): number {
-    this.wheelRemainderY += delta * REMOTE_WHEEL_SCALE;
+    this.wheelRemainderY += -delta * REMOTE_WHEEL_SCALE;
     let step: number = this.takeWholeWheelStep(this.wheelRemainderY);
     this.wheelRemainderY -= step;
     return step;
