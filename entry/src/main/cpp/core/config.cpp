@@ -136,6 +136,9 @@ void Config::load() {
     std::string content;
     bool encrypted = decrypt_config(bytes, content);
     if (!encrypted) {
+        if (bytes.size() >= CONFIG_MAGIC_LEN && memcmp(bytes.data(), CONFIG_MAGIC, CONFIG_MAGIC_LEN) == 0) {
+            return;
+        }
         content.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
     options_ = parse_options(content);

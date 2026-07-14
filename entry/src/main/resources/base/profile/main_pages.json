@@ -1,9 +1,6 @@
 {
   "src": [
     "pages/HomePage",
-    "pages/RemotePage",
-    "pages/FileManagerPage",
-    "pages/ScanPage",
-    "pages/TerminalPage"
+    "pages/RemotePage"
   ]
 }

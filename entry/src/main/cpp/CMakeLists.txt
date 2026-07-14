@@ -18,14 +18,11 @@ target_compile_options(opus PRIVATE -O2)
 
 add_library(entry SHARED napi_init.cpp
                        core/config.cpp
-                       core/service.cpp
                        core/audio_player.cpp
                        core/video_render.cpp
                        core/xcomponent_render.cpp
                        core/h264_decoder.cpp
                        core/vp9_decoder.cpp
-                       core/connection.cpp
-                       core/file_transfer.cpp
                        crypto/encrypted_stream.cpp
                        crypto/aead.cpp
                        crypto/chacha20.cpp

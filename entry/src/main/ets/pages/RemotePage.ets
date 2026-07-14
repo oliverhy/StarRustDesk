@@ -3,7 +3,11 @@ import { RustDeskTheme } from '../theme/RustDeskTheme';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
-import { RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { FileTransferStatus, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { picker } from '@kit.CoreFileKit';
+import { fileIo } from '@kit.CoreFileKit';
+import { common } from '@kit.AbilityKit';
 
 interface RemotePoint {
   x: number;
@@ -11,6 +15,7 @@ interface RemotePoint {
 }
 
 const REMOTE_WHEEL_SCALE: number = 0.08;
+const LOG_DOMAIN: number = 0x0000;
 
 @Entry
 @Component
@@ -42,13 +47,20 @@ struct RemotePage {
   @State speedText: string = '0 KB/s';
   @State routeText: string = '未知';
   @State pageWidth: number = 0;
-  @State clipboardSyncEnabled: boolean = false;
+  @State clipboardSyncEnabled: boolean = true;
+  @State showRemoteFileBrowser: boolean = false;
+  @State remoteDirectoryPath: string = '';
+  @State remoteDirectoryEntries: RemoteDirectoryEntry[] = [];
+  @State remoteDirectoryLoading: boolean = false;
+  @State transferProgress: number = 0;
+  @State transferActive: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
   private toolbarTimer: number = -1;
   private statusTimer: number = -1;
   private frameTimer: number = -1;
   private clipboardTimer: number = -1;
   private surfaceRebindTimer: number = -1;
+  private remoteDirectoryTimer: number = -1;
   private longPressTimer: number = -1;
   private tapTimer: number = -1;
   private longPressTriggered: boolean = false;
@@ -84,7 +96,10 @@ struct RemotePage {
   private lastLocalClipboardText: string = '';
   private lastRemoteClipboardText: string = '';
   private suppressClipboardText: string = '';
+  private clipboardBaselineInitialized: boolean = false;
   private isLeavingAfterDisconnect: boolean = false;
+  private pendingUploadPath: string = '';
+  private pendingUploadName: string = '';
 
   aboutToAppear(): void {
     let status: number = RustDeskNapi.getConnectionStatus();
@@ -98,9 +113,20 @@ struct RemotePage {
     if (this.statusTimer !== -1) { clearTimeout(this.statusTimer); }
     if (this.frameTimer !== -1) { clearTimeout(this.frameTimer); }
     if (this.surfaceRebindTimer !== -1) { clearTimeout(this.surfaceRebindTimer); }
+    if (this.remoteDirectoryTimer !== -1) { clearTimeout(this.remoteDirectoryTimer); }
     this.stopClipboardSync();
     this.clearLongPressTimer();
     this.clearTapTimer();
+    this.cleanupPendingUploadFile();
+  }
+
+  cleanupPendingUploadFile(): void {
+    if (this.pendingUploadPath.length === 0) return;
+    try {
+      fileIo.unlinkSync(this.pendingUploadPath);
+    } catch (_e) {
+    }
+    this.pendingUploadPath = '';
   }
 
   startPolling(): void {
@@ -124,9 +150,14 @@ struct RemotePage {
         this.currentDisplay = RustDeskNapi.getCurrentDisplay();
         this.updateConnectionRoute();
       }
+      if (status === ConnectionStatus.CONNECTED) {
+        this.ensureClipboardSyncRunning();
+        this.pollFileTransferStatus();
+      }
       if (status !== ConnectionStatus.CONNECTED) {
         this.hasVideo = false;
         this.routeText = '未连接';
+        this.pauseClipboardSync();
       }
       this.statusTimer = setTimeout(poll, 1000);
     };
@@ -148,6 +179,12 @@ struct RemotePage {
   onAreaChangeCallback(oldValue: Area, newValue: Area): void {
     this.componentWidth = newValue.width as number;
     this.componentHeight = newValue.height as number;
+    if (this.lastSurfaceWidth <= 0 || this.lastSurfaceHeight <= 0) {
+      this.lastSurfaceWidth = this.componentWidth;
+      this.lastSurfaceHeight = this.componentHeight;
+      this.bindSurfaceIfReady();
+      return;
+    }
     this.scheduleSurfaceRebindIfSizeChanged();
   }
 
@@ -187,6 +224,13 @@ struct RemotePage {
       }
       .width('100%')
       .height('100%');
+
+      if (this.showRemoteFileBrowser) {
+        this.buildRemoteFileBrowser();
+      }
+      if (this.transferActive && !this.showRemoteFileBrowser) {
+        this.buildTransferProgress();
+      }
     }
     .width('100%')
     .height('100%')
@@ -254,6 +298,120 @@ struct RemotePage {
       .width('100%').height('100%')
       .backgroundColor(Color.Black);
     }
+  }
+
+  @Builder
+  buildRemoteFileBrowser() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 12 }) {
+        Row({ space: 8 }) {
+          Button('上一级')
+            .height(40)
+            .borderRadius(8)
+            .enabled(!this.remoteDirectoryLoading)
+            .onClick(() => {
+              this.openRemoteDirectory(this.getRemoteParentPath());
+            })
+          Text(this.remoteDirectoryPath === '/' ? '此电脑' : this.remoteDirectoryPath)
+            .layoutWeight(1)
+            .fontSize(15)
+            .fontColor(Color.White)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+
+        if (this.remoteDirectoryLoading) {
+          Column() {
+            LoadingProgress().width(40).height(40).color(Color.White)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else {
+          List({ space: 2 }) {
+            ForEach(this.getRemoteFolders(), (entry: RemoteDirectoryEntry) => {
+              ListItem() {
+                Row({ space: 12 }) {
+                  Text(entry.entryType === 3 ? '磁盘' : '文件夹')
+                    .fontSize(12)
+                    .fontColor(Color.Gray)
+                    .width(52)
+                  Text(entry.name)
+                    .layoutWeight(1)
+                    .fontSize(15)
+                    .fontColor(Color.White)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+                .width('100%')
+                .height(48)
+                .padding({ left: 12, right: 12 })
+                .onClick(() => {
+                  this.openRemoteDirectory(this.joinRemotePath(entry.name));
+                })
+              }
+            }, (entry: RemoteDirectoryEntry) => `${entry.entryType}:${entry.name}`)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .divider({ strokeWidth: 1, color: '#333333' })
+        }
+
+        Row({ space: 12 }) {
+          Button('取消')
+            .layoutWeight(1)
+            .height(42)
+            .borderRadius(8)
+            .backgroundColor('#444444')
+            .onClick(() => {
+              this.closeRemoteFileBrowser(true);
+            })
+          Button('发送到这里')
+            .layoutWeight(1)
+            .height(42)
+            .borderRadius(8)
+            .enabled(this.remoteDirectoryPath.length > 0 && this.remoteDirectoryPath !== '/' && !this.remoteDirectoryLoading)
+            .backgroundColor(RustDeskTheme.ACCENT)
+            .onClick(() => {
+              this.startPendingFileUpload();
+            })
+        }
+        .width('100%')
+      }
+      .width(this.isLargeLayout() ? 560 : '92%')
+      .height(this.isLargeLayout() ? '78%' : '84%')
+      .padding(16)
+      .backgroundColor('#202124')
+      .borderRadius(8)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#99000000')
+  }
+
+  @Builder
+  buildTransferProgress() {
+    Row({ space: 10 }) {
+      Text('正在发送文件')
+        .fontSize(13)
+        .fontColor(Color.White)
+      Progress({ value: this.transferProgress, total: 100, type: ProgressType.Linear })
+        .layoutWeight(1)
+        .height(6)
+        .color(RustDeskTheme.ACCENT)
+      Text(`${Math.floor(this.transferProgress)}%`)
+        .width(44)
+        .fontSize(13)
+        .fontColor(Color.White)
+        .textAlign(TextAlign.End)
+    }
+    .width(this.isLargeLayout() ? 420 : '88%')
+    .height(44)
+    .padding({ left: 12, right: 12 })
+    .backgroundColor('#E6202124')
+    .borderRadius(8)
+    .position({ x: this.isLargeLayout() ? 24 : '6%', y: 16 })
   }
 
   @Builder
@@ -386,6 +544,19 @@ struct RemotePage {
           .onClick(() => {
             this.showKeyboardPanel = !this.showKeyboardPanel;
           })
+        Button('粘贴')
+          .height(40)
+          .fontSize(14)
+          .onClick(() => {
+            this.showKeyboardPanel = true;
+          })
+        Button('发送文件')
+          .height(40)
+          .fontSize(14)
+          .enabled(!this.transferActive)
+          .onClick(() => {
+            this.pickFileForUpload();
+          })
         Button(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关')
           .height(40)
           .fontSize(13)
@@ -459,6 +630,21 @@ struct RemotePage {
           .onClick(() => {
             this.showKeyboardPanel = !this.showKeyboardPanel;
           })
+        Button('粘贴')
+          .width(88)
+          .height(40)
+          .fontSize(14)
+          .onClick(() => {
+            this.showKeyboardPanel = true;
+          })
+        Button('发送文件')
+          .width(88)
+          .height(40)
+          .fontSize(13)
+          .enabled(!this.transferActive)
+          .onClick(() => {
+            this.pickFileForUpload();
+          })
         Button(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关')
           .width(88)
           .height(40)
@@ -522,6 +708,11 @@ struct RemotePage {
           .onClick(() => {
             this.sendKeyboardText(this.keyboardInput);
             this.keyboardInput = '';
+          })
+        Button('发剪贴板')
+          .height(40)
+          .onClick(() => {
+            this.sendManualClipboardText(this.keyboardInput);
           })
         Button('关闭')
           .height(40)
@@ -1092,6 +1283,176 @@ struct RemotePage {
     ConnectionService.sendText(text);
   }
 
+  sendManualClipboardText(text: string): void {
+    if (text.length <= 0) {
+      return;
+    }
+    let result: number = RustDeskNapi.sendClipboardText(text);
+    this.lastLocalClipboardText = text;
+    hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Manual clipboard sent result=%{public}d', result);
+  }
+
+  async pickFileForUpload(): Promise<void> {
+    try {
+      let context = getContext(this) as common.UIAbilityContext;
+      let documentPicker = new picker.DocumentViewPicker(context);
+      let options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      options.fileSuffixFilters = ['All files (*.*)|.*'];
+      let uris: string[] = await documentPicker.select(options);
+      if (uris.length <= 0) {
+        return;
+      }
+
+      let source: fileIo.File = fileIo.openSync(uris[0], fileIo.OpenMode.READ_ONLY);
+      let fileName: string = source.name;
+      let safeName: string = fileName.replace(/[\\/:*?"<>|]/g, '_');
+      let cachedPath: string = `${context.cacheDir}/upload-${Date.now()}-${safeName}`;
+      fileIo.copyFileSync(source.fd, cachedPath);
+      fileIo.closeSync(source);
+
+      this.cleanupPendingUploadFile();
+      this.pendingUploadPath = cachedPath;
+      this.pendingUploadName = fileName;
+      this.showRemoteFileBrowser = true;
+      this.openRemoteDirectory('/');
+    } catch (_e) {
+      this.showFileToast('未选择文件或无法读取文件');
+    }
+  }
+
+  openRemoteDirectory(path: string): void {
+    this.remoteDirectoryLoading = true;
+    this.remoteDirectoryEntries = [];
+    if (this.remoteDirectoryTimer !== -1) {
+      clearTimeout(this.remoteDirectoryTimer);
+    }
+    let result: number = RustDeskNapi.requestRemoteDirectory(path);
+    if (result !== 0) {
+      this.remoteDirectoryLoading = false;
+      this.showFileToast(`无法读取远端目录 (${result})`);
+      return;
+    }
+    this.pollRemoteDirectoryResult(0);
+  }
+
+  pollRemoteDirectoryResult(attempt: number): void {
+    let raw: string = RustDeskNapi.takeRemoteDirectoryResult();
+    if (raw.length > 0) {
+      try {
+        let result: RemoteDirectoryResult = JSON.parse(raw) as RemoteDirectoryResult;
+        this.remoteDirectoryLoading = false;
+        if (result.error.length > 0) {
+          this.showFileToast(`读取远端目录失败：${result.error}`);
+          return;
+        }
+        this.remoteDirectoryPath = result.path;
+        this.remoteDirectoryEntries = result.entries;
+        return;
+      } catch (_e) {
+        this.remoteDirectoryLoading = false;
+        this.showFileToast('远端目录数据无效');
+        return;
+      }
+    }
+    if (attempt >= 150 || !this.showRemoteFileBrowser) {
+      this.remoteDirectoryLoading = false;
+      if (this.showRemoteFileBrowser) this.showFileToast('读取远端目录超时');
+      return;
+    }
+    this.remoteDirectoryTimer = setTimeout(() => {
+      this.pollRemoteDirectoryResult(attempt + 1);
+    }, 100);
+  }
+
+  getRemoteFolders(): RemoteDirectoryEntry[] {
+    return this.remoteDirectoryEntries.filter((entry: RemoteDirectoryEntry) => {
+      return entry.entryType === 0 || entry.entryType === 2 || entry.entryType === 3;
+    });
+  }
+
+  joinRemotePath(name: string): string {
+    if (this.remoteDirectoryPath === '/') return `${name}\\`;
+    if (this.remoteDirectoryPath.length === 0) return name;
+    if (this.remoteDirectoryPath.endsWith('\\') || this.remoteDirectoryPath.endsWith('/')) {
+      return `${this.remoteDirectoryPath}${name}`;
+    }
+    let separator: string = this.remoteDirectoryPath.includes('\\') || this.remoteDirectoryPath.includes(':') ? '\\' : '/';
+    return `${this.remoteDirectoryPath}${separator}${name}`;
+  }
+
+  getRemoteParentPath(): string {
+    let path: string = this.remoteDirectoryPath;
+    if (path.length === 0 || path === '/') return '/';
+    while (path.length > 1 && (path.endsWith('\\') || path.endsWith('/'))) {
+      path = path.substring(0, path.length - 1);
+    }
+    if (/^[A-Za-z]:$/.test(path)) return '/';
+    let separatorIndex: number = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+    if (separatorIndex < 0) return '/';
+    let parent: string = path.substring(0, separatorIndex);
+    if (/^[A-Za-z]:$/.test(parent)) return `${parent}\\`;
+    return parent;
+  }
+
+  startPendingFileUpload(): void {
+    if (this.pendingUploadPath.length === 0 || this.pendingUploadName.length === 0) return;
+    let result: number = RustDeskNapi.startFileUpload(
+      this.pendingUploadPath,
+      this.pendingUploadName,
+      this.remoteDirectoryPath
+    );
+    if (result !== 0) {
+      this.showFileToast(`发送文件失败 (${result})`);
+      return;
+    }
+    this.transferActive = true;
+    this.transferProgress = 0;
+    this.closeRemoteFileBrowser(false);
+    this.showFileToast('文件开始传输');
+  }
+
+  closeRemoteFileBrowser(removePendingFile: boolean): void {
+    this.showRemoteFileBrowser = false;
+    this.remoteDirectoryLoading = false;
+    if (this.remoteDirectoryTimer !== -1) {
+      clearTimeout(this.remoteDirectoryTimer);
+      this.remoteDirectoryTimer = -1;
+    }
+    if (removePendingFile) {
+      this.cleanupPendingUploadFile();
+      this.pendingUploadName = '';
+    }
+  }
+
+  pollFileTransferStatus(): void {
+    if (!this.transferActive) return;
+    let raw: string = RustDeskNapi.getFileTransferStatus();
+    if (raw.length === 0) return;
+    try {
+      let status: FileTransferStatus = JSON.parse(raw) as FileTransferStatus;
+      this.transferProgress = status.total > 0 ? Math.min(100, status.transferred * 100 / status.total) : 0;
+      if (status.state === 'completed') {
+        this.transferActive = false;
+        this.transferProgress = 100;
+        this.cleanupPendingUploadFile();
+        this.pendingUploadName = '';
+        this.showFileToast('文件传输完成');
+      } else if (status.state === 'failed') {
+        this.transferActive = false;
+        this.showFileToast(status.error.length > 0 ? `文件传输失败：${status.error}` : '文件传输失败');
+      }
+    } catch (_e) {
+    }
+  }
+
+  showFileToast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 2500 });
+    } catch (_e) {
+    }
+  }
+
   sendControlKey(code: number): void {
     ConnectionService.sendKeyEvent(code, 2);
   }
@@ -1132,16 +1493,30 @@ struct RemotePage {
     this.lastLocalClipboardText = '';
     this.lastRemoteClipboardText = '';
     this.suppressClipboardText = '';
-    this.scheduleClipboardPoll(100);
+    this.clipboardBaselineInitialized = false;
+    if (this.connectionStatus === ConnectionStatus.CONNECTED) {
+      this.scheduleClipboardPoll(100);
+    }
   }
 
   stopClipboardSync(): void {
     this.clipboardSyncEnabled = false;
+    this.pauseClipboardSync();
+  }
+
+  pauseClipboardSync(): void {
     this.clipboardPolling = false;
     if (this.clipboardTimer !== -1) {
       clearTimeout(this.clipboardTimer);
       this.clipboardTimer = -1;
     }
+  }
+
+  ensureClipboardSyncRunning(): void {
+    if (!this.clipboardSyncEnabled || this.clipboardPolling || this.clipboardTimer !== -1) {
+      return;
+    }
+    this.scheduleClipboardPoll(100);
   }
 
   scheduleClipboardPoll(delayMs: number): void {
@@ -1154,7 +1529,8 @@ struct RemotePage {
   }
 
   async pollClipboardSync(): Promise<void> {
-    if (!this.clipboardSyncEnabled || this.clipboardPolling) {
+    this.clipboardTimer = -1;
+    if (!this.clipboardSyncEnabled || this.clipboardPolling || this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
     this.clipboardPolling = true;
@@ -1164,20 +1540,31 @@ struct RemotePage {
         this.lastRemoteClipboardText = remoteText;
         this.lastLocalClipboardText = remoteText;
         this.suppressClipboardText = remoteText;
+        this.clipboardBaselineInitialized = true;
         RustDeskNapi.setClipboardText(remoteText);
       }
 
       let localText: string = await RustDeskNapi.getClipboardTextAsync();
-      if (localText.length > 0 && localText !== this.lastLocalClipboardText) {
+      if (!this.clipboardBaselineInitialized) {
+        this.lastLocalClipboardText = localText;
+        this.clipboardBaselineInitialized = true;
+        if (localText.length > 0 && localText !== this.suppressClipboardText) {
+          let result: number = RustDeskNapi.sendClipboardText(localText);
+          hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Initial local clipboard synced result=%{public}d', result);
+        } else if (localText === this.suppressClipboardText) {
+          this.suppressClipboardText = '';
+        }
+      } else if (localText.length > 0 && localText !== this.lastLocalClipboardText) {
         this.lastLocalClipboardText = localText;
         if (localText === this.suppressClipboardText) {
           this.suppressClipboardText = '';
         } else {
-          RustDeskNapi.sendClipboardText(localText);
+          let result: number = RustDeskNapi.sendClipboardText(localText);
+          hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Local clipboard synced result=%{public}d', result);
         }
       }
     } catch (_e) {
-      // Ignore transient pasteboard permission/read failures and keep polling.
+      hilog.warn(LOG_DOMAIN, 'StarRustDesk', 'Clipboard sync poll failed');
     }
     this.clipboardPolling = false;
     if (this.clipboardSyncEnabled) {
@@ -1226,6 +1613,7 @@ struct RemotePage {
       RustDeskNapi.setSurfaceId(this.surfaceId);
       this.lastSurfaceWidth = this.componentWidth;
       this.lastSurfaceHeight = this.componentHeight;
+      this.requestVideoRefreshAfterSurfaceRebind();
     }
   }
 

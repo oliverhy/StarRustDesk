@@ -1,7 +1,6 @@
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { ConnectionPage } from './ConnectionPage'
-import { ServerPage } from './ServerPage'
 import { SettingsPage } from './SettingsPage'
 
 @Entry
@@ -19,7 +18,6 @@ struct HomePage {
     Stack({ alignContent: Alignment.Bottom }) {
       Swiper(this.swiperController) {
         ConnectionPage()
-        ServerPage()
         SettingsPage()
       }
       .indicator(false)
@@ -63,8 +61,7 @@ struct HomePage {
 
       Row({ space: 3 }) {
         this.buildTabItem(0, translate('Connection'))
-        this.buildTabItem(1, translate('Server'))
-        this.buildTabItem(2, translate('Settings'))
+        this.buildTabItem(1, translate('Settings'))
       }
       .height(46)
       .padding({ left: 5, right: 5, top: 4, bottom: 4 })

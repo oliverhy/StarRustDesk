@@ -4,6 +4,7 @@ import { translate } from '../utils/I18n'
 import { ConnectionService } from '../service/ConnectionService'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { RustDeskNapi } from '../service/RustDeskNapi'
+import { CredentialStore } from '../service/CredentialStore'
 
 interface SavedConnectionInfo {
   id: string
@@ -17,7 +18,7 @@ interface SavedConnectionRow {
   id: string
   name: string
   remoteId: string
-  passwordEnc: string
+  credentialAlias: string
   performancePreset: string
 }
 
@@ -468,7 +469,7 @@ export struct ConnectionPage {
     }
   }
 
-  loadSavedConnections(): void {
+  async loadSavedConnections(): Promise<void> {
     let raw: string = RustDeskNapi.getOption('saved-connections')
     if (raw.length <= 0) {
       this.savedConnections = []
@@ -478,21 +479,29 @@ export struct ConnectionPage {
     try {
       let rows: Record<string, string>[] = JSON.parse(raw) as Record<string, string>[]
       let list: SavedConnectionInfo[] = []
-      rows.forEach((row: Record<string, string>) => {
+      for (let row of rows) {
         let remoteId: string = (row['remoteId'] ?? '').trim()
         if (remoteId.length > 0) {
-          let savedPassword: string = row['passwordEnc'] ?? row['password'] ?? ''
+          let id: string = row['id'] ?? this.makeConnectionId(remoteId)
+          let savedPassword: string = await CredentialStore.load(id)
+          let legacyPassword: string = row['passwordEnc'] ?? row['password'] ?? ''
+          if (savedPassword.length === 0 && legacyPassword.length > 0) {
+            savedPassword = legacyPassword
+            await CredentialStore.save(id, legacyPassword)
+          }
           list.push({
-            id: row['id'] ?? this.makeConnectionId(remoteId),
+            id: id,
             name: row['name'] ?? '',
             remoteId: remoteId,
             password: savedPassword,
             performancePreset: row['performancePreset'] ?? 'smooth'
           })
         }
-      })
+      }
       this.savedConnections = this.cloneSavedConnections(list)
       this.savedConnectionsVersion++
+      this.persistSavedConnections(list)
+      RustDeskNapi.setOption('password', '')
     } catch (_e) {
       this.savedConnections = []
       this.savedConnectionsVersion++
@@ -506,7 +515,7 @@ export struct ConnectionPage {
         id: item.id,
         name: item.name,
         remoteId: item.remoteId,
-        passwordEnc: item.password,
+        credentialAlias: item.id,
         performancePreset: item.performancePreset
       })
     })
@@ -522,7 +531,7 @@ export struct ConnectionPage {
     this.isIdEmpty = this.remoteId.length === 0
   }
 
-  saveCurrentConnection(): void {
+  async saveCurrentConnection(): Promise<void> {
     let peerId: string = this.remoteId.trim()
     let password: string = this.password.trim()
     if (peerId.length <= 0) {
@@ -553,10 +562,11 @@ export struct ConnectionPage {
     this.savedConnections = this.cloneSavedConnections(list)
     this.savedConnectionsVersion++
     this.selectedConnectionId = targetId
+    await CredentialStore.save(targetId, password)
     this.persistSavedConnections(list)
   }
 
-  deleteSavedConnection(id: string): void {
+  async deleteSavedConnection(id: string): Promise<void> {
     let list: SavedConnectionInfo[] = []
     this.savedConnections.forEach((item: SavedConnectionInfo) => {
       if (item.id !== id) {
@@ -568,6 +578,7 @@ export struct ConnectionPage {
     if (this.selectedConnectionId === id) {
       this.clearConnectionForm()
     }
+    await CredentialStore.remove(id)
     this.persistSavedConnections(list)
   }
 

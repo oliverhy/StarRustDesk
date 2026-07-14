@@ -3,9 +3,6 @@
 #include "core/config.h"
 #include "core/video_render.h"
 #include "core/xcomponent_render.h"
-#include "core/file_transfer.h"
-#include "core/connection.h"
-#include "core/service.h"
 #include "core/audio_player.h"
 #include <cstring>
 #include <cstdio>
@@ -73,7 +70,11 @@ static void OnRustEvent(const char* message) {
     if (message == nullptr) {
         return;
     }
-    OH_LOG_INFO(LOG_APP, "rust_event: %{public}s", message);
+    if (strncmp(message, "file-session:", 13) == 0) {
+        OH_LOG_INFO(LOG_APP, "rust_event: %{public}s", message);
+    } else {
+        OH_LOG_DEBUG(LOG_APP, "rust_event: %{private}s", message);
+    }
     const std::string text(message);
     const std::string loginErrorPrefix = "login response: error=";
     if (text.rfind(loginErrorPrefix, 0) == 0) {
@@ -169,7 +170,7 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     g_connectionStartedAtMs.store(NowMs());
     SetLastConnectionMessage("");
     VideoRender::instance().resetSession();
-    OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{public}s password_len=%{public}zu server=%{public}s key=%{public}s",
+    OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
                 peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
     std::thread([peer, pass, rendezvous, relay, serverKey, generation]() {
         OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
@@ -360,57 +361,7 @@ static napi_value RefreshVideo(napi_env env, napi_callback_info info) {
     return ret;
 }
 
-// ===== Service Control =====
-
-extern "C" int start_service_cpp();
-extern "C" void stop_service_cpp();
-
-static napi_value StartService(napi_env env, napi_callback_info info) {
-    extern int start_service_cpp();
-    int result = start_service_cpp();
-    napi_value ret;
-    napi_create_int32(env, result, &ret);
-    return ret;
-}
-
-static napi_value StopService(napi_env env, napi_callback_info info) {
-    extern void stop_service_cpp();
-    stop_service_cpp();
-    napi_value ret;
-    napi_create_int32(env, 0, &ret);
-    return ret;
-}
-
-static napi_value GetActiveSessions(napi_env env, napi_callback_info info) {
-    auto sessions = Service::instance().getActiveSessions();
-    napi_value arr;
-    napi_create_array(env, &arr);
-    uint32_t idx = 0;
-    for (const auto& s : sessions) {
-        napi_value obj;
-        napi_create_object(env, &obj);
-        napi_value peerIdVal;
-        napi_create_string_utf8(env, s.peerId.c_str(), NAPI_AUTO_LENGTH, &peerIdVal);
-        napi_set_named_property(env, obj, "peerId", peerIdVal);
-        napi_value addrVal;
-        napi_create_string_utf8(env, s.clientAddr.c_str(), NAPI_AUTO_LENGTH, &addrVal);
-        napi_set_named_property(env, obj, "clientAddr", addrVal);
-        napi_value timeVal;
-        napi_create_int64(env, (int64_t)s.connectedAt, &timeVal);
-        napi_set_named_property(env, obj, "connectedAt", timeVal);
-        napi_set_element(env, arr, idx++, obj);
-    }
-    return arr;
-}
-
 // ===== Device Info =====
-
-static napi_value GetDeviceId(napi_env env, napi_callback_info info) {
-    std::string id = Service::instance().getDeviceId();
-    napi_value ret;
-    napi_create_string_utf8(env, id.c_str(), id.length(), &ret);
-    return ret;
-}
 
 static napi_value GetDeviceName(napi_env env, napi_callback_info info) {
     char hostname[256] = {0};
@@ -505,77 +456,6 @@ static napi_value GetPeerList(napi_env env, napi_callback_info info) {
     return ret;
 }
 
-// ===== File Transfer =====
-
-static napi_value SendFile(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-
-    char localPath[1024] = {0}, remotePath[1024] = {0};
-    size_t localLen = 0, remoteLen = 0;
-    napi_get_value_string_utf8(env, args[0], localPath, sizeof(localPath), &localLen);
-    napi_get_value_string_utf8(env, args[1], remotePath, sizeof(remotePath), &remoteLen);
-
-    FileTransfer::instance().setSocketFd(Connection::instance().getSocketFd());
-    int result = FileTransfer::instance().sendFile(localPath, remotePath);
-    napi_value ret;
-    napi_create_int32(env, result, &ret);
-    return ret;
-}
-
-static napi_value ReceiveFile(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-
-    char remotePath[1024] = {0}, localPath[1024] = {0};
-    size_t remoteLen = 0, localLen = 0;
-    napi_get_value_string_utf8(env, args[0], remotePath, sizeof(remotePath), &remoteLen);
-    napi_get_value_string_utf8(env, args[1], localPath, sizeof(localPath), &localLen);
-
-    FileTransfer::instance().setSocketFd(Connection::instance().getSocketFd());
-    int result = FileTransfer::instance().receiveFile(remotePath, localPath);
-    napi_value ret;
-    napi_create_int32(env, result, &ret);
-    return ret;
-}
-
-static napi_value GetFileTransferProgress(napi_env env, napi_callback_info info) {
-    FileTransferProgress p = FileTransfer::instance().getProgress();
-    napi_value obj;
-    napi_create_object(env, &obj);
-
-    napi_value statusVal;
-    napi_create_int32(env, (int)p.status, &statusVal);
-    napi_set_named_property(env, obj, "status", statusVal);
-
-    napi_value fileNameVal;
-    napi_create_string_utf8(env, p.fileName.c_str(), p.fileName.length(), &fileNameVal);
-    napi_set_named_property(env, obj, "fileName", fileNameVal);
-
-    napi_value totalVal;
-    napi_create_int64(env, p.totalBytes, &totalVal);
-    napi_set_named_property(env, obj, "totalBytes", totalVal);
-
-    napi_value transferredVal;
-    napi_create_int64(env, p.transferredBytes, &transferredVal);
-    napi_set_named_property(env, obj, "transferredBytes", transferredVal);
-
-    napi_value progressVal;
-    napi_create_double(env, p.progress, &progressVal);
-    napi_set_named_property(env, obj, "progress", progressVal);
-
-    return obj;
-}
-
-static napi_value CancelFileTransfer(napi_env env, napi_callback_info info) {
-    FileTransfer::instance().cancel();
-    napi_value ret;
-    napi_create_int32(env, 0, &ret);
-    return ret;
-}
-
 // ===== Clipboard (delegated to ArkTS pasteboard) =====
 
 static napi_value GetClipboardText(napi_env env, napi_callback_info info) {
@@ -607,6 +487,59 @@ static napi_value SendClipboardText(napi_env env, napi_callback_info info) {
     }
     napi_value ret;
     napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static std::string GetStringArgument(napi_env env, napi_value value) {
+    size_t length = 0;
+    napi_get_value_string_utf8(env, value, nullptr, 0, &length);
+    std::vector<char> buffer(length + 1, '\0');
+    napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length);
+    return std::string(buffer.data(), length);
+}
+
+static napi_value RequestRemoteDirectory(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::string path = argc > 0 ? GetStringArgument(env, args[0]) : "";
+    int result = rust_request_remote_directory(path.c_str());
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value TakeRemoteDirectoryResult(napi_env env, napi_callback_info info) {
+    char* value = rust_take_remote_directory_result();
+    napi_value ret;
+    napi_create_string_utf8(env, value == nullptr ? "" : value, NAPI_AUTO_LENGTH, &ret);
+    if (value != nullptr) rust_free_string(value);
+    return ret;
+}
+
+static napi_value StartFileUpload(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 3) {
+        napi_value ret;
+        napi_create_int32(env, -1, &ret);
+        return ret;
+    }
+    std::string path = GetStringArgument(env, args[0]);
+    std::string name = GetStringArgument(env, args[1]);
+    std::string directory = GetStringArgument(env, args[2]);
+    int result = rust_start_file_upload(path.c_str(), name.c_str(), directory.c_str());
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value GetFileTransferStatus(napi_env env, napi_callback_info info) {
+    char* value = rust_get_file_transfer_status();
+    napi_value ret;
+    napi_create_string_utf8(env, value == nullptr ? "" : value, NAPI_AUTO_LENGTH, &ret);
+    if (value != nullptr) rust_free_string(value);
     return ret;
 }
 
@@ -865,22 +798,18 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getCurrentDisplay", nullptr, GetCurrentDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"refreshVideo", nullptr, RefreshVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"startService", nullptr, StartService, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"stopService", nullptr, StopService, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getActiveSessions", nullptr, GetActiveSessions, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPeerList", nullptr, GetPeerList, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionStatus", nullptr, GetConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionRoute", nullptr, GetConnectionRoute, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLastConnectionError", nullptr, GetLastConnectionError, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getDeviceId", nullptr, GetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDeviceName", nullptr, GetDeviceName, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"sendFile", nullptr, SendFile, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"receiveFile", nullptr, ReceiveFile, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getFileTransferProgress", nullptr, GetFileTransferProgress, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"cancelFileTransfer", nullptr, CancelFileTransfer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getClipboardText", nullptr, GetClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setClipboardText", nullptr, SetClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendClipboardText", nullptr, SendClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"requestRemoteDirectory", nullptr, RequestRemoteDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeRemoteDirectoryResult", nullptr, TakeRemoteDirectoryResult, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startFileUpload", nullptr, StartFileUpload, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getFileTransferStatus", nullptr, GetFileTransferStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeRemoteClipboardText", nullptr, TakeRemoteClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOption", nullptr, SetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getOption", nullptr, GetOption, nullptr, nullptr, nullptr, napi_default, nullptr},

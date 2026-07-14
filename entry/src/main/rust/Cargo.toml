@@ -8,17 +8,16 @@ name = "rustdesk_core"
 crate-type = ["staticlib"]
 
 [dependencies]
-hbb_common = { path = "C:/Users/YIN/AppData/Local/Temp/rustdesk_full/libs/hbb_common" }
+hbb_common = { path = "vendor/hbb_common" }
 libc = "0.2"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 log = "0.4"
 protobuf = "3"
 
 [patch.crates-io]
-machine-uid = { path = "C:/Users/YIN/AppData/Local/Temp/machine_uid_replace" }
-sodiumoxide = { path = "C:/Users/YIN/AppData/Local/Temp/sodiumoxide_replace" }
+machine-uid = { path = "vendor/machine_uid" }
 
 [profile.release]
 opt-level = "z"

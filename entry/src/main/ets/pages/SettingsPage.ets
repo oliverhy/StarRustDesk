@@ -13,12 +13,8 @@ export struct SettingsPage {
   @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
-  @State password: string = ''
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
-  @State showPasswordDialog: boolean = false
-  @State passwordInput: string = ''
-  @State passwordConfirm: string = ''
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
     autoCancel: true,
@@ -35,7 +31,6 @@ export struct SettingsPage {
     if (savedFps.length > 0) {
       this.frameRate = parseInt(savedFps)
     }
-    this.password = RustDeskNapi.getOption('password')
   }
 
   build() {
@@ -43,11 +38,9 @@ export struct SettingsPage {
       Scroll() {
         Column({ space: 16 }) {
           this.buildSectionCard(translate('Account'), [
-            { label: translate('Device ID'), value: RustDeskNapi.getDeviceId() },
             { label: translate('Device Name'), value: RustDeskNapi.getDeviceName() },
           ])
           this.buildDisplayCard()
-          this.buildSecurityCard()
           this.buildServerConfigCard()
           this.buildThemeToggle()
           this.buildSectionCard(translate('About'), [
@@ -166,62 +159,6 @@ export struct SettingsPage {
       .width('100%')
       .borderRadius(6)
       .onClick(() => { onClick() })
-  }
-
-  @Builder
-  buildSecurityCard() {
-    Column() {
-      Text(translate('Security'))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 8 })
-
-      Row() {
-        Text(translate('Password'))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Text(this.password.length > 0 ? '********' : translate('Set'))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.password.length > 0 ? RustDeskTheme.TEXT_SECONDARY : RustDeskTheme.ACCENT)
-        Text('>')
-          .fontSize(16)
-          .fontColor(RustDeskTheme.DARK_GRAY)
-          .margin({ left: 4 })
-      }
-      .width('100%')
-      .padding({ top: 8, bottom: 8 })
-      .onClick(() => {
-        this.passwordInput = this.password
-        this.passwordConfirm = this.password
-        this.showPasswordDialog = true
-      })
-
-      if (this.showPasswordDialog) {
-        SettingsPasswordDialog({
-          password: this.passwordInput,
-          passwordConfirm: this.passwordConfirm,
-          onPasswordChange: (v: string) => { this.passwordInput = v },
-          onConfirmChange: (v: string) => { this.passwordConfirm = v },
-          onSave: () => {
-            if (this.passwordInput === this.passwordConfirm) {
-              RustDeskNapi.setOption('password', this.passwordInput)
-              this.password = this.passwordInput
-            }
-            this.showPasswordDialog = false
-          },
-          onCancel: () => {
-            this.showPasswordDialog = false
-          }
-        })
-      }
-    }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .width('100%')
   }
 
   @Builder

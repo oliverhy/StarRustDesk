@@ -1,14 +1,6 @@
 import rustdeskNapi from 'libentry.so'
 import { pasteboard } from '@kit.BasicServicesKit';
 
-export interface FileTransferProgressInfo {
-  status: number
-  fileName: string
-  totalBytes: number
-  transferredBytes: number
-  progress: number
-}
-
 const systemPasteboard: pasteboard.SystemPasteboard = pasteboard.getSystemPasteboard()
 
 export interface PeerInfo {
@@ -18,12 +10,6 @@ export interface PeerInfo {
   online: boolean
 }
 
-export interface SessionInfo {
-  peerId: string
-  clientAddr: string
-  connectedAt: number
-}
-
 export interface VideoFrameInfo {
   hasFrame: boolean
   width: number
@@ -31,6 +17,27 @@ export interface VideoFrameInfo {
   length: number
   totalFrames?: number
   totalBytes?: number
+}
+
+export interface RemoteDirectoryEntry {
+  name: string
+  entryType: number
+  size: number
+  modifiedTime: number
+}
+
+export interface RemoteDirectoryResult {
+  path: string
+  entries: RemoteDirectoryEntry[]
+  error: string
+}
+
+export interface FileTransferStatus {
+  sessionId: number
+  state: string
+  transferred: number
+  total: number
+  error: string
 }
 
 export class RustDeskNapi {
@@ -86,18 +93,6 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).refreshVideo()
   }
 
-  static startService(): number {
-    return rustdeskNapi.startService()
-  }
-
-  static stopService(): number {
-    return rustdeskNapi.stopService()
-  }
-
-  static getActiveSessions(): SessionInfo[] {
-    return rustdeskNapi.getActiveSessions()
-  }
-
   static getPeerList(): PeerInfo[] {
     return rustdeskNapi.getPeerList()
   }
@@ -114,28 +109,8 @@ export class RustDeskNapi {
     return rustdeskNapi.getLastConnectionError()
   }
 
-  static getDeviceId(): string {
-    return rustdeskNapi.getDeviceId()
-  }
-
   static getDeviceName(): string {
     return rustdeskNapi.getDeviceName()
-  }
-
-  static sendFile(localPath: string, remotePath: string): number {
-    return rustdeskNapi.sendFile(localPath, remotePath)
-  }
-
-  static receiveFile(remotePath: string, localPath: string): number {
-    return rustdeskNapi.receiveFile(remotePath, localPath)
-  }
-
-  static getFileTransferProgress(): FileTransferProgressInfo {
-    return rustdeskNapi.getFileTransferProgress()
-  }
-
-  static cancelFileTransfer(): number {
-    return rustdeskNapi.cancelFileTransfer()
   }
 
   static getClipboardText(): string {
@@ -148,7 +123,7 @@ export class RustDeskNapi {
       let recordCount: number = data.getRecordCount()
       for (let i: number = 0; i < recordCount; i++) {
         let record: pasteboard.PasteDataRecord = data.getRecord(i)
-        let text: string = record.toPlainText()
+        let text: string = RustDeskNapi.getPlainTextFromRecord(record)
         if (text.length > 0) {
           return text
         }
@@ -157,6 +132,32 @@ export class RustDeskNapi {
       // clipboard may be empty or no permission
     }
     return ''
+  }
+
+  private static getPlainTextFromRecord(record: pasteboard.PasteDataRecord): string {
+    if (record.plainText.length > 0) {
+      return record.plainText
+    }
+    if (record.htmlText.length > 0) {
+      return RustDeskNapi.htmlToText(record.htmlText)
+    }
+    return record.toPlainText()
+  }
+
+  private static htmlToText(html: string): string {
+    return html
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, '\'')
+      .trim()
   }
 
   static setClipboardText(text: string): number {
@@ -171,6 +172,22 @@ export class RustDeskNapi {
 
   static sendClipboardText(text: string): number {
     return (rustdeskNapi as ESObject).sendClipboardText(text)
+  }
+
+  static requestRemoteDirectory(path: string): number {
+    return (rustdeskNapi as ESObject).requestRemoteDirectory(path)
+  }
+
+  static takeRemoteDirectoryResult(): string {
+    return (rustdeskNapi as ESObject).takeRemoteDirectoryResult()
+  }
+
+  static startFileUpload(path: string, name: string, remoteDirectory: string): number {
+    return (rustdeskNapi as ESObject).startFileUpload(path, name, remoteDirectory)
+  }
+
+  static getFileTransferStatus(): string {
+    return (rustdeskNapi as ESObject).getFileTransferStatus()
   }
 
   static takeRemoteClipboardText(): string {

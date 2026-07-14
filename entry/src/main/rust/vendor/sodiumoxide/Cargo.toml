@@ -1,0 +1,14 @@
+[package]
+name = "sodiumoxide-compat"
+version = "0.2.7"
+edition = "2021"
+
+[lib]
+name = "sodiumoxide"
+
+[dependencies]
+base64 = "0.22"
+crypto_box = "0.10.0-pre.0"
+crypto_secretbox = "0.2.0-pre.0"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

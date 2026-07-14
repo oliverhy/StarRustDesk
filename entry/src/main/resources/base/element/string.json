@@ -97,10 +97,6 @@
       "value": "Favorites"
     },
     {
-      "name": "permission_camera_reason",
-      "value": "Camera is used for QR code scanning to connect to remote devices"
-    },
-    {
       "name": "permission_microphone_reason",
       "value": "Microphone is used for audio communication during remote sessions"
     }
