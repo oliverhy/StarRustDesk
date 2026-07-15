@@ -15,11 +15,12 @@ export struct SettingsPage {
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
+  @State pageWidth: number = 0
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
     autoCancel: true,
     customStyle: true,
-    cornerRadius: 16,
+    cornerRadius: 8,
   })
 
   aboutToAppear(): void {
@@ -35,6 +36,24 @@ export struct SettingsPage {
 
   build() {
     Column() {
+      Row() {
+        Column({ space: 4 }) {
+          Text('设置')
+            .fontSize(this.pageWidth >= 820 ? 30 : 26)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('连接质量、网络服务与外观')
+            .fontSize(14)
+            .fontColor(this.isDarkMode ? '#B7C0CF' : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .height(this.pageWidth >= 820 ? 116 : 104)
+      .padding({ left: this.pageWidth >= 820 ? 32 : 16, right: this.pageWidth >= 820 ? 32 : 16, top: 24, bottom: 18 })
+
       Scroll() {
         Column({ space: 16 }) {
           this.buildSectionCard(translate('Account'), [
@@ -47,13 +66,18 @@ export struct SettingsPage {
             { label: translate('Version'), value: '1.0.0' },
           ])
         }
-        .width('100%')
+        .width(this.pageWidth >= 820 ? 720 : '100%')
         .padding(RustDeskTheme.PAGE_PADDING)
       }
+      .width('100%')
       .layoutWeight(1)
     }
     .width('100%')
     .height('100%')
+    .alignItems(HorizontalAlign.Center)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.pageWidth = newValue.width as number
+    })
   }
 
   @Builder
@@ -134,7 +158,9 @@ export struct SettingsPage {
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
     .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
     .width('100%')
   }
 
@@ -157,6 +183,7 @@ export struct SettingsPage {
       .fontColor(RustDeskTheme.ACCENT)
       .padding({ top: 6, bottom: 6, left: 8 })
       .width('100%')
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.ACCENT_SOFT)
       .borderRadius(6)
       .onClick(() => { onClick() })
   }
@@ -189,7 +216,9 @@ export struct SettingsPage {
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
     .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
     .width('100%')
   }
 
@@ -221,7 +250,9 @@ export struct SettingsPage {
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
     .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
     .width('100%')
   }
 
@@ -244,7 +275,9 @@ export struct SettingsPage {
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
     .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
     .width('100%')
   }
 }
@@ -327,6 +360,7 @@ struct SettingsPasswordDialog {
     .padding(24)
     .width('85%')
     .backgroundColor(Color.White)
-    .borderRadius(16)
+    .border({ width: 1, color: '#E4EAF3' })
+    .borderRadius(8)
   }
 }

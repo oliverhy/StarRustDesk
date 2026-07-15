@@ -115,29 +115,38 @@ export struct ConnectionPage {
         if (this.showUpdateBanner) {
           this.buildUpdateBanner()
         }
+        this.buildPageHeader()
         Scroll() {
-          Column({ space: 16 }) {
-            this.buildSavedConnections()
-            this.buildRemoteIdInput()
-            this.buildConnectionNameInput()
-            this.buildPasswordInput()
-            this.buildPerformancePresetSelector()
-            this.buildConnectionEditActions()
-            if (this.connectionStatusText.length > 0) {
-              this.buildConnectionStatus()
+          if (this.pageWidth >= 820) {
+            Row({ space: 18 }) {
+              Column() {
+                this.buildSavedConnections()
+              }
+              .layoutWeight(1)
+              .height('100%')
+
+              Column() {
+                this.buildConnectionForm()
+              }
+              .layoutWeight(1.2)
+              .height('100%')
             }
-            if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
-              this.buildCustomServerIndicator()
+            .width('100%')
+            .alignItems(VerticalAlign.Top)
+          } else {
+            Column({ space: 14 }) {
+              this.buildSavedConnections()
+              this.buildConnectionForm()
             }
+            .width('100%')
           }
-          .width(this.pageWidth >= 720 ? 520 : '100%')
-          .padding({ top: this.pageWidth >= 720 ? 32 : 8 })
         }
+        .width('100%')
         .layoutWeight(1)
       }
       .width('100%')
       .height('100%')
-      .padding({ left: this.pageWidth >= 720 ? 24 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 720 ? 24 : RustDeskTheme.PAGE_PADDING })
+      .padding({ left: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING })
       .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
@@ -145,6 +154,81 @@ export struct ConnectionPage {
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.pageWidth = newValue.width as number
     })
+  }
+
+  @Builder
+  buildPageHeader() {
+    Row() {
+      Column({ space: 4 }) {
+        Text('StarRustDesk')
+          .fontSize(this.pageWidth >= 820 ? 30 : 26)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .width('100%')
+        Text('轻松连接并控制你的远端设备')
+          .fontSize(14)
+          .fontColor(this.isDarkMode ? '#B7C0CF' : RustDeskTheme.TEXT_SECONDARY)
+          .width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Row({ space: 7 }) {
+        Circle()
+          .width(8)
+          .height(8)
+          .fill(this.isUsingPublicServer || this.customServerHint.length > 0 ? RustDeskTheme.SUCCESS : RustDeskTheme.WARNING)
+        Text(this.isUsingPublicServer ? '公共网络' : '自建网络')
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+      }
+      .height(34)
+      .padding({ left: 12, right: 12 })
+      .backgroundColor(this.isDarkMode ? '#263142' : '#F7FAFF')
+      .border({ width: 1, color: this.isDarkMode ? '#364256' : '#DFE7F2' })
+      .borderRadius(7)
+    }
+    .width('100%')
+    .height(this.pageWidth >= 820 ? 116 : 104)
+    .padding({ top: 24, bottom: 18 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  buildConnectionForm() {
+    Column({ space: 12 }) {
+      Row() {
+        Text(this.selectedConnectionId.length > 0 ? '编辑连接' : '新建连接')
+          .fontSize(18)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Text(this.performancePreset === 'stable' ? '稳定优先' : this.performancePreset === 'high_fps' ? '帧率优先' : this.performancePreset === 'silky' ? '丝滑优先' : '流畅优先')
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ACCENT)
+      }
+      .width('100%')
+      .margin({ bottom: 2 })
+
+      this.buildRemoteIdInput()
+      this.buildConnectionNameInput()
+      this.buildPasswordInput()
+      this.buildPerformancePresetSelector()
+      this.buildConnectionEditActions()
+      if (this.connectionStatusText.length > 0) {
+        this.buildConnectionStatus()
+      }
+      if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
+        this.buildCustomServerIndicator()
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
+    .margin({ bottom: 18 })
   }
 
   @Builder
@@ -201,7 +285,10 @@ export struct ConnectionPage {
       }
     }
     .width('100%')
-    .padding({ left: 4, top: 8, bottom: 4 })
+    .height(38)
+    .padding({ left: 12, right: 8 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+    .borderRadius(6)
   }
 
   @Builder
@@ -238,30 +325,30 @@ export struct ConnectionPage {
 
         Button({ type: ButtonType.Circle }) {
           Text('→')
-            .fontSize(28)
-            .fontColor(RustDeskTheme.DARK_GRAY)
+            .fontSize(24)
+            .fontColor(Color.White)
         }
-        .width(48)
-        .height(48)
-        .backgroundColor(Color.Transparent)
+        .width(44)
+        .height(44)
+        .backgroundColor(this.remoteId.trim().length > 0 && this.password.trim().length > 0 ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
         .onClick(() => {
           this.onConnect()
         })
       }
       .padding({ left: 16, right: 8 })
-      .height(64)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .height(68)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
+      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
       .alignItems(VerticalAlign.Center)
       .shadow({
-        radius: 4,
-        color: this.isDarkMode ? '#00000040' : '#0000001A',
+        radius: 8,
+        color: this.isDarkMode ? '#00000030' : '#10345A84',
         offsetX: 0,
         offsetY: 2
       })
     }
     .width('100%')
-    .margin({ top: 8 })
   }
 
   @Builder
@@ -273,8 +360,9 @@ export struct ConnectionPage {
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
+      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
       .onChange((value: string) => {
         this.connectionName = value
       })
@@ -289,8 +377,9 @@ export struct ConnectionPage {
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-      .borderRadius(RustDeskTheme.CARD_RADIUS)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
+      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
       .onChange((value: string) => {
         this.password = value
       })
@@ -298,22 +387,51 @@ export struct ConnectionPage {
 
   @Builder
   buildSavedConnections() {
-    if (this.savedConnections.length > 0) {
-      Column({ space: 8 }) {
-        Row() {
-          Text('已保存连接')
+    Column({ space: 8 }) {
+      Row() {
+        Text('已保存连接')
+          .fontSize(18)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Text(`${this.savedConnections.length} 个设备`)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+      }
+      .width('100%')
+      .margin({ bottom: 2 })
+
+      if (this.savedConnections.length === 0) {
+        Column({ space: 8 }) {
+          Text('暂无保存的连接')
             .fontSize(15)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          Blank()
-          Text(`${this.savedConnections.length} 个`)
+            .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+          Text('连接信息会安全保存在本机')
             .fontSize(12)
             .fontColor(RustDeskTheme.TEXT_SECONDARY)
         }
         .width('100%')
-
+        .height(112)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .borderRadius(6)
+      } else {
         ForEach(this.savedConnections, (item: SavedConnectionInfo) => {
           Row({ space: 8 }) {
+            Column() {
+              Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
+                .fontSize(15)
+                .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+                .fontColor(RustDeskTheme.ACCENT)
+            }
+            .width(36)
+            .height(36)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor(this.isDarkMode ? '#26364E' : RustDeskTheme.ACCENT_SOFT)
+            .borderRadius(6)
+
             Column({ space: 3 }) {
               Text(item.name.length > 0 ? item.name : item.remoteId)
                 .fontSize(14)
@@ -332,9 +450,9 @@ export struct ConnectionPage {
             Button('使用')
               .height(32)
               .fontSize(12)
-              .fontColor(Color.White)
-              .backgroundColor(item.id === this.selectedConnectionId ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
-              .borderRadius(8)
+              .fontColor(item.id === this.selectedConnectionId ? Color.White : RustDeskTheme.ACCENT)
+              .backgroundColor(item.id === this.selectedConnectionId ? RustDeskTheme.ACCENT : (this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT))
+              .borderRadius(6)
               .onClick(() => {
                 this.applySavedConnection(item)
               })
@@ -349,13 +467,19 @@ export struct ConnectionPage {
               })
           }
           .width('100%')
-          .padding({ left: 12, right: 8, top: 10, bottom: 10 })
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-          .borderRadius(8)
+          .height(58)
+          .padding({ left: 8, right: 4 })
+          .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
         }, (item: SavedConnectionInfo) => `${item.id}-${this.savedConnectionsVersion}`)
       }
-      .width('100%')
     }
+    .width('100%')
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
+    .margin({ bottom: 18 })
   }
 
   @Builder
@@ -367,7 +491,7 @@ export struct ConnectionPage {
         .fontSize(14)
         .fontColor(Color.White)
         .backgroundColor(this.remoteId.trim().length > 0 ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
-        .borderRadius(8)
+        .borderRadius(6)
         .onClick(() => {
           this.saveCurrentConnection()
         })
@@ -376,8 +500,8 @@ export struct ConnectionPage {
         .height(40)
         .fontSize(14)
         .fontColor(RustDeskTheme.TEXT_SECONDARY)
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-        .borderRadius(8)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .borderRadius(6)
         .onClick(() => {
           this.clearConnectionForm()
         })
@@ -409,13 +533,16 @@ export struct ConnectionPage {
         .fontColor(RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
 
-      Row({ space: 8 }) {
+      Row({ space: 3 }) {
         this.buildPresetButton('稳定', 'stable')
         this.buildPresetButton('高帧率', 'high_fps')
         this.buildPresetButton('高流畅', 'smooth')
         this.buildPresetButton('高丝滑', 'silky')
       }
       .width('100%')
+      .padding(3)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+      .borderRadius(7)
     }
     .width('100%')
   }
@@ -427,8 +554,8 @@ export struct ConnectionPage {
       .layoutWeight(1)
       .fontSize(12)
       .fontColor(this.performancePreset === preset ? Color.White : RustDeskTheme.TEXT_SECONDARY)
-      .backgroundColor(this.performancePreset === preset ? RustDeskTheme.ACCENT : (this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT))
-      .borderRadius(8)
+      .backgroundColor(this.performancePreset === preset ? RustDeskTheme.ACCENT : Color.Transparent)
+      .borderRadius(5)
       .onClick(() => {
         this.performancePreset = preset
       })

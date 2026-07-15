@@ -1820,7 +1820,7 @@ async fn send_login(hash: Hash) {
             custom_fps: performance.fps,
             disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
             enable_file_transfer: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
-            show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+            show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::No.into(),
             ..Default::default()
         }),
         version: "1.2.0".to_string(),
@@ -1855,7 +1855,7 @@ async fn send_performance_options(refresh_video: bool) {
             ..Default::default()
         }),
         disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
-        show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+        show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::No.into(),
         ..Default::default()
     });
     let mut msg = PeerMessage::new();

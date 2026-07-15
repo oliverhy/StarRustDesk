@@ -16,6 +16,23 @@ struct HomePage {
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
+      Column() {
+        Row() {
+          Column()
+            .width('42%')
+            .height('100%')
+            .backgroundColor(this.isDarkMode ? '#202D44' : '#D7E5FF')
+          Blank()
+        }
+        .width('100%')
+        .height(196)
+        .backgroundColor(this.isDarkMode ? '#19202B' : '#F7F9FD')
+        Blank()
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : RustDeskTheme.BG_LIGHT)
+
       Swiper(this.swiperController) {
         ConnectionPage()
         SettingsPage()
@@ -29,8 +46,8 @@ struct HomePage {
       })
       .width('100%')
       .height('100%')
-      .padding({ bottom: 58 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : RustDeskTheme.BG_LIGHT)
+      .padding({ bottom: 66 })
+      .backgroundColor(Color.Transparent)
 
       this.buildFloatingTabBar()
     }
@@ -41,63 +58,43 @@ struct HomePage {
 
   @Builder
   buildFloatingTabBar() {
-    Stack({ alignContent: Alignment.Start }) {
-      Column() {
-        Blank()
-      }
-      .width(112)
-      .height(38)
-      .backgroundColor(this.isDarkMode ? '#4A6FA8FF' : '#5A9CC8FF')
-      .backgroundBlurStyle(BlurStyle.BACKGROUND_THIN)
-      .border({
-        width: 1,
-        color: '#88FFFFFF'
-      })
-      .borderRadius(19)
-      .clip(true)
-      .position({ x: 5, y: 4 })
-      .translate({ x: this.currentTabIndex * 115, y: 0 })
-      .animation({ duration: 320, curve: Curve.EaseInOut })
-
-      Row({ space: 3 }) {
-        this.buildTabItem(0, translate('Connection'))
-        this.buildTabItem(1, translate('Settings'))
-      }
-      .height(46)
-      .padding({ left: 5, right: 5, top: 4, bottom: 4 })
+    Row({ space: 6 }) {
+      this.buildTabItem(0, translate('Connection'))
+      this.buildTabItem(1, translate('Settings'))
     }
-    .height(46)
-    .margin({ left: 26, right: 26, bottom: 10 })
-    .backgroundColor(this.isDarkMode ? '#24242B38' : '#24FFFFFF')
-    .backgroundBlurStyle(BlurStyle.BACKGROUND_THICK)
+    .height(52)
+    .padding(5)
+    .margin({ left: 24, right: 24, bottom: 9 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
     .border({
       width: 1,
-      color: this.isDarkMode ? '#70FFFFFF' : '#E6FFFFFF'
+      color: this.isDarkMode ? '#344052' : '#E5EAF2'
     })
-    .borderRadius(23)
+    .borderRadius(8)
     .clip(true)
     .shadow({
-      radius: 15,
-      color: this.isDarkMode ? '#66000000' : '#22000000',
+      radius: 18,
+      color: this.isDarkMode ? '#66000000' : '#1A335A8A',
       offsetX: 0,
-      offsetY: 4
+      offsetY: 6
     })
   }
 
   @Builder
   buildTabItem(index: number, label: string) {
-    Column() {
+    Row() {
       Text(label)
         .fontSize(14)
         .fontWeight(index === this.currentTabIndex ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-        .fontColor(index === this.currentTabIndex ? '#FF2D6A' : (this.isDarkMode ? '#E8FFFFFF' : '#CC111111'))
+        .fontColor(index === this.currentTabIndex ? Color.White : (this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY))
         .textAlign(TextAlign.Center)
     }
-    .width(112)
-    .height(38)
+    .layoutWeight(1)
+    .height(42)
     .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
-    .borderRadius(19)
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(index === this.currentTabIndex ? RustDeskTheme.ACCENT : Color.Transparent)
+    .borderRadius(6)
     .clip(true)
     .onClick(() => {
       if (index === this.currentTabIndex) {

@@ -54,6 +54,7 @@ struct RemotePage {
   @State remoteDirectoryLoading: boolean = false;
   @State transferProgress: number = 0;
   @State transferActive: boolean = false;
+  @State connectedPeerId: string = '';
   private xComponentController: XComponentController = new XComponentController();
   private toolbarTimer: number = -1;
   private statusTimer: number = -1;
@@ -102,6 +103,7 @@ struct RemotePage {
   private pendingUploadName: string = '';
 
   aboutToAppear(): void {
+    this.connectedPeerId = AppStorage.get<string>('connectedPeerId') ?? '';
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
     this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
@@ -234,7 +236,7 @@ struct RemotePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(Color.Black)
+    .backgroundColor('#E7EEF8')
     .focusable(true)
     .onKeyEventDispatch((event: KeyEvent) => {
       return this.handleRemoteKey(event);
@@ -247,13 +249,16 @@ struct RemotePage {
 
   @Builder
   buildDisconnectedView() {
-    Column({ space: 16 }) {
-      Text('🖥').fontSize(64);
+    Column({ space: 12 }) {
+      Text('StarRustDesk')
+        .fontSize(28)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY);
       Text(translate('No active connection'))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(Color.White);
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(RustDeskTheme.TEXT_PRIMARY);
       Text(translate('Enter a Remote ID to connect'))
-        .fontSize(RustDeskTheme.FONT_SIZE_SMALL).fontColor(Color.Gray);
-      Button(translate('Back')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(8)
+        .fontSize(RustDeskTheme.FONT_SIZE_SMALL).fontColor(RustDeskTheme.TEXT_SECONDARY);
+      Button(translate('Back')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(6)
         .onClick(() => { router.back(); });
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
@@ -261,9 +266,15 @@ struct RemotePage {
 
   @Builder
   buildConnectingView() {
-    Column({ space: 16 }) {
-      LoadingProgress().width(48).height(48).color(Color.White);
-      Text(translate('Connecting')).fontSize(RustDeskTheme.FONT_SIZE_BODY).fontColor(Color.White);
+    Column({ space: 14 }) {
+      LoadingProgress().width(42).height(42).color(RustDeskTheme.ACCENT);
+      Text('正在连接远端设备')
+        .fontSize(20)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+      Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : translate('Connecting'))
+        .fontSize(13)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY);
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
@@ -285,7 +296,7 @@ struct RemotePage {
         this.buildSideToolbar();
       }
       .width('100%').height('100%')
-      .backgroundColor(Color.Black);
+      .backgroundColor('#DCE5F2');
     } else {
       Column() {
         this.buildStatsPanel();
@@ -296,7 +307,7 @@ struct RemotePage {
         this.buildFloatingToolbar();
       }
       .width('100%').height('100%')
-      .backgroundColor(Color.Black);
+      .backgroundColor('#DCE5F2');
     }
   }
 
@@ -307,6 +318,8 @@ struct RemotePage {
         Row({ space: 8 }) {
           Button('上一级')
             .height(40)
+            .fontColor(RustDeskTheme.ACCENT)
+            .backgroundColor(RustDeskTheme.ACCENT_SOFT)
             .borderRadius(8)
             .enabled(!this.remoteDirectoryLoading)
             .onClick(() => {
@@ -315,7 +328,7 @@ struct RemotePage {
           Text(this.remoteDirectoryPath === '/' ? '此电脑' : this.remoteDirectoryPath)
             .layoutWeight(1)
             .fontSize(15)
-            .fontColor(Color.White)
+            .fontColor(RustDeskTheme.TEXT_PRIMARY)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
@@ -323,7 +336,7 @@ struct RemotePage {
 
         if (this.remoteDirectoryLoading) {
           Column() {
-            LoadingProgress().width(40).height(40).color(Color.White)
+            LoadingProgress().width(40).height(40).color(RustDeskTheme.ACCENT)
           }
           .layoutWeight(1)
           .width('100%')
@@ -335,12 +348,12 @@ struct RemotePage {
                 Row({ space: 12 }) {
                   Text(entry.entryType === 3 ? '磁盘' : '文件夹')
                     .fontSize(12)
-                    .fontColor(Color.Gray)
+                    .fontColor(RustDeskTheme.TEXT_SECONDARY)
                     .width(52)
                   Text(entry.name)
                     .layoutWeight(1)
                     .fontSize(15)
-                    .fontColor(Color.White)
+                    .fontColor(RustDeskTheme.TEXT_PRIMARY)
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                 }
@@ -355,7 +368,7 @@ struct RemotePage {
           }
           .layoutWeight(1)
           .width('100%')
-          .divider({ strokeWidth: 1, color: '#333333' })
+          .divider({ strokeWidth: 1, color: RustDeskTheme.DIVIDER })
         }
 
         Row({ space: 12 }) {
@@ -363,7 +376,8 @@ struct RemotePage {
             .layoutWeight(1)
             .height(42)
             .borderRadius(8)
-            .backgroundColor('#444444')
+            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+            .backgroundColor(RustDeskTheme.SURFACE_MUTED)
             .onClick(() => {
               this.closeRemoteFileBrowser(true);
             })
@@ -382,8 +396,10 @@ struct RemotePage {
       .width(this.isLargeLayout() ? 560 : '92%')
       .height(this.isLargeLayout() ? '78%' : '84%')
       .padding(16)
-      .backgroundColor('#202124')
+      .backgroundColor(Color.White)
+      .border({ width: 1, color: '#DEE6F1' })
       .borderRadius(8)
+      .shadow({ radius: 28, color: '#500C1524', offsetX: 0, offsetY: 10 })
     }
     .width('100%')
     .height('100%')
@@ -395,7 +411,7 @@ struct RemotePage {
     Row({ space: 10 }) {
       Text('正在发送文件')
         .fontSize(13)
-        .fontColor(Color.White)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY)
       Progress({ value: this.transferProgress, total: 100, type: ProgressType.Linear })
         .layoutWeight(1)
         .height(6)
@@ -403,13 +419,14 @@ struct RemotePage {
       Text(`${Math.floor(this.transferProgress)}%`)
         .width(44)
         .fontSize(13)
-        .fontColor(Color.White)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY)
         .textAlign(TextAlign.End)
     }
     .width(this.isLargeLayout() ? 420 : '88%')
     .height(44)
     .padding({ left: 12, right: 12 })
-    .backgroundColor('#E6202124')
+    .backgroundColor(Color.White)
+    .border({ width: 1, color: '#DEE6F1' })
     .borderRadius(8)
     .position({ x: this.isLargeLayout() ? 24 : '6%', y: 16 })
   }
@@ -468,8 +485,10 @@ struct RemotePage {
 
       if (!this.hasVideo) {
         Column({ space: 12 }) {
-          Text('🖥')
-            .fontSize(64)
+          LoadingProgress()
+            .width(42)
+            .height(42)
+            .color(RustDeskTheme.ACCENT)
           Text(translate('Connected'))
             .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
             .fontColor(Color.White)
@@ -492,6 +511,7 @@ struct RemotePage {
     .width('100%')
     .layoutWeight(1)
     .clip(true)
+    .backgroundColor('#090D14')
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.componentWidth = newValue.width as number;
       this.componentHeight = newValue.height as number;
@@ -503,12 +523,15 @@ struct RemotePage {
 
   @Builder
   buildErrorView() {
-    Column({ space: 16 }) {
-      Text('⚠').fontSize(48);
+    Column({ space: 14 }) {
+      Text('连接失败')
+        .fontSize(24)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY);
       Text(translate('Connection failed')).fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(RustDeskTheme.ERROR);
       Button(translate('Retry')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(8)
         .onClick(() => { router.back(); });
-      Button(translate('Back')).fontColor(RustDeskTheme.TEXT_PRIMARY).backgroundColor(Color.Gray).borderRadius(8)
+      Button(translate('Back')).fontColor(RustDeskTheme.TEXT_PRIMARY).backgroundColor(RustDeskTheme.SURFACE_MUTED).borderRadius(8)
         .onClick(() => { router.back(); });
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
@@ -517,74 +540,35 @@ struct RemotePage {
   @Builder
   buildFloatingToolbar() {
     Scroll() {
-      Row({ space: 8 }) {
+      Row({ space: 6 }) {
         if (this.displayCount > 1) {
           ForEach(this.makeDisplayIndexes(), (display: number) => {
-            Button(`屏${display + 1}`)
-              .height(40)
-              .fontSize(13)
-              .fontColor(Color.White)
-              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : '#66000000')
-              .borderRadius(8)
-              .onClick(() => {
-                this.switchDisplay(display);
-              })
+            this.buildToolbarButton(`屏${display + 1}`, 54, display === this.currentDisplay, false, true, () => {
+              this.switchDisplay(display);
+            })
           })
         }
-        Button('鼠标')
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 1);
-            ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 2);
-          })
-        Button('键盘')
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            this.showKeyboardPanel = !this.showKeyboardPanel;
-          })
-        Button('粘贴')
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            this.showKeyboardPanel = true;
-          })
-        Button('发送文件')
-          .height(40)
-          .fontSize(14)
-          .enabled(!this.transferActive)
-          .onClick(() => {
-            this.pickFileForUpload();
-          })
-        Button(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关')
-          .height(40)
-          .fontSize(13)
-          .fontColor(this.clipboardSyncEnabled ? Color.White : Color.Gray)
-          .backgroundColor(this.clipboardSyncEnabled ? RustDeskTheme.ACCENT : '#66000000')
-          .borderRadius(8)
-          .onClick(() => {
-            this.toggleClipboardSync();
-          })
-        Button('+')
-          .height(40)
-          .fontSize(18)
-          .onClick(() => {
-            this.zoomScale = Math.min(this.zoomScale + 0.25, 5.0);
-          })
-        Button('-')
-          .height(40)
-          .fontSize(18)
-          .onClick(() => {
-            this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
-          })
-        Button('断开')
-          .height(40)
-          .fontSize(14)
-          .fontColor(RustDeskTheme.ERROR)
-          .onClick(() => {
-            this.disconnectSession();
-          })
+        this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
+          this.showKeyboardPanel = !this.showKeyboardPanel;
+        })
+        this.buildToolbarButton('输入', 64, false, false, true, () => {
+          this.showKeyboardPanel = true;
+        })
+        this.buildToolbarButton('发送文件', 82, false, false, !this.transferActive, () => {
+          this.pickFileForUpload();
+        })
+        this.buildToolbarButton(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关', 82, this.clipboardSyncEnabled, false, true, () => {
+          this.toggleClipboardSync();
+        })
+        this.buildToolbarButton('+', 40, false, false, true, () => {
+          this.zoomScale = Math.min(this.zoomScale + 0.25, 5.0);
+        })
+        this.buildToolbarButton('-', 40, false, false, true, () => {
+          this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
+        })
+        this.buildToolbarButton('断开', 64, false, true, true, () => {
+          this.disconnectSession();
+        })
       }
       .height(40)
       .alignItems(VerticalAlign.Center)
@@ -592,7 +576,8 @@ struct RemotePage {
     .width('100%')
     .height(56)
     .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-    .backgroundColor('#CC000000')
+    .backgroundColor(Color.White)
+    .border({ width: { top: 1 }, color: '#DEE6F1' })
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off);
   }
@@ -600,93 +585,64 @@ struct RemotePage {
   @Builder
   buildSideToolbar() {
     Scroll() {
-      Column({ space: 8 }) {
+      Column({ space: 6 }) {
         if (this.displayCount > 1) {
           ForEach(this.makeDisplayIndexes(), (display: number) => {
-            Button(`屏${display + 1}`)
-              .width(88)
-              .height(40)
-              .fontSize(13)
-              .fontColor(Color.White)
-              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : '#66000000')
-              .borderRadius(8)
-              .onClick(() => {
-                this.switchDisplay(display);
-              })
+            this.buildToolbarButton(`屏${display + 1}`, 80, display === this.currentDisplay, false, true, () => {
+              this.switchDisplay(display);
+            })
           })
         }
-        Button('鼠标')
-          .width(88)
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 1);
-            ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 2);
-          })
-        Button('键盘')
-          .width(88)
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            this.showKeyboardPanel = !this.showKeyboardPanel;
-          })
-        Button('粘贴')
-          .width(88)
-          .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            this.showKeyboardPanel = true;
-          })
-        Button('发送文件')
-          .width(88)
-          .height(40)
-          .fontSize(13)
-          .enabled(!this.transferActive)
-          .onClick(() => {
-            this.pickFileForUpload();
-          })
-        Button(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关')
-          .width(88)
-          .height(40)
-          .fontSize(13)
-          .fontColor(this.clipboardSyncEnabled ? Color.White : Color.Gray)
-          .backgroundColor(this.clipboardSyncEnabled ? RustDeskTheme.ACCENT : '#66000000')
-          .borderRadius(8)
-          .onClick(() => {
-            this.toggleClipboardSync();
-          })
-        Button('+')
-          .width(88)
-          .height(40)
-          .fontSize(18)
-          .onClick(() => {
-            this.zoomScale = Math.min(this.zoomScale + 0.25, 5.0);
-          })
-        Button('-')
-          .width(88)
-          .height(40)
-          .fontSize(18)
-          .onClick(() => {
-            this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
-          })
-        Button('断开')
-          .width(88)
-          .height(40)
-          .fontSize(14)
-          .fontColor(RustDeskTheme.ERROR)
-          .onClick(() => {
-            this.disconnectSession();
-          })
+        this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
+          this.showKeyboardPanel = !this.showKeyboardPanel;
+        })
+        this.buildToolbarButton('输入', 80, false, false, true, () => {
+          this.showKeyboardPanel = true;
+        })
+        this.buildToolbarButton('发送文件', 80, false, false, !this.transferActive, () => {
+          this.pickFileForUpload();
+        })
+        this.buildToolbarButton(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关', 80, this.clipboardSyncEnabled, false, true, () => {
+          this.toggleClipboardSync();
+        })
+        this.buildToolbarButton('+', 80, false, false, true, () => {
+          this.zoomScale = Math.min(this.zoomScale + 0.25, 5.0);
+        })
+        this.buildToolbarButton('-', 80, false, false, true, () => {
+          this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
+        })
+        this.buildToolbarButton('断开', 80, false, true, true, () => {
+          this.disconnectSession();
+        })
       }
-      .width(88)
+      .width(80)
       .alignItems(HorizontalAlign.Center)
     }
-    .width(112)
+    .width(104)
     .height('100%')
-    .padding({ left: 12, right: 12, top: 12, bottom: 12 })
-    .backgroundColor('#CC000000')
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .backgroundColor(Color.White)
+    .border({ width: { left: 1 }, color: '#DEE6F1' })
     .scrollable(ScrollDirection.Vertical)
     .scrollBar(BarState.Auto);
+  }
+
+  @Builder
+  buildToolbarButton(label: string, buttonWidth: number, selected: boolean, danger: boolean,
+    enabled: boolean, onClick: () => void) {
+    Button(label)
+      .width(buttonWidth)
+      .height(40)
+      .padding({ left: 2, right: 2 })
+      .fontSize(label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12))
+      .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+      .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : RustDeskTheme.TEXT_PRIMARY))
+      .backgroundColor(danger ? '#FDECEC' : (selected ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED))
+      .borderRadius(6)
+      .enabled(enabled)
+      .onClick(() => {
+        onClick();
+      })
   }
 
   @Builder
@@ -697,7 +653,9 @@ struct RemotePage {
           .id('remoteKeyboardInput')
           .height(40)
           .layoutWeight(1)
-          .backgroundColor(Color.White)
+          .fontColor(RustDeskTheme.TEXT_PRIMARY)
+          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .border({ width: 1, color: '#DEE6F1', radius: 6 })
           .focusable(true)
           .defaultFocus(true)
           .onChange((value: string) => {
@@ -705,54 +663,79 @@ struct RemotePage {
           })
         Button('发送')
           .height(40)
+          .fontColor(Color.White)
+          .backgroundColor(RustDeskTheme.ACCENT)
+          .borderRadius(6)
           .onClick(() => {
             this.sendKeyboardText(this.keyboardInput);
             this.keyboardInput = '';
           })
         Button('发剪贴板')
           .height(40)
+          .fontColor(RustDeskTheme.ACCENT)
+          .backgroundColor(RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
           .onClick(() => {
             this.sendManualClipboardText(this.keyboardInput);
           })
         Button('关闭')
           .height(40)
+          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
           .onClick(() => {
             this.showKeyboardPanel = false;
           })
       }
       Row({ space: 8 }) {
-        Button('Enter').onClick(() => { this.sendControlKey(13); })
-        Button('Backspace').onClick(() => { this.sendControlKey(8); })
-        Button('Esc').onClick(() => { this.sendControlKey(27); })
-        Button('Tab').onClick(() => { this.sendControlKey(9); })
+        Button('Enter').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(13); })
+        Button('Backspace').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(8); })
+        Button('Esc').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(27); })
+        Button('Tab').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(9); })
       }
     }
     .width('96%')
     .padding(10)
-    .backgroundColor('#D9000000')
+    .backgroundColor(Color.White)
+    .border({ width: 1, color: '#DEE6F1' })
     .borderRadius(8)
     .margin({ left: 8, right: 8, bottom: 6 });
   }
 
   @Builder
   buildStatsPanel() {
-    Column({ space: 2 }) {
-      Text(`速度 ${this.speedText}`)
-        .fontSize(11)
-        .fontColor(Color.White)
-      Text(`帧率 ${this.fpsText}`)
-        .fontSize(11)
-        .fontColor(Color.White)
-      Text(`状态 ${this.routeText}`)
-        .fontSize(11)
-        .fontColor(Color.White)
+    Scroll() {
+      Row({ space: 14 }) {
+        Row({ space: 7 }) {
+          Circle()
+            .width(8)
+            .height(8)
+            .fill(RustDeskTheme.SUCCESS)
+          Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : '远端设备')
+            .fontSize(13)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+        }
+        Text(this.routeText)
+          .fontSize(11)
+          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        Text(this.speedText)
+          .fontSize(11)
+          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        Text(this.fpsText)
+          .fontSize(11)
+          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+      }
+      .height(44)
+      .padding({ left: 14, right: 14 })
+      .alignItems(VerticalAlign.Center)
     }
-    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
     .width('100%')
-    .height(56)
-    .backgroundColor('#CC000000')
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Start);
+    .height(44)
+    .backgroundColor(Color.White)
+    .border({ width: { bottom: 1 }, color: '#DEE6F1' })
+    .scrollable(ScrollDirection.Horizontal)
+    .scrollBar(BarState.Off);
   }
 
   @Builder
@@ -962,11 +945,12 @@ struct RemotePage {
     this.clearTapTimer();
     this.requestRemoteInputFocus();
 
-    let remotePoint: RemotePoint = this.updatePointerFromLocal(event.x, event.y);
     let action: number = this.mapMouseAction(event);
     if (action < 0) {
       return;
     }
+
+    let remotePoint: RemotePoint = this.updatePointerFromLocal(event.x, event.y);
 
     let now: number = Date.now();
     if (action === 0 && now - this.lastMoveSentAt <= 8) {
@@ -1003,7 +987,6 @@ struct RemotePage {
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.requestRemoteInputFocus();
-    this.showCursor = false;
     ConnectionService.sendMouseWheel(deltaX, deltaY);
   }
 
@@ -1589,6 +1572,7 @@ struct RemotePage {
       return;
     }
     this.currentDisplay = display;
+    this.showCursor = false;
     this.lastStatsTime = 0;
     this.bindSurfaceIfReady();
   }

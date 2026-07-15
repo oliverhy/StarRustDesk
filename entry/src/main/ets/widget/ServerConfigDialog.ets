@@ -28,6 +28,12 @@ export struct ServerConfigDialog {
         .width('100%')
         .textAlign(TextAlign.Start)
 
+      Text('为连接指定自建的 ID、Relay 与 API 服务')
+        .fontSize(13)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+        .margin({ bottom: 4 })
+
       this.buildField(translate('ID Server'), this.idServer, (v: string) => { this.idServer = v })
       this.buildField(translate('Relay Server'), this.relayServer, (v: string) => { this.relayServer = v })
       this.buildField(translate('API Server'), this.apiServer, (v: string) => { this.apiServer = v })
@@ -63,8 +69,8 @@ export struct ServerConfigDialog {
       Row({ space: 12 }) {
         Button(translate('Cancel'))
           .fontColor(RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(RustDeskTheme.BG_LIGHT)
-          .borderRadius(8)
+          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
           .layoutWeight(1)
           .onClick(() => {
             if (this.controller != undefined) {
@@ -74,8 +80,8 @@ export struct ServerConfigDialog {
 
         Button(translate('Test Connection'))
           .fontColor(Color.White)
-          .backgroundColor(RustDeskTheme.SUCCESS)
-          .borderRadius(8)
+          .backgroundColor('#248A68')
+          .borderRadius(6)
           .layoutWeight(1)
           .enabled(!this.isTesting)
           .onClick(() => {
@@ -85,7 +91,7 @@ export struct ServerConfigDialog {
         Button(translate('OK'))
           .fontColor(Color.White)
           .backgroundColor(RustDeskTheme.ACCENT)
-          .borderRadius(8)
+          .borderRadius(6)
           .layoutWeight(1)
           .enabled(!this.isTesting)
           .onClick(() => {
@@ -98,7 +104,9 @@ export struct ServerConfigDialog {
     .padding(24)
     .width('90%')
     .backgroundColor(Color.White)
-    .borderRadius(16)
+    .border({ width: 1, color: '#E4EAF3' })
+    .borderRadius(8)
+    .shadow({ radius: 24, color: '#26345A84', offsetX: 0, offsetY: 8 })
   }
 
   testConnection(): void {
@@ -135,10 +143,11 @@ export struct ServerConfigDialog {
         .fontColor(RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
       TextInput({ placeholder: label, text: value })
-        .height(40)
+        .height(44)
         .fontSize(14)
-        .border({ width: 1, color: RustDeskTheme.DIVIDER, radius: 8 })
-        .padding({ left: 8, right: 8 })
+        .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: RustDeskTheme.DIVIDER, radius: 7 })
+        .padding({ left: 12, right: 12 })
         .onChange((v: string) => { onChange(v) })
     }
     .width('100%')
