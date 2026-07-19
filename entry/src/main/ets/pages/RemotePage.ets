@@ -88,6 +88,10 @@ struct RemotePage {
   private wheelRemainderX: number = 0;
   private wheelRemainderY: number = 0;
   private lastDisplayPollAt: number = 0;
+  // The remote peer reports its current display in the login response, but it
+  // does not continuously acknowledge display switches. Keep the user's local
+  // selection after the initial sync instead of overwriting it during polling.
+  private displayStateInitialized: boolean = false;
   private connectingStartedAt: number = 0;
   private lastSurfaceWidth: number = 0;
   private lastSurfaceHeight: number = 0;
@@ -149,7 +153,18 @@ struct RemotePage {
       if (status === ConnectionStatus.CONNECTED && now - this.lastDisplayPollAt > 2000) {
         this.lastDisplayPollAt = now;
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());
-        this.currentDisplay = RustDeskNapi.getCurrentDisplay();
+        if (!this.displayStateInitialized) {
+          // Always start a new remote session on the first display, regardless
+          // of which display the remote peer reported as currently active.
+          this.currentDisplay = 0;
+          this.displayStateInitialized = true;
+          const switchResult: number = RustDeskNapi.switchDisplay(0);
+          if (switchResult === 0) {
+            RustDeskNapi.refreshVideo();
+          } else {
+            hilog.error(LOG_DOMAIN, 'StarRustDesk', `Initial display switch failed result=${switchResult}`);
+          }
+        }
         this.updateConnectionRoute();
       }
       if (status === ConnectionStatus.CONNECTED) {
@@ -157,6 +172,7 @@ struct RemotePage {
         this.pollFileTransferStatus();
       }
       if (status !== ConnectionStatus.CONNECTED) {
+        this.displayStateInitialized = false;
         this.hasVideo = false;
         this.routeText = '未连接';
         this.pauseClipboardSync();
@@ -543,10 +559,19 @@ struct RemotePage {
       Row({ space: 6 }) {
         if (this.displayCount > 1) {
           ForEach(this.makeDisplayIndexes(), (display: number) => {
-            this.buildToolbarButton(`屏${display + 1}`, 54, display === this.currentDisplay, false, true, () => {
-              this.switchDisplay(display);
-            })
-          })
+            Button(`屏${display + 1}`)
+              .width(54)
+              .height(40)
+              .padding({ left: 2, right: 2 })
+              .fontSize(12)
+              .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+              .fontColor(display === this.currentDisplay ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED)
+              .borderRadius(6)
+              .onClick(() => {
+                this.switchDisplay(display);
+              })
+          }, (display: number) => `${display}-${this.currentDisplay}`)
         }
         this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
           this.showKeyboardPanel = !this.showKeyboardPanel;
@@ -588,10 +613,19 @@ struct RemotePage {
       Column({ space: 6 }) {
         if (this.displayCount > 1) {
           ForEach(this.makeDisplayIndexes(), (display: number) => {
-            this.buildToolbarButton(`屏${display + 1}`, 80, display === this.currentDisplay, false, true, () => {
-              this.switchDisplay(display);
-            })
-          })
+            Button(`屏${display + 1}`)
+              .width(80)
+              .height(40)
+              .padding({ left: 2, right: 2 })
+              .fontSize(12)
+              .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+              .fontColor(display === this.currentDisplay ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED)
+              .borderRadius(6)
+              .onClick(() => {
+                this.switchDisplay(display);
+              })
+          }, (display: number) => `${display}-${this.currentDisplay}`)
         }
         this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
           this.showKeyboardPanel = !this.showKeyboardPanel;
@@ -1564,16 +1598,18 @@ struct RemotePage {
   }
 
   switchDisplay(display: number): void {
-    if (display === this.currentDisplay) {
-      return;
-    }
-    const result = RustDeskNapi.switchDisplay(display);
-    if (result !== 0) {
+    if (display < 0 || display >= this.displayCount || display === this.currentDisplay) {
       return;
     }
     this.currentDisplay = display;
     this.showCursor = false;
     this.lastStatsTime = 0;
+    const result = RustDeskNapi.switchDisplay(display);
+    if (result !== 0) {
+      hilog.error(LOG_DOMAIN, 'StarRustDesk', `Switch display failed display=${display} result=${result}`);
+      return;
+    }
+    RustDeskNapi.refreshVideo();
     this.bindSurfaceIfReady();
   }
 
