@@ -6,6 +6,7 @@ const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    PersistentStorage.persistProp('privacyConsentVersion', '');
     AppStorage.setOrCreate('isDarkMode', false);
     AppStorage.setOrCreate('currentTabIndex', 0);
     AppStorage.setOrCreate('connectionStatus', 0);

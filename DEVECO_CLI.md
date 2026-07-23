@@ -1,12 +1,12 @@
 # DevEco CLI
 
-This project is configured for `@deveco/deveco-cli@1.0.0`.
+This project is configured for the latest `@deveco/deveco-cli`.
 
 Local paths:
 
-- DevEco Studio: `D:\work\DevEco Studio`
+- DevEco Studio: `C:\Program Files\Huawei\DevEco Studio`
 - DevEco CLI: `C:\Users\YIN\AppData\Roaming\npm\devecocli.cmd`
-- Project: `C:\Users\YIN\DevecostudioProjects\StarRustDesk`
+- Project: `C:\Users\YIN\DevEcoStudioProjects\StarRustDesk`
 
 Use the project wrapper from PowerShell:
 
@@ -16,7 +16,7 @@ Use the project wrapper from PowerShell:
 .\tools\deveco.ps1 build --build-mode release
 .\tools\deveco.ps1 run --module entry
 .\tools\deveco.ps1 device list
-.\tools\deveco.ps1 log --level E --bundle-name com.example.starrustdesk
+.\tools\deveco.ps1 log --level E --bundle-name com.yinhe.starrustdesk
 .\tools\deveco.ps1 emulator list
 ```
 

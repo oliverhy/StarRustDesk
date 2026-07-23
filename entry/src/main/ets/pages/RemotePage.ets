@@ -1659,19 +1659,10 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.componentWidth <= 0 || this.componentHeight <= 0) {
       return;
     }
-    this.hasVideo = false;
-    this.showRemoteSurface = false;
-    RustDeskNapi.setSurfaceId('');
-    this.surfaceId = '';
-    this.xComponentController = new XComponentController();
-    this.surfaceEpoch++;
-    setTimeout(() => {
-      this.showRemoteSurface = true;
-      setTimeout(() => {
-        this.bindSurfaceIfReady();
-        this.requestVideoRefreshAfterSurfaceRebind();
-      }, 160);
-    }, 120);
+    // XComponent keeps the same surface while its layout size changes. Reusing
+    // that surface avoids racing an asynchronous native-window teardown against
+    // the decoder startup that happens immediately after connection.
+    this.bindSurfaceIfReady();
   }
 
   requestVideoRefreshAfterSurfaceRebind(): void {

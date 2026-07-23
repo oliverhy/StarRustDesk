@@ -1,5 +1,6 @@
 ﻿import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
+import { router } from '@kit.ArkUI'
 import { ServerConfigDialog } from '../widget/ServerConfigDialog'
 import { RustDeskNapi } from '../service/RustDeskNapi'
 
@@ -11,6 +12,7 @@ interface SettingItem {
 @Component
 export struct SettingsPage {
   @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
+  @StorageLink('privacyConsentVersion') privacyConsentVersion: string = ''
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
@@ -62,6 +64,7 @@ export struct SettingsPage {
           this.buildDisplayCard()
           this.buildServerConfigCard()
           this.buildThemeToggle()
+          this.buildPrivacyCard()
           this.buildSectionCard(translate('About'), [
             { label: translate('Version'), value: '1.0.0' },
           ])
@@ -272,6 +275,81 @@ export struct SettingsPage {
           })
       }
       .width('100%')
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .width('100%')
+  }
+
+  @Builder
+  buildPrivacyCard() {
+    Column() {
+      Text('隐私与安全')
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+        .margin({ bottom: 8 })
+
+      Row() {
+        Text('隐私政策')
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Text('查看')
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(RustDeskTheme.ACCENT)
+        Text('>')
+          .fontSize(16)
+          .fontColor(RustDeskTheme.DARK_GRAY)
+          .margin({ left: 4 })
+      }
+      .width('100%')
+      .padding({ top: 8, bottom: 10 })
+      .onClick(() => {
+        router.pushUrl({ url: 'pages/PrivacyPolicyPage' })
+      })
+
+      Divider()
+        .height(1)
+        .color(RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('撤回隐私同意')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontColor(RustDeskTheme.ERROR)
+          Text('撤回后将停止使用远程连接等功能')
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        }
+        .alignItems(HorizontalAlign.Start)
+        Blank()
+      }
+      .width('100%')
+      .padding({ top: 12, bottom: 6 })
+      .onClick(() => {
+        AlertDialog.show({
+          title: '撤回隐私同意',
+          message: '撤回后，StarRustDesk 将停止远程连接和剪贴板同步。再次使用前需要重新阅读并同意隐私政策。',
+          primaryButton: {
+            value: '取消',
+            action: () => {
+            }
+          },
+          secondaryButton: {
+            value: '确认撤回',
+            fontColor: RustDeskTheme.ERROR,
+            action: () => {
+              RustDeskNapi.disconnect()
+              this.privacyConsentVersion = ''
+            }
+          }
+        })
+      })
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)

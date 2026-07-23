@@ -1,6 +1,6 @@
 {
   "app": {
-    "bundleName": "com.example.starrustdesk",
+    "bundleName": "com.yinhe.starrustdesk",
     "vendor": "example",
     "versionCode": 1000001,
     "versionName": "1.0.1",

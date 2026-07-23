@@ -763,13 +763,11 @@ static napi_value SetSurfaceId(napi_env env, napi_callback_info info) {
     napi_get_value_string_utf8(env, args[0], surfaceId, sizeof(surfaceId), &surfaceIdLen);
 
     std::string surface(surfaceId, surfaceIdLen);
-    if (surface.empty()) {
-        std::thread([]() {
-            VideoRender::instance().setSurfaceId("");
-        }).detach();
-    } else {
-        VideoRender::instance().setSurfaceId(surface);
-    }
+    // Keep surface updates ordered. Dispatching the empty-surface update to a
+    // detached thread allows an old cleanup to run after a new XComponent has
+    // already been bound, destroying the new native window and leaving video
+    // decoding active against a stale surface.
+    VideoRender::instance().setSurfaceId(surface);
 
     napi_value ret;
     napi_create_int32(env, 0, &ret);

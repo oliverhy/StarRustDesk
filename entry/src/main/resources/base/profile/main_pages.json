@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/HomePage",
-    "pages/RemotePage"
+    "pages/RemotePage",
+    "pages/PrivacyPolicyPage"
   ]
 }
