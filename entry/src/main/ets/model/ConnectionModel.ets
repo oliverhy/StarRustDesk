@@ -3,6 +3,7 @@ export enum ConnectionStatus {
   CONNECTING = 1,
   CONNECTED = 2,
   FAILED = 3,
+  WAITING_2FA = 4,
 }
 
 export class ConnectionModel {

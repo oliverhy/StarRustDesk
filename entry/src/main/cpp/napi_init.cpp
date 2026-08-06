@@ -1,6 +1,7 @@
 #include "napi/native_api.h"
 #include "core/rustdesk_ffi.h"
 #include "core/config.h"
+#include "crypto/aead.h"
 #include "core/video_render.h"
 #include "core/xcomponent_render.h"
 #include "core/audio_player.h"
@@ -37,6 +38,7 @@ static std::atomic<int> g_lastConnectionResult{0};
 static std::atomic<uint64_t> g_connectionGeneration{0};
 static std::atomic<int64_t> g_connectionStartedAtMs{0};
 static std::atomic<bool> g_disconnectInProgress{false};
+static std::atomic<bool> g_enableTrustedDevices{false};
 static std::atomic<uint64_t> g_videoFrameCount{0};
 static std::atomic<uint64_t> g_videoByteCount{0};
 static std::mutex g_lastConnectionMessageMutex;
@@ -55,6 +57,24 @@ static std::string GetLastConnectionMessage() {
 static int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::string GetOrCreateClientHwid() {
+    std::string hwid = Config::instance().get("trusted-device-hwid");
+    if (!hwid.empty()) {
+        return hwid;
+    }
+
+    uint8_t randomBytes[AEAD::KEY_SIZE] = {0};
+    char encoded[AEAD::KEY_SIZE * 2 + 1] = {0};
+    AEAD::generateKey(randomBytes);
+    for (int i = 0; i < AEAD::KEY_SIZE; ++i) {
+        std::snprintf(encoded + i * 2, 3, "%02x", randomBytes[i]);
+    }
+    hwid.assign(encoded);
+    Config::instance().set("trusted-device-hwid", hwid);
+    Config::instance().save();
+    return hwid;
 }
 
 static void OnRustVideoFrame(const unsigned char* data, int length, int width, int height) {
@@ -76,16 +96,36 @@ static void OnRustEvent(const char* message) {
         OH_LOG_DEBUG(LOG_APP, "rust_event: %{private}s", message);
     }
     const std::string text(message);
+    const std::string twoFactorPrefix = "login response: 2fa-required enable_trusted_devices=";
     const std::string loginErrorPrefix = "login response: error=";
-    if (text.rfind(loginErrorPrefix, 0) == 0) {
+    if (text.rfind(twoFactorPrefix, 0) == 0) {
+        g_enableTrustedDevices.store(text.substr(twoFactorPrefix.length()) == "1");
+        SetLastConnectionMessage("2FA Required");
+        g_lastConnectionResult.store(0);
+        g_connectionStartedAtMs.store(0);
+        g_connectionStatus.store(4);
+    } else if (text == "login response: 2fa-wrong") {
+        SetLastConnectionMessage("Wrong 2FA Code");
+        g_lastConnectionResult.store(0);
+        g_connectionStartedAtMs.store(0);
+        g_connectionStatus.store(4);
+    } else if (text.rfind("login response: ok/peer info", 0) == 0) {
+        SetLastConnectionMessage("");
+        g_lastConnectionResult.store(0);
+        g_connectionStartedAtMs.store(0);
+        g_connectionStatus.store(2);
+    } else if (text.rfind(loginErrorPrefix, 0) == 0) {
         SetLastConnectionMessage(text.substr(loginErrorPrefix.length()));
         g_lastConnectionResult.store(-17);
+        g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(3);
     } else if (text.rfind("connection lost:", 0) == 0) {
         SetLastConnectionMessage("Peer connection closed");
         g_lastConnectionResult.store(-18);
         g_connectionStatus.store(3);
-    } else if (text == "receive loop ended" && g_connectionStatus.load() == 2) {
+    } else if (text == "receive loop ended" &&
+               (g_connectionStatus.load() == 1 || g_connectionStatus.load() == 2 ||
+                g_connectionStatus.load() == 4)) {
         SetLastConnectionMessage("Peer connection closed");
         g_lastConnectionResult.store(-18);
         g_connectionStatus.store(3);
@@ -153,6 +193,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     std::string rendezvous = rendezvousLen > 0 ? rendezvousServer : "";
     std::string relay = relayLen > 0 ? relayServer : "";
     std::string serverKey = Config::instance().get("key");
+    std::string clientHwid = Config::instance().get("trust-this-device") == "Y"
+        ? GetOrCreateClientHwid() : "";
 
     if (peer.empty()) {
         napi_value ret;
@@ -168,21 +210,25 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     g_connectionStatus.store(1);
     g_lastConnectionResult.store(0);
     g_connectionStartedAtMs.store(NowMs());
+    g_enableTrustedDevices.store(false);
     SetLastConnectionMessage("");
     VideoRender::instance().resetSession();
     OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
                 peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
-    std::thread([peer, pass, rendezvous, relay, serverKey, generation]() {
+    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, generation]() {
         OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
-        int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(), serverKey.c_str());
+        int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
+                                  serverKey.c_str(), clientHwid.c_str());
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
         if (g_connectionGeneration.load() != generation) {
             OH_LOG_INFO(LOG_APP, "Ignore stale rust_connect result generation=%{public}llu", static_cast<unsigned long long>(generation));
             return;
         }
         g_lastConnectionResult.store(result);
-        g_connectionStartedAtMs.store(0);
-        g_connectionStatus.store(result == 0 ? 2 : 3);
+        if (result != 0) {
+            g_connectionStartedAtMs.store(0);
+            g_connectionStatus.store(3);
+        }
     }).detach();
 
     napi_value ret;
@@ -294,6 +340,48 @@ static napi_value SendText(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value Send2FA(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char code[16] = {0};
+    size_t codeLen = 0;
+    bool trustThisDevice = false;
+    if (argc >= 1) {
+        napi_get_value_string_utf8(env, args[0], code, sizeof(code), &codeLen);
+    }
+    if (argc >= 2) {
+        napi_get_value_bool(env, args[1], &trustThisDevice);
+    }
+
+    int result = -3;
+    if (g_connectionStatus.load() == 4) {
+        trustThisDevice = trustThisDevice && g_enableTrustedDevices.load();
+        std::string clientHwid = trustThisDevice ? GetOrCreateClientHwid() : "";
+        Config::instance().set("trust-this-device", trustThisDevice ? "Y" : "");
+        Config::instance().save();
+        result = rust_send_2fa(code, clientHwid.c_str());
+        if (result == 0) {
+            SetLastConnectionMessage("");
+            g_connectionStatus.store(1);
+            g_connectionStartedAtMs.store(NowMs());
+        } else {
+            SetLastConnectionMessage("Invalid 2FA code");
+        }
+    }
+
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value GetEnableTrustedDevices(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_get_boolean(env, g_enableTrustedDevices.load(), &ret);
+    return ret;
+}
+
 static napi_value SendMouseEvent(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value args[3] = {nullptr};
@@ -392,7 +480,7 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
             status = 3;
         }
     }
-    if (status == 2 && rust_get_connection_status() == 0) {
+    if ((status == 2 || status == 4) && rust_get_connection_status() == 0) {
         status = 3;
         g_connectionStatus.store(status);
         if (GetLastConnectionMessage().empty()) {
@@ -790,6 +878,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"sendKeyEvent", nullptr, SendKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendPhysicalKeyEvent", nullptr, SendPhysicalKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"send2FA", nullptr, Send2FA, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getEnableTrustedDevices", nullptr, GetEnableTrustedDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseEvent", nullptr, SendMouseEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseWheel", nullptr, SendMouseWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},

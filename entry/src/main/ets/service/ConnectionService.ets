@@ -32,6 +32,10 @@ export class ConnectionService {
     RustDeskNapi.sendText(text)
   }
 
+  static send2FA(code: string, trustThisDevice: boolean): number {
+    return RustDeskNapi.send2FA(code, trustThisDevice)
+  }
+
   static sendMouseEvent(x: number, y: number, action: number): void {
     RustDeskNapi.sendMouseEvent(x, y, action)
   }

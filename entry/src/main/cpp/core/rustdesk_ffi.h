@@ -7,7 +7,7 @@ extern "C" {
 
 int rust_connect(const char* peer_id, const char* password,
                  const char* rendezvous_server, const char* relay_server,
-                 const char* server_key);
+                 const char* server_key, const char* client_hwid);
 int rust_set_performance_preset(const char* preset);
 int rust_disconnect(void);
 int rust_get_connection_status(void);
@@ -17,6 +17,7 @@ int rust_send_mouse_wheel(double delta_x, double delta_y);
 int rust_send_key_event(int key_code, int action);
 int rust_send_physical_key_event(int scan_code, int action);
 int rust_send_text(const char* text);
+int rust_send_2fa(const char* code, const char* client_hwid);
 int rust_send_clipboard_text(const char* text);
 int rust_request_remote_directory(const char* path);
 char* rust_take_remote_directory_result(void);

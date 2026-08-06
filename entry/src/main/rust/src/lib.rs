@@ -13,7 +13,7 @@ use hbb_common::fs::{self, DataSource, JobType, TransferJob};
 use hbb_common::message_proto::{
     file_action, file_response, file_transfer_send_confirm_request, key_event, login_response,
     message, misc, supported_decoding, video_frame, AudioFormat, Clipboard, ClipboardFormat,
-    CodecAbility, ControlKey, EncodedVideoFrames, FileAction, FileTransfer,
+    Auth2FA, CodecAbility, ControlKey, EncodedVideoFrames, FileAction, FileTransfer,
     FileTransferSendConfirmRequest, Hash, ImageQuality, KeyEvent, IdPk, KeyboardMode, LoginRequest,
     Message as PeerMessage,
     Misc, MouseEvent, ReadDir,
@@ -50,6 +50,7 @@ static AUDIO_STOP_CALLBACK: Mutex<Option<AudioStopCallback>> = Mutex::new(None);
 static AUDIO_FRAME_CALLBACK: Mutex<Option<AudioFrameCallback>> = Mutex::new(None);
 static PASSWORD_HASH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static CURRENT_PEER_ID: Mutex<String> = Mutex::new(String::new());
+static CURRENT_CLIENT_HWID: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
 static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
@@ -67,6 +68,9 @@ static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+const DIRECT_CONNECT_TIMEOUT: u64 = 6_000;
+const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 1_000;
 
 #[derive(Clone, Copy)]
 struct PerformanceConfig {
@@ -93,6 +97,7 @@ struct ConnectionConfig {
     rendezvous_addr: String,
     relay_override: String,
     key: String,
+    client_hwid: Vec<u8>,
 }
 
 #[derive(serde::Serialize)]
@@ -199,6 +204,7 @@ pub extern "C" fn rust_connect(
     rendezvous_server: *const c_char,
     relay_server: *const c_char,
     server_key: *const c_char,
+    client_hwid: *const c_char,
 ) -> i32 {
     if peer_id.is_null() {
         return -1;
@@ -219,6 +225,7 @@ pub extern "C" fn rust_connect(
     let rv = cstr_to_string(rendezvous_server).unwrap_or_default();
     let relay_override = cstr_to_string(relay_server).unwrap_or_default();
     let key = cstr_to_string(server_key).unwrap_or_default();
+    let client_hwid = cstr_to_string(client_hwid).unwrap_or_default().into_bytes();
 
     let Ok(mut password_guard) = PASSWORD_HASH.try_lock() else {
         emit_event("connect failed: credential lock busy");
@@ -234,6 +241,10 @@ pub extern "C" fn rust_connect(
     *peer_guard = peer.clone();
     drop(peer_guard);
 
+    if let Ok(mut hwid_guard) = CURRENT_CLIENT_HWID.lock() {
+        *hwid_guard = client_hwid.clone();
+    }
+
     clear_clipboard_state();
 
     let rendezvous_addr = with_port(if rv.is_empty() { "rustdesk.com" } else { &rv }, 21116);
@@ -244,6 +255,7 @@ pub extern "C" fn rust_connect(
             rendezvous_addr: rendezvous_addr.clone(),
             relay_override: relay_override.clone(),
             key: key.clone(),
+            client_hwid,
         });
     }
     emit_event(&format!("connect start peer={peer} rendezvous={rendezvous_addr} relay_override={relay_override} key_set={}", !key.is_empty()));
@@ -293,14 +305,17 @@ pub extern "C" fn rust_connect(
         let mut peer_addr: Option<SocketAddr> = None;
         let mut relay_from_server = relay_override.clone();
         let mut signed_id_pk = Vec::new();
+        let mut is_local = false;
 
         match response.union {
             Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
+                is_local = ph.is_local();
                 emit_event(&format!(
-                    "punch response socket_addr={} relay={} pk_len={} other_failure={}",
+                    "punch response socket_addr={} relay={} pk_len={} is_local={} other_failure={}",
                     ph.socket_addr.len(),
                     ph.relay_server,
                     ph.pk.len(),
+                    is_local,
                     ph.other_failure
                 ));
                 if !ph.other_failure.is_empty() {
@@ -406,16 +421,28 @@ pub extern "C" fn rust_connect(
             }
         }
 
+        // The direct connection must reuse the rendezvous connection's local
+        // endpoint. Release the original socket first, especially for the
+        // same-intranet path where the peer address is a LAN endpoint.
+        drop(rv_conn);
+
         let mut stream = if let Some(addr) = peer_addr {
-            emit_event(&format!("try direct peer addr={addr} local={local_addr}"));
-            match connect_tcp_local(addr, Some(local_addr), 6000).await {
+            let direct_timeout = if is_local {
+                LOCAL_DIRECT_CONNECT_TIMEOUT
+            } else {
+                DIRECT_CONNECT_TIMEOUT
+            };
+            emit_event(&format!(
+                "try direct peer addr={addr} local={local_addr} is_local={is_local} timeout={direct_timeout}"
+            ));
+            match connect_tcp_local(addr, Some(local_addr), direct_timeout).await {
                 Ok(s) => {
                     emit_event("direct peer connected");
                     CONNECTION_ROUTE.store(1, Ordering::SeqCst);
                     s
                 }
-                Err(_) if !relay_from_server.is_empty() => {
-                    emit_event("direct peer failed, try relay");
+                Err(e) if !relay_from_server.is_empty() => {
+                    emit_event(&format!("direct peer failed: {e}; try relay"));
                     match request_relay(&peer, &relay_from_server, &rendezvous_addr, &key).await {
                         Ok(s) => {
                             emit_event("relay connected");
@@ -657,6 +684,32 @@ pub extern "C" fn rust_send_clipboard_text(text: *const c_char) -> i32 {
     let mut msg = PeerMessage::new();
     msg.set_clipboard(clipboard);
     emit_event("local clipboard text sent");
+    queue_peer_message(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_send_2fa(code: *const c_char, client_hwid: *const c_char) -> i32 {
+    let Some(code) = cstr_to_string(code) else { return -1 };
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return -2;
+    }
+    let hwid = cstr_to_string(client_hwid).unwrap_or_default().into_bytes();
+    if let Ok(mut hwid_guard) = CURRENT_CLIENT_HWID.lock() {
+        *hwid_guard = hwid.clone();
+    }
+    if let Ok(mut config_guard) = CURRENT_CONNECTION_CONFIG.lock() {
+        if let Some(config) = config_guard.as_mut() {
+            config.client_hwid = hwid.clone();
+        }
+    }
+
+    let mut msg = PeerMessage::new();
+    msg.set_auth_2fa(Auth2FA {
+        code,
+        hwid: hwid.into(),
+        ..Default::default()
+    });
+    emit_event("2fa response queued");
     queue_peer_message(msg)
 }
 
@@ -945,11 +998,12 @@ async fn send_file_login(
     let mut login = LoginRequest {
         username: config.peer.clone(),
         password: response_password.into(),
-        my_id: "harmony-file-client".to_string(),
+        my_id: "harmony-client".to_string(),
         my_name: "StarRustDesk HarmonyOS".to_string(),
         my_platform: "HarmonyOS".to_string(),
         version: "1.2.0".to_string(),
         os_login: MessageField::some(OSLogin::new()),
+        hwid: config.client_hwid.clone().into(),
         ..Default::default()
     };
     login.set_file_transfer(FileTransfer {
@@ -1159,6 +1213,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     let mut peer_addr = None;
     let mut relay = config.relay_override.clone();
     let mut signed_id_pk = Vec::new();
+    let mut is_local = false;
     if let Some(rendezvous_message::Union::RelayResponse(response)) = response.union {
         if !response.refuse_reason.is_empty() {
             return Err(response.refuse_reason);
@@ -1187,6 +1242,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     } else {
         match response.union {
             Some(rendezvous_message::Union::PunchHoleResponse(response)) => {
+                is_local = response.is_local();
                 if !response.other_failure.is_empty() {
                     return Err(response.other_failure);
                 }
@@ -1210,8 +1266,15 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         }
     }
 
+    drop(rendezvous);
+
     let mut stream = if let Some(address) = peer_addr {
-        match connect_tcp_local(address, Some(local_addr), 6000).await {
+        let direct_timeout = if is_local {
+            LOCAL_DIRECT_CONNECT_TIMEOUT
+        } else {
+            DIRECT_CONNECT_TIMEOUT
+        };
+        match connect_tcp_local(address, Some(local_addr), direct_timeout).await {
             Ok(stream) => stream,
             Err(_) if !relay.is_empty() => request_relay_with_type(
                 &config.peer,
@@ -1531,8 +1594,17 @@ async fn handle_peer_bytes(bytes: &[u8], read_jobs: &mut Vec<TransferJob>, strea
             emit_event("peer message: LoginResponse");
             match resp.union {
                 Some(login_response::Union::Error(err)) => {
-                    emit_event(&format!("login response: error={err}"));
-                    let _ = rust_disconnect();
+                    if err == "2FA Required" {
+                        emit_event(&format!(
+                            "login response: 2fa-required enable_trusted_devices={}",
+                            if resp.enable_trusted_devices { 1 } else { 0 }
+                        ));
+                    } else if err == "Wrong 2FA Code" {
+                        emit_event("login response: 2fa-wrong");
+                    } else {
+                        emit_event(&format!("login response: error={err}"));
+                        let _ = rust_disconnect();
+                    }
                 }
                 Some(login_response::Union::PeerInfo(info)) => {
                     let display_count = info.displays.len().max(1) as i32;
@@ -1784,6 +1856,10 @@ async fn send_login(hash: Hash) {
         Ok(guard) => guard.clone(),
         Err(_) => String::new(),
     };
+    let client_hwid = match CURRENT_CLIENT_HWID.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => Vec::new(),
+    };
     let mut response_password = Vec::new();
     if !password.is_empty() {
         let mut first = Sha256::new();
@@ -1825,6 +1901,7 @@ async fn send_login(hash: Hash) {
         }),
         version: "1.2.0".to_string(),
         os_login: MessageField::some(OSLogin::new()),
+        hwid: client_hwid.into(),
         ..Default::default()
     };
 

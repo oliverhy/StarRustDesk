@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.yinhe.starrustdesk",
     "vendor": "example",
-    "versionCode": 1000002,
-    "versionName": "1.0.2",
+    "versionCode": 1000003,
+    "versionName": "1.0.3-beta.1",
     "buildVersion": "1",
     "icon": "$media:starrustdesk_app_icon_1024",
     "label": "$string:app_name"

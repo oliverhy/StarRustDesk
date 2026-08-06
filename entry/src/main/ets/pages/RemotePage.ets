@@ -55,6 +55,11 @@ struct RemotePage {
   @State transferProgress: number = 0;
   @State transferActive: boolean = false;
   @State connectedPeerId: string = '';
+  @State twoFaCode: string = '';
+  @State twoFaError: string = '';
+  @State trustThisDevice: boolean = false;
+  @State enableTrustedDevices: boolean = false;
+  @State connectionError: string = '';
   private xComponentController: XComponentController = new XComponentController();
   private toolbarTimer: number = -1;
   private statusTimer: number = -1;
@@ -111,6 +116,9 @@ struct RemotePage {
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
     this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
+    if (status === ConnectionStatus.WAITING_2FA) {
+      this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
+    }
     this.startPolling();
   }
 
@@ -150,6 +158,17 @@ struct RemotePage {
         this.connectingStartedAt = 0;
       }
       this.connectionStatus = status as ConnectionStatus;
+      if (status === ConnectionStatus.WAITING_2FA) {
+        this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
+        let message: string = ConnectionService.getLastConnectionError();
+        this.twoFaError = message === 'Wrong 2FA Code' ? '验证码错误，请重试' : '';
+      } else if (status === ConnectionStatus.CONNECTED) {
+        this.twoFaCode = '';
+        this.twoFaError = '';
+        this.connectionError = '';
+      } else if (status === ConnectionStatus.FAILED) {
+        this.connectionError = ConnectionService.getLastConnectionError();
+      }
       if (status === ConnectionStatus.CONNECTED && now - this.lastDisplayPollAt > 2000) {
         this.lastDisplayPollAt = now;
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());
@@ -234,6 +253,8 @@ struct RemotePage {
           this.buildDisconnectedView();
         } else if (this.connectionStatus === ConnectionStatus.CONNECTING) {
           this.buildConnectingView();
+        } else if (this.connectionStatus === ConnectionStatus.WAITING_2FA) {
+          this.buildTwoFactorView();
         } else if (this.connectionStatus === ConnectionStatus.CONNECTED) {
           this.buildRemoteScreen();
         } else {
@@ -293,6 +314,103 @@ struct RemotePage {
         .fontColor(RustDeskTheme.TEXT_SECONDARY);
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
+  }
+
+  @Builder
+  buildTwoFactorView() {
+    Column({ space: 18 }) {
+      Text('二次验证')
+        .fontSize(26)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+      Text('被控端已开启二次验证，请输入身份验证器中的 6 位验证码')
+        .fontSize(14)
+        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .textAlign(TextAlign.Center)
+        .width('100%');
+      TextInput({ placeholder: '6 位验证码', text: this.twoFaCode })
+        .type(InputType.Number)
+        .maxLength(6)
+        .fontSize(22)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .textAlign(TextAlign.Center)
+        .height(52)
+        .width('100%')
+        .backgroundColor(Color.White)
+        .border({ width: 1, color: this.twoFaError.length > 0 ? RustDeskTheme.ERROR : '#CBD5E1' })
+        .borderRadius(8)
+        .onChange((value: string) => {
+          this.twoFaCode = value.replace(/[^0-9]/g, '').slice(0, 6);
+          this.twoFaError = '';
+        });
+      if (this.twoFaError.length > 0) {
+        Text(this.twoFaError)
+          .fontSize(13)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%');
+      }
+      if (this.enableTrustedDevices) {
+        Row() {
+          Text('信任此设备，以后连接时不再询问验证码')
+            .fontSize(14)
+            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+            .layoutWeight(1);
+          Toggle({ type: ToggleType.Switch, isOn: this.trustThisDevice })
+            .onChange((isOn: boolean) => {
+              this.trustThisDevice = isOn;
+            });
+        }
+        .width('100%');
+      }
+      Row({ space: 12 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .height(44)
+          .fontColor(RustDeskTheme.TEXT_PRIMARY)
+          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(8)
+          .onClick(() => {
+            this.disconnectSession();
+          });
+        Button('验证')
+          .layoutWeight(1)
+          .height(44)
+          .enabled(this.isTwoFactorCodeReady())
+          .fontColor(Color.White)
+          .backgroundColor(this.isTwoFactorCodeReady() ? RustDeskTheme.ACCENT : '#94A3B8')
+          .borderRadius(8)
+          .onClick(() => {
+            this.submitTwoFactor();
+          });
+      }
+      .width('100%');
+    }
+    .width(this.pageWidth > 600 ? 440 : '88%')
+    .padding(24)
+    .backgroundColor(Color.White)
+    .borderRadius(14)
+    .shadow({ radius: 18, color: '#22000000', offsetX: 0, offsetY: 6 });
+  }
+
+  isTwoFactorCodeReady(): boolean {
+    return /^\d{6}$/.test(this.twoFaCode);
+  }
+
+  submitTwoFactor(): void {
+    if (!this.isTwoFactorCodeReady()) {
+      this.twoFaError = '请输入 6 位数字验证码';
+      return;
+    }
+    let result: number = ConnectionService.send2FA(
+      this.twoFaCode, this.enableTrustedDevices && this.trustThisDevice);
+    if (result === 0) {
+      this.twoFaCode = '';
+      this.twoFaError = '';
+      this.connectionStatus = ConnectionStatus.CONNECTING;
+      this.connectingStartedAt = Date.now();
+    } else {
+      this.twoFaError = '验证码发送失败，请重试';
+    }
   }
 
   @Builder
@@ -544,7 +662,11 @@ struct RemotePage {
         .fontSize(24)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
         .fontColor(RustDeskTheme.TEXT_PRIMARY);
-      Text(translate('Connection failed')).fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(RustDeskTheme.ERROR);
+      Text(this.connectionError.length > 0 ? this.connectionError : translate('Connection failed'))
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+        .fontColor(RustDeskTheme.ERROR)
+        .textAlign(TextAlign.Center)
+        .padding({ left: 24, right: 24 });
       Button(translate('Retry')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(8)
         .onClick(() => { router.back(); });
       Button(translate('Back')).fontColor(RustDeskTheme.TEXT_PRIMARY).backgroundColor(RustDeskTheme.SURFACE_MUTED).borderRadius(8)

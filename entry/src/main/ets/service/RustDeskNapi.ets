@@ -69,6 +69,14 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).sendText(text)
   }
 
+  static send2FA(code: string, trustThisDevice: boolean): number {
+    return (rustdeskNapi as ESObject).send2FA(code, trustThisDevice)
+  }
+
+  static getEnableTrustedDevices(): boolean {
+    return (rustdeskNapi as ESObject).getEnableTrustedDevices()
+  }
+
   static sendMouseEvent(x: number, y: number, action: number): number {
     return rustdeskNapi.sendMouseEvent(x, y, action)
   }

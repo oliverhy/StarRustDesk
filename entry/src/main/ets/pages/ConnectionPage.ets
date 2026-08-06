@@ -59,11 +59,13 @@ export struct ConnectionPage {
   }
 
   checkServerConfig(): void {
-    this.isUsingPublicServer = RustDeskNapi.isUsingPublicServer()
-    let idServer: string = RustDeskNapi.getOption('custom-rendezvous-server')
-    if (idServer.length > 0) {
+    try {
+      let idServer: string = RustDeskNapi.getOption('custom-rendezvous-server')
+      this.isUsingPublicServer = idServer.length === 0
       this.customServerHint = idServer
-    } else {
+    } catch (error) {
+      // Server status is informational and must never prevent app startup.
+      this.isUsingPublicServer = true
       this.customServerHint = ''
     }
   }
@@ -71,7 +73,7 @@ export struct ConnectionPage {
   startStatusPolling(): void {
     let poll = () => {
       let status: ConnectionStatus = this.syncConnectionState()
-      if (status === ConnectionStatus.CONNECTED) {
+      if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.WAITING_2FA) {
         if (!this.hasOpenedRemotePage) {
           this.hasOpenedRemotePage = true
           router.pushUrl({ url: 'pages/RemotePage' })
@@ -93,6 +95,10 @@ export struct ConnectionPage {
     } else if (status === ConnectionStatus.CONNECTED) {
       this.connectionStatusText = translate('Connected')
       this.connectionStatusColor = RustDeskTheme.SUCCESS
+      this.isConnecting = false
+    } else if (status === ConnectionStatus.WAITING_2FA) {
+      this.connectionStatusText = '需要二次验证'
+      this.connectionStatusColor = RustDeskTheme.WARNING
       this.isConnecting = false
     } else if (status === ConnectionStatus.FAILED) {
       let error: string = ConnectionService.getLastConnectionError()
@@ -565,7 +571,7 @@ export struct ConnectionPage {
     let peerId: string = this.remoteId.trim()
     let password: string = this.password.trim()
     let nativeStatus: ConnectionStatus = this.syncConnectionState()
-    if (nativeStatus === ConnectionStatus.CONNECTED) {
+    if (nativeStatus === ConnectionStatus.CONNECTED || nativeStatus === ConnectionStatus.WAITING_2FA) {
       if (!this.hasOpenedRemotePage) {
         this.hasOpenedRemotePage = true
         router.pushUrl({ url: 'pages/RemotePage' })

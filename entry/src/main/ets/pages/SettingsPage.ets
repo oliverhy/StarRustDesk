@@ -63,7 +63,7 @@ export struct SettingsPage {
           this.buildServerConfigCard()
           this.buildThemeToggle()
           this.buildSectionCard(translate('About'), [
-            { label: translate('Version'), value: '1.0.2' },
+            { label: translate('Version'), value: '1.0.3-beta.1' },
           ])
         }
         .width(this.pageWidth >= 820 ? 720 : '100%')
