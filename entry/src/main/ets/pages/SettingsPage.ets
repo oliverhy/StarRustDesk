@@ -10,7 +10,7 @@ interface SettingItem {
 
 @Component
 export struct SettingsPage {
-  @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
+  @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
@@ -63,7 +63,7 @@ export struct SettingsPage {
           this.buildServerConfigCard()
           this.buildThemeToggle()
           this.buildSectionCard(translate('About'), [
-            { label: translate('Version'), value: '1.0.3-beta.1' },
+            { label: translate('Version'), value: '1.0.3' },
           ])
         }
         .width(this.pageWidth >= 820 ? 720 : '100%')
@@ -97,7 +97,7 @@ export struct SettingsPage {
         Blank()
         Text(this.resolution)
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         Text('>')
           .fontSize(16)
           .fontColor(RustDeskTheme.DARK_GRAY)
@@ -123,7 +123,7 @@ export struct SettingsPage {
 
       Divider()
         .height(1)
-        .color(RustDeskTheme.DIVIDER)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
         .margin({ top: 4, bottom: 4 })
 
       Row() {
@@ -133,7 +133,7 @@ export struct SettingsPage {
         Blank()
         Text(this.frameRate.toString())
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         Text('>')
           .fontSize(16)
           .fontColor(RustDeskTheme.DARK_GRAY)
@@ -207,7 +207,7 @@ export struct SettingsPage {
           if (item.value.length > 0) {
             Text(item.value)
               .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-              .fontColor(RustDeskTheme.TEXT_SECONDARY)
+              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
           }
         }
         .width('100%')
@@ -233,7 +233,7 @@ export struct SettingsPage {
             .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
           Text(translate('Configure custom server'))
             .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(RustDeskTheme.TEXT_SECONDARY)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         }
         .alignItems(HorizontalAlign.Start)
 
@@ -268,7 +268,6 @@ export struct SettingsPage {
         Toggle({ type: ToggleType.Switch, isOn: this.isDarkMode })
           .onChange((isOn: boolean) => {
             this.isDarkMode = isOn
-            AppStorage.set<boolean>('isDarkMode', isOn)
           })
       }
       .width('100%')
@@ -285,6 +284,7 @@ export struct SettingsPage {
 
 @Component
 struct SettingsPasswordDialog {
+  @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State password: string = ''
   @State passwordConfirm: string = ''
   onPasswordChange: (v: string) => void = () => {}
@@ -298,6 +298,7 @@ struct SettingsPasswordDialog {
       Text(translate('Password'))
         .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
         .width('100%')
         .textAlign(TextAlign.Start)
 
@@ -305,7 +306,10 @@ struct SettingsPasswordDialog {
         .height(40)
         .fontSize(14)
         .type(InputType.Password)
-        .border({ width: 1, color: RustDeskTheme.DIVIDER, radius: 8 })
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER, radius: 8 })
         .padding({ left: 8, right: 8 })
         .width('100%')
         .onChange((v: string) => {
@@ -318,7 +322,10 @@ struct SettingsPasswordDialog {
         .height(40)
         .fontSize(14)
         .type(InputType.Password)
-        .border({ width: 1, color: RustDeskTheme.DIVIDER, radius: 8 })
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER, radius: 8 })
         .padding({ left: 8, right: 8 })
         .width('100%')
         .onChange((v: string) => {
@@ -336,8 +343,8 @@ struct SettingsPasswordDialog {
 
       Row({ space: 12 }) {
         Button(translate('Cancel'))
-          .fontColor(RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(RustDeskTheme.BG_LIGHT)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.BG_LIGHT)
           .borderRadius(8)
           .layoutWeight(1)
           .onClick(() => { this.onCancel() })
@@ -360,8 +367,8 @@ struct SettingsPasswordDialog {
     }
     .padding(24)
     .width('85%')
-    .backgroundColor(Color.White)
-    .border({ width: 1, color: '#E4EAF3' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
     .borderRadius(8)
   }
 }

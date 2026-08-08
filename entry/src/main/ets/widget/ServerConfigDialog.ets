@@ -4,6 +4,7 @@ import { RustDeskNapi } from '../service/RustDeskNapi'
 
 @CustomDialog
 export struct ServerConfigDialog {
+  @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State idServer: string = ''
   @State relayServer: string = ''
   @State apiServer: string = ''
@@ -25,12 +26,13 @@ export struct ServerConfigDialog {
       Text(translate('ID/Relay Server'))
         .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
         .width('100%')
         .textAlign(TextAlign.Start)
 
       Text('为连接指定自建的 ID、Relay 与 API 服务')
         .fontSize(13)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
         .margin({ bottom: 4 })
 
@@ -60,7 +62,7 @@ export struct ServerConfigDialog {
             .height(16)
           Text(translate('Testing connection...'))
             .fontSize(12)
-            .fontColor(RustDeskTheme.TEXT_SECONDARY)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .margin({ left: 6 })
         }
         .width('100%')
@@ -68,8 +70,8 @@ export struct ServerConfigDialog {
 
       Row({ space: 12 }) {
         Button(translate('Cancel'))
-          .fontColor(RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
           .borderRadius(6)
           .layoutWeight(1)
           .onClick(() => {
@@ -103,8 +105,8 @@ export struct ServerConfigDialog {
     }
     .padding(24)
     .width('90%')
-    .backgroundColor(Color.White)
-    .border({ width: 1, color: '#E4EAF3' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
     .borderRadius(8)
     .shadow({ radius: 24, color: '#26345A84', offsetX: 0, offsetY: 8 })
   }
@@ -140,13 +142,15 @@ export struct ServerConfigDialog {
     Column() {
       Text(label)
         .fontSize(12)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
       TextInput({ placeholder: label, text: value })
         .height(44)
         .fontSize(14)
-        .backgroundColor(RustDeskTheme.SURFACE_MUTED)
-        .border({ width: 1, color: RustDeskTheme.DIVIDER, radius: 7 })
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER, radius: 7 })
         .padding({ left: 12, right: 12 })
         .onChange((v: string) => { onChange(v) })
     }

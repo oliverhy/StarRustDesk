@@ -7,12 +7,8 @@ import { SettingsPage } from './SettingsPage'
 @Component
 struct HomePage {
   @State currentTabIndex: number = 0
-  @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
+  @StorageLink('isDarkMode') isDarkMode: boolean = false
   private swiperController: SwiperController = new SwiperController()
-
-  aboutToAppear(): void {
-    this.isDarkMode = AppStorage.get<boolean>('isDarkMode') ?? false
-  }
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {

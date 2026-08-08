@@ -11,6 +11,12 @@
 #define LOG_DOMAIN 0x0001
 #define LOG_TAG "RustDeskVP9"
 
+namespace {
+// OH_AVCODEC_MIMETYPE_VIDEO_VP9 is exported only from API 23. Referencing that
+// symbol directly prevents libentry.so from loading at all on API 22 devices.
+constexpr const char* VP9_MIME_TYPE = "video/x-vnd.on2.vp9";
+}
+
 VP9Decoder& VP9Decoder::instance() {
     static VP9Decoder decoder;
     return decoder;
@@ -52,7 +58,7 @@ void VP9Decoder::release() {
 }
 
 bool VP9Decoder::startLocked(OHNativeWindow* window, int width, int height) {
-    codec_ = OH_VideoDecoder_CreateByMime(OH_AVCODEC_MIMETYPE_VIDEO_VP9);
+    codec_ = OH_VideoDecoder_CreateByMime(VP9_MIME_TYPE);
     if (codec_ == nullptr) {
         OH_LOG_ERROR(LOG_APP, "Create VP9 decoder failed");
         return false;
@@ -70,7 +76,7 @@ bool VP9Decoder::startLocked(OHNativeWindow* window, int width, int height) {
         return false;
     }
 
-    OH_AVFormat* format = OH_AVFormat_CreateVideoFormat(OH_AVCODEC_MIMETYPE_VIDEO_VP9, width, height);
+    OH_AVFormat* format = OH_AVFormat_CreateVideoFormat(VP9_MIME_TYPE, width, height);
     if (format == nullptr) {
         OH_LOG_ERROR(LOG_APP, "Create VP9 video format failed");
         stopLocked();

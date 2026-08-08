@@ -20,6 +20,7 @@ const LOG_DOMAIN: number = 0x0000;
 @Entry
 @Component
 struct RemotePage {
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
   @State connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   @State showToolbar: boolean = true;
   @State zoomScale: number = 1.0;
@@ -246,6 +247,26 @@ struct RemotePage {
     }, 2000);
   }
 
+  primaryTextColor(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY;
+  }
+
+  secondaryTextColor(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY;
+  }
+
+  panelColor(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT;
+  }
+
+  mutedSurfaceColor(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED;
+  }
+
+  themeBorderColor(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#DEE6F1';
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       Column() {
@@ -273,7 +294,7 @@ struct RemotePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#E7EEF8')
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#E7EEF8')
     .focusable(true)
     .onKeyEventDispatch((event: KeyEvent) => {
       return this.handleRemoteKey(event);
@@ -290,11 +311,11 @@ struct RemotePage {
       Text('StarRustDesk')
         .fontSize(28)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+        .fontColor(this.primaryTextColor());
       Text(translate('No active connection'))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(RustDeskTheme.TEXT_PRIMARY);
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE).fontColor(this.primaryTextColor());
       Text(translate('Enter a Remote ID to connect'))
-        .fontSize(RustDeskTheme.FONT_SIZE_SMALL).fontColor(RustDeskTheme.TEXT_SECONDARY);
+        .fontSize(RustDeskTheme.FONT_SIZE_SMALL).fontColor(this.secondaryTextColor());
       Button(translate('Back')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(6)
         .onClick(() => { router.back(); });
     }
@@ -308,10 +329,10 @@ struct RemotePage {
       Text('正在连接远端设备')
         .fontSize(20)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+        .fontColor(this.primaryTextColor());
       Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : translate('Connecting'))
         .fontSize(13)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY);
+        .fontColor(this.secondaryTextColor());
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
@@ -322,10 +343,10 @@ struct RemotePage {
       Text('二次验证')
         .fontSize(26)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+        .fontColor(this.primaryTextColor());
       Text('被控端已开启二次验证，请输入身份验证器中的 6 位验证码')
         .fontSize(14)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.secondaryTextColor())
         .textAlign(TextAlign.Center)
         .width('100%');
       TextInput({ placeholder: '6 位验证码', text: this.twoFaCode })
@@ -333,11 +354,13 @@ struct RemotePage {
         .maxLength(6)
         .fontSize(22)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.primaryTextColor())
+        .placeholderColor(this.secondaryTextColor())
         .textAlign(TextAlign.Center)
         .height(52)
         .width('100%')
-        .backgroundColor(Color.White)
-        .border({ width: 1, color: this.twoFaError.length > 0 ? RustDeskTheme.ERROR : '#CBD5E1' })
+        .backgroundColor(this.mutedSurfaceColor())
+        .border({ width: 1, color: this.twoFaError.length > 0 ? RustDeskTheme.ERROR : this.themeBorderColor() })
         .borderRadius(8)
         .onChange((value: string) => {
           this.twoFaCode = value.replace(/[^0-9]/g, '').slice(0, 6);
@@ -353,7 +376,7 @@ struct RemotePage {
         Row() {
           Text('信任此设备，以后连接时不再询问验证码')
             .fontSize(14)
-            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+            .fontColor(this.primaryTextColor())
             .layoutWeight(1);
           Toggle({ type: ToggleType.Switch, isOn: this.trustThisDevice })
             .onChange((isOn: boolean) => {
@@ -366,8 +389,8 @@ struct RemotePage {
         Button('取消')
           .layoutWeight(1)
           .height(44)
-          .fontColor(RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .fontColor(this.primaryTextColor())
+          .backgroundColor(this.mutedSurfaceColor())
           .borderRadius(8)
           .onClick(() => {
             this.disconnectSession();
@@ -387,7 +410,8 @@ struct RemotePage {
     }
     .width(this.pageWidth > 600 ? 440 : '88%')
     .padding(24)
-    .backgroundColor(Color.White)
+    .backgroundColor(this.panelColor())
+    .border({ width: 1, color: this.themeBorderColor() })
     .borderRadius(14)
     .shadow({ radius: 18, color: '#22000000', offsetX: 0, offsetY: 6 });
   }
@@ -430,7 +454,7 @@ struct RemotePage {
         this.buildSideToolbar();
       }
       .width('100%').height('100%')
-      .backgroundColor('#DCE5F2');
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#DCE5F2');
     } else {
       Column() {
         this.buildStatsPanel();
@@ -441,7 +465,7 @@ struct RemotePage {
         this.buildFloatingToolbar();
       }
       .width('100%').height('100%')
-      .backgroundColor('#DCE5F2');
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#DCE5F2');
     }
   }
 
@@ -453,7 +477,7 @@ struct RemotePage {
           Button('上一级')
             .height(40)
             .fontColor(RustDeskTheme.ACCENT)
-            .backgroundColor(RustDeskTheme.ACCENT_SOFT)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
             .borderRadius(8)
             .enabled(!this.remoteDirectoryLoading)
             .onClick(() => {
@@ -462,7 +486,7 @@ struct RemotePage {
           Text(this.remoteDirectoryPath === '/' ? '此电脑' : this.remoteDirectoryPath)
             .layoutWeight(1)
             .fontSize(15)
-            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+            .fontColor(this.primaryTextColor())
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
@@ -482,12 +506,12 @@ struct RemotePage {
                 Row({ space: 12 }) {
                   Text(entry.entryType === 3 ? '磁盘' : '文件夹')
                     .fontSize(12)
-                    .fontColor(RustDeskTheme.TEXT_SECONDARY)
+                    .fontColor(this.secondaryTextColor())
                     .width(52)
                   Text(entry.name)
                     .layoutWeight(1)
                     .fontSize(15)
-                    .fontColor(RustDeskTheme.TEXT_PRIMARY)
+                    .fontColor(this.primaryTextColor())
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                 }
@@ -502,7 +526,7 @@ struct RemotePage {
           }
           .layoutWeight(1)
           .width('100%')
-          .divider({ strokeWidth: 1, color: RustDeskTheme.DIVIDER })
+          .divider({ strokeWidth: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER })
         }
 
         Row({ space: 12 }) {
@@ -510,8 +534,8 @@ struct RemotePage {
             .layoutWeight(1)
             .height(42)
             .borderRadius(8)
-            .fontColor(RustDeskTheme.TEXT_PRIMARY)
-            .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.mutedSurfaceColor())
             .onClick(() => {
               this.closeRemoteFileBrowser(true);
             })
@@ -530,8 +554,8 @@ struct RemotePage {
       .width(this.isLargeLayout() ? 560 : '92%')
       .height(this.isLargeLayout() ? '78%' : '84%')
       .padding(16)
-      .backgroundColor(Color.White)
-      .border({ width: 1, color: '#DEE6F1' })
+      .backgroundColor(this.panelColor())
+      .border({ width: 1, color: this.themeBorderColor() })
       .borderRadius(8)
       .shadow({ radius: 28, color: '#500C1524', offsetX: 0, offsetY: 10 })
     }
@@ -545,7 +569,7 @@ struct RemotePage {
     Row({ space: 10 }) {
       Text('正在发送文件')
         .fontSize(13)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY)
+        .fontColor(this.primaryTextColor())
       Progress({ value: this.transferProgress, total: 100, type: ProgressType.Linear })
         .layoutWeight(1)
         .height(6)
@@ -553,14 +577,14 @@ struct RemotePage {
       Text(`${Math.floor(this.transferProgress)}%`)
         .width(44)
         .fontSize(13)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY)
+        .fontColor(this.primaryTextColor())
         .textAlign(TextAlign.End)
     }
     .width(this.isLargeLayout() ? 420 : '88%')
     .height(44)
     .padding({ left: 12, right: 12 })
-    .backgroundColor(Color.White)
-    .border({ width: 1, color: '#DEE6F1' })
+    .backgroundColor(this.panelColor())
+    .border({ width: 1, color: this.themeBorderColor() })
     .borderRadius(8)
     .position({ x: this.isLargeLayout() ? 24 : '6%', y: 16 })
   }
@@ -661,7 +685,7 @@ struct RemotePage {
       Text('连接失败')
         .fontSize(24)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-        .fontColor(RustDeskTheme.TEXT_PRIMARY);
+        .fontColor(this.primaryTextColor());
       Text(this.connectionError.length > 0 ? this.connectionError : translate('Connection failed'))
         .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
         .fontColor(RustDeskTheme.ERROR)
@@ -669,7 +693,7 @@ struct RemotePage {
         .padding({ left: 24, right: 24 });
       Button(translate('Retry')).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(8)
         .onClick(() => { router.back(); });
-      Button(translate('Back')).fontColor(RustDeskTheme.TEXT_PRIMARY).backgroundColor(RustDeskTheme.SURFACE_MUTED).borderRadius(8)
+      Button(translate('Back')).fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor()).borderRadius(8)
         .onClick(() => { router.back(); });
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
@@ -687,8 +711,8 @@ struct RemotePage {
               .padding({ left: 2, right: 2 })
               .fontSize(12)
               .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-              .fontColor(display === this.currentDisplay ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED)
+              .fontColor(display === this.currentDisplay ? Color.White : this.primaryTextColor())
+              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : this.mutedSurfaceColor())
               .borderRadius(6)
               .onClick(() => {
                 this.switchDisplay(display);
@@ -723,8 +747,8 @@ struct RemotePage {
     .width('100%')
     .height(56)
     .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-    .backgroundColor(Color.White)
-    .border({ width: { top: 1 }, color: '#DEE6F1' })
+    .backgroundColor(this.panelColor())
+    .border({ width: { top: 1 }, color: this.themeBorderColor() })
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off);
   }
@@ -741,8 +765,8 @@ struct RemotePage {
               .padding({ left: 2, right: 2 })
               .fontSize(12)
               .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-              .fontColor(display === this.currentDisplay ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED)
+              .fontColor(display === this.currentDisplay ? Color.White : this.primaryTextColor())
+              .backgroundColor(display === this.currentDisplay ? RustDeskTheme.ACCENT : this.mutedSurfaceColor())
               .borderRadius(6)
               .onClick(() => {
                 this.switchDisplay(display);
@@ -777,8 +801,8 @@ struct RemotePage {
     .width(104)
     .height('100%')
     .padding({ left: 12, right: 12, top: 10, bottom: 10 })
-    .backgroundColor(Color.White)
-    .border({ width: { left: 1 }, color: '#DEE6F1' })
+    .backgroundColor(this.panelColor())
+    .border({ width: { left: 1 }, color: this.themeBorderColor() })
     .scrollable(ScrollDirection.Vertical)
     .scrollBar(BarState.Auto);
   }
@@ -792,8 +816,9 @@ struct RemotePage {
       .padding({ left: 2, right: 2 })
       .fontSize(label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12))
       .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-      .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : RustDeskTheme.TEXT_PRIMARY))
-      .backgroundColor(danger ? '#FDECEC' : (selected ? RustDeskTheme.ACCENT : RustDeskTheme.SURFACE_MUTED))
+      .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : this.primaryTextColor()))
+      .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FDECEC') :
+        (selected ? RustDeskTheme.ACCENT : this.mutedSurfaceColor()))
       .borderRadius(6)
       .enabled(enabled)
       .onClick(() => {
@@ -809,9 +834,10 @@ struct RemotePage {
           .id('remoteKeyboardInput')
           .height(40)
           .layoutWeight(1)
-          .fontColor(RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
-          .border({ width: 1, color: '#DEE6F1', radius: 6 })
+          .fontColor(this.primaryTextColor())
+          .placeholderColor(this.secondaryTextColor())
+          .backgroundColor(this.mutedSurfaceColor())
+          .border({ width: 1, color: this.themeBorderColor(), radius: 6 })
           .focusable(true)
           .defaultFocus(true)
           .onChange((value: string) => {
@@ -829,31 +855,31 @@ struct RemotePage {
         Button('发剪贴板')
           .height(40)
           .fontColor(RustDeskTheme.ACCENT)
-          .backgroundColor(RustDeskTheme.ACCENT_SOFT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
           .borderRadius(6)
           .onClick(() => {
             this.sendManualClipboardText(this.keyboardInput);
           })
         Button('关闭')
           .height(40)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
-          .backgroundColor(RustDeskTheme.SURFACE_MUTED)
+          .fontColor(this.secondaryTextColor())
+          .backgroundColor(this.mutedSurfaceColor())
           .borderRadius(6)
           .onClick(() => {
             this.showKeyboardPanel = false;
           })
       }
       Row({ space: 8 }) {
-        Button('Enter').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(13); })
-        Button('Backspace').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(8); })
-        Button('Esc').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(27); })
-        Button('Tab').backgroundColor(RustDeskTheme.SURFACE_MUTED).fontColor(RustDeskTheme.TEXT_PRIMARY).borderRadius(6).onClick(() => { this.sendControlKey(9); })
+        Button('Enter').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(13); })
+        Button('Backspace').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(8); })
+        Button('Esc').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(27); })
+        Button('Tab').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(9); })
       }
     }
     .width('96%')
     .padding(10)
-    .backgroundColor(Color.White)
-    .border({ width: 1, color: '#DEE6F1' })
+    .backgroundColor(this.panelColor())
+    .border({ width: 1, color: this.themeBorderColor() })
     .borderRadius(8)
     .margin({ left: 8, right: 8, bottom: 6 });
   }
@@ -870,17 +896,17 @@ struct RemotePage {
           Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : '远端设备')
             .fontSize(13)
             .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(RustDeskTheme.TEXT_PRIMARY)
+            .fontColor(this.primaryTextColor())
         }
         Text(this.routeText)
           .fontSize(11)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.secondaryTextColor())
         Text(this.speedText)
           .fontSize(11)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.secondaryTextColor())
         Text(this.fpsText)
           .fontSize(11)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.secondaryTextColor())
       }
       .height(44)
       .padding({ left: 14, right: 14 })
@@ -888,8 +914,8 @@ struct RemotePage {
     }
     .width('100%')
     .height(44)
-    .backgroundColor(Color.White)
-    .border({ width: { bottom: 1 }, color: '#DEE6F1' })
+    .backgroundColor(this.panelColor())
+    .border({ width: { bottom: 1 }, color: this.themeBorderColor() })
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off);
   }

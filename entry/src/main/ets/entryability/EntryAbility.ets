@@ -1,4 +1,4 @@
-import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 
@@ -6,7 +6,7 @@ const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    AppStorage.setOrCreate('isDarkMode', false);
+    AppStorage.setOrCreate('isDarkMode', this.isDarkColorMode(this.context.config.colorMode));
     AppStorage.setOrCreate('currentTabIndex', 0);
     AppStorage.setOrCreate('connectionStatus', 0);
     AppStorage.setOrCreate('remoteId', '');
@@ -35,11 +35,24 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageDestroy');
   }
 
+  onConfigurationUpdate(newConfig: Configuration): void {
+    this.updateColorMode(newConfig.colorMode);
+  }
+
   onForeground(): void {
+    this.updateColorMode(this.context.config.colorMode);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+  }
+
+  private isDarkColorMode(colorMode?: ConfigurationConstant.ColorMode): boolean {
+    return colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  }
+
+  private updateColorMode(colorMode?: ConfigurationConstant.ColorMode): void {
+    AppStorage.set<boolean>('isDarkMode', this.isDarkColorMode(colorMode));
   }
 }

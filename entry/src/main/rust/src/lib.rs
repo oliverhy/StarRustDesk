@@ -1882,7 +1882,7 @@ async fn send_login(hash: Hash) {
         option: MessageField::some(OptionMessage {
             supported_decoding: MessageField::some(SupportedDecoding {
                 ability_vp8: 0,
-                ability_vp9: 1,
+                ability_vp9: 0,
                 ability_av1: 0,
                 ability_h264: 1,
                 ability_h265: 0,
@@ -1921,7 +1921,7 @@ async fn send_performance_options(refresh_video: bool) {
         custom_fps: performance.fps,
         supported_decoding: MessageField::some(SupportedDecoding {
             ability_vp8: 0,
-            ability_vp9: 1,
+            ability_vp9: 0,
             ability_av1: 0,
             ability_h264: 1,
             ability_h265: 0,

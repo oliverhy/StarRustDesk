@@ -29,7 +29,7 @@ export struct ConnectionPage {
   @State password: string = ''
   @State isIdEmpty: boolean = true
   @State isConnecting: boolean = false
-  @State isDarkMode: boolean = AppStorage.get<boolean>('isDarkMode') ?? false
+  @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State showUpdateBanner: boolean = false
   @State isUsingPublicServer: boolean = true
   @State customServerHint: string = ''
@@ -306,7 +306,8 @@ export struct ConnectionPage {
           .maxLength(12)
           .fontSize(RustDeskTheme.FONT_SIZE_ID)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-          .fontColor(RustDeskTheme.ID_COLOR)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
+          .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
           .layoutWeight(1)
           .onChange((value: string) => {
             this.remoteId = value
@@ -363,6 +364,7 @@ export struct ConnectionPage {
       .type(InputType.Normal)
       .fontSize(RustDeskTheme.FONT_SIZE_BODY)
       .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
@@ -380,6 +382,7 @@ export struct ConnectionPage {
       .type(InputType.Password)
       .fontSize(RustDeskTheme.FONT_SIZE_BODY)
       .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
@@ -402,7 +405,7 @@ export struct ConnectionPage {
         Blank()
         Text(`${this.savedConnections.length} 个设备`)
           .fontSize(12)
-          .fontColor(RustDeskTheme.TEXT_SECONDARY)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       }
       .width('100%')
       .margin({ bottom: 2 })
@@ -414,7 +417,7 @@ export struct ConnectionPage {
             .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
           Text('连接信息会安全保存在本机')
             .fontSize(12)
-            .fontColor(RustDeskTheme.TEXT_SECONDARY)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         }
         .width('100%')
         .height(112)
@@ -448,7 +451,7 @@ export struct ConnectionPage {
                 .maxLines(1)
               Text(item.remoteId)
                 .fontSize(12)
-                .fontColor(RustDeskTheme.TEXT_SECONDARY)
+                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
                 .width('100%')
             }
             .layoutWeight(1)
@@ -505,7 +508,7 @@ export struct ConnectionPage {
       Button('新建')
         .height(40)
         .fontSize(14)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
         .borderRadius(6)
         .onClick(() => {
@@ -524,7 +527,7 @@ export struct ConnectionPage {
         .fill(RustDeskTheme.SUCCESS)
       Text(translate('Custom Server') + ': ' + this.customServerHint)
         .fontSize(12)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .margin({ left: 6 })
     }
     .width('100%')
@@ -536,7 +539,7 @@ export struct ConnectionPage {
     Column({ space: 8 }) {
       Text('连接模式')
         .fontSize(13)
-        .fontColor(RustDeskTheme.TEXT_SECONDARY)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
 
       Row({ space: 3 }) {
@@ -559,7 +562,8 @@ export struct ConnectionPage {
       .height(36)
       .layoutWeight(1)
       .fontSize(12)
-      .fontColor(this.performancePreset === preset ? Color.White : RustDeskTheme.TEXT_SECONDARY)
+      .fontColor(this.performancePreset === preset ? Color.White :
+        (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
       .backgroundColor(this.performancePreset === preset ? RustDeskTheme.ACCENT : Color.Transparent)
       .borderRadius(5)
       .onClick(() => {
