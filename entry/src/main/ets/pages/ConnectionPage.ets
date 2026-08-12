@@ -303,15 +303,15 @@ export struct ConnectionPage {
       Row() {
         TextInput({ placeholder: translate('Remote ID'), text: this.remoteId })
           .type(InputType.Normal)
-          .maxLength(12)
           .fontSize(RustDeskTheme.FONT_SIZE_ID)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
           .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
           .layoutWeight(1)
           .onChange((value: string) => {
-            this.remoteId = value
-            this.isIdEmpty = value.length === 0
+            let normalized: string = this.normalizeRemoteId(value)
+            this.remoteId = normalized
+            this.isIdEmpty = normalized.length === 0
           })
 
         if (!this.isIdEmpty) {
@@ -572,7 +572,9 @@ export struct ConnectionPage {
   }
 
   onConnect(): void {
-    let peerId: string = this.remoteId.trim()
+    let peerId: string = this.normalizeRemoteId(this.remoteId)
+    this.remoteId = peerId
+    this.isIdEmpty = peerId.length === 0
     let password: string = this.password.trim()
     let nativeStatus: ConnectionStatus = this.syncConnectionState()
     if (nativeStatus === ConnectionStatus.CONNECTED || nativeStatus === ConnectionStatus.WAITING_2FA) {
@@ -617,7 +619,7 @@ export struct ConnectionPage {
       let rows: Record<string, string>[] = JSON.parse(raw) as Record<string, string>[]
       let list: SavedConnectionInfo[] = []
       for (let row of rows) {
-        let remoteId: string = (row['remoteId'] ?? '').trim()
+        let remoteId: string = this.normalizeRemoteId(row['remoteId'] ?? '')
         if (remoteId.length > 0) {
           let id: string = row['id'] ?? this.makeConnectionId(remoteId)
           let savedPassword: string = await CredentialStore.load(id)
@@ -662,14 +664,14 @@ export struct ConnectionPage {
   applySavedConnection(item: SavedConnectionInfo): void {
     this.selectedConnectionId = item.id
     this.connectionName = item.name
-    this.remoteId = item.remoteId
+    this.remoteId = this.normalizeRemoteId(item.remoteId)
     this.password = item.password
     this.performancePreset = item.performancePreset.length > 0 ? item.performancePreset : 'smooth'
     this.isIdEmpty = this.remoteId.length === 0
   }
 
   async saveCurrentConnection(): Promise<void> {
-    let peerId: string = this.remoteId.trim()
+    let peerId: string = this.normalizeRemoteId(this.remoteId)
     let password: string = this.password.trim()
     if (peerId.length <= 0) {
       return
@@ -730,6 +732,10 @@ export struct ConnectionPage {
 
   makeConnectionId(remoteId: string): string {
     return `${remoteId}-${Date.now()}`
+  }
+
+  normalizeRemoteId(remoteId: string): string {
+    return remoteId.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
   }
 
   cloneSavedConnections(list: SavedConnectionInfo[]): SavedConnectionInfo[] {

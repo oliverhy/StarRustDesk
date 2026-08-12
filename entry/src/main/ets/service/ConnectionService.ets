@@ -3,7 +3,7 @@ import { ConnectionStatus } from '../model/ConnectionModel'
 
 export class ConnectionService {
   static connect(remoteId: string, password: string, performancePreset: string = 'smooth'): ConnectionStatus {
-    let peerId: string = remoteId.trim()
+    let peerId: string = remoteId.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
     let rendezvousServer: string = RustDeskNapi.getOption('custom-rendezvous-server').trim()
     let relayServer: string = RustDeskNapi.getOption('relay-server').trim()
     RustDeskNapi.setPerformancePreset(performancePreset)
