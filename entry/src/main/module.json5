@@ -19,7 +19,7 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:starrustdesk_app_icon_1024",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:starrustdesk_app_icon_1024",
+        "startWindowIcon": "$media:starrustdesk_start_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "skills": [

@@ -443,7 +443,15 @@ pub extern "C" fn rust_connect(
                 }
                 Err(e) if !relay_from_server.is_empty() => {
                     emit_event(&format!("direct peer failed: {e}; try relay"));
-                    match request_relay(&peer, &relay_from_server, &rendezvous_addr, &key).await {
+                    match request_relay(
+                        &peer,
+                        &relay_from_server,
+                        &rendezvous_addr,
+                        !signed_id_pk.is_empty(),
+                        &key,
+                    )
+                    .await
+                    {
                         Ok(s) => {
                             emit_event("relay connected");
                             CONNECTION_ROUTE.store(2, Ordering::SeqCst);
@@ -462,7 +470,15 @@ pub extern "C" fn rust_connect(
             }
         } else if !relay_from_server.is_empty() {
             emit_event("no direct addr, try relay");
-            match request_relay(&peer, &relay_from_server, &rendezvous_addr, &key).await {
+            match request_relay(
+                &peer,
+                &relay_from_server,
+                &rendezvous_addr,
+                !signed_id_pk.is_empty(),
+                &key,
+            )
+            .await
+            {
                 Ok(s) => {
                     emit_event("relay connected");
                     CONNECTION_ROUTE.store(2, Ordering::SeqCst);
@@ -1280,6 +1296,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
                 &config.peer,
                 &relay,
                 &config.rendezvous_addr,
+                !signed_id_pk.is_empty(),
                 &config.key,
                 ConnType::FILE_TRANSFER,
             )
@@ -1292,6 +1309,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
             &config.peer,
             &relay,
             &config.rendezvous_addr,
+            !signed_id_pk.is_empty(),
             &config.key,
             ConnType::FILE_TRANSFER,
         )
@@ -1310,15 +1328,25 @@ async fn request_relay(
     peer: &str,
     relay_server: &str,
     rendezvous_server: &str,
+    secure: bool,
     key: &str,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
-    request_relay_with_type(peer, relay_server, rendezvous_server, key, ConnType::DEFAULT_CONN).await
+    request_relay_with_type(
+        peer,
+        relay_server,
+        rendezvous_server,
+        secure,
+        key,
+        ConnType::DEFAULT_CONN,
+    )
+    .await
 }
 
 async fn request_relay_with_type(
     peer: &str,
     relay_server: &str,
     rendezvous_server: &str,
+    secure: bool,
     key: &str,
     conn_type: ConnType,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
@@ -1331,7 +1359,7 @@ async fn request_relay_with_type(
         id: peer.to_string(),
         uuid: uuid.clone(),
         relay_server: relay_server.to_string(),
-        secure: false,
+        secure,
         conn_type: conn_type.into(),
         ..Default::default()
     });
@@ -1414,8 +1442,11 @@ async fn secure_peer_connection(
     }
 
     let Some(sign_pk) = sign_pk else {
-        emit_event("secure peer: unavailable");
-        hbb_common::bail!("secure peer unavailable");
+        emit_event("secure peer: unavailable; use non-secure connection");
+        // Keep compatibility with peers that are waiting for the client's
+        // first handshake message before continuing without encryption.
+        conn.send(&PeerMessage::new()).await?;
+        return Ok(());
     };
 
     let Some(Ok(bytes)) = conn.next_timeout(READ_TIMEOUT).await else {
@@ -1423,10 +1454,20 @@ async fn secure_peer_connection(
         hbb_common::bail!("peer did not send signed id");
     };
 
-    let msg = PeerMessage::parse_from_bytes(&bytes)?;
+    let msg = match PeerMessage::parse_from_bytes(&bytes) {
+        Ok(msg) => msg,
+        Err(e) => {
+            emit_event(&format!(
+                "secure peer: invalid handshake message: {e}; use non-secure connection"
+            ));
+            conn.send(&PeerMessage::new()).await?;
+            return Ok(());
+        }
+    };
     let Some(message::Union::SignedId(signed_id)) = msg.union else {
-        emit_event("secure peer: first peer msg not SignedId");
-        hbb_common::bail!("peer did not send signed id");
+        emit_event("secure peer: first peer msg not SignedId; use non-secure connection");
+        conn.send(&PeerMessage::new()).await?;
+        return Ok(());
     };
 
     match decode_id_pk(&signed_id.id, &sign_pk) {
@@ -1443,12 +1484,18 @@ async fn secure_peer_connection(
             emit_event("secure peer: encrypted stream enabled");
         }
         Ok((id, _)) => {
-            emit_event(&format!("secure peer: peer signed id mismatch id={id}"));
-            hbb_common::bail!("peer signed id mismatch");
+            emit_event(&format!(
+                "secure peer: peer signed id mismatch id={id}; use non-secure connection"
+            ));
+            conn.send(&PeerMessage::new()).await?;
         }
         Err(e) => {
-            emit_event(&format!("secure peer: invalid peer signed id: {e}"));
-            hbb_common::bail!("invalid peer signed id");
+            emit_event(&format!(
+                "secure peer: invalid peer signed id: {e}; use non-secure connection"
+            ));
+            let mut msg_out = PeerMessage::new();
+            msg_out.set_public_key(PublicKey::new());
+            conn.send(&msg_out).await?;
         }
     }
     Ok(())
