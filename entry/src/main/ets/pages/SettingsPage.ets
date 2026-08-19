@@ -2,6 +2,7 @@
 import { translate } from '../utils/I18n'
 import { ServerConfigDialog } from '../widget/ServerConfigDialog'
 import { RustDeskNapi } from '../service/RustDeskNapi'
+import { common } from '@kit.AbilityKit'
 
 interface SettingItem {
   label: string
@@ -11,6 +12,7 @@ interface SettingItem {
 @Component
 export struct SettingsPage {
   @StorageLink('isDarkMode') isDarkMode: boolean = false
+  @StorageLink('isDarkModeManual') isDarkModeManual: boolean = false
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
@@ -62,9 +64,7 @@ export struct SettingsPage {
           this.buildDisplayCard()
           this.buildServerConfigCard()
           this.buildThemeToggle()
-          this.buildSectionCard(translate('About'), [
-            { label: translate('Version'), value: '1.0.5' },
-          ])
+          this.buildAboutCard()
         }
         .width(this.pageWidth >= 820 ? 720 : '100%')
         .padding(RustDeskTheme.PAGE_PADDING)
@@ -223,6 +223,70 @@ export struct SettingsPage {
   }
 
   @Builder
+  buildAboutCard() {
+    Column() {
+      Text(translate('About'))
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+        .margin({ bottom: 8 })
+
+      Row() {
+        Text(translate('Version'))
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Text('1.0.6')
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      }
+      .width('100%')
+      .padding({ top: 8, bottom: 8 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Text(translate('APP Filing Number'))
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Text('浙ICP备2026058556号-2A')
+          .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+        Text('>')
+          .fontSize(16)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .margin({ left: 4 })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .onClick(() => {
+        this.openFilingWebsite()
+      })
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .width('100%')
+  }
+
+  async openFilingWebsite(): Promise<void> {
+    try {
+      let context = getContext(this) as common.UIAbilityContext
+      await context.startAbility({
+        action: 'ohos.want.action.viewData',
+        uri: 'https://beian.miit.gov.cn/',
+      })
+    } catch (_) {
+    }
+  }
+
+  @Builder
   buildServerConfigCard() {
     Column() {
       Row() {
@@ -267,6 +331,7 @@ export struct SettingsPage {
         Blank()
         Toggle({ type: ToggleType.Switch, isOn: this.isDarkMode })
           .onChange((isOn: boolean) => {
+            this.isDarkModeManual = true
             this.isDarkMode = isOn
           })
       }

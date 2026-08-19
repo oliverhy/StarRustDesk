@@ -6,7 +6,9 @@ const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    AppStorage.setOrCreate('isDarkMode', this.isDarkColorMode(this.context.config.colorMode));
+    PersistentStorage.persistProp('isDarkModeManual', false);
+    PersistentStorage.persistProp('isDarkMode', this.isDarkColorMode(this.context.config.colorMode));
+    this.updateColorMode(this.context.config.colorMode);
     AppStorage.setOrCreate('currentTabIndex', 0);
     AppStorage.setOrCreate('connectionStatus', 0);
     AppStorage.setOrCreate('remoteId', '');
@@ -53,6 +55,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   private updateColorMode(colorMode?: ConfigurationConstant.ColorMode): void {
+    if (AppStorage.get<boolean>('isDarkModeManual') ?? false) {
+      return;
+    }
     AppStorage.set<boolean>('isDarkMode', this.isDarkColorMode(colorMode));
   }
 }

@@ -31,6 +31,7 @@ const translations: Record<string, string> = {
   'Relay Server': '中继服务器',
   'Port': '端口',
   'Version': '版本',
+  'APP Filing Number': 'APP备案号',
   'Update': '更新',
   'Cancel': '取消',
   'Confirm': '确认',
