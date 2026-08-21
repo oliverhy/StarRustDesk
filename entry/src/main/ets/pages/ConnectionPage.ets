@@ -12,6 +12,7 @@ interface SavedConnectionInfo {
   remoteId: string
   password: string
   performancePreset: string
+  groupId: string
 }
 
 interface SavedConnectionRow {
@@ -20,6 +21,19 @@ interface SavedConnectionRow {
   remoteId: string
   credentialAlias: string
   performancePreset: string
+  groupId: string
+}
+
+interface SavedConnectionGroup {
+  id: string
+  name: string
+  expanded: boolean
+}
+
+interface SavedConnectionGroupRow {
+  id: string
+  name: string
+  expanded: boolean
 }
 
 @Component
@@ -41,11 +55,25 @@ export struct ConnectionPage {
   @State pageWidth: number = 0
   @State savedConnections: SavedConnectionInfo[] = []
   @State selectedConnectionId: string = ''
+  @State selectedGroupId: string = ''
   @State savedConnectionsVersion: number = 0
+  @State connectionGroups: SavedConnectionGroup[] = []
+  @State savedConnectionsExpanded: boolean = true
+  @State ungroupedExpanded: boolean = true
+  @State showGroupNameDialog: boolean = false
+  @State editingGroupId: string = ''
+  @State groupNameDraft: string = ''
+  @State groupNameError: string = ''
+  @State assignCreatedGroupToForm: boolean = false
+  @State assignCreatedGroupConnectionId: string = ''
+  @State showGroupPicker: boolean = false
+  @State groupPickerConnectionId: string = ''
+  @State groupPickerForForm: boolean = false
   private statusTimer: number = -1
 
   aboutToAppear(): void {
     this.checkServerConfig()
+    this.loadConnectionGroups()
     this.loadSavedConnections()
     this.syncConnectionState()
     this.startStatusPolling()
@@ -116,7 +144,7 @@ export struct ConnectionPage {
   }
 
   build() {
-    Stack({ alignContent: Alignment.Top }) {
+    Stack({ alignContent: Alignment.Center }) {
       Column() {
         if (this.showUpdateBanner) {
           this.buildUpdateBanner()
@@ -154,6 +182,23 @@ export struct ConnectionPage {
       .height('100%')
       .padding({ left: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING })
       .alignItems(HorizontalAlign.Center)
+
+      if (this.showGroupNameDialog || this.showGroupPicker) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => {
+            this.closeGroupDialogs()
+          })
+          .zIndex(10)
+
+        if (this.showGroupNameDialog) {
+          this.buildGroupNameDialog()
+        } else if (this.showGroupPicker) {
+          this.buildGroupPickerDialog()
+        }
+      }
     }
     .width('100%')
     .height('100%')
@@ -218,6 +263,7 @@ export struct ConnectionPage {
 
       this.buildRemoteIdInput()
       this.buildConnectionNameInput()
+      this.buildConnectionGroupSelector()
       this.buildPasswordInput()
       this.buildPerformancePresetSelector()
       this.buildConnectionEditActions()
@@ -301,34 +347,41 @@ export struct ConnectionPage {
   buildRemoteIdInput() {
     Column() {
       Row() {
-        TextInput({ placeholder: translate('Remote ID'), text: this.remoteId })
-          .type(InputType.Normal)
-          .fontSize(RustDeskTheme.FONT_SIZE_ID)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
-          .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          .layoutWeight(1)
-          .onChange((value: string) => {
-            let normalized: string = this.normalizeRemoteId(value)
-            this.remoteId = normalized
-            this.isIdEmpty = normalized.length === 0
-          })
+        Stack({ alignContent: Alignment.End }) {
+          TextInput({ placeholder: translate('Remote ID'), text: this.remoteId })
+            .type(InputType.Normal)
+            .fontSize(RustDeskTheme.FONT_SIZE_ID)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
+            .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+            .height(52)
+            .padding({ left: 12, right: 44 })
+            .onChange((value: string) => {
+              let normalized: string = this.normalizeRemoteId(value)
+              this.remoteId = normalized
+              this.isIdEmpty = normalized.length === 0
+            })
 
-        if (!this.isIdEmpty) {
-          Button({ type: ButtonType.Circle }) {
-            Text('✕')
-              .fontSize(14)
-              .fontColor(Color.White)
+          if (!this.isIdEmpty) {
+            Button({ type: ButtonType.Circle }) {
+              Text('✕')
+                .fontSize(14)
+                .fontColor(Color.White)
+            }
+            .width(24)
+            .height(24)
+            .margin({ right: 10 })
+            .backgroundColor(RustDeskTheme.DARK_GRAY)
+            .onClick(() => {
+              this.remoteId = ''
+              this.isIdEmpty = true
+            })
+            .transition(TransitionEffect.OPACITY)
           }
-          .width(24)
-          .height(24)
-          .backgroundColor(RustDeskTheme.DARK_GRAY)
-          .onClick(() => {
-            this.remoteId = ''
-            this.isIdEmpty = true
-          })
-          .transition(TransitionEffect.OPACITY)
         }
+        .layoutWeight(1)
+        .height(52)
 
         Button({ type: ButtonType.Circle }) {
           Text('→')
@@ -377,6 +430,52 @@ export struct ConnectionPage {
   }
 
   @Builder
+  buildConnectionGroupSelector() {
+    Row({ space: 8 }) {
+      Column({ space: 2 }) {
+        Text('保存到分组')
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        Text(this.groupNameForId(this.selectedGroupId))
+          .fontSize(14)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Button('选择')
+        .height(32)
+        .fontSize(12)
+        .fontColor(RustDeskTheme.ACCENT)
+        .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+        .borderRadius(6)
+        .onClick(() => {
+          this.openGroupPickerForForm()
+        })
+
+      Button('+ 分组')
+        .height(32)
+        .fontSize(12)
+        .fontColor(Color.White)
+        .backgroundColor(RustDeskTheme.ACCENT)
+        .borderRadius(6)
+        .onClick(() => {
+          this.openNewGroupDialog(true)
+        })
+    }
+    .width('100%')
+    .height(52)
+    .padding({ left: 14, right: 8 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
+    .borderRadius(RustDeskTheme.CONTROL_RADIUS)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
   buildPasswordInput() {
     TextInput({ placeholder: translate('Password'), text: this.password })
       .type(InputType.Password)
@@ -398,6 +497,22 @@ export struct ConnectionPage {
   buildSavedConnections() {
     Column({ space: 8 }) {
       Row() {
+        Button() {
+          Image(this.savedConnectionsExpanded ?
+            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+            .width(12)
+            .height(12)
+            .objectFit(ImageFit.Contain)
+        }
+          .width(44)
+          .height(34)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding(0)
+          .onClick(() => {
+            this.savedConnectionsExpanded = !this.savedConnectionsExpanded
+            RustDeskNapi.setOption('saved-connections-expanded', this.savedConnectionsExpanded ? '1' : '0')
+          })
         Text('已保存连接')
           .fontSize(18)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -406,27 +521,106 @@ export struct ConnectionPage {
         Text(`${this.savedConnections.length} 个设备`)
           .fontSize(12)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        Button('+ 分组')
+          .height(30)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding(0)
+          .margin({ left: 8 })
+          .onClick(() => {
+            this.openNewGroupDialog()
+          })
       }
       .width('100%')
       .margin({ bottom: 2 })
 
-      if (this.savedConnections.length === 0) {
-        Column({ space: 8 }) {
-          Text('暂无保存的连接')
-            .fontSize(15)
-            .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
-          Text('连接信息会安全保存在本机')
-            .fontSize(12)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      if (this.savedConnectionsExpanded) {
+        if (this.savedConnections.length === 0 && this.connectionGroups.length === 0) {
+          Column({ space: 8 }) {
+            Text('暂无保存的连接')
+              .fontSize(15)
+              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+            Text('可先创建分组，再保存连接')
+              .fontSize(12)
+              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          }
+          .width('100%')
+          .height(112)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
+        } else {
+          if (this.connectionsForGroup('').length > 0) {
+            this.buildSavedConnectionGroup('', '未分组', this.ungroupedExpanded, false)
+          }
+
+          ForEach(this.connectionGroups, (group: SavedConnectionGroup) => {
+            this.buildSavedConnectionGroup(group.id, group.name, group.expanded, true)
+          }, (group: SavedConnectionGroup) => `${group.id}-${this.savedConnectionsVersion}`)
         }
-        .width('100%')
-        .height(112)
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-        .borderRadius(6)
-      } else {
-        ForEach(this.savedConnections, (item: SavedConnectionInfo) => {
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
+    .margin({ bottom: 18 })
+  }
+
+  @Builder
+  buildSavedConnectionGroup(groupId: string, groupName: string, expanded: boolean, canRename: boolean) {
+    Column() {
+      Row({ space: 6 }) {
+        Button() {
+          Image((groupId.length <= 0 ? this.ungroupedExpanded : expanded) ?
+            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+            .width(12)
+            .height(12)
+            .objectFit(ImageFit.Contain)
+        }
+          .width(44)
+          .height(34)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .onClick(() => {
+            this.toggleConnectionGroup(groupId)
+          })
+        Text(groupName)
+          .fontSize(14)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(`${this.connectionsForGroup(groupId).length}`)
+          .fontSize(11)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+          .backgroundColor(this.isDarkMode ? '#29364A' : '#E7EEF9')
+          .borderRadius(8)
+        Blank()
+        if (canRename) {
+          Button('重命名')
+            .height(28)
+            .fontSize(11)
+            .fontColor(RustDeskTheme.ACCENT)
+            .backgroundColor(Color.Transparent)
+            .onClick(() => {
+              this.openRenameGroupDialog(groupId)
+            })
+        }
+      }
+      .width('100%')
+      .height(42)
+      .padding({ left: 4, right: 4 })
+      .alignItems(VerticalAlign.Center)
+
+      if (groupId.length <= 0 ? this.ungroupedExpanded : expanded) {
+        ForEach(this.connectionsForGroup(groupId), (item: SavedConnectionInfo) => {
           Row({ space: 8 }) {
             Column() {
               Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
@@ -466,6 +660,15 @@ export struct ConnectionPage {
                 this.applySavedConnection(item)
               })
 
+            Button('移动')
+              .height(32)
+              .fontSize(12)
+              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+              .backgroundColor(Color.Transparent)
+              .onClick(() => {
+                this.openGroupPickerForConnection(item.id)
+              })
+
             Button('删除')
               .height(32)
               .fontSize(12)
@@ -483,12 +686,149 @@ export struct ConnectionPage {
       }
     }
     .width('100%')
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .margin({ top: 4 })
+    .backgroundColor(this.isDarkMode ? '#1E2938' : '#F7F9FD')
     .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
-    .margin({ bottom: 18 })
+    .borderRadius(7)
+  }
+
+  @Builder
+  buildGroupNameDialog() {
+    Column({ space: 14 }) {
+      Text(this.editingGroupId.length > 0 ? '重命名分组' : '新建分组')
+        .fontSize(19)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      TextInput({ placeholder: '输入分组名称', text: this.groupNameDraft })
+        .width('100%')
+        .height(48)
+        .fontSize(15)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: this.groupNameError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
+        .borderRadius(7)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => {
+          this.groupNameDraft = value
+          this.groupNameError = ''
+        })
+
+      if (this.groupNameError.length > 0) {
+        Text(this.groupNameError)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%')
+      }
+
+      Row({ space: 10 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
+          .onClick(() => {
+            this.closeGroupDialogs()
+          })
+        Button(this.editingGroupId.length > 0 ? '保存名称' : '创建')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(Color.White)
+          .backgroundColor(RustDeskTheme.ACCENT)
+          .borderRadius(6)
+          .onClick(() => {
+            this.saveGroupName()
+          })
+      }
+      .width('100%')
+    }
+    .width(this.pageWidth >= 820 ? 420 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
+  }
+
+  @Builder
+  buildGroupPickerDialog() {
+    Column({ space: 12 }) {
+      Row() {
+        Text(this.groupPickerForForm ? '选择保存分组' : '移动连接到分组')
+          .fontSize(19)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        Button('关闭')
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(Color.Transparent)
+          .onClick(() => {
+            this.closeGroupDialogs()
+          })
+      }
+      .width('100%')
+
+      Scroll() {
+        Column({ space: 7 }) {
+          this.buildGroupPickerOption('', '未分组')
+          ForEach(this.connectionGroups, (group: SavedConnectionGroup) => {
+            this.buildGroupPickerOption(group.id, group.name)
+          }, (group: SavedConnectionGroup) => group.id)
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .height(Math.min(320, 58 + this.connectionGroups.length * 48))
+
+      Button('+ 新建分组')
+        .width('100%')
+        .height(40)
+        .fontColor(RustDeskTheme.ACCENT)
+        .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+        .borderRadius(6)
+        .onClick(() => {
+          this.openNewGroupDialog(this.groupPickerForForm, this.groupPickerForForm ? '' : this.groupPickerConnectionId)
+        })
+    }
+    .width(this.pageWidth >= 820 ? 420 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
+  }
+
+  @Builder
+  buildGroupPickerOption(groupId: string, groupName: string) {
+    Button() {
+      Row() {
+        Text(groupName)
+          .fontSize(14)
+          .fontColor(this.groupPickerCurrentGroupId() === groupId ? Color.White : (this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Blank()
+        Text(this.groupPickerCurrentGroupId() === groupId ? '✓' : '')
+          .fontSize(16)
+          .fontColor(Color.White)
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12 })
+    }
+    .width('100%')
+    .height(42)
+    .backgroundColor(this.groupPickerCurrentGroupId() === groupId ? RustDeskTheme.ACCENT : (this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED))
+    .borderRadius(6)
+    .onClick(() => {
+      this.selectGroupFromPicker(groupId)
+    })
   }
 
   @Builder
@@ -608,6 +948,215 @@ export struct ConnectionPage {
     }
   }
 
+  loadConnectionGroups(): void {
+    this.connectionGroups = []
+    try {
+      this.savedConnectionsExpanded = RustDeskNapi.getOption('saved-connections-expanded') !== '0'
+      this.ungroupedExpanded = RustDeskNapi.getOption('saved-connections-ungrouped-expanded') !== '0'
+      let raw: string = RustDeskNapi.getOption('saved-connection-groups')
+      if (raw.length <= 0) {
+        return
+      }
+      let rows: Record<string, string | boolean>[] = JSON.parse(raw) as Record<string, string | boolean>[]
+      let groups: SavedConnectionGroup[] = []
+      rows.forEach((row: Record<string, string | boolean>) => {
+        let id: string = `${row['id'] ?? ''}`.trim()
+        let name: string = `${row['name'] ?? ''}`.trim()
+        if (id.length > 0 && name.length > 0 && !groups.some((group: SavedConnectionGroup) => group.id === id)) {
+          groups.push({
+            id: id,
+            name: name,
+            expanded: row['expanded'] !== false
+          })
+        }
+      })
+      this.connectionGroups = this.cloneConnectionGroups(groups)
+    } catch (_e) {
+      this.connectionGroups = []
+    }
+  }
+
+  persistConnectionGroups(): void {
+    let rows: SavedConnectionGroupRow[] = []
+    this.connectionGroups.forEach((group: SavedConnectionGroup) => {
+      rows.push({ id: group.id, name: group.name, expanded: group.expanded })
+    })
+    RustDeskNapi.setOption('saved-connection-groups', JSON.stringify(rows))
+  }
+
+  cloneConnectionGroups(groups: SavedConnectionGroup[]): SavedConnectionGroup[] {
+    let cloned: SavedConnectionGroup[] = []
+    groups.forEach((group: SavedConnectionGroup) => {
+      cloned.push({ id: group.id, name: group.name, expanded: group.expanded })
+    })
+    return cloned
+  }
+
+  connectionsForGroup(groupId: string): SavedConnectionInfo[] {
+    let result: SavedConnectionInfo[] = []
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      if (this.validGroupId(item.groupId) === groupId) {
+        result.push(item)
+      }
+    })
+    return result
+  }
+
+  validGroupId(groupId: string): string {
+    return this.connectionGroups.some((group: SavedConnectionGroup) => group.id === groupId) ? groupId : ''
+  }
+
+  groupNameForId(groupId: string): string {
+    let validId: string = this.validGroupId(groupId)
+    if (validId.length <= 0) {
+      return '未分组'
+    }
+    let found: SavedConnectionGroup | undefined = this.connectionGroups.find((group: SavedConnectionGroup) => group.id === validId)
+    return found?.name ?? '未分组'
+  }
+
+  toggleConnectionGroup(groupId: string): void {
+    if (groupId.length <= 0) {
+      this.ungroupedExpanded = !this.ungroupedExpanded
+      RustDeskNapi.setOption('saved-connections-ungrouped-expanded', this.ungroupedExpanded ? '1' : '0')
+      return
+    }
+    let groups: SavedConnectionGroup[] = []
+    this.connectionGroups.forEach((group: SavedConnectionGroup) => {
+      groups.push({
+        id: group.id,
+        name: group.name,
+        expanded: group.id === groupId ? !group.expanded : group.expanded
+      })
+    })
+    this.connectionGroups = groups
+    this.savedConnectionsVersion++
+    this.persistConnectionGroups()
+  }
+
+  openNewGroupDialog(assignToForm: boolean = false, connectionId: string = ''): void {
+    this.showGroupPicker = false
+    this.showGroupNameDialog = true
+    this.editingGroupId = ''
+    this.groupNameDraft = ''
+    this.groupNameError = ''
+    this.assignCreatedGroupToForm = assignToForm
+    this.assignCreatedGroupConnectionId = connectionId
+  }
+
+  openRenameGroupDialog(groupId: string): void {
+    let group: SavedConnectionGroup | undefined = this.connectionGroups.find((item: SavedConnectionGroup) => item.id === groupId)
+    if (group === undefined) {
+      return
+    }
+    this.showGroupPicker = false
+    this.showGroupNameDialog = true
+    this.editingGroupId = groupId
+    this.groupNameDraft = group.name
+    this.groupNameError = ''
+    this.assignCreatedGroupToForm = false
+    this.assignCreatedGroupConnectionId = ''
+  }
+
+  saveGroupName(): void {
+    let name: string = this.groupNameDraft.trim()
+    if (name.length <= 0) {
+      this.groupNameError = '分组名称不能为空'
+      return
+    }
+    if (this.connectionGroups.some((group: SavedConnectionGroup) => group.id !== this.editingGroupId && group.name.toLowerCase() === name.toLowerCase())) {
+      this.groupNameError = '已存在同名分组'
+      return
+    }
+
+    if (this.editingGroupId.length > 0) {
+      let groups: SavedConnectionGroup[] = []
+      this.connectionGroups.forEach((group: SavedConnectionGroup) => {
+        groups.push({ id: group.id, name: group.id === this.editingGroupId ? name : group.name, expanded: group.expanded })
+      })
+      this.connectionGroups = groups
+    } else {
+      let groupId: string = `group-${Date.now()}-${this.connectionGroups.length}`
+      let groups: SavedConnectionGroup[] = this.cloneConnectionGroups(this.connectionGroups)
+      groups.push({ id: groupId, name: name, expanded: true })
+      this.connectionGroups = groups
+      if (this.assignCreatedGroupToForm) {
+        this.selectedGroupId = groupId
+      }
+      if (this.assignCreatedGroupConnectionId.length > 0) {
+        this.moveConnectionToGroup(this.assignCreatedGroupConnectionId, groupId)
+      }
+    }
+    this.savedConnectionsVersion++
+    this.persistConnectionGroups()
+    this.closeGroupDialogs()
+  }
+
+  openGroupPickerForForm(): void {
+    this.groupPickerForForm = true
+    this.groupPickerConnectionId = ''
+    this.showGroupNameDialog = false
+    this.showGroupPicker = true
+  }
+
+  openGroupPickerForConnection(connectionId: string): void {
+    this.groupPickerForForm = false
+    this.groupPickerConnectionId = connectionId
+    this.showGroupNameDialog = false
+    this.showGroupPicker = true
+  }
+
+  groupPickerCurrentGroupId(): string {
+    if (this.groupPickerForForm) {
+      return this.validGroupId(this.selectedGroupId)
+    }
+    let found: SavedConnectionInfo | undefined = this.savedConnections.find((item: SavedConnectionInfo) => item.id === this.groupPickerConnectionId)
+    return this.validGroupId(found?.groupId ?? '')
+  }
+
+  selectGroupFromPicker(groupId: string): void {
+    let validId: string = this.validGroupId(groupId)
+    if (this.groupPickerForForm) {
+      this.selectedGroupId = validId
+    } else if (this.groupPickerConnectionId.length > 0) {
+      this.moveConnectionToGroup(this.groupPickerConnectionId, validId)
+    }
+    this.closeGroupDialogs()
+  }
+
+  moveConnectionToGroup(connectionId: string, groupId: string): void {
+    let validId: string = this.validGroupId(groupId)
+    let list: SavedConnectionInfo[] = []
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      list.push({
+        id: item.id,
+        name: item.name,
+        remoteId: item.remoteId,
+        password: item.password,
+        performancePreset: item.performancePreset,
+        groupId: item.id === connectionId ? validId : item.groupId
+      })
+    })
+    this.savedConnections = list
+    if (this.selectedConnectionId === connectionId) {
+      this.selectedGroupId = validId
+    }
+    this.savedConnectionsVersion++
+    this.persistSavedConnections(list)
+  }
+
+  closeGroupDialogs(): void {
+    this.showGroupNameDialog = false
+    this.showGroupPicker = false
+    this.editingGroupId = ''
+    this.groupNameDraft = ''
+    this.groupNameError = ''
+    this.assignCreatedGroupToForm = false
+    this.assignCreatedGroupConnectionId = ''
+    this.groupPickerConnectionId = ''
+    this.groupPickerForForm = false
+  }
+
   async loadSavedConnections(): Promise<void> {
     let raw: string = RustDeskNapi.getOption('saved-connections')
     if (raw.length <= 0) {
@@ -633,7 +1182,8 @@ export struct ConnectionPage {
             name: row['name'] ?? '',
             remoteId: remoteId,
             password: savedPassword,
-            performancePreset: row['performancePreset'] ?? 'smooth'
+            performancePreset: row['performancePreset'] ?? 'smooth',
+            groupId: this.validGroupId(row['groupId'] ?? '')
           })
         }
       }
@@ -655,7 +1205,8 @@ export struct ConnectionPage {
         name: item.name,
         remoteId: item.remoteId,
         credentialAlias: item.id,
-        performancePreset: item.performancePreset
+        performancePreset: item.performancePreset,
+        groupId: item.groupId
       })
     })
     RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
@@ -667,6 +1218,7 @@ export struct ConnectionPage {
     this.remoteId = this.normalizeRemoteId(item.remoteId)
     this.password = item.password
     this.performancePreset = item.performancePreset.length > 0 ? item.performancePreset : 'smooth'
+    this.selectedGroupId = this.validGroupId(item.groupId)
     this.isIdEmpty = this.remoteId.length === 0
   }
 
@@ -683,7 +1235,8 @@ export struct ConnectionPage {
       name: savedName.length > 0 ? savedName : peerId,
       remoteId: peerId,
       password: password,
-      performancePreset: this.performancePreset
+      performancePreset: this.performancePreset,
+      groupId: this.validGroupId(this.selectedGroupId)
     }
     let list: SavedConnectionInfo[] = []
     let updated: boolean = false
@@ -723,6 +1276,7 @@ export struct ConnectionPage {
 
   clearConnectionForm(): void {
     this.selectedConnectionId = ''
+    this.selectedGroupId = ''
     this.connectionName = ''
     this.remoteId = ''
     this.password = ''
@@ -746,7 +1300,8 @@ export struct ConnectionPage {
         name: item.name,
         remoteId: item.remoteId,
         password: item.password,
-        performancePreset: item.performancePreset
+        performancePreset: item.performancePreset,
+        groupId: item.groupId
       })
     })
     return cloned

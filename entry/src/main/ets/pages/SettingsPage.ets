@@ -17,6 +17,7 @@ export struct SettingsPage {
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
+  @State showLocalCursor: boolean = true
   @State pageWidth: number = 0
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
@@ -34,6 +35,7 @@ export struct SettingsPage {
     if (savedFps.length > 0) {
       this.frameRate = parseInt(savedFps)
     }
+    this.showLocalCursor = RustDeskNapi.getOption('show-local-cursor') !== '0'
   }
 
   build() {
@@ -62,6 +64,7 @@ export struct SettingsPage {
             { label: translate('Device Name'), value: RustDeskNapi.getDeviceName() },
           ])
           this.buildDisplayCard()
+          this.buildInputCard()
           this.buildServerConfigCard()
           this.buildThemeToggle()
           this.buildAboutCard()
@@ -223,6 +226,39 @@ export struct SettingsPage {
   }
 
   @Builder
+  buildInputCard() {
+    Column({ space: 4 }) {
+      Row() {
+        Column({ space: 4 }) {
+          Text('显示本地鼠标指针')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('鼠标模式下同步远端光标，光标已嵌入画面或使用触摸模式时自动隐藏')
+            .fontSize(12)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.showLocalCursor })
+          .onChange((isOn: boolean) => {
+            this.showLocalCursor = isOn
+            RustDeskNapi.setOption('show-local-cursor', isOn ? '1' : '0')
+          })
+      }
+      .width('100%')
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .width('100%')
+  }
+
+  @Builder
   buildAboutCard() {
     Column() {
       Text(translate('About'))
@@ -237,7 +273,7 @@ export struct SettingsPage {
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Text('1.0.6')
+        Text('1.0.7')
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       }

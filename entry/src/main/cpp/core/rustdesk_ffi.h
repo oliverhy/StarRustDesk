@@ -1,6 +1,8 @@
 #ifndef RUSTDESK_CORE_FFI_H
 #define RUSTDESK_CORE_FFI_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +28,8 @@ char* rust_get_file_transfer_status(void);
 char* rust_take_remote_clipboard_text(void);
 int rust_get_display_count(void);
 int rust_get_current_display(void);
+int rust_get_remote_cursor_position(int32_t* x, int32_t* y, uint64_t* sequence);
+int rust_is_remote_cursor_embedded(void);
 int rust_switch_display(int display);
 int rust_refresh_video(void);
 typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int width, int height);

@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
@@ -53,7 +53,11 @@ static CURRENT_PEER_ID: Mutex<String> = Mutex::new(String::new());
 static CURRENT_CLIENT_HWID: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
-static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32, bool)>> = Mutex::new(Vec::new());
+static REMOTE_CURSOR_X: AtomicI32 = AtomicI32::new(0);
+static REMOTE_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
+static REMOTE_CURSOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static REMOTE_CURSOR_VALID: AtomicBool = AtomicBool::new(false);
 static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static REMOTE_DIRECTORY_RESULT: Mutex<String> = Mutex::new(String::new());
@@ -146,6 +150,8 @@ fn reset_display_state() {
     if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
         guard.clear();
     }
+    REMOTE_CURSOR_VALID.store(false, Ordering::SeqCst);
+    REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
 }
 
 fn clear_connection_for_session(session_id: u64) -> bool {
@@ -1054,6 +1060,35 @@ pub extern "C" fn rust_get_current_display() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_get_remote_cursor_position(
+    x: *mut i32,
+    y: *mut i32,
+    sequence: *mut u64,
+) -> i32 {
+    if !REMOTE_CURSOR_VALID.load(Ordering::SeqCst) || x.is_null() || y.is_null() || sequence.is_null() {
+        return 0;
+    }
+    let (origin_x, origin_y) = current_display_origin();
+    unsafe {
+        *x = REMOTE_CURSOR_X.load(Ordering::SeqCst) - origin_x;
+        *y = REMOTE_CURSOR_Y.load(Ordering::SeqCst) - origin_y;
+        *sequence = REMOTE_CURSOR_SEQUENCE.load(Ordering::SeqCst);
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_is_remote_cursor_embedded() -> i32 {
+    let current = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
+    let index = current.max(0) as usize;
+    DISPLAY_INFOS
+        .try_lock()
+        .ok()
+        .and_then(|guard| guard.get(index).map(|display| display.4))
+        .unwrap_or(false) as i32
+}
+
+#[no_mangle]
 pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     if display < 0 {
         return -1;
@@ -1137,11 +1172,30 @@ fn emit_event(message: &str) {
 }
 
 fn with_port(host: &str, port: i32) -> String {
-    if host.contains(':') {
-        host.to_string()
-    } else {
-        format!("{host}:{port}")
+    let host = host.trim();
+    if host.is_empty() {
+        return format!("127.0.0.1:{port}");
     }
+    if host.parse::<SocketAddr>().is_ok() {
+        return host.to_string();
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(_) => format!("{host}:{port}"),
+            IpAddr::V6(_) => format!("[{host}]:{port}"),
+        };
+    }
+    if host.starts_with('[') && host.ends_with(']') {
+        return format!("{host}:{port}");
+    }
+    if host.matches(':').count() == 1 {
+        if let Some((_, port_text)) = host.rsplit_once(':') {
+            if port_text.parse::<u16>().is_ok() {
+                return host.to_string();
+            }
+        }
+    }
+    format!("{host}:{port}")
 }
 
 fn rendezvous_message_kind(union: &Option<rendezvous_message::Union>) -> &'static str {
@@ -1655,10 +1709,10 @@ async fn handle_peer_bytes(bytes: &[u8], read_jobs: &mut Vec<TransferJob>, strea
                 }
                 Some(login_response::Union::PeerInfo(info)) => {
                     let display_count = info.displays.len().max(1) as i32;
-                    let displays: Vec<(i32, i32, i32, i32)> = info
+                    let displays: Vec<(i32, i32, i32, i32, bool)> = info
                         .displays
                         .iter()
-                        .map(|display| (display.x, display.y, display.width, display.height))
+                        .map(|display| (display.x, display.y, display.width, display.height, display.cursor_embedded))
                         .collect();
                     if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
                         *guard = display_count;
@@ -1700,7 +1754,12 @@ async fn handle_peer_bytes(bytes: &[u8], read_jobs: &mut Vec<TransferJob>, strea
             handle_file_response(response, read_jobs, stream).await;
         }
         Some(message::Union::CursorData(_)) => emit_event("peer message: CursorData"),
-        Some(message::Union::CursorPosition(_)) => {}
+        Some(message::Union::CursorPosition(position)) => {
+            REMOTE_CURSOR_X.store(position.x, Ordering::SeqCst);
+            REMOTE_CURSOR_Y.store(position.y, Ordering::SeqCst);
+            REMOTE_CURSOR_VALID.store(true, Ordering::SeqCst);
+            REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+        }
         Some(message::Union::CursorId(_)) => emit_event("peer message: CursorId"),
         Some(_) => {}
         None => emit_event("peer message: empty"),
@@ -1802,6 +1861,30 @@ fn set_file_transfer_status(state: &str, transferred: u64, total: u64, error: &s
 fn handle_misc_message(misc_msg: Misc) {
     match misc_msg.union {
         Some(misc::Union::AudioFormat(format)) => handle_audio_format(format),
+        Some(misc::Union::SwitchDisplay(display)) => {
+            let index = display.display.max(0) as usize;
+            if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
+                *guard = display.display.max(0);
+            }
+            if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
+                if guard.len() <= index {
+                    guard.resize(index + 1, (0, 0, 1920, 1080, false));
+                }
+                let previous = guard[index];
+                guard[index] = (
+                    display.x,
+                    display.y,
+                    if display.width > 0 { display.width } else { previous.2 },
+                    if display.height > 0 { display.height } else { previous.3 },
+                    display.cursor_embedded,
+                );
+            }
+            REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+            emit_event(&format!(
+                "switch display received display={} size={}x{} cursor_embedded={}",
+                display.display, display.width, display.height, display.cursor_embedded
+            ));
+        }
         _ => emit_event("peer message: Misc"),
     }
 }
@@ -1943,7 +2026,7 @@ async fn send_login(hash: Hash) {
             custom_fps: performance.fps,
             disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
             enable_file_transfer: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
-            show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::No.into(),
+            show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
             ..Default::default()
         }),
         version: "1.2.0".to_string(),
@@ -1979,7 +2062,7 @@ async fn send_performance_options(refresh_video: bool) {
             ..Default::default()
         }),
         disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
-        show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::No.into(),
+        show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
         ..Default::default()
     });
     let mut msg = PeerMessage::new();
@@ -2115,7 +2198,7 @@ fn current_display_rect() -> (i32, i32, i32, i32) {
     DISPLAY_INFOS
         .try_lock()
         .ok()
-        .and_then(|guard| guard.get(index).copied())
+        .and_then(|guard| guard.get(index).map(|display| (display.0, display.1, display.2, display.3)))
         .unwrap_or((0, 0, 1920, 1080))
 }
 

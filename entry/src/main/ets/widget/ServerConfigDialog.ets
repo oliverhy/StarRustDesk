@@ -41,6 +41,11 @@ export struct ServerConfigDialog {
       this.buildField(translate('API Server'), this.apiServer, (v: string) => { this.apiServer = v })
       this.buildField(translate('Key'), this.serverKey, (v: string) => { this.serverKey = v })
 
+      Text('IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:db8::1]:21116')
+        .fontSize(11)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+
       if (this.testResult.length > 0) {
         Row() {
           Circle()

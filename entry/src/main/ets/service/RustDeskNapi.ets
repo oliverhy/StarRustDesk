@@ -19,6 +19,14 @@ export interface VideoFrameInfo {
   totalBytes?: number
 }
 
+export interface RemoteCursorPosition {
+  valid: boolean
+  embedded: boolean
+  x: number
+  y: number
+  sequence: number
+}
+
 export interface RemoteDirectoryEntry {
   name: string
   entryType: number
@@ -91,6 +99,10 @@ export class RustDeskNapi {
 
   static getCurrentDisplay(): number {
     return (rustdeskNapi as ESObject).getCurrentDisplay()
+  }
+
+  static getRemoteCursorPosition(): RemoteCursorPosition {
+    return (rustdeskNapi as ESObject).getRemoteCursorPosition() as RemoteCursorPosition
   }
 
   static switchDisplay(display: number): number {

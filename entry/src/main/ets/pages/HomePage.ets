@@ -7,22 +7,27 @@ import { SettingsPage } from './SettingsPage'
 @Component
 struct HomePage {
   @State currentTabIndex: number = 0
+  @State pageWidth: number = 0
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   private swiperController: SwiperController = new SwiperController()
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
-        Row() {
-          Column()
-            .width('42%')
-            .height('100%')
-            .backgroundColor(this.isDarkMode ? '#202D44' : '#D7E5FF')
-          Blank()
+        Stack({ alignContent: Alignment.TopStart }) {
+          Circle()
+            .width(this.pageWidth >= 820 ? 900 : 520)
+            .height(this.pageWidth >= 820 ? 900 : 520)
+            .fill(this.isDarkMode ? '#202D44' : '#D7E5FF')
+            .offset({
+              x: this.pageWidth >= 820 ? -450 : -260,
+              y: this.pageWidth >= 820 ? -450 : -260
+            })
         }
         .width('100%')
         .height(196)
         .backgroundColor(this.isDarkMode ? '#19202B' : '#F7F9FD')
+        .clip(true)
         Blank()
       }
       .width('100%')
@@ -50,6 +55,9 @@ struct HomePage {
     .width('100%')
     .height('100%')
     .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : RustDeskTheme.BG_LIGHT)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.pageWidth = newValue.width as number
+    })
   }
 
   @Builder

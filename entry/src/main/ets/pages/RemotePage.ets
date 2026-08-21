@@ -1,13 +1,16 @@
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
+import { window } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
-import { FileTransferStatus, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { FileTransferStatus, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
+import pointer from '@ohos.multimodalInput.pointer';
 
 interface RemotePoint {
   x: number;
@@ -15,6 +18,16 @@ interface RemotePoint {
 }
 
 const REMOTE_WHEEL_SCALE: number = 0.08;
+const TOUCH_SCROLL_SCALE: number = 0.12;
+const TOUCHPAD_POINTER_SPEED: number = 1.25;
+const TOUCH_MOVE_THRESHOLD: number = 12;
+const MULTI_TOUCH_MOVE_THRESHOLD: number = 8;
+const PINCH_DISTANCE_THRESHOLD: number = 12;
+const THREE_FINGER_SWIPE_THRESHOLD: number = 70;
+const THREE_FINGER_HORIZONTAL_LIMIT: number = 120;
+const THREE_FINGER_MAX_DURATION: number = 1500;
+const INPUT_MODE_MOUSE: string = 'mouse';
+const INPUT_MODE_TOUCH: string = 'touch';
 const LOG_DOMAIN: number = 0x0000;
 
 @Entry
@@ -35,8 +48,12 @@ struct RemotePage {
   @State lastAbsX: number = 0;
   @State lastAbsY: number = 0;
   @State showKeyboardPanel: boolean = false;
+  @State inputMode: string = INPUT_MODE_MOUSE;
+  @State showGestureHelp: boolean = false;
+  @State showLocalCursor: boolean = true;
   @State keyboardInput: string = '';
   @State showCursor: boolean = false;
+  @State remoteCursorEmbedded: boolean = false;
   @State cursorX: number = 0;
   @State cursorY: number = 0;
   @State surfaceId: string = '';
@@ -61,10 +78,12 @@ struct RemotePage {
   @State trustThisDevice: boolean = false;
   @State enableTrustedDevices: boolean = false;
   @State connectionError: string = '';
+  @State isFullScreen: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
   private toolbarTimer: number = -1;
   private statusTimer: number = -1;
   private frameTimer: number = -1;
+  private cursorTimer: number = -1;
   private clipboardTimer: number = -1;
   private surfaceRebindTimer: number = -1;
   private remoteDirectoryTimer: number = -1;
@@ -103,6 +122,28 @@ struct RemotePage {
   private lastSurfaceHeight: number = 0;
   private touchStartX: number = 0;
   private touchStartY: number = 0;
+  private lastTouchX: number = 0;
+  private lastTouchY: number = 0;
+  private touchMoved: boolean = false;
+  private pointerInitialized: boolean = false;
+  private leftButtonHeld: boolean = false;
+  private multiTouchActive: boolean = false;
+  private multiTouchGesture: number = 0;
+  private multiTouchStartedAt: number = 0;
+  private multiTouchStartCenterX: number = 0;
+  private multiTouchStartCenterY: number = 0;
+  private multiTouchLastCenterX: number = 0;
+  private multiTouchLastCenterY: number = 0;
+  private multiTouchMoved: boolean = false;
+  private multiTouchRemoteX: number = 0;
+  private multiTouchRemoteY: number = 0;
+  private threeFingerGestureActive: boolean = false;
+  private threeFingerStartedAt: number = 0;
+  private threeFingerStartCenterX: number = 0;
+  private threeFingerStartCenterY: number = 0;
+  private threeFingerLastCenterX: number = 0;
+  private threeFingerLastCenterY: number = 0;
+  private directKeyboardCommittedText: string = '';
   private clipboardPolling: boolean = false;
   private lastLocalClipboardText: string = '';
   private lastRemoteClipboardText: string = '';
@@ -111,9 +152,15 @@ struct RemotePage {
   private isLeavingAfterDisconnect: boolean = false;
   private pendingUploadPath: string = '';
   private pendingUploadName: string = '';
+  private lastRemoteCursorSequence: number = -1;
+  private pointerOverRemoteViewport: boolean = false;
+  private systemPointerHidden: boolean = false;
 
   aboutToAppear(): void {
     this.connectedPeerId = AppStorage.get<string>('connectedPeerId') ?? '';
+    this.loadInputMode();
+    this.loadLocalCursorPreference();
+    this.showGestureHelp = RustDeskNapi.getOption('mobile-gesture-help-shown') !== '1';
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
     this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
@@ -121,18 +168,43 @@ struct RemotePage {
       this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
     }
     this.startPolling();
+    this.startRemoteCursorPolling();
   }
 
   aboutToDisappear(): void {
     if (this.toolbarTimer !== -1) { clearTimeout(this.toolbarTimer); }
     if (this.statusTimer !== -1) { clearTimeout(this.statusTimer); }
     if (this.frameTimer !== -1) { clearTimeout(this.frameTimer); }
+    if (this.cursorTimer !== -1) { clearTimeout(this.cursorTimer); }
     if (this.surfaceRebindTimer !== -1) { clearTimeout(this.surfaceRebindTimer); }
     if (this.remoteDirectoryTimer !== -1) { clearTimeout(this.remoteDirectoryTimer); }
     this.stopClipboardSync();
+    this.cancelActiveTouchGesture();
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.cleanupPendingUploadFile();
+    this.pointerOverRemoteViewport = false;
+    this.setSystemPointerHidden(false);
+    if (this.isFullScreen) {
+      this.applyFullscreenWindow(false);
+      this.isFullScreen = false;
+    }
+  }
+
+  onBackPress(): boolean {
+    if (this.showRemoteFileBrowser) {
+      this.closeRemoteFileBrowser(true);
+      return true;
+    }
+    if (this.showGestureHelp) {
+      this.showGestureHelp = false;
+      return true;
+    }
+    if (this.isFullScreen) {
+      this.exitFullScreen();
+      return true;
+    }
+    return false;
   }
 
   cleanupPendingUploadFile(): void {
@@ -159,6 +231,7 @@ struct RemotePage {
         this.connectingStartedAt = 0;
       }
       this.connectionStatus = status as ConnectionStatus;
+      this.updateSystemPointerVisibility();
       if (status === ConnectionStatus.WAITING_2FA) {
         this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
         let message: string = ConnectionService.getLastConnectionError();
@@ -247,6 +320,39 @@ struct RemotePage {
     }, 2000);
   }
 
+  startRemoteCursorPolling(): void {
+    if (this.cursorTimer !== -1) {
+      clearTimeout(this.cursorTimer);
+    }
+    let poll = () => {
+      if (this.connectionStatus === ConnectionStatus.CONNECTED) {
+        try {
+          let cursor: RemoteCursorPosition = RustDeskNapi.getRemoteCursorPosition();
+          this.remoteCursorEmbedded = cursor.embedded;
+          if (cursor.embedded) {
+            this.showCursor = false;
+          } else if (cursor.valid && cursor.sequence !== this.lastRemoteCursorSequence) {
+            this.lastRemoteCursorSequence = cursor.sequence;
+            if (cursor.x >= 0 && cursor.y >= 0 && cursor.x < this.remoteWidth && cursor.y < this.remoteHeight) {
+              this.lastAbsX = cursor.x;
+              this.lastAbsY = cursor.y;
+              this.pointerInitialized = true;
+              this.updateCursorOverlayFromRemote();
+            } else {
+              this.showCursor = false;
+            }
+          }
+        } catch (_e) {
+        }
+      } else {
+        this.remoteCursorEmbedded = false;
+        this.lastRemoteCursorSequence = -1;
+      }
+      this.cursorTimer = setTimeout(poll, 33);
+    };
+    this.cursorTimer = setTimeout(poll, 33);
+  }
+
   primaryTextColor(): ResourceColor {
     return this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY;
   }
@@ -290,6 +396,9 @@ struct RemotePage {
       }
       if (this.transferActive && !this.showRemoteFileBrowser) {
         this.buildTransferProgress();
+      }
+      if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        this.buildGestureHelpOverlay();
       }
     }
     .width('100%')
@@ -439,7 +548,35 @@ struct RemotePage {
 
   @Builder
   buildRemoteScreen() {
-    if (this.isLargeLayout()) {
+    if (this.isFullScreen) {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column() {
+          this.buildRemoteViewport();
+        }
+        .width('100%')
+        .height('100%')
+
+        Button('退出全屏')
+          .width(88)
+          .height(36)
+          .fontSize(12)
+          .fontColor(Color.White)
+          .backgroundColor('#99000000')
+          .border({ width: 1, color: '#66FFFFFF' })
+          .borderRadius(18)
+          .position({ x: Math.max(12, this.pageWidth - 100), y: 12 })
+          .onClick(() => {
+            this.exitFullScreen();
+          })
+
+        if (this.showKeyboardPanel) {
+          this.buildFullscreenKeyboardPanel();
+        }
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#090D14');
+    } else if (this.isLargeLayout()) {
       Row() {
         Column() {
           this.buildStatsPanel();
@@ -603,21 +740,12 @@ struct RemotePage {
           .onLoad(() => {
             this.onSurfaceReady();
           })
-          .onTouch((event: TouchEvent) => {
-            this.handleRemoteTouch(event);
-          })
-        .onMouse((event: MouseEvent) => {
-          this.handleRemoteMouse(event);
-        })
-        .onAxisEvent((event: AxisEvent) => {
-          this.handleRemoteAxis(event);
-        })
       }
 
       Stack()
         .id('remoteInputCapture')
-        .width(this.getDisplayWidth())
-        .height(this.getDisplayHeight())
+        .width(this.inputMode === INPUT_MODE_MOUSE ? '100%' : this.getDisplayWidth())
+        .height(this.inputMode === INPUT_MODE_MOUSE ? '100%' : this.getDisplayHeight())
         .backgroundColor('#01000000')
         .focusable(true)
         .defaultFocus(true)
@@ -630,6 +758,10 @@ struct RemotePage {
         })
         .onMouse((event: MouseEvent) => {
           this.handleRemoteMouse(event);
+        })
+        .onHover((isHovering: boolean) => {
+          this.pointerOverRemoteViewport = isHovering;
+          this.updateSystemPointerVisibility();
         })
         .onAxisEvent((event: AxisEvent) => {
           this.handleRemoteAxis(event);
@@ -662,7 +794,8 @@ struct RemotePage {
         .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
       }
 
-      if (this.showCursor) {
+      if (this.showCursor && this.showLocalCursor && !this.remoteCursorEmbedded &&
+        this.inputMode === INPUT_MODE_MOUSE) {
         this.buildCursorOverlay();
       }
     }
@@ -719,6 +852,10 @@ struct RemotePage {
               })
           }, (display: number) => `${display}-${this.currentDisplay}`)
         }
+        this.buildInputModeButton(70, false)
+        this.buildToolbarButton('手势', 54, false, false, true, () => {
+          this.showGestureHelp = true;
+        })
         this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
           this.showKeyboardPanel = !this.showKeyboardPanel;
         })
@@ -736,6 +873,9 @@ struct RemotePage {
         })
         this.buildToolbarButton('-', 40, false, false, true, () => {
           this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
+        })
+        this.buildToolbarButton('全屏', 58, false, false, true, () => {
+          this.enterFullScreen();
         })
         this.buildToolbarButton('断开', 64, false, true, true, () => {
           this.disconnectSession();
@@ -773,6 +913,10 @@ struct RemotePage {
               })
           }, (display: number) => `${display}-${this.currentDisplay}`)
         }
+        this.buildInputModeButton(80, true)
+        this.buildToolbarButton('手势说明', 80, false, false, true, () => {
+          this.showGestureHelp = true;
+        })
         this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
           this.showKeyboardPanel = !this.showKeyboardPanel;
         })
@@ -790,6 +934,9 @@ struct RemotePage {
         })
         this.buildToolbarButton('-', 80, false, false, true, () => {
           this.zoomScale = Math.max(this.zoomScale - 0.25, 0.5);
+        })
+        this.buildToolbarButton('全屏', 80, false, false, true, () => {
+          this.enterFullScreen();
         })
         this.buildToolbarButton('断开', 80, false, true, true, () => {
           this.disconnectSession();
@@ -824,6 +971,157 @@ struct RemotePage {
       .onClick(() => {
         onClick();
       })
+  }
+
+  @Builder
+  buildInputModeIcon(mode: string, size: number, selected: boolean) {
+    Stack() {
+      if (mode === INPUT_MODE_MOUSE) {
+        Path()
+          .commands('M 2 1 L 2 18 L 6.5 13.5 L 10 21 L 13 19.5 L 9.5 12.5 L 16 12.5 Z')
+          .fill(selected ? Color.White : this.primaryTextColor())
+          .stroke(selected ? '#B3000000' : this.themeBorderColor())
+          .strokeWidth(1.2)
+      } else {
+        Path()
+          .commands('M 8 11 L 8 4 C 8 2.7 9 2 10 2 C 11.1 2 12 2.8 12 4 L 12 10 L 13 6.8 C 13.3 5.8 14.2 5.3 15.1 5.6 C 16 5.9 16.4 6.8 16.1 7.7 L 15.3 10.5 L 17 8.2 C 17.6 7.4 18.6 7.3 19.3 7.9 C 20 8.5 20.1 9.5 19.5 10.2 L 16.2 15.5 C 15.1 17.2 13.3 18.2 11.3 18.2 L 9.5 18.2 C 7.8 18.2 6.3 17.4 5.3 16.1 L 2.7 12.7 C 2 11.8 2.1 10.6 3 9.9 C 3.8 9.3 4.9 9.4 5.6 10.1 Z')
+          .fill(selected ? Color.White : this.primaryTextColor())
+          .stroke(selected ? '#B3000000' : this.themeBorderColor())
+          .strokeWidth(1.1)
+      }
+    }
+    .width(size)
+    .height(size)
+  }
+
+  @Builder
+  buildInputModeButton(buttonWidth: number, vertical: boolean) {
+    Button() {
+      if (vertical) {
+        Column({ space: 1 }) {
+          this.buildInputModeIcon(this.inputMode, 20, true)
+          Text(this.inputMode === INPUT_MODE_MOUSE ? '鼠标' : '触摸')
+            .fontSize(11)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(Color.White)
+        }
+        .justifyContent(FlexAlign.Center)
+      } else {
+        Row({ space: 4 }) {
+          this.buildInputModeIcon(this.inputMode, 19, true)
+          Text(this.inputMode === INPUT_MODE_MOUSE ? '鼠标' : '触摸')
+            .fontSize(12)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(Color.White)
+        }
+        .justifyContent(FlexAlign.Center)
+      }
+    }
+    .width(buttonWidth)
+    .height(vertical ? 48 : 40)
+    .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+    .backgroundColor(RustDeskTheme.ACCENT)
+    .borderRadius(7)
+    .onClick(() => {
+      this.toggleInputMode();
+    })
+  }
+
+  @Builder
+  buildGestureHelpOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 14 }) {
+        Text('触屏操作方式')
+          .fontSize(20)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+          .fontColor(this.primaryTextColor())
+          .width('100%')
+
+        Row({ space: 10 }) {
+          this.buildInputModeChoice(INPUT_MODE_MOUSE, '鼠标模式')
+          this.buildInputModeChoice(INPUT_MODE_TOUCH, '触摸模式')
+        }
+        .width('100%')
+
+        Row() {
+          Column({ space: 3 }) {
+            Text('显示本地鼠标指针')
+              .fontSize(14)
+              .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+              .fontColor(this.primaryTextColor())
+              .width('100%')
+            Text(this.inputMode === INPUT_MODE_MOUSE ? '优先同步远端真实位置，光标已嵌入画面时自动隐藏' : '仅在鼠标模式下显示')
+              .fontSize(11)
+              .fontColor(this.secondaryTextColor())
+              .width('100%')
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          Toggle({ type: ToggleType.Switch, isOn: this.showLocalCursor })
+            .enabled(this.inputMode === INPUT_MODE_MOUSE)
+            .onChange((isOn: boolean) => {
+              this.setLocalCursorPreference(isOn);
+            })
+        }
+        .width('100%')
+        .padding({ left: 2, right: 2, top: 2, bottom: 2 })
+
+        if (this.inputMode === INPUT_MODE_MOUSE) {
+          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：打开本地键盘')
+            .fontSize(14)
+            .lineHeight(24)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+        } else {
+          Text('适合直接点按：\n• 点按位置：左键\n• 按住移动：拖拽\n• 双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：打开本地键盘')
+            .fontSize(14)
+            .lineHeight(24)
+            .fontColor(this.secondaryTextColor())
+            .width('100%')
+        }
+
+        Button('知道了')
+          .width('100%')
+          .height(42)
+          .fontColor(Color.White)
+          .backgroundColor(RustDeskTheme.ACCENT)
+          .borderRadius(8)
+          .onClick(() => {
+            this.dismissGestureHelp();
+          })
+      }
+      .width(this.isLargeLayout() ? 420 : '88%')
+      .padding(20)
+      .backgroundColor(this.panelColor())
+      .border({ width: 1, color: this.themeBorderColor() })
+      .borderRadius(12)
+      .shadow({ radius: 28, color: '#66000000', offsetX: 0, offsetY: 10 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#99000000')
+  }
+
+  @Builder
+  buildInputModeChoice(mode: string, label: string) {
+    Button() {
+      Row({ space: 6 }) {
+        this.buildInputModeIcon(mode, 20, this.inputMode === mode)
+        Text(label)
+          .fontSize(13)
+          .fontWeight(this.inputMode === mode ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+          .fontColor(this.inputMode === mode ? Color.White : this.primaryTextColor())
+      }
+      .justifyContent(FlexAlign.Center)
+    }
+    .layoutWeight(1)
+    .height(42)
+    .backgroundColor(this.inputMode === mode ? RustDeskTheme.ACCENT : this.mutedSurfaceColor())
+    .border({ width: 1, color: this.inputMode === mode ? RustDeskTheme.ACCENT : this.themeBorderColor() })
+    .borderRadius(8)
+    .onClick(() => {
+      this.setInputMode(mode);
+    })
   }
 
   @Builder
@@ -885,6 +1183,89 @@ struct RemotePage {
   }
 
   @Builder
+  buildFullscreenKeyboardPanel() {
+    Column({ space: 7 }) {
+      Row({ space: 8 }) {
+        Text('实时输入到远端')
+          .fontSize(13)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.primaryTextColor())
+        Blank()
+        Button('收起')
+          .height(32)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+          .backgroundColor(this.mutedSurfaceColor())
+          .borderRadius(6)
+          .onClick(() => {
+            this.closeFullscreenKeyboard();
+          })
+      }
+      .width('100%')
+
+      TextInput({ placeholder: '直接输入到远端（支持中文）', text: this.keyboardInput })
+        .id('fullscreenRemoteKeyboardInput')
+        .height(42)
+        .width('100%')
+        .fontColor(this.primaryTextColor())
+        .placeholderColor(this.secondaryTextColor())
+        .backgroundColor(this.mutedSurfaceColor())
+        .border({ width: 1, color: this.themeBorderColor(), radius: 7 })
+        .focusable(true)
+        .defaultFocus(true)
+        .focusOnTouch(true)
+        .enablePreviewText(true)
+        .onChange((value: string, previewText?: PreviewText) => {
+          this.handleDirectKeyboardChange(value, previewText);
+        })
+        .onSubmit(() => {
+          this.sendControlKey(13);
+          this.keyboardInput = '';
+          this.directKeyboardCommittedText = '';
+        })
+
+      Row({ space: 7 }) {
+        Button('Enter')
+          .layoutWeight(1)
+          .height(34)
+          .backgroundColor(this.mutedSurfaceColor())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(6)
+          .onClick(() => { this.sendControlKey(13); })
+        Button('Backspace')
+          .layoutWeight(1)
+          .height(34)
+          .backgroundColor(this.mutedSurfaceColor())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(6)
+          .onClick(() => { this.sendControlKey(8); })
+        Button('Esc')
+          .layoutWeight(1)
+          .height(34)
+          .backgroundColor(this.mutedSurfaceColor())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(6)
+          .onClick(() => { this.sendControlKey(27); })
+        Button('Tab')
+          .layoutWeight(1)
+          .height(34)
+          .backgroundColor(this.mutedSurfaceColor())
+          .fontColor(this.primaryTextColor())
+          .borderRadius(6)
+          .onClick(() => { this.sendControlKey(9); })
+      }
+      .width('100%')
+    }
+    .width(this.pageWidth >= 820 ? 500 : '94%')
+    .padding(10)
+    .backgroundColor(this.panelColor())
+    .border({ width: 1, color: this.themeBorderColor() })
+    .borderRadius(10)
+    .shadow({ radius: 18, color: '#44000000', offsetX: 0, offsetY: 6 })
+    .margin({ bottom: 10 })
+  }
+
+  @Builder
   buildStatsPanel() {
     Scroll() {
       Row({ space: 14 }) {
@@ -924,15 +1305,51 @@ struct RemotePage {
   buildCursorOverlay() {
     Stack() {
       Path()
-        .commands('M 0 0 L 0 18 L 5 13 L 8 20 L 11 19 L 8 12 L 15 12 Z')
+        .commands('M 1 1 L 1 21 L 6.5 15.5 L 10.5 24 L 14 22.2 L 10 14.5 L 18 14.5 Z')
         .fill(Color.White)
-        .stroke('#CC000000')
-        .strokeWidth(1)
+        .stroke('#E6000000')
+        .strokeWidth(1.4)
     }
-    .width(16)
-    .height(21)
+    .width(20)
+    .height(25)
     .hitTestBehavior(HitTestMode.None)
     .position({ x: this.cursorX, y: this.cursorY });
+  }
+
+  enterFullScreen(): void {
+    if (this.isFullScreen) {
+      return;
+    }
+    this.showKeyboardPanel = false;
+    this.showGestureHelp = false;
+    this.isFullScreen = true;
+    this.applyFullscreenWindow(true);
+    this.scheduleSurfaceRebindIfSizeChanged();
+  }
+
+  exitFullScreen(): void {
+    if (!this.isFullScreen) {
+      return;
+    }
+    this.closeFullscreenKeyboard();
+    this.isFullScreen = false;
+    this.applyFullscreenWindow(false);
+    this.scheduleSurfaceRebindIfSizeChanged();
+  }
+
+  applyFullscreenWindow(enabled: boolean): void {
+    try {
+      let context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      window.getLastWindow(context).then((mainWindow: window.Window) => {
+        let bars: Array<'status' | 'navigation'> = enabled ? [] : ['status', 'navigation'];
+        mainWindow.setWindowLayoutFullScreen(enabled).catch((_e: BusinessError) => {
+        });
+        mainWindow.setWindowSystemBarEnable(bars).catch((_e: BusinessError) => {
+        });
+      }).catch((_e: BusinessError) => {
+      });
+    } catch (_e) {
+    }
   }
 
   @Builder
@@ -992,74 +1409,271 @@ struct RemotePage {
     return Math.max(1, this.remoteHeight * scale);
   }
 
+  inputModeOptionKey(): string {
+    let peerKey: string = this.connectedPeerId.replace(/[^0-9A-Za-z_-]/g, '');
+    return peerKey.length > 0 ? `mobile-input-mode-${peerKey}` : 'mobile-input-mode-default';
+  }
+
+  loadInputMode(): void {
+    let savedMode: string = RustDeskNapi.getOption(this.inputModeOptionKey());
+    this.inputMode = savedMode === INPUT_MODE_TOUCH ? INPUT_MODE_TOUCH : INPUT_MODE_MOUSE;
+  }
+
+  loadLocalCursorPreference(): void {
+    this.showLocalCursor = RustDeskNapi.getOption('show-local-cursor') !== '0';
+  }
+
+  setLocalCursorPreference(show: boolean): void {
+    this.showLocalCursor = show;
+    RustDeskNapi.setOption('show-local-cursor', show ? '1' : '0');
+    if (show && this.inputMode === INPUT_MODE_MOUSE) {
+      this.ensurePointerInitialized();
+    }
+    this.updateSystemPointerVisibility();
+  }
+
+  updateSystemPointerVisibility(): void {
+    const shouldHide: boolean = this.pointerOverRemoteViewport &&
+      this.connectionStatus === ConnectionStatus.CONNECTED &&
+      this.inputMode === INPUT_MODE_MOUSE && this.showLocalCursor;
+    this.setSystemPointerHidden(shouldHide);
+  }
+
+  setSystemPointerHidden(hidden: boolean): void {
+    if (this.systemPointerHidden === hidden) {
+      return;
+    }
+    try {
+      pointer.setPointerVisibleSync(!hidden);
+      this.systemPointerHidden = hidden;
+    } catch (error) {
+      const message: string = (error as BusinessError).message ?? '';
+      hilog.warn(LOG_DOMAIN, 'StarRustDesk', `Set pointer visibility failed: ${message}`);
+    }
+  }
+
+  toggleInputMode(): void {
+    this.setInputMode(this.inputMode === INPUT_MODE_MOUSE ? INPUT_MODE_TOUCH : INPUT_MODE_MOUSE);
+  }
+
+  setInputMode(mode: string): void {
+    if (mode !== INPUT_MODE_MOUSE && mode !== INPUT_MODE_TOUCH) {
+      return;
+    }
+    this.cancelActiveTouchGesture();
+    this.inputMode = mode;
+    RustDeskNapi.setOption(this.inputModeOptionKey(), mode);
+    if (mode === INPUT_MODE_MOUSE) {
+      this.ensurePointerInitialized();
+    } else {
+      this.showCursor = false;
+    }
+    this.updateSystemPointerVisibility();
+  }
+
+  dismissGestureHelp(): void {
+    this.showGestureHelp = false;
+    RustDeskNapi.setOption('mobile-gesture-help-shown', '1');
+  }
+
+  cancelActiveTouchGesture(): void {
+    this.clearLongPressTimer();
+    this.clearTapTimer();
+    this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+    this.multiTouchActive = false;
+    this.multiTouchGesture = 0;
+    this.multiTouchStartedAt = 0;
+    this.multiTouchMoved = false;
+    this.threeFingerGestureActive = false;
+    this.threeFingerStartedAt = 0;
+    this.threeFingerStartCenterX = 0;
+    this.threeFingerStartCenterY = 0;
+    this.threeFingerLastCenterX = 0;
+    this.threeFingerLastCenterY = 0;
+    this.isPinching = false;
+    this.pinchStartDistance = 0;
+    this.touchMoved = false;
+    this.longPressTriggered = false;
+    this.ignoreTouchUntilNextDown = false;
+  }
+
   handleRemoteTouch(event: TouchEvent): void {
     if (Date.now() - this.lastMouseEventAt < 120) {
       return;
     }
 
-    if (event.touches.length <= 0) {
-      if (this.isPinching || this.pinchStartDistance > 0) {
-        this.endPinchTouch();
+    if (this.threeFingerGestureActive) {
+      if (event.touches.length < 3) {
+        this.finishThreeFingerGesture();
+      } else {
+        this.handleThreeFingerGesture(event);
       }
+      return;
+    }
+
+    if (this.isFullScreen && event.touches.length >= 3) {
+      this.handleThreeFingerGesture(event);
+      return;
+    }
+
+    if (this.multiTouchActive && event.touches.length < 2) {
+      this.finishMultiTouchGesture();
+      return;
+    }
+
+    if (event.touches.length <= 0) {
+      this.finishSingleTouch(event.type === TouchType.Cancel);
       this.ignoreTouchUntilNextDown = false;
       return;
     }
 
     if (event.touches.length >= 2) {
-      this.handlePinchTouch(event);
-      return;
-    }
-
-    if (this.isPinching || this.pinchStartDistance > 0) {
-      this.endPinchTouch();
+      this.handleMultiTouch(event);
       return;
     }
 
     if (this.ignoreTouchUntilNextDown) {
-      if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      if (event.type === TouchType.Down) {
         this.ignoreTouchUntilNextDown = false;
+      } else {
+        return;
       }
-      return;
     }
 
     if (Date.now() - this.lastPinchEndedAt < 90) {
       return;
     }
 
+    if (this.inputMode === INPUT_MODE_MOUSE) {
+      this.handleTouchpadTouch(event);
+    } else {
+      this.handleDirectTouch(event);
+    }
+  }
+
+  handleTouchpadTouch(event: TouchEvent): void {
     let touch = event.touches[0];
-    let remotePoint: RemotePoint = this.updatePointerFromLocal(touch.x, touch.y);
-    let remoteX: number = remotePoint.x;
-    let remoteY: number = remotePoint.y;
 
     if (event.type === TouchType.Down) {
       this.requestRemoteInputFocus();
+      this.ensurePointerInitialized();
       this.touchStartX = touch.x;
       this.touchStartY = touch.y;
+      this.lastTouchX = touch.x;
+      this.lastTouchY = touch.y;
+      this.touchMoved = false;
       this.longPressTriggered = false;
-      this.startRightClickTimer(remoteX, remoteY);
+      if (this.isSecondTapNear(touch.x, touch.y)) {
+        this.clearTapTimer();
+        this.sendLeftClick(this.pendingTapRemoteX, this.pendingTapRemoteY);
+        this.sendLeftDown(this.lastAbsX, this.lastAbsY);
+      } else {
+        this.flushPendingTap();
+        this.startRightClickTimer(this.lastAbsX, this.lastAbsY);
+      }
       this.showToolbar = true;
       this.resetToolbarTimer();
     } else if (event.type === TouchType.Move) {
       let movedX: number = touch.x - this.touchStartX;
       let movedY: number = touch.y - this.touchStartY;
-      if (Math.sqrt(movedX * movedX + movedY * movedY) >= 12) {
+      if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCH_MOVE_THRESHOLD) {
+        this.touchMoved = true;
         this.clearLongPressTimer();
+      }
+      let deltaX: number = touch.x - this.lastTouchX;
+      let deltaY: number = touch.y - this.lastTouchY;
+      this.lastTouchX = touch.x;
+      this.lastTouchY = touch.y;
+      let remotePoint: RemotePoint = this.updatePointerFromDelta(deltaX, deltaY);
+      let now: number = Date.now();
+      if (now - this.lastMoveSentAt > 16) {
+        this.lastMoveSentAt = now;
+        ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      }
+    } else if (event.type === TouchType.Up) {
+      this.finishTouchpadTouch(touch.x, touch.y, false);
+    } else if (event.type === TouchType.Cancel) {
+      this.finishTouchpadTouch(touch.x, touch.y, true);
+    }
+  }
+
+  handleDirectTouch(event: TouchEvent): void {
+    let touch = event.touches[0];
+    let remotePoint: RemotePoint = this.updatePointerFromLocal(touch.x, touch.y);
+
+    if (event.type === TouchType.Down) {
+      this.requestRemoteInputFocus();
+      this.touchStartX = touch.x;
+      this.touchStartY = touch.y;
+      this.lastTouchX = touch.x;
+      this.lastTouchY = touch.y;
+      this.pendingTapRemoteX = remotePoint.x;
+      this.pendingTapRemoteY = remotePoint.y;
+      this.touchMoved = false;
+      this.longPressTriggered = false;
+      this.startRightClickTimer(remotePoint.x, remotePoint.y);
+      this.showToolbar = true;
+      this.resetToolbarTimer();
+    } else if (event.type === TouchType.Move) {
+      let movedX: number = touch.x - this.touchStartX;
+      let movedY: number = touch.y - this.touchStartY;
+      if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCH_MOVE_THRESHOLD) {
+        this.touchMoved = true;
+        this.clearLongPressTimer();
+        if (!this.leftButtonHeld && !this.longPressTriggered) {
+          this.sendLeftDown(this.pendingTapRemoteX, this.pendingTapRemoteY);
+        }
       }
       let now: number = Date.now();
       if (now - this.lastMoveSentAt > 16) {
         this.lastMoveSentAt = now;
-        ConnectionService.sendMouseEvent(remoteX, remoteY, 0);
+        ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
       }
     } else if (event.type === TouchType.Up) {
-      this.clearLongPressTimer();
-      let movedX: number = touch.x - this.touchStartX;
-      let movedY: number = touch.y - this.touchStartY;
-      if (!this.longPressTriggered && Math.sqrt(movedX * movedX + movedY * movedY) < 12) {
-        this.handleTap(remoteX, remoteY, touch.x, touch.y);
-      }
+      this.finishDirectTouch(remotePoint.x, remotePoint.y, false);
     } else if (event.type === TouchType.Cancel) {
-      this.clearLongPressTimer();
+      this.finishDirectTouch(remotePoint.x, remotePoint.y, true);
     }
+  }
+
+  finishSingleTouch(cancelled: boolean): void {
+    if (this.inputMode === INPUT_MODE_MOUSE) {
+      this.finishTouchpadTouch(this.lastTouchX, this.lastTouchY, cancelled);
+    } else {
+      this.finishDirectTouch(this.lastAbsX, this.lastAbsY, cancelled);
+    }
+  }
+
+  finishTouchpadTouch(localX: number, localY: number, cancelled: boolean): void {
+    this.clearLongPressTimer();
+    if (this.leftButtonHeld) {
+      this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+    } else if (!cancelled && !this.longPressTriggered && !this.touchMoved) {
+      this.queueTouchpadTap(this.lastAbsX, this.lastAbsY, localX, localY);
+    }
+    this.longPressTriggered = false;
+    this.touchMoved = false;
+  }
+
+  finishDirectTouch(remoteX: number, remoteY: number, cancelled: boolean): void {
+    this.clearLongPressTimer();
+    if (this.leftButtonHeld) {
+      ConnectionService.sendMouseEvent(remoteX, remoteY, 0);
+      this.sendLeftUp(remoteX, remoteY);
+    } else if (!cancelled && !this.longPressTriggered && !this.touchMoved) {
+      this.sendLeftClick(remoteX, remoteY);
+    }
+    this.longPressTriggered = false;
+    this.touchMoved = false;
+  }
+
+  isSecondTapNear(localX: number, localY: number): boolean {
+    if (this.tapTimer === -1) {
+      return false;
+    }
+    let dx: number = localX - this.pendingTapLocalX;
+    let dy: number = localY - this.pendingTapLocalY;
+    return Math.sqrt(dx * dx + dy * dy) < 24;
   }
 
   startRightClickTimer(remoteX: number, remoteY: number): void {
@@ -1079,19 +1693,7 @@ struct RemotePage {
     }
   }
 
-  handleTap(remoteX: number, remoteY: number, localX: number, localY: number): void {
-    if (this.tapTimer !== -1) {
-      let dx: number = localX - this.pendingTapLocalX;
-      let dy: number = localY - this.pendingTapLocalY;
-      if (Math.sqrt(dx * dx + dy * dy) < 24) {
-        this.clearTapTimer();
-        this.sendLeftClick(this.pendingTapRemoteX, this.pendingTapRemoteY);
-        this.sendLeftClick(remoteX, remoteY);
-        return;
-      }
-      this.flushPendingTap();
-    }
-
+  queueTouchpadTap(remoteX: number, remoteY: number, localX: number, localY: number): void {
     this.pendingTapRemoteX = remoteX;
     this.pendingTapRemoteY = remoteY;
     this.pendingTapLocalX = localX;
@@ -1121,6 +1723,22 @@ struct RemotePage {
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
   }
 
+  sendLeftDown(remoteX: number, remoteY: number): void {
+    if (this.leftButtonHeld) {
+      return;
+    }
+    ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
+    this.leftButtonHeld = true;
+  }
+
+  sendLeftUp(remoteX: number, remoteY: number): void {
+    if (!this.leftButtonHeld) {
+      return;
+    }
+    ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
+    this.leftButtonHeld = false;
+  }
+
   handleRemoteMouse(event: MouseEvent): void {
     this.lastMouseEventAt = Date.now();
     this.clearLongPressTimer();
@@ -1132,7 +1750,9 @@ struct RemotePage {
       return;
     }
 
-    let remotePoint: RemotePoint = this.updatePointerFromLocal(event.x, event.y);
+    let localX: number = this.inputMode === INPUT_MODE_MOUSE ? event.x - this.getDisplayLeft() : event.x;
+    let localY: number = this.inputMode === INPUT_MODE_MOUSE ? event.y - this.getDisplayTop() : event.y;
+    let remotePoint: RemotePoint = this.updatePointerFromLocal(localX, localY);
 
     let now: number = Date.now();
     if (action === 0 && now - this.lastMoveSentAt <= 8) {
@@ -1231,10 +1851,40 @@ struct RemotePage {
     let remoteY: number = Math.max(0, Math.min(this.remoteHeight - 1, clampedY * this.remoteHeight / displayHeight));
     this.lastAbsX = remoteX;
     this.lastAbsY = remoteY;
+    this.pointerInitialized = true;
     this.cursorX = this.getDisplayLeft() + clampedX;
     this.cursorY = this.getDisplayTop() + clampedY;
     this.showCursor = true;
     return { x: remoteX, y: remoteY };
+  }
+
+  ensurePointerInitialized(): void {
+    if (!this.pointerInitialized) {
+      this.lastAbsX = Math.max(0, (this.remoteWidth - 1) / 2);
+      this.lastAbsY = Math.max(0, (this.remoteHeight - 1) / 2);
+      this.pointerInitialized = true;
+    }
+    this.updateCursorOverlayFromRemote();
+  }
+
+  updatePointerFromDelta(deltaX: number, deltaY: number): RemotePoint {
+    this.ensurePointerInitialized();
+    let displayWidth: number = Math.max(1, this.getDisplayWidth());
+    let displayHeight: number = Math.max(1, this.getDisplayHeight());
+    let remoteDeltaX: number = deltaX * this.remoteWidth / displayWidth * TOUCHPAD_POINTER_SPEED;
+    let remoteDeltaY: number = deltaY * this.remoteHeight / displayHeight * TOUCHPAD_POINTER_SPEED;
+    this.lastAbsX = Math.max(0, Math.min(this.remoteWidth - 1, this.lastAbsX + remoteDeltaX));
+    this.lastAbsY = Math.max(0, Math.min(this.remoteHeight - 1, this.lastAbsY + remoteDeltaY));
+    this.updateCursorOverlayFromRemote();
+    return { x: this.lastAbsX, y: this.lastAbsY };
+  }
+
+  updateCursorOverlayFromRemote(): void {
+    let displayWidth: number = Math.max(1, this.getDisplayWidth());
+    let displayHeight: number = Math.max(1, this.getDisplayHeight());
+    this.cursorX = this.getDisplayLeft() + this.lastAbsX * displayWidth / Math.max(1, this.remoteWidth);
+    this.cursorY = this.getDisplayTop() + this.lastAbsY * displayHeight / Math.max(1, this.remoteHeight);
+    this.showCursor = true;
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
@@ -1351,7 +2001,7 @@ struct RemotePage {
     }
   }
 
-  handlePinchTouch(event: TouchEvent): void {
+  handleMultiTouch(event: TouchEvent): void {
     let first = event.touches[0];
     let second = event.touches[1];
     let dx: number = first.x - second.x;
@@ -1359,39 +2009,94 @@ struct RemotePage {
     let distance: number = Math.sqrt(dx * dx + dy * dy);
     let centerX: number = (first.x + second.x) / 2;
     let centerY: number = (first.y + second.y) / 2;
-    if (event.type === TouchType.Down || this.pinchStartDistance <= 0) {
-      this.isPinching = true;
+    if (!this.multiTouchActive) {
+      this.multiTouchActive = true;
+      this.multiTouchGesture = 0;
+      this.multiTouchStartedAt = Date.now();
+      this.multiTouchStartCenterX = centerX;
+      this.multiTouchStartCenterY = centerY;
+      this.multiTouchLastCenterX = centerX;
+      this.multiTouchLastCenterY = centerY;
+      this.multiTouchMoved = false;
       this.clearLongPressTimer();
-      this.clearTapTimer();
-      this.showCursor = false;
+      this.flushPendingTap();
+      this.sendLeftUp(this.lastAbsX, this.lastAbsY);
       this.pinchStartDistance = distance;
       this.pinchStartScale = this.zoomScale;
       this.lastPinchCenterX = centerX;
       this.lastPinchCenterY = centerY;
       this.lastPinchUpdateAt = Date.now();
+      if (this.inputMode === INPUT_MODE_TOUCH) {
+        let remotePoint: RemotePoint = this.updatePointerFromLocal(centerX, centerY);
+        this.multiTouchRemoteX = remotePoint.x;
+        this.multiTouchRemoteY = remotePoint.y;
+      } else {
+        this.ensurePointerInitialized();
+        this.multiTouchRemoteX = this.lastAbsX;
+        this.multiTouchRemoteY = this.lastAbsY;
+      }
       return;
     }
-    if (event.type === TouchType.Move && this.pinchStartDistance > 0) {
+
+    if (event.type === TouchType.Move) {
+      let distanceChange: number = Math.abs(distance - this.pinchStartDistance);
+      let centerMoveX: number = centerX - this.multiTouchStartCenterX;
+      let centerMoveY: number = centerY - this.multiTouchStartCenterY;
+      let centerMove: number = Math.sqrt(centerMoveX * centerMoveX + centerMoveY * centerMoveY);
+      if (distanceChange >= PINCH_DISTANCE_THRESHOLD || centerMove >= MULTI_TOUCH_MOVE_THRESHOLD) {
+        this.multiTouchMoved = true;
+      }
+      if (this.multiTouchGesture === 0) {
+        if (distanceChange >= PINCH_DISTANCE_THRESHOLD) {
+          this.multiTouchGesture = 2;
+          this.isPinching = true;
+        } else if (centerMove >= MULTI_TOUCH_MOVE_THRESHOLD) {
+          this.multiTouchGesture = 1;
+        }
+      }
+
       let now: number = Date.now();
-      if (now - this.lastPinchUpdateAt < 24) {
+      if (now - this.lastPinchUpdateAt < 16) {
         return;
       }
-      let nextScale: number = Math.max(0.5, Math.min(5.0, this.pinchStartScale * distance / this.pinchStartDistance));
       let deltaX: number = centerX - this.lastPinchCenterX;
       let deltaY: number = centerY - this.lastPinchCenterY;
-      if (Math.abs(nextScale - this.zoomScale) < 0.006 && Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
-        return;
-      }
       this.lastPinchUpdateAt = now;
       this.lastPinchCenterX = centerX;
       this.lastPinchCenterY = centerY;
-      this.applyPinchTransform(centerX, centerY, nextScale, deltaX, deltaY);
-    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-      this.endPinchTouch();
+      this.multiTouchLastCenterX = centerX;
+      this.multiTouchLastCenterY = centerY;
+
+      if (this.multiTouchGesture === 2 && this.pinchStartDistance > 0) {
+        let nextScale: number = Math.max(0.5,
+          Math.min(5.0, this.pinchStartScale * distance / this.pinchStartDistance));
+        let displayLocalX: number = this.inputMode === INPUT_MODE_MOUSE ? centerX - this.getDisplayLeft() : centerX;
+        let displayLocalY: number = this.inputMode === INPUT_MODE_MOUSE ? centerY - this.getDisplayTop() : centerY;
+        this.applyPinchTransform(displayLocalX, displayLocalY, nextScale, deltaX, deltaY);
+      } else if (this.multiTouchGesture === 1) {
+        this.sendTouchScroll(deltaX, deltaY);
+      }
+    }
+
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      this.finishMultiTouchGesture();
     }
   }
 
-  endPinchTouch(): void {
+  finishMultiTouchGesture(): void {
+    if (!this.multiTouchActive) {
+      return;
+    }
+    let isTwoFingerTap: boolean = this.multiTouchGesture === 0 && !this.multiTouchMoved &&
+      Date.now() - this.multiTouchStartedAt <= 500;
+    if (isTwoFingerTap) {
+      ConnectionService.sendMouseEvent(this.multiTouchRemoteX, this.multiTouchRemoteY, 3);
+      ConnectionService.sendMouseEvent(this.multiTouchRemoteX, this.multiTouchRemoteY, 4);
+    }
+    this.multiTouchActive = false;
+    this.multiTouchGesture = 0;
+    this.multiTouchStartedAt = 0;
+    this.multiTouchMoved = false;
     this.isPinching = false;
     this.pinchStartDistance = 0;
     this.lastPinchCenterX = 0;
@@ -1400,6 +2105,18 @@ struct RemotePage {
     this.lastPinchEndedAt = Date.now();
     this.ignoreTouchUntilNextDown = true;
     this.clampViewportOffset();
+  }
+
+  sendTouchScroll(deltaX: number, deltaY: number): void {
+    this.wheelRemainderX += -deltaX * TOUCH_SCROLL_SCALE;
+    this.wheelRemainderY += -deltaY * TOUCH_SCROLL_SCALE;
+    let stepX: number = this.takeWholeWheelStep(this.wheelRemainderX);
+    let stepY: number = this.takeWholeWheelStep(this.wheelRemainderY);
+    this.wheelRemainderX -= stepX;
+    this.wheelRemainderY -= stepY;
+    if (stepX !== 0 || stepY !== 0) {
+      ConnectionService.sendMouseWheel(stepX, stepY);
+    }
   }
 
   applyPinchTransform(localX: number, localY: number, nextScale: number, deltaX: number, deltaY: number): void {
@@ -1446,6 +2163,117 @@ struct RemotePage {
       return;
     }
     ConnectionService.sendText(text);
+  }
+
+  openFullscreenKeyboard(): void {
+    if (!this.isFullScreen || this.connectionStatus !== ConnectionStatus.CONNECTED) {
+      return;
+    }
+    this.keyboardInput = '';
+    this.directKeyboardCommittedText = '';
+    this.showKeyboardPanel = true;
+    setTimeout(() => {
+      try {
+        this.getUIContext()?.getFocusController().requestFocus('fullscreenRemoteKeyboardInput');
+      } catch (_e) {
+      }
+    }, 80);
+  }
+
+  closeFullscreenKeyboard(): void {
+    this.showKeyboardPanel = false;
+    this.keyboardInput = '';
+    this.directKeyboardCommittedText = '';
+    setTimeout(() => {
+      this.requestRemoteInputFocus();
+    }, 60);
+  }
+
+  handleDirectKeyboardChange(value: string, previewText?: PreviewText): void {
+    this.keyboardInput = value;
+    if (previewText !== undefined && previewText.value.length > 0) {
+      return;
+    }
+
+    let previous: string = this.directKeyboardCommittedText;
+    let commonLength: number = 0;
+    let maxCommonLength: number = Math.min(previous.length, value.length);
+    while (commonLength < maxCommonLength && previous.charAt(commonLength) === value.charAt(commonLength)) {
+      commonLength++;
+    }
+
+    let removedLength: number = previous.length - commonLength;
+    for (let index: number = 0; index < removedLength; index++) {
+      this.sendControlKey(8);
+    }
+    let addedText: string = value.substring(commonLength);
+    if (addedText.length > 0) {
+      this.sendKeyboardText(addedText);
+    }
+    this.directKeyboardCommittedText = value;
+
+    if (value.length >= 80) {
+      this.keyboardInput = '';
+      this.directKeyboardCommittedText = '';
+    }
+  }
+
+  handleThreeFingerGesture(event: TouchEvent): void {
+    if (!this.threeFingerGestureActive) {
+      this.threeFingerGestureActive = true;
+      this.threeFingerStartedAt = Date.now();
+      this.multiTouchActive = false;
+      this.multiTouchGesture = 0;
+      this.multiTouchMoved = false;
+      this.isPinching = false;
+      this.clearLongPressTimer();
+      this.flushPendingTap();
+      this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+    }
+
+    let count: number = Math.min(3, event.touches.length);
+    let centerX: number = 0;
+    let centerY: number = 0;
+    for (let index: number = 0; index < count; index++) {
+      centerX += event.touches[index].x;
+      centerY += event.touches[index].y;
+    }
+    centerX /= Math.max(1, count);
+    centerY /= Math.max(1, count);
+
+    if (this.threeFingerStartCenterY === 0) {
+      this.threeFingerStartCenterX = centerX;
+      this.threeFingerStartCenterY = centerY;
+    }
+    this.threeFingerLastCenterX = centerX;
+    this.threeFingerLastCenterY = centerY;
+
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      this.finishThreeFingerGesture();
+    }
+  }
+
+  finishThreeFingerGesture(): void {
+    if (!this.threeFingerGestureActive) {
+      return;
+    }
+    let moveX: number = this.threeFingerLastCenterX - this.threeFingerStartCenterX;
+    let moveY: number = this.threeFingerLastCenterY - this.threeFingerStartCenterY;
+    let duration: number = Date.now() - this.threeFingerStartedAt;
+    let shouldOpenKeyboard: boolean = moveY <= -THREE_FINGER_SWIPE_THRESHOLD &&
+      Math.abs(moveX) <= THREE_FINGER_HORIZONTAL_LIMIT && duration <= THREE_FINGER_MAX_DURATION;
+
+    this.threeFingerGestureActive = false;
+    this.threeFingerStartedAt = 0;
+    this.threeFingerStartCenterX = 0;
+    this.threeFingerStartCenterY = 0;
+    this.threeFingerLastCenterX = 0;
+    this.threeFingerLastCenterY = 0;
+    this.ignoreTouchUntilNextDown = true;
+
+    if (shouldOpenKeyboard) {
+      this.openFullscreenKeyboard();
+    }
   }
 
   sendManualClipboardText(text: string): void {
@@ -1627,9 +2455,15 @@ struct RemotePage {
       return;
     }
     this.isLeavingAfterDisconnect = true;
+    if (this.isFullScreen) {
+      this.isFullScreen = false;
+      this.applyFullscreenWindow(false);
+    }
     this.hasVideo = false;
     this.showKeyboardPanel = false;
     this.showCursor = false;
+    this.pointerOverRemoteViewport = false;
+    this.setSystemPointerHidden(false);
     this.stopClipboardSync();
     this.clearLongPressTimer();
     this.clearTapTimer();
@@ -1751,6 +2585,8 @@ struct RemotePage {
     }
     this.currentDisplay = display;
     this.showCursor = false;
+    this.remoteCursorEmbedded = false;
+    this.lastRemoteCursorSequence = -1;
     this.lastStatsTime = 0;
     const result = RustDeskNapi.switchDisplay(display);
     if (result !== 0) {

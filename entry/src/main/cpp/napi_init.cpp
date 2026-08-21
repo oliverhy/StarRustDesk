@@ -24,6 +24,8 @@
 #include <mutex>
 #include <vector>
 #include <chrono>
+#include <algorithm>
+#include <cstdlib>
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
@@ -597,6 +599,32 @@ static napi_value RequestRemoteDirectory(napi_env env, napi_callback_info info) 
     return ret;
 }
 
+static napi_value GetRemoteCursorPosition(napi_env env, napi_callback_info info) {
+    int32_t x = 0;
+    int32_t y = 0;
+    uint64_t sequence = 0;
+    bool valid = rust_get_remote_cursor_position(&x, &y, &sequence) != 0;
+    bool embedded = rust_is_remote_cursor_embedded() != 0;
+    napi_value object;
+    napi_create_object(env, &object);
+    napi_value validValue;
+    napi_get_boolean(env, valid, &validValue);
+    napi_set_named_property(env, object, "valid", validValue);
+    napi_value embeddedValue;
+    napi_get_boolean(env, embedded, &embeddedValue);
+    napi_set_named_property(env, object, "embedded", embeddedValue);
+    napi_value xValue;
+    napi_create_int32(env, x, &xValue);
+    napi_set_named_property(env, object, "x", xValue);
+    napi_value yValue;
+    napi_create_int32(env, y, &yValue);
+    napi_set_named_property(env, object, "y", yValue);
+    napi_value sequenceValue;
+    napi_create_int64(env, static_cast<int64_t>(sequence), &sequenceValue);
+    napi_set_named_property(env, object, "sequence", sequenceValue);
+    return object;
+}
+
 static napi_value TakeRemoteDirectoryResult(napi_env env, napi_callback_info info) {
     char* value = rust_take_remote_directory_result();
     napi_value ret;
@@ -730,86 +758,91 @@ static napi_value TestIfValidServer(napi_env env, napi_callback_info info) {
     std::string result;
     if (serverLen == 0) { napi_value ret; napi_create_string_utf8(env, "", NAPI_AUTO_LENGTH, &ret); return ret; }
 
-    std::string hostname(server);
+    std::string endpoint(server, serverLen);
+    std::string hostname = endpoint;
     int port = 21116;
-    size_t colonPos = hostname.find(':');
-    if (colonPos != std::string::npos) {
-        port = std::stoi(hostname.substr(colonPos + 1));
-        hostname = hostname.substr(0, colonPos);
-    }
+    auto parsePort = [](const std::string& value, int& parsedPort) -> bool {
+        if (value.empty()) return false;
+        char* end = nullptr;
+        long candidate = std::strtol(value.c_str(), &end, 10);
+        if (end == nullptr || *end != '\0' || candidate <= 0 || candidate > 65535) return false;
+        parsedPort = static_cast<int>(candidate);
+        return true;
+    };
 
-    struct hostent* host = gethostbyname(hostname.c_str());
-    if (!host) { result = "DNS解析失败"; napi_value ret; napi_create_string_utf8(env, result.c_str(), result.length(), &ret); return ret; }
-
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) { result = "创建socket失败"; napi_value ret; napi_create_string_utf8(env, result.c_str(), result.length(), &ret); return ret; }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    memcpy(&addr.sin_addr, host->h_addr, host->h_length);
-
-    // Non-blocking connect with 5s timeout
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-    int connectRet = ::connect(sock, (struct sockaddr*)&addr, sizeof(addr));
-    bool connected = false;
-
-    if (connectRet == 0) {
-        connected = true;
-    } else if (connectRet < 0 && errno == EINPROGRESS) {
-        fd_set fdset;
-        FD_ZERO(&fdset);
-        FD_SET(sock, &fdset);
-        struct timeval tv;
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
-        int selRet = select(sock + 1, nullptr, &fdset, nullptr, &tv);
-        if (selRet > 0) {
-            int soError = 0;
-            socklen_t soLen = sizeof(soError);
-            getsockopt(sock, SOL_SOCKET, SO_ERROR, &soError, &soLen);
-            if (soError == 0) {
-                // TCP connected - now verify with send+recv
-                // Send a byte to trigger server response
-                fcntl(sock, F_SETFL, flags); // back to blocking
-                struct timeval respTv;
-                respTv.tv_sec = 3;
-                respTv.tv_usec = 0;
-                setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &respTv, sizeof(respTv));
-
-                char probe = 0x00;
-                send(sock, &probe, 1, 0);
-
-                // Try to recv - real server will respond or close
-                char respBuf[8];
-                int recvd = recv(sock, respBuf, sizeof(respBuf), 0);
-                if (recvd > 0) {
-                    connected = true; // Got real data back
-                } else if (recvd == 0) {
-                    connected = true; // Clean close = real server
-                } else {
-                    // errno == EAGAIN means timeout - likely fake connection
-                    result = "服务器无响应";
-                }
-            } else {
-                result = "连接被拒绝 (" + std::string(strerror(soError)) + ")";
+    if (!endpoint.empty() && endpoint.front() == '[') {
+        size_t closingBracket = endpoint.find(']');
+        if (closingBracket != std::string::npos) {
+            hostname = endpoint.substr(1, closingBracket - 1);
+            if (closingBracket + 1 < endpoint.size() && endpoint[closingBracket + 1] == ':') {
+                parsePort(endpoint.substr(closingBracket + 2), port);
             }
-        } else if (selRet == 0) {
-            result = "连接超时 (5秒)";
-        } else {
-            result = "select失败";
         }
-    } else {
-        result = "连接被拒绝 (" + std::string(strerror(errno)) + ")";
+    } else if (std::count(endpoint.begin(), endpoint.end(), ':') == 1) {
+        size_t colonPos = endpoint.rfind(':');
+        int parsedPort = port;
+        if (parsePort(endpoint.substr(colonPos + 1), parsedPort)) {
+            hostname = endpoint.substr(0, colonPos);
+            port = parsedPort;
+        }
     }
 
-    if (connected) result = "";
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    struct addrinfo* addresses = nullptr;
+    std::string portText = std::to_string(port);
+    int resolveRet = getaddrinfo(hostname.c_str(), portText.c_str(), &hints, &addresses);
+    if (resolveRet != 0 || addresses == nullptr) {
+        result = "DNS/IPv6解析失败";
+        napi_value ret;
+        napi_create_string_utf8(env, result.c_str(), result.length(), &ret);
+        return ret;
+    }
 
-    fcntl(sock, F_SETFL, flags);
-    close(sock);
+    bool connected = false;
+    result = "连接失败";
+    for (struct addrinfo* address = addresses; address != nullptr && !connected; address = address->ai_next) {
+        int sock = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        if (sock < 0) continue;
+        int flags = fcntl(sock, F_GETFL, 0);
+        if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+            close(sock);
+            continue;
+        }
+
+        int connectRet = ::connect(sock, address->ai_addr, address->ai_addrlen);
+        if (connectRet == 0) {
+            connected = true;
+        } else if (errno == EINPROGRESS) {
+            fd_set fdset;
+            FD_ZERO(&fdset);
+            FD_SET(sock, &fdset);
+            struct timeval tv;
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+            int selectRet = select(sock + 1, nullptr, &fdset, nullptr, &tv);
+            if (selectRet > 0) {
+                int socketError = 0;
+                socklen_t errorLength = sizeof(socketError);
+                if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) == 0 && socketError == 0) {
+                    connected = true;
+                } else if (socketError != 0) {
+                    result = "连接被拒绝 (" + std::string(strerror(socketError)) + ")";
+                }
+            } else if (selectRet == 0) {
+                result = "连接超时 (5秒)";
+            }
+        } else {
+            result = "连接被拒绝 (" + std::string(strerror(errno)) + ")";
+        }
+        close(sock);
+    }
+    freeaddrinfo(addresses);
+    if (connected) result.clear();
+
     napi_value ret;
     napi_create_string_utf8(env, result.c_str(), result.length(), &ret);
     return ret;
@@ -884,6 +917,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"sendMouseWheel", nullptr, SendMouseWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getCurrentDisplay", nullptr, GetCurrentDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getRemoteCursorPosition", nullptr, GetRemoteCursorPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"refreshVideo", nullptr, RefreshVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPeerList", nullptr, GetPeerList, nullptr, nullptr, nullptr, napi_default, nullptr},
