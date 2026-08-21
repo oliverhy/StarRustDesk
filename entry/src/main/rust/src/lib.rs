@@ -2266,6 +2266,9 @@ fn enqueue_peer_message(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Erro
 
 fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
     match key_code {
+        16 => Some(ControlKey::Shift),
+        17 => Some(ControlKey::Control),
+        18 => Some(ControlKey::Alt),
         13 => Some(ControlKey::Return),
         27 => Some(ControlKey::Escape),
         32 => Some(ControlKey::Space),
@@ -2276,6 +2279,7 @@ fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
         39 => Some(ControlKey::RightArrow),
         40 => Some(ControlKey::DownArrow),
         46 => Some(ControlKey::Delete),
+        91 => Some(ControlKey::Meta),
         _ => None,
     }
 }

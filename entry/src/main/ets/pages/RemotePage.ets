@@ -397,6 +397,9 @@ struct RemotePage {
       if (this.transferActive && !this.showRemoteFileBrowser) {
         this.buildTransferProgress();
       }
+      if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        this.buildKeyboardCapture();
+      }
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildGestureHelpOverlay();
       }
@@ -569,9 +572,6 @@ struct RemotePage {
             this.exitFullScreen();
           })
 
-        if (this.showKeyboardPanel) {
-          this.buildFullscreenKeyboardPanel();
-        }
       }
       .width('100%')
       .height('100%')
@@ -581,9 +581,6 @@ struct RemotePage {
         Column() {
           this.buildStatsPanel();
           this.buildRemoteViewport();
-          if (this.showKeyboardPanel) {
-            this.buildKeyboardPanel();
-          }
         }
         .layoutWeight(1)
         .height('100%')
@@ -596,9 +593,6 @@ struct RemotePage {
       Column() {
         this.buildStatsPanel();
         this.buildRemoteViewport();
-        if (this.showKeyboardPanel) {
-          this.buildKeyboardPanel();
-        }
         this.buildFloatingToolbar();
       }
       .width('100%').height('100%')
@@ -857,10 +851,7 @@ struct RemotePage {
           this.showGestureHelp = true;
         })
         this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
-          this.showKeyboardPanel = !this.showKeyboardPanel;
-        })
-        this.buildToolbarButton('输入', 64, false, false, true, () => {
-          this.showKeyboardPanel = true;
+          this.toggleRemoteKeyboard();
         })
         this.buildToolbarButton('发送文件', 82, false, false, !this.transferActive, () => {
           this.pickFileForUpload();
@@ -918,10 +909,7 @@ struct RemotePage {
           this.showGestureHelp = true;
         })
         this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
-          this.showKeyboardPanel = !this.showKeyboardPanel;
-        })
-        this.buildToolbarButton('输入', 80, false, false, true, () => {
-          this.showKeyboardPanel = true;
+          this.toggleRemoteKeyboard();
         })
         this.buildToolbarButton('发送文件', 80, false, false, !this.transferActive, () => {
           this.pickFileForUpload();
@@ -1067,13 +1055,13 @@ struct RemotePage {
         .padding({ left: 2, right: 2, top: 2, bottom: 2 })
 
         if (this.inputMode === INPUT_MODE_MOUSE) {
-          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：打开本地键盘')
+          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：调出系统键盘，输入直达远端')
             .fontSize(14)
             .lineHeight(24)
             .fontColor(this.secondaryTextColor())
             .width('100%')
         } else {
-          Text('适合直接点按：\n• 点按位置：左键\n• 按住移动：拖拽\n• 双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：打开本地键盘')
+          Text('适合直接点按：\n• 点按位置：左键\n• 按住移动：拖拽\n• 双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 全屏三指上滑：调出系统键盘，输入直达远端')
             .fontSize(14)
             .lineHeight(24)
             .fontColor(this.secondaryTextColor())
@@ -1125,144 +1113,30 @@ struct RemotePage {
   }
 
   @Builder
-  buildKeyboardPanel() {
-    Column({ space: 8 }) {
-      Row({ space: 8 }) {
-        TextInput({ placeholder: '输入后点发送', text: this.keyboardInput })
-          .id('remoteKeyboardInput')
-          .height(40)
-          .layoutWeight(1)
-          .fontColor(this.primaryTextColor())
-          .placeholderColor(this.secondaryTextColor())
-          .backgroundColor(this.mutedSurfaceColor())
-          .border({ width: 1, color: this.themeBorderColor(), radius: 6 })
-          .focusable(true)
-          .defaultFocus(true)
-          .onChange((value: string) => {
-            this.keyboardInput = value;
-          })
-        Button('发送')
-          .height(40)
-          .fontColor(Color.White)
-          .backgroundColor(RustDeskTheme.ACCENT)
-          .borderRadius(6)
-          .onClick(() => {
-            this.sendKeyboardText(this.keyboardInput);
-            this.keyboardInput = '';
-          })
-        Button('发剪贴板')
-          .height(40)
-          .fontColor(RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
-          .onClick(() => {
-            this.sendManualClipboardText(this.keyboardInput);
-          })
-        Button('关闭')
-          .height(40)
-          .fontColor(this.secondaryTextColor())
-          .backgroundColor(this.mutedSurfaceColor())
-          .borderRadius(6)
-          .onClick(() => {
-            this.showKeyboardPanel = false;
-          })
-      }
-      Row({ space: 8 }) {
-        Button('Enter').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(13); })
-        Button('Backspace').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(8); })
-        Button('Esc').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(27); })
-        Button('Tab').backgroundColor(this.mutedSurfaceColor()).fontColor(this.primaryTextColor()).borderRadius(6).onClick(() => { this.sendControlKey(9); })
-      }
-    }
-    .width('96%')
-    .padding(10)
-    .backgroundColor(this.panelColor())
-    .border({ width: 1, color: this.themeBorderColor() })
-    .borderRadius(8)
-    .margin({ left: 8, right: 8, bottom: 6 });
-  }
-
-  @Builder
-  buildFullscreenKeyboardPanel() {
-    Column({ space: 7 }) {
-      Row({ space: 8 }) {
-        Text('实时输入到远端')
-          .fontSize(13)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.primaryTextColor())
-        Blank()
-        Button('收起')
-          .height(32)
-          .fontSize(12)
-          .fontColor(this.secondaryTextColor())
-          .backgroundColor(this.mutedSurfaceColor())
-          .borderRadius(6)
-          .onClick(() => {
-            this.closeFullscreenKeyboard();
-          })
-      }
-      .width('100%')
-
-      TextInput({ placeholder: '直接输入到远端（支持中文）', text: this.keyboardInput })
-        .id('fullscreenRemoteKeyboardInput')
-        .height(42)
-        .width('100%')
-        .fontColor(this.primaryTextColor())
-        .placeholderColor(this.secondaryTextColor())
-        .backgroundColor(this.mutedSurfaceColor())
-        .border({ width: 1, color: this.themeBorderColor(), radius: 7 })
-        .focusable(true)
-        .defaultFocus(true)
-        .focusOnTouch(true)
-        .enablePreviewText(true)
-        .onChange((value: string, previewText?: PreviewText) => {
-          this.handleDirectKeyboardChange(value, previewText);
-        })
-        .onSubmit(() => {
-          this.sendControlKey(13);
-          this.keyboardInput = '';
-          this.directKeyboardCommittedText = '';
-        })
-
-      Row({ space: 7 }) {
-        Button('Enter')
-          .layoutWeight(1)
-          .height(34)
-          .backgroundColor(this.mutedSurfaceColor())
-          .fontColor(this.primaryTextColor())
-          .borderRadius(6)
-          .onClick(() => { this.sendControlKey(13); })
-        Button('Backspace')
-          .layoutWeight(1)
-          .height(34)
-          .backgroundColor(this.mutedSurfaceColor())
-          .fontColor(this.primaryTextColor())
-          .borderRadius(6)
-          .onClick(() => { this.sendControlKey(8); })
-        Button('Esc')
-          .layoutWeight(1)
-          .height(34)
-          .backgroundColor(this.mutedSurfaceColor())
-          .fontColor(this.primaryTextColor())
-          .borderRadius(6)
-          .onClick(() => { this.sendControlKey(27); })
-        Button('Tab')
-          .layoutWeight(1)
-          .height(34)
-          .backgroundColor(this.mutedSurfaceColor())
-          .fontColor(this.primaryTextColor())
-          .borderRadius(6)
-          .onClick(() => { this.sendControlKey(9); })
-      }
-      .width('100%')
-    }
-    .width(this.pageWidth >= 820 ? 500 : '94%')
-    .padding(10)
-    .backgroundColor(this.panelColor())
-    .border({ width: 1, color: this.themeBorderColor() })
-    .borderRadius(10)
-    .shadow({ radius: 18, color: '#44000000', offsetX: 0, offsetY: 6 })
-    .margin({ bottom: 10 })
+  buildKeyboardCapture() {
+    TextInput({ text: this.keyboardInput })
+      .id('remoteKeyboardCapture')
+      .width(2)
+      .height(2)
+      .padding(0)
+      .fontSize(1)
+      .fontColor(Color.Transparent)
+      .caretColor(Color.Transparent)
+      .backgroundColor(Color.Transparent)
+      .border({ width: 0 })
+      .opacity(0.01)
+      .focusable(true)
+      .defaultFocus(true)
+      .enablePreviewText(true)
+      .onChange((value: string, previewText?: PreviewText) => {
+        this.handleDirectKeyboardChange(value, previewText);
+      })
+      .onSubmit(() => {
+        this.sendControlKey(13);
+        this.keyboardInput = '';
+        this.directKeyboardCommittedText = '';
+      })
+      .position({ x: 0, y: 0 })
   }
 
   @Builder
@@ -1331,7 +1205,7 @@ struct RemotePage {
     if (!this.isFullScreen) {
       return;
     }
-    this.closeFullscreenKeyboard();
+    this.closeRemoteKeyboard();
     this.isFullScreen = false;
     this.applyFullscreenWindow(false);
     this.scheduleSurfaceRebindIfSizeChanged();
@@ -1888,13 +1762,26 @@ struct RemotePage {
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
-    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return false;
     }
 
     let controlCode: number = this.mapControlKeyCode(event.keyCode);
+    if (this.showKeyboardPanel) {
+      if (this.isModifierControlCode(controlCode)) {
+        ConnectionService.sendKeyEvent(controlCode, event.type === KeyType.Down ? 0 : 1);
+        return true;
+      }
+      return false;
+    }
     if (controlCode > 0) {
       ConnectionService.sendKeyEvent(controlCode, event.type === KeyType.Down ? 0 : 1);
+      return true;
+    }
+
+    let physicalScanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
+    if (physicalScanCode > 0) {
+      ConnectionService.sendPhysicalKeyEvent(physicalScanCode, event.type === KeyType.Down ? 0 : 1);
       return true;
     }
 
@@ -1974,8 +1861,24 @@ struct RemotePage {
     }
   }
 
+  mapHarmonyKeyCodeToWindowsScanCode(keyCode: number): number {
+    if (keyCode >= 2017 && keyCode <= 2042) {
+      return this.mapAsciiToWindowsScanCode('abcdefghijklmnopqrstuvwxyz'.charAt(keyCode - 2017));
+    }
+    if (keyCode >= 2000 && keyCode <= 2009) {
+      return this.mapAsciiToWindowsScanCode((keyCode - 2000).toString());
+    }
+    return 0;
+  }
+
   mapControlKeyCode(keyCode: number): number {
     switch (keyCode) {
+      case 2045:
+      case 2046:
+        return 18;
+      case 2047:
+      case 2048:
+        return 16;
       case 2012:
         return 38;
       case 2013:
@@ -1996,9 +1899,19 @@ struct RemotePage {
         return 27;
       case 2071:
         return 46;
+      case 2072:
+      case 2073:
+        return 17;
+      case 2076:
+      case 2077:
+        return 91;
       default:
         return 0;
     }
+  }
+
+  isModifierControlCode(controlCode: number): boolean {
+    return controlCode === 16 || controlCode === 17 || controlCode === 18 || controlCode === 91;
   }
 
   handleMultiTouch(event: TouchEvent): void {
@@ -2165,8 +2078,16 @@ struct RemotePage {
     ConnectionService.sendText(text);
   }
 
-  openFullscreenKeyboard(): void {
-    if (!this.isFullScreen || this.connectionStatus !== ConnectionStatus.CONNECTED) {
+  toggleRemoteKeyboard(): void {
+    if (this.showKeyboardPanel) {
+      this.closeRemoteKeyboard();
+    } else {
+      this.openRemoteKeyboard();
+    }
+  }
+
+  openRemoteKeyboard(): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
     this.keyboardInput = '';
@@ -2174,13 +2095,13 @@ struct RemotePage {
     this.showKeyboardPanel = true;
     setTimeout(() => {
       try {
-        this.getUIContext()?.getFocusController().requestFocus('fullscreenRemoteKeyboardInput');
+        this.getUIContext()?.getFocusController().requestFocus('remoteKeyboardCapture');
       } catch (_e) {
       }
     }, 80);
   }
 
-  closeFullscreenKeyboard(): void {
+  closeRemoteKeyboard(): void {
     this.showKeyboardPanel = false;
     this.keyboardInput = '';
     this.directKeyboardCommittedText = '';
@@ -2272,7 +2193,7 @@ struct RemotePage {
     this.ignoreTouchUntilNextDown = true;
 
     if (shouldOpenKeyboard) {
-      this.openFullscreenKeyboard();
+      this.openRemoteKeyboard();
     }
   }
 

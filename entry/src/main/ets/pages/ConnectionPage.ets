@@ -150,33 +150,49 @@ export struct ConnectionPage {
           this.buildUpdateBanner()
         }
         this.buildPageHeader()
-        Scroll() {
-          if (this.pageWidth >= 820) {
-            Row({ space: 18 }) {
+        if (this.pageWidth >= 820) {
+          Row({ space: 18 }) {
+            Scroll() {
               Column() {
                 this.buildSavedConnections()
               }
-              .layoutWeight(1)
-              .height('100%')
+              .width('100%')
+              .padding({ bottom: 8 })
+            }
+            .layoutWeight(1)
+            .height('100%')
+            .scrollBar(BarState.Off)
+            .edgeEffect(EdgeEffect.Spring)
 
+            Scroll() {
               Column() {
                 this.buildConnectionForm()
               }
-              .layoutWeight(1.2)
-              .height('100%')
+              .width('100%')
+              .padding({ bottom: 8 })
             }
-            .width('100%')
-            .alignItems(VerticalAlign.Top)
-          } else {
+            .layoutWeight(1.2)
+            .height('100%')
+            .scrollBar(BarState.Off)
+            .edgeEffect(EdgeEffect.Spring)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .alignItems(VerticalAlign.Top)
+        } else {
+          Scroll() {
             Column({ space: 14 }) {
               this.buildSavedConnections()
               this.buildConnectionForm()
             }
             .width('100%')
+            .padding({ bottom: 8 })
           }
+          .width('100%')
+          .layoutWeight(1)
+          .scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring)
         }
-        .width('100%')
-        .layoutWeight(1)
       }
       .width('100%')
       .height('100%')
