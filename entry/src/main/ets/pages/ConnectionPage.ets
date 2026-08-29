@@ -934,10 +934,11 @@ export struct ConnectionPage {
     let password: string = this.password.trim()
     let nativeStatus: ConnectionStatus = this.syncConnectionState()
     if (nativeStatus === ConnectionStatus.CONNECTED || nativeStatus === ConnectionStatus.WAITING_2FA) {
-      if (!this.hasOpenedRemotePage) {
-        this.hasOpenedRemotePage = true
-        router.pushUrl({ url: 'pages/RemotePage' })
-      }
+      // A user-triggered connect action means this page is currently visible.
+      // Reopen an existing session instead of silently ignoring the tap when a
+      // previous page transition left hasOpenedRemotePage set.
+      this.hasOpenedRemotePage = true
+      router.pushUrl({ url: 'pages/RemotePage' })
       return
     }
     if (password.length <= 0) {

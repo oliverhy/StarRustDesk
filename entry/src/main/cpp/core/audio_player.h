@@ -25,8 +25,10 @@ private:
 
     static int32_t OnWriteData(OH_AudioRenderer* renderer, void* userData, void* buffer, int32_t length);
     int32_t fillBuffer(void* buffer, int32_t length);
-    void releaseLocked();
+    void detachLocked(OH_AudioRenderer*& renderer, OpusDecoder*& decoder);
+    static void releaseDetached(OH_AudioRenderer* renderer, OpusDecoder* decoder);
 
+    mutable std::mutex lifecycleMutex_;
     mutable std::mutex mutex_;
     OH_AudioRenderer* renderer_ = nullptr;
     OpusDecoder* decoder_ = nullptr;

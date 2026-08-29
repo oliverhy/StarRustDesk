@@ -1,6 +1,7 @@
 #include "napi/native_api.h"
 #include "core/rustdesk_ffi.h"
 #include "core/config.h"
+#include "core/diagnostic_log.h"
 #include "crypto/aead.h"
 #include "core/video_render.h"
 #include "core/xcomponent_render.h"
@@ -22,6 +23,7 @@
 #include <cstdint>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <vector>
 #include <chrono>
 #include <algorithm>
@@ -43,8 +45,15 @@ static std::atomic<bool> g_disconnectInProgress{false};
 static std::atomic<bool> g_enableTrustedDevices{false};
 static std::atomic<uint64_t> g_videoFrameCount{0};
 static std::atomic<uint64_t> g_videoByteCount{0};
+static std::atomic<uint64_t> g_frameCallbackEnteredGeneration{0};
+static std::atomic<uint64_t> g_frameCallbackCompletedGeneration{0};
+static std::atomic<int64_t> g_lastVideoHealthLogMs{0};
+static std::atomic<uint64_t> g_lastVideoHealthFrameCount{0};
+static std::atomic<uint64_t> g_lastVideoHealthDecodedCount{0};
 static std::mutex g_lastConnectionMessageMutex;
 static std::string g_lastConnectionMessage;
+static std::mutex g_connectionLifecycleMutex;
+static std::condition_variable g_disconnectFinished;
 
 static void SetLastConnectionMessage(const std::string& message) {
     std::lock_guard<std::mutex> lock(g_lastConnectionMessageMutex);
@@ -59,6 +68,13 @@ static std::string GetLastConnectionMessage() {
 static int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::string MaskPeerId(const std::string& peerId) {
+    if (peerId.size() <= 4) {
+        return "****";
+    }
+    return "****" + peerId.substr(peerId.size() - 4);
 }
 
 static std::string GetOrCreateClientHwid() {
@@ -79,25 +95,130 @@ static std::string GetOrCreateClientHwid() {
     return hwid;
 }
 
-static void OnRustVideoFrame(const unsigned char* data, int length, int width, int height) {
+static std::string GetOrCreateClientId() {
+    std::string clientId = Config::instance().get("client-id");
+    if (!clientId.empty()) {
+        return clientId;
+    }
+
+    uint8_t randomBytes[AEAD::KEY_SIZE] = {0};
+    char encoded[17] = {0};
+    AEAD::generateKey(randomBytes);
+    for (int i = 0; i < 8; ++i) {
+        std::snprintf(encoded + i * 2, 3, "%02x", randomBytes[i]);
+    }
+    clientId = std::string("harmony-") + encoded;
+    Config::instance().set("client-id", clientId);
+    Config::instance().save();
+    return clientId;
+}
+
+static void OnRustVideoFrame(const unsigned char* data, int length, int width, int height,
+                             int isKey, int64_t pts) {
     if (data == nullptr || length <= 0) {
         return;
     }
     g_videoFrameCount.fetch_add(1);
     g_videoByteCount.fetch_add(static_cast<uint64_t>(length));
-    VideoRender::instance().onFrameReceived(data, length, width, height);
+    uint64_t generation = g_connectionGeneration.load();
+    if (g_frameCallbackEnteredGeneration.exchange(generation) != generation) {
+        OH_LOG_INFO(LOG_APP, "First video frame entered generation=%{public}llu size=%{public}d",
+                    static_cast<unsigned long long>(generation), length);
+        char codec = length > 5 && data[0] == 'S' && data[1] == 'R' && data[2] == 'D' && data[3] == '0'
+            ? static_cast<char>(data[4]) : '?';
+        DiagnosticLog::instance().append("I", "video",
+            "first_input generation=" + std::to_string(generation) +
+            " codec=" + std::string(1, codec) +
+            " size=" + std::to_string(length) +
+            " resolution=" + std::to_string(width) + "x" + std::to_string(height) +
+            " key=" + std::to_string(isKey) + " pts=" + std::to_string(pts));
+    }
+    VideoRender::instance().onFrameReceived(data, length, width, height, isKey != 0, pts);
+    if (g_frameCallbackCompletedGeneration.exchange(generation) != generation) {
+        OH_LOG_INFO(LOG_APP, "First video frame completed generation=%{public}llu",
+                    static_cast<unsigned long long>(generation));
+        DiagnosticLog::instance().append("I", "video",
+            "first_input_forwarded generation=" + std::to_string(generation));
+    }
+}
+
+static bool IsSafeRustLifecycleEvent(const std::string& text) {
+    const char* prefixes[] = {
+        "file-session:",
+        "rust_connect entered",
+        "previous connection cleared",
+        "rendezvous tcp connected",
+        "rendezvous tcp failed:",
+        "punch request sent",
+        "punch request send failed",
+        "rendezvous response received",
+        "rendezvous response timeout",
+        "direct peer connected",
+        "direct peer failed:",
+        "relay connected",
+        "relay failed:",
+        "relay response connect failed:",
+        "relay response missing",
+        "no direct addr",
+        "secure fallback failed",
+        "secure fallback completed",
+        "secure peer: encrypted stream enabled",
+        "secure peer: unavailable; use non-secure connection",
+        "secure peer: wait signed id timeout",
+        "secure peer: first peer msg not SignedId; use non-secure connection",
+        "receive loop spawned",
+        "peer message:",
+        "login request sent",
+        "login response: ok/",
+        "login response: 2fa-",
+        "performance options sent",
+        "refresh video sent",
+        "initial video received ack",
+        "switch display received",
+        "audio format received",
+        "close reason sent",
+        "close wait:",
+        "close request:",
+        "close reason send failed",
+        "peer command channel closed",
+        "peer task abort:",
+        "receive loop peer eof",
+        "receive loop error:",
+        "stale receive loop ended",
+        "receive loop ended",
+        "skip stale peer command",
+        "video frame:",
+        "video fallback:",
+        "remote cursor visibility updated:",
+        "connection lost:",
+        "login request send failed:",
+        "performance options send failed:",
+        "refresh video send failed:",
+        "initial video received ack failed:",
+        "peer message parse failed"
+    };
+    for (const char* prefix : prefixes) {
+        if (text.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void OnRustEvent(const char* message) {
     if (message == nullptr) {
         return;
     }
-    if (strncmp(message, "file-session:", 13) == 0) {
+    const std::string text(message);
+    if (IsSafeRustLifecycleEvent(text)) {
         OH_LOG_INFO(LOG_APP, "rust_event: %{public}s", message);
+        if (text != "peer message: CursorData" && text != "peer message: CursorId" &&
+            text != "peer message: Misc") {
+            DiagnosticLog::instance().append("I", "rust", text);
+        }
     } else {
         OH_LOG_DEBUG(LOG_APP, "rust_event: %{private}s", message);
     }
-    const std::string text(message);
     const std::string twoFactorPrefix = "login response: 2fa-required enable_trusted_devices=";
     const std::string loginErrorPrefix = "login response: error=";
     if (text.rfind(twoFactorPrefix, 0) == 0) {
@@ -135,11 +256,20 @@ static void OnRustEvent(const char* message) {
 }
 
 static int OnRustAudioStart(int sampleRate, int channels) {
-    return audio_player_start(sampleRate, channels);
+    OH_LOG_INFO(LOG_APP, "audio start entered sampleRate=%{public}d channels=%{public}d", sampleRate, channels);
+    const int result = audio_player_start(sampleRate, channels);
+    OH_LOG_INFO(LOG_APP, "audio start completed result=%{public}d", result);
+    DiagnosticLog::instance().append(result == 0 ? "I" : "E", "audio",
+        "start sample_rate=" + std::to_string(sampleRate) + " channels=" +
+        std::to_string(channels) + " result=" + std::to_string(result));
+    return result;
 }
 
 static void OnRustAudioStop() {
+    OH_LOG_INFO(LOG_APP, "audio stop entered");
     audio_player_stop();
+    OH_LOG_INFO(LOG_APP, "audio stop completed");
+    DiagnosticLog::instance().append("I", "audio", "stopped");
 }
 
 static void OnRustAudioFrame(const unsigned char* data, int length) {
@@ -197,31 +327,53 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     std::string serverKey = Config::instance().get("key");
     std::string clientHwid = Config::instance().get("trust-this-device") == "Y"
         ? GetOrCreateClientHwid() : "";
+    std::string clientId = GetOrCreateClientId();
 
     if (peer.empty()) {
         napi_value ret;
         napi_create_int32(env, -1, &ret);
         return ret;
     }
-    if (g_disconnectInProgress.load()) {
-        OH_LOG_INFO(LOG_APP, "Previous disconnect still marked; reconnecting immediately; stale cleanup will be ignored");
-        g_disconnectInProgress.store(false);
-    }
-
     uint64_t generation = g_connectionGeneration.fetch_add(1) + 1;
     g_connectionStatus.store(1);
     g_lastConnectionResult.store(0);
     g_connectionStartedAtMs.store(NowMs());
     g_enableTrustedDevices.store(false);
     SetLastConnectionMessage("");
-    VideoRender::instance().resetSession();
-    OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
-                peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
-    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, generation]() {
+    g_lastVideoHealthLogMs.store(0);
+    g_lastVideoHealthFrameCount.store(g_videoFrameCount.load());
+    g_lastVideoHealthDecodedCount.store(0);
+    DiagnosticLog::instance().append("I", "connection",
+        "connect_requested generation=" + std::to_string(generation) +
+        " peer=" + MaskPeerId(peer) +
+        " password_configured=" + std::string(pass.empty() ? "no" : "yes") +
+        " rendezvous=" + std::string(rendezvous.empty() ? "default" : "custom") +
+        " relay=" + std::string(relay.empty() ? "default" : "custom") +
+        " key=" + std::string(serverKey.empty() ? "empty" : "set"));
+    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId, generation]() {
+        {
+            std::unique_lock<std::mutex> lock(g_connectionLifecycleMutex);
+            g_disconnectFinished.wait(lock, []() { return !g_disconnectInProgress.load(); });
+        }
+        if (g_connectionGeneration.load() != generation) {
+            OH_LOG_INFO(LOG_APP, "Skip stale queued connect generation=%{public}llu",
+                        static_cast<unsigned long long>(generation));
+            DiagnosticLog::instance().append("W", "connection",
+                "skip_stale_connect generation=" + std::to_string(generation));
+            return;
+        }
+        VideoRender::instance().resetSession();
+        OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
+                    peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
         OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
+        DiagnosticLog::instance().append("I", "connection",
+            "rust_connect_started generation=" + std::to_string(generation));
         int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
-                                  serverKey.c_str(), clientHwid.c_str());
+                                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str());
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
+        DiagnosticLog::instance().append(result == 0 ? "I" : "E", "connection",
+            "rust_connect_finished generation=" + std::to_string(generation) +
+            " result=" + std::to_string(result) + " message=" + ConnectionResultToMessage(result));
         if (g_connectionGeneration.load() != generation) {
             OH_LOG_INFO(LOG_APP, "Ignore stale rust_connect result generation=%{public}llu", static_cast<unsigned long long>(generation));
             return;
@@ -265,20 +417,25 @@ static napi_value Disconnect(napi_env env, napi_callback_info info) {
     uint64_t disconnectGeneration = g_connectionGeneration.fetch_add(1) + 1;
     g_connectionStatus.store(0);
     g_connectionStartedAtMs.store(0);
+    DiagnosticLog::instance().append("I", "connection",
+        "disconnect_requested generation=" + std::to_string(disconnectGeneration));
     std::thread([disconnectGeneration]() {
+        OH_LOG_INFO(LOG_APP, "disconnect cleanup started generation=%{public}llu",
+                    static_cast<unsigned long long>(disconnectGeneration));
+        rust_disconnect();
+        OH_LOG_INFO(LOG_APP, "disconnect cleanup rust finished generation=%{public}llu",
+                    static_cast<unsigned long long>(disconnectGeneration));
+        DiagnosticLog::instance().append("I", "connection",
+            "disconnect_core_finished generation=" + std::to_string(disconnectGeneration));
         if (g_connectionGeneration.load() == disconnectGeneration) {
-            OH_LOG_INFO(LOG_APP, "disconnect cleanup started generation=%{public}llu",
-                        static_cast<unsigned long long>(disconnectGeneration));
-            rust_disconnect();
-            OH_LOG_INFO(LOG_APP, "disconnect cleanup rust finished generation=%{public}llu",
-                        static_cast<unsigned long long>(disconnectGeneration));
             VideoRender::instance().resetSession();
         } else {
-            OH_LOG_INFO(LOG_APP, "Skip stale disconnect cleanup generation=%{public}llu current=%{public}llu",
+            OH_LOG_INFO(LOG_APP, "Preserve video state for queued connect generation=%{public}llu current=%{public}llu",
                         static_cast<unsigned long long>(disconnectGeneration),
                         static_cast<unsigned long long>(g_connectionGeneration.load()));
         }
         g_disconnectInProgress.store(false);
+        g_disconnectFinished.notify_all();
         if (g_connectionGeneration.load() == disconnectGeneration && g_connectionStatus.load() != 1) {
             g_connectionStatus.store(0);
         }
@@ -580,12 +737,60 @@ static napi_value SendClipboardText(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value FallbackVideoToVp9(napi_env env, napi_callback_info info) {
+    int result = rust_fallback_video_to_vp9();
+    OH_LOG_WARN(LOG_APP, "FallbackVideoToVp9 result=%{public}d", result);
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static std::string GetStringArgument(napi_env env, napi_value value) {
     size_t length = 0;
     napi_get_value_string_utf8(env, value, nullptr, 0, &length);
     std::vector<char> buffer(length + 1, '\0');
     napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length);
     return std::string(buffer.data(), length);
+}
+
+static napi_value InitializeDiagnosticLog(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc > 0 && args[0] != nullptr) {
+        DiagnosticLog::instance().initialize(GetStringArgument(env, args[0]));
+        DiagnosticLog::instance().append("I", "app", "diagnostic_log_initialized");
+    }
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
+static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::string component = argc > 0 && args[0] != nullptr ? GetStringArgument(env, args[0]) : "arkts";
+    std::string message = argc > 1 && args[1] != nullptr ? GetStringArgument(env, args[1]) : "";
+    DiagnosticLog::instance().append("I", component.c_str(), message);
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
+static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
+    std::string content = DiagnosticLog::instance().exportText();
+    napi_value ret;
+    napi_create_string_utf8(env, content.c_str(), content.size(), &ret);
+    return ret;
+}
+
+static napi_value ClearDiagnosticLog(napi_env env, napi_callback_info info) {
+    DiagnosticLog::instance().clear();
+    DiagnosticLog::instance().append("I", "app", "diagnostic_log_cleared");
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
 }
 
 static napi_value RequestRemoteDirectory(napi_env env, napi_callback_info info) {
@@ -622,6 +827,63 @@ static napi_value GetRemoteCursorPosition(napi_env env, napi_callback_info info)
     napi_value sequenceValue;
     napi_create_int64(env, static_cast<int64_t>(sequence), &sequenceValue);
     napi_set_named_property(env, object, "sequence", sequenceValue);
+    return object;
+}
+
+static napi_value GetRemoteCursorData(napi_env env, napi_callback_info info) {
+    uint64_t id = 0;
+    uint64_t sequence = 0;
+    int32_t hotx = 0;
+    int32_t hoty = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+    int required = rust_get_remote_cursor_data(
+        &id, &hotx, &hoty, &width, &height, &sequence, nullptr, 0);
+
+    napi_value object;
+    napi_create_object(env, &object);
+    napi_value validValue;
+    napi_get_boolean(env, required > 0, &validValue);
+    napi_set_named_property(env, object, "valid", validValue);
+    if (required <= 0) {
+        return object;
+    }
+
+    std::vector<unsigned char> colors(static_cast<size_t>(required));
+    int copied = rust_get_remote_cursor_data(
+        &id, &hotx, &hoty, &width, &height, &sequence,
+        colors.data(), static_cast<int32_t>(colors.size()));
+    if (copied <= 0 || copied > static_cast<int>(colors.size())) {
+        napi_get_boolean(env, false, &validValue);
+        napi_set_named_property(env, object, "valid", validValue);
+        return object;
+    }
+
+    napi_value idValue;
+    napi_create_int64(env, static_cast<int64_t>(id), &idValue);
+    napi_set_named_property(env, object, "id", idValue);
+    napi_value hotxValue;
+    napi_create_int32(env, hotx, &hotxValue);
+    napi_set_named_property(env, object, "hotx", hotxValue);
+    napi_value hotyValue;
+    napi_create_int32(env, hoty, &hotyValue);
+    napi_set_named_property(env, object, "hoty", hotyValue);
+    napi_value widthValue;
+    napi_create_int32(env, width, &widthValue);
+    napi_set_named_property(env, object, "width", widthValue);
+    napi_value heightValue;
+    napi_create_int32(env, height, &heightValue);
+    napi_set_named_property(env, object, "height", heightValue);
+    napi_value sequenceValue;
+    napi_create_int64(env, static_cast<int64_t>(sequence), &sequenceValue);
+    napi_set_named_property(env, object, "sequence", sequenceValue);
+    napi_value buffer;
+    void* bufferData = nullptr;
+    napi_create_arraybuffer(env, static_cast<size_t>(copied), &bufferData, &buffer);
+    if (bufferData != nullptr) {
+        std::memcpy(bufferData, colors.data(), static_cast<size_t>(copied));
+    }
+    napi_set_named_property(env, object, "colors", buffer);
     return object;
 }
 
@@ -861,14 +1123,45 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     uint8_t* data = nullptr;
     int length = 0, width = 0, height = 0;
     bool hasFrame = VideoRender::instance().getLatestFrame(data, length, width, height);
+    uint64_t totalFrames = g_videoFrameCount.load();
+    uint64_t totalBytes = g_videoByteCount.load();
+    uint64_t decodedFrames = VideoRender::instance().decodedFrameCount();
+    int codec = VideoRender::instance().activeCodec();
+    int decoderMode = VideoRender::instance().activeDecodeMode();
+    int64_t now = NowMs();
+    int64_t previousHealthLog = g_lastVideoHealthLogMs.load();
+    int status = g_connectionStatus.load();
+    if ((status == 1 || status == 2 || status == 4) &&
+        (previousHealthLog == 0 || now - previousHealthLog >= 5000) &&
+        g_lastVideoHealthLogMs.compare_exchange_strong(previousHealthLog, now)) {
+        uint64_t previousFrames = g_lastVideoHealthFrameCount.exchange(totalFrames);
+        uint64_t previousDecoded = g_lastVideoHealthDecodedCount.exchange(decodedFrames);
+        DiagnosticLog::instance().append("I", "video-health",
+            "generation=" + std::to_string(g_connectionGeneration.load()) +
+            " status=" + std::to_string(status) +
+            " route=" + std::to_string(rust_get_connection_route()) +
+            " codec=" + std::to_string(codec) +
+            " decoder_mode=" + std::to_string(decoderMode) +
+            " input_total=" + std::to_string(totalFrames) +
+            " input_delta=" + std::to_string(totalFrames - previousFrames) +
+            " bytes_total=" + std::to_string(totalBytes) +
+            " decoded_total=" + std::to_string(decodedFrames) +
+            " decoded_delta=" + std::to_string(decodedFrames - std::min(decodedFrames, previousDecoded)) +
+            " frame=" + std::to_string(width) + "x" + std::to_string(height) +
+            " latest_size=" + std::to_string(length) +
+            " has_frame=" + std::string(hasFrame ? "yes" : "no"));
+    }
     napi_value obj;
     napi_create_object(env, &obj);
     napi_value hasFrameVal; napi_get_boolean(env, hasFrame, &hasFrameVal); napi_set_named_property(env, obj, "hasFrame", hasFrameVal);
     napi_value widthVal; napi_create_int32(env, width, &widthVal); napi_set_named_property(env, obj, "width", widthVal);
     napi_value heightVal; napi_create_int32(env, height, &heightVal); napi_set_named_property(env, obj, "height", heightVal);
     napi_value lengthVal; napi_create_int32(env, length, &lengthVal); napi_set_named_property(env, obj, "length", lengthVal);
-    napi_value frameCountVal; napi_create_int64(env, static_cast<int64_t>(g_videoFrameCount.load()), &frameCountVal); napi_set_named_property(env, obj, "totalFrames", frameCountVal);
-    napi_value byteCountVal; napi_create_int64(env, static_cast<int64_t>(g_videoByteCount.load()), &byteCountVal); napi_set_named_property(env, obj, "totalBytes", byteCountVal);
+    napi_value frameCountVal; napi_create_int64(env, static_cast<int64_t>(totalFrames), &frameCountVal); napi_set_named_property(env, obj, "totalFrames", frameCountVal);
+    napi_value byteCountVal; napi_create_int64(env, static_cast<int64_t>(totalBytes), &byteCountVal); napi_set_named_property(env, obj, "totalBytes", byteCountVal);
+    napi_value decodedCountVal; napi_create_int64(env, static_cast<int64_t>(decodedFrames), &decodedCountVal); napi_set_named_property(env, obj, "decodedFrames", decodedCountVal);
+    napi_value codecVal; napi_create_int32(env, codec, &codecVal); napi_set_named_property(env, obj, "codec", codecVal);
+    napi_value decoderModeVal; napi_create_int32(env, decoderMode, &decoderModeVal); napi_set_named_property(env, obj, "decoderMode", decoderModeVal);
     return obj;
 }
 
@@ -888,7 +1181,30 @@ static napi_value SetSurfaceId(napi_env env, napi_callback_info info) {
     // detached thread allows an old cleanup to run after a new XComponent has
     // already been bound, destroying the new native window and leaving video
     // decoding active against a stale surface.
+    DiagnosticLog::instance().append("I", "surface", surface.empty() ? "unbind" : "bind");
     VideoRender::instance().setSurfaceId(surface);
+
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
+static napi_value PrepareSurfaceRebind(napi_env env, napi_callback_info info) {
+    VideoRender::instance().prepareSurfaceRebind();
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
+static napi_value RebindSurface(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    char surfaceId[128] = {0};
+    size_t surfaceIdLen = 0;
+    napi_get_value_string_utf8(env, args[0], surfaceId, sizeof(surfaceId), &surfaceIdLen);
+    VideoRender::instance().rebindSurface(std::string(surfaceId, surfaceIdLen));
 
     napi_value ret;
     napi_create_int32(env, 0, &ret);
@@ -900,12 +1216,26 @@ static napi_value SetSurfaceId(napi_env env, napi_callback_info info) {
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     Config::instance().load();
+    // Always subscribe to the controlled device's real cursor. The local
+    // pointer preference only controls HarmonyOS' own physical mouse pointer.
+    rust_set_remote_cursor_visible(1);
     rust_set_frame_callback(OnRustVideoFrame);
     rust_set_event_callback(OnRustEvent);
     rust_set_audio_callbacks(OnRustAudioStart, OnRustAudioStop, OnRustAudioFrame);
+    VideoDecoderCapabilities decoderCapabilities = VideoRender::instance().decoderCapabilities();
+    rust_set_video_codec_support(decoderCapabilities.h264 ? 1 : 0,
+                                 decoderCapabilities.vp9 ? 1 : 0,
+                                 decoderCapabilities.vp8 ? 1 : 0,
+                                 decoderCapabilities.av1 ? 1 : 0,
+                                 decoderCapabilities.h265 ? 1 : 0);
+    DiagnosticLog::instance().append("I", "native", "module_initialized");
 
     napi_property_descriptor desc[] = {
         {"connect", nullptr, Connect, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"initializeDiagnosticLog", nullptr, InitializeDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"appendDiagnosticLog", nullptr, AppendDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getDiagnosticLog", nullptr, GetDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clearDiagnosticLog", nullptr, ClearDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPerformancePreset", nullptr, SetPerformancePreset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"disconnect", nullptr, Disconnect, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent", nullptr, SendKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -918,8 +1248,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getCurrentDisplay", nullptr, GetCurrentDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getRemoteCursorPosition", nullptr, GetRemoteCursorPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getRemoteCursorData", nullptr, GetRemoteCursorData, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"refreshVideo", nullptr, RefreshVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"fallbackVideoToVp9", nullptr, FallbackVideoToVp9, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPeerList", nullptr, GetPeerList, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionStatus", nullptr, GetConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionRoute", nullptr, GetConnectionRoute, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -940,6 +1272,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"isUsingPublicServer", nullptr, IsUsingPublicServer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getVideoFrame", nullptr, GetVideoFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setSurfaceId", nullptr, SetSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"prepareSurfaceRebind", nullptr, PrepareSurfaceRebind, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"rebindSurface", nullptr, RebindSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

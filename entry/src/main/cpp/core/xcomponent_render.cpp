@@ -16,8 +16,10 @@ XComponentRender& XComponentRender::instance() {
 }
 
 void XComponentRender::setSurface(const std::string& surfaceId) {
+    renderingPaused_.store(true);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!surfaceId.empty() && surfaceId == surfaceId_ && nativeWindow_ != nullptr) {
+        renderingPaused_.store(false);
         return;
     }
 
@@ -26,6 +28,26 @@ void XComponentRender::setSurface(const std::string& surfaceId) {
     if (surfaceId_.empty()) return;
 
     createWindowLocked();
+    renderingPaused_.store(false);
+}
+
+void XComponentRender::prepareSurfaceRebind() {
+    renderingPaused_.store(true);
+    // Synchronize with an in-flight CPU buffer write. Once this lock has been
+    // acquired and released, no software frame can still be using the old
+    // native window.
+    std::lock_guard<std::mutex> lock(mutex_);
+}
+
+void XComponentRender::rebindSurface(const std::string& surfaceId) {
+    renderingPaused_.store(true);
+    std::lock_guard<std::mutex> lock(mutex_);
+    destroyWindowLocked();
+    surfaceId_ = surfaceId;
+    if (!surfaceId_.empty()) {
+        createWindowLocked();
+    }
+    renderingPaused_.store(false);
 }
 
 bool XComponentRender::createWindowLocked() {
@@ -67,7 +89,21 @@ void XComponentRender::configureWindowLocked(int width, int height) {
 }
 
 void XComponentRender::renderFrame(const uint8_t* data, int length, int width, int height) {
+    renderPackedFrame(data, length, width, height, true);
+}
+
+void XComponentRender::renderBGRAFrame(const uint8_t* data, int length, int width, int height) {
+    renderPackedFrame(data, length, width, height, false);
+}
+
+void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput) {
+    if (renderingPaused_.load()) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (renderingPaused_.load()) {
+        return;
+    }
     if (!nativeWindow_ || !data || length <= 0) {
         OH_LOG_WARN(LOG_APP, "Skip render nativeWindow=%{public}d data=%{public}d length=%{public}d", nativeWindow_ ? 1 : 0, data ? 1 : 0, length);
         return;
@@ -123,12 +159,16 @@ void XComponentRender::renderFrame(const uint8_t* data, int length, int width, i
         for (int y = 0; y < height; y++) {
             uint8_t* dstRow = dst + y * strideBytes;
             const uint8_t* srcRow = data + y * width * bpp;
-            for (int x = 0; x < width; x++) {
-                // Convert RGBA -> BGRA (HarmonyOS native window format)
-                dstRow[x * 4] = srcRow[x * 4 + 2];     // B
-                dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G
-                dstRow[x * 4 + 2] = srcRow[x * 4];     // R
-                dstRow[x * 4 + 3] = srcRow[x * 4 + 3]; // A
+            if (!rgbaInput) {
+                memcpy(dstRow, srcRow, static_cast<size_t>(width) * bpp);
+            } else {
+                for (int x = 0; x < width; x++) {
+                    // Convert RGBA -> BGRA (HarmonyOS native window format)
+                    dstRow[x * 4] = srcRow[x * 4 + 2];     // B
+                    dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G
+                    dstRow[x * 4 + 2] = srcRow[x * 4];     // R
+                    dstRow[x * 4 + 3] = srcRow[x * 4 + 3]; // A
+                }
             }
         }
     } else {
@@ -146,16 +186,27 @@ void XComponentRender::renderFrame(const uint8_t* data, int length, int width, i
         close(fenceFd);
     }
     ret = OH_NativeWindow_NativeWindowFlushBuffer(nativeWindow_, buffer, -1, region);
-    OH_LOG_INFO(LOG_APP, "Flush mapped frame length=%{public}d size=%{public}dx%{public}d stride=%{public}d ret=%{public}d",
-        length, width, height, strideBytes, ret);
+    static uint64_t renderedFrames = 0;
+    renderedFrames += 1;
+    if (renderedFrames == 1 || renderedFrames % 300 == 0 || ret != 0) {
+        OH_LOG_INFO(LOG_APP, "Flush mapped frame count=%{public}llu size=%{public}dx%{public}d stride=%{public}d ret=%{public}d",
+            static_cast<unsigned long long>(renderedFrames), width, height, strideBytes, ret);
+    }
 }
 
 OHNativeWindow* XComponentRender::window() {
+    if (renderingPaused_.load()) {
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (renderingPaused_.load()) {
+        return nullptr;
+    }
     return nativeWindow_;
 }
 
 void XComponentRender::release() {
+    renderingPaused_.store(true);
     std::lock_guard<std::mutex> lock(mutex_);
     destroyWindowLocked();
 }

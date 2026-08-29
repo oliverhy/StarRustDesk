@@ -17,6 +17,9 @@ export interface VideoFrameInfo {
   length: number
   totalFrames?: number
   totalBytes?: number
+  decodedFrames?: number
+  codec?: number
+  decoderMode?: number
 }
 
 export interface RemoteCursorPosition {
@@ -25,6 +28,17 @@ export interface RemoteCursorPosition {
   x: number
   y: number
   sequence: number
+}
+
+export interface RemoteCursorData {
+  valid: boolean
+  id?: number
+  hotx?: number
+  hoty?: number
+  width?: number
+  height?: number
+  sequence?: number
+  colors?: ArrayBuffer
 }
 
 export interface RemoteDirectoryEntry {
@@ -49,6 +63,22 @@ export interface FileTransferStatus {
 }
 
 export class RustDeskNapi {
+  static initializeDiagnosticLog(filesDirectory: string): number {
+    return (rustdeskNapi as ESObject).initializeDiagnosticLog(filesDirectory)
+  }
+
+  static appendDiagnosticLog(component: string, message: string): number {
+    return (rustdeskNapi as ESObject).appendDiagnosticLog(component, message)
+  }
+
+  static getDiagnosticLog(): string {
+    return (rustdeskNapi as ESObject).getDiagnosticLog()
+  }
+
+  static clearDiagnosticLog(): number {
+    return (rustdeskNapi as ESObject).clearDiagnosticLog()
+  }
+
   static connect(peerId: string, password: string): number {
     return rustdeskNapi.connect(peerId, password)
   }
@@ -105,12 +135,20 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).getRemoteCursorPosition() as RemoteCursorPosition
   }
 
+  static getRemoteCursorData(): RemoteCursorData {
+    return (rustdeskNapi as ESObject).getRemoteCursorData() as RemoteCursorData
+  }
+
   static switchDisplay(display: number): number {
     return (rustdeskNapi as ESObject).switchDisplay(display)
   }
 
   static refreshVideo(): number {
     return (rustdeskNapi as ESObject).refreshVideo()
+  }
+
+  static fallbackVideoToVp9(): number {
+    return (rustdeskNapi as ESObject).fallbackVideoToVp9()
   }
 
   static getPeerList(): PeerInfo[] {
@@ -240,5 +278,13 @@ export class RustDeskNapi {
 
   static setSurfaceId(surfaceId: string): number {
     return rustdeskNapi.setSurfaceId(surfaceId)
+  }
+
+  static prepareSurfaceRebind(): number {
+    return rustdeskNapi.prepareSurfaceRebind()
+  }
+
+  static rebindSurface(surfaceId: string): number {
+    return rustdeskNapi.rebindSurface(surfaceId)
   }
 }

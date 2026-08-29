@@ -1,8 +1,19 @@
 ﻿import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { ServerConfigDialog } from '../widget/ServerConfigDialog'
+import {
+  RELEASE_NOTES_SHOWN_OPTION,
+  RELEASE_NOTES_SHOWN_ID,
+  RELEASE_NOTES_VERSION,
+  ReleaseNotesDialog,
+} from '../widget/ReleaseNotesDialog'
 import { RustDeskNapi } from '../service/RustDeskNapi'
 import { common } from '@kit.AbilityKit'
+import { pasteboard } from '@kit.BasicServicesKit'
+import { promptAction } from '@kit.ArkUI'
+import { fileIo, picker } from '@kit.CoreFileKit'
+
+const QQ_GROUP_NUMBER: string = '221568948'
 
 interface SettingItem {
   label: string
@@ -18,12 +29,23 @@ export struct SettingsPage {
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
   @State showLocalCursor: boolean = true
+  @State diagnosticLogBusy: boolean = false
   @State pageWidth: number = 0
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
     autoCancel: true,
     customStyle: true,
     cornerRadius: 8,
+  })
+  private releaseNotesDialogController: CustomDialogController = new CustomDialogController({
+    builder: ReleaseNotesDialog({
+      onClose: () => {
+        RustDeskNapi.setOption(RELEASE_NOTES_SHOWN_OPTION, RELEASE_NOTES_SHOWN_ID)
+      },
+    }),
+    autoCancel: false,
+    customStyle: true,
+    cornerRadius: 10,
   })
 
   aboutToAppear(): void {
@@ -66,6 +88,7 @@ export struct SettingsPage {
           this.buildDisplayCard()
           this.buildInputCard()
           this.buildServerConfigCard()
+          this.buildDiagnosticsCard()
           this.buildThemeToggle()
           this.buildAboutCard()
         }
@@ -235,7 +258,7 @@ export struct SettingsPage {
             .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
             .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
             .width('100%')
-          Text('鼠标模式下同步远端光标，光标已嵌入画面或使用触摸模式时自动隐藏')
+          Text('仅控制本机连接的物理鼠标指针，远端真实光标始终显示')
             .fontSize(12)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .width('100%')
@@ -259,6 +282,148 @@ export struct SettingsPage {
   }
 
   @Builder
+  buildDiagnosticsCard() {
+    Column({ space: 4 }) {
+      Text('问题诊断')
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+        .margin({ bottom: 4 })
+
+      Text('自动记录连接、网络通道、视频编码和解码状态。不会记录密码、验证码、剪贴板内容或密钥。')
+        .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+        .lineHeight(19)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+        .margin({ bottom: 6 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text(this.diagnosticLogBusy ? '正在导出…' : '导出诊断日志')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('选择保存位置后，可将日志文件发送给开发者排查')
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Text('导出')
+          .fontSize(14)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .enabled(!this.diagnosticLogBusy)
+      .opacity(this.diagnosticLogBusy ? 0.6 : 1)
+      .onClick(() => {
+        this.exportDiagnosticLog()
+      })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Text('清除诊断日志')
+          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+          .fontColor(this.isDarkMode ? '#FF9A9A' : RustDeskTheme.ERROR)
+        Blank()
+        Text('>')
+          .fontSize(16)
+          .fontColor(this.isDarkMode ? '#FF9A9A' : RustDeskTheme.ERROR)
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 8 })
+      .onClick(() => {
+        this.confirmClearDiagnosticLog()
+      })
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .width('100%')
+  }
+
+  async exportDiagnosticLog(): Promise<void> {
+    if (this.diagnosticLogBusy) {
+      return
+    }
+    this.diagnosticLogBusy = true
+    let outputFile: fileIo.File | undefined = undefined
+    try {
+      RustDeskNapi.appendDiagnosticLog('support', 'user_requested_log_export')
+      let content: string = RustDeskNapi.getDiagnosticLog()
+      let context = getContext(this) as common.UIAbilityContext
+      let documentPicker = new picker.DocumentViewPicker(context)
+      let fileName: string = `StarRustDesk-diagnostic-${this.diagnosticTimestamp()}.txt`
+      let saveUris: string[] = await documentPicker.save({ newFileNames: [fileName] })
+      if (saveUris.length <= 0) {
+        return
+      }
+      outputFile = fileIo.openSync(saveUris[0],
+        fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC)
+      fileIo.writeSync(outputFile.fd, content)
+      promptAction.showToast({ message: '诊断日志导出成功' })
+      RustDeskNapi.appendDiagnosticLog('support', 'log_export_succeeded')
+    } catch (_e) {
+      RustDeskNapi.appendDiagnosticLog('support', 'log_export_failed')
+      promptAction.showToast({ message: '诊断日志导出失败，请重新选择保存位置' })
+    } finally {
+      if (outputFile !== undefined) {
+        try {
+          fileIo.closeSync(outputFile)
+        } catch (_e) {
+        }
+      }
+      this.diagnosticLogBusy = false
+    }
+  }
+
+  diagnosticTimestamp(): string {
+    let now: Date = new Date()
+    let pad: (value: number) => string = (value: number): string => value < 10 ? `0${value}` : value.toString()
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-` +
+      `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  }
+
+  confirmClearDiagnosticLog(): void {
+    AlertDialog.show({
+      title: '清除诊断日志',
+      message: '清除后，当前和上一份诊断日志都无法恢复。确定继续吗？',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        },
+      },
+      secondaryButton: {
+        value: '清除',
+        fontColor: RustDeskTheme.ERROR,
+        action: () => {
+          RustDeskNapi.clearDiagnosticLog()
+          promptAction.showToast({ message: '诊断日志已清除' })
+        },
+      },
+    })
+  }
+
+  @Builder
   buildAboutCard() {
     Column() {
       Text(translate('About'))
@@ -273,12 +438,68 @@ export struct SettingsPage {
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Text('1.0.7')
+        Text('1.0.8')
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       }
       .width('100%')
       .padding({ top: 8, bottom: 8 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('更新日志')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text(`查看 v${RELEASE_NOTES_VERSION} 的更新内容`)
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Text('>')
+          .fontSize(16)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .margin({ left: 4 })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .onClick(() => {
+        this.releaseNotesDialogController.open()
+      })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('加入 QQ 群')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text(`群号 ${QQ_GROUP_NUMBER}`)
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Text('>')
+          .fontSize(16)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .margin({ left: 4 })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .onClick(() => {
+        this.openQQGroup()
+      })
 
       Divider()
         .height(1)
@@ -319,6 +540,24 @@ export struct SettingsPage {
         uri: 'https://beian.miit.gov.cn/',
       })
     } catch (_) {
+    }
+  }
+
+  async openQQGroup(): Promise<void> {
+    try {
+      let context = getContext(this) as common.UIAbilityContext
+      await context.startAbility({
+        action: 'ohos.want.action.viewData',
+        uri: `mqqapi://card/show_pslcard?src_type=internal&version=1&uin=${QQ_GROUP_NUMBER}&card_type=group&source=qrcode`,
+      })
+    } catch (_) {
+      try {
+        let data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, QQ_GROUP_NUMBER)
+        await pasteboard.getSystemPasteboard().setData(data)
+        promptAction.showToast({ message: `未检测到 QQ，群号 ${QQ_GROUP_NUMBER} 已复制` })
+      } catch (_) {
+        promptAction.showToast({ message: `请在 QQ 中搜索群号 ${QQ_GROUP_NUMBER}` })
+      }
     }
   }
 

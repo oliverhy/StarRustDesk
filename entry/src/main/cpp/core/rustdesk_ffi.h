@@ -9,8 +9,12 @@ extern "C" {
 
 int rust_connect(const char* peer_id, const char* password,
                  const char* rendezvous_server, const char* relay_server,
-                 const char* server_key, const char* client_hwid);
+                 const char* server_key, const char* client_hwid,
+                 const char* client_id);
+void rust_set_video_codec_support(int h264_supported, int vp9_supported,
+                                  int vp8_supported, int av1_supported, int h265_supported);
 int rust_set_performance_preset(const char* preset);
+int rust_set_remote_cursor_visible(int visible);
 int rust_disconnect(void);
 int rust_get_connection_status(void);
 int rust_get_connection_route(void);
@@ -29,10 +33,15 @@ char* rust_take_remote_clipboard_text(void);
 int rust_get_display_count(void);
 int rust_get_current_display(void);
 int rust_get_remote_cursor_position(int32_t* x, int32_t* y, uint64_t* sequence);
+int rust_get_remote_cursor_data(uint64_t* id, int32_t* hotx, int32_t* hoty,
+                                int32_t* width, int32_t* height, uint64_t* sequence,
+                                unsigned char* colors, int32_t colors_capacity);
 int rust_is_remote_cursor_embedded(void);
 int rust_switch_display(int display);
 int rust_refresh_video(void);
-typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int width, int height);
+int rust_fallback_video_to_vp9(void);
+typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int width, int height,
+                                      int is_key, int64_t pts);
 void rust_set_frame_callback(rust_frame_callback_t callback);
 typedef void (*rust_event_callback_t)(const char* message);
 void rust_set_event_callback(rust_event_callback_t callback);

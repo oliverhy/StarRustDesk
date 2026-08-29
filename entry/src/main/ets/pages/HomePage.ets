@@ -2,6 +2,13 @@ import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { ConnectionPage } from './ConnectionPage'
 import { SettingsPage } from './SettingsPage'
+import { RustDeskNapi } from '../service/RustDeskNapi'
+import {
+  RELEASE_NOTES_SHOWN_OPTION,
+  RELEASE_NOTES_SHOWN_ID,
+  RELEASE_NOTES_VERSION,
+  ReleaseNotesDialog,
+} from '../widget/ReleaseNotesDialog'
 
 @Entry
 @Component
@@ -10,6 +17,28 @@ struct HomePage {
   @State pageWidth: number = 0
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   private swiperController: SwiperController = new SwiperController()
+  private releaseNotesScheduled: boolean = false
+  private releaseNotesDialogController: CustomDialogController = new CustomDialogController({
+    builder: ReleaseNotesDialog({
+      onClose: () => {
+        RustDeskNapi.setOption(RELEASE_NOTES_SHOWN_OPTION, RELEASE_NOTES_SHOWN_ID)
+      },
+    }),
+    autoCancel: false,
+    customStyle: true,
+    cornerRadius: 10,
+  })
+
+  aboutToAppear(): void {
+    if (this.releaseNotesScheduled ||
+      RustDeskNapi.getOption(RELEASE_NOTES_SHOWN_OPTION) === RELEASE_NOTES_SHOWN_ID) {
+      return
+    }
+    this.releaseNotesScheduled = true
+    setTimeout(() => {
+      this.releaseNotesDialogController.open()
+    }, 280)
+  }
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {

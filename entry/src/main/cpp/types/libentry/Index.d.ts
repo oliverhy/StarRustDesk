@@ -12,8 +12,34 @@ export interface VideoFrameInfo {
   length: number;
   totalFrames?: number;
   totalBytes?: number;
+  decodedFrames?: number;
+  codec?: number;
+  decoderMode?: number;
 }
 
+export interface RemoteCursorPosition {
+  valid: boolean;
+  embedded: boolean;
+  x: number;
+  y: number;
+  sequence: number;
+}
+
+export interface RemoteCursorData {
+  valid: boolean;
+  id?: number;
+  hotx?: number;
+  hoty?: number;
+  width?: number;
+  height?: number;
+  sequence?: number;
+  colors?: ArrayBuffer;
+}
+
+export const initializeDiagnosticLog: (filesDirectory: string) => number;
+export const appendDiagnosticLog: (component: string, message: string) => number;
+export const getDiagnosticLog: () => string;
+export const clearDiagnosticLog: () => number;
 export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string) => number;
 export const disconnect: () => number;
 export const sendKeyEvent: (keyCode: number, action: number) => number;
@@ -31,8 +57,11 @@ export const sendMouseEvent: (x: number, y: number, action: number) => number;
 export const sendMouseWheel: (deltaX: number, deltaY: number) => number;
 export const getDisplayCount: () => number;
 export const getCurrentDisplay: () => number;
+export const getRemoteCursorPosition: () => RemoteCursorPosition;
+export const getRemoteCursorData: () => RemoteCursorData;
 export const switchDisplay: (display: number) => number;
 export const refreshVideo: () => number;
+export const fallbackVideoToVp9: () => number;
 export const getPeerList: () => PeerInfo[];
 export const getConnectionStatus: () => number;
 export const getConnectionRoute: () => number;
@@ -47,3 +76,5 @@ export const testIfValidServer: (server: string) => string;
 export const isUsingPublicServer: () => boolean;
 export const getVideoFrame: () => VideoFrameInfo;
 export const setSurfaceId: (surfaceId: string) => number;
+export const prepareSurfaceRebind: () => number;
+export const rebindSurface: (surfaceId: string) => number;

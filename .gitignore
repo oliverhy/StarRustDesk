@@ -5,6 +5,7 @@
 /.idea
 /.agents
 /.codex
+/.codex-*
 **/build
 /.hvigor
 .cxx

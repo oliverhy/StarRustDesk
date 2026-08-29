@@ -27,26 +27,33 @@ int AudioPlayer::start(int sampleRate, int channels) {
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (running_ && renderer_ != nullptr && sampleRate_ == sampleRate && channels_ == channels) {
-        return 0;
+    std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (running_ && renderer_ != nullptr && sampleRate_ == sampleRate && channels_ == channels) {
+            return 0;
+        }
     }
 
-    releaseLocked();
+    OH_AudioRenderer* oldRenderer = nullptr;
+    OpusDecoder* oldDecoder = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        detachLocked(oldRenderer, oldDecoder);
+    }
+    releaseDetached(oldRenderer, oldDecoder);
 
     int opusError = OPUS_OK;
-    decoder_ = opus_decoder_create(sampleRate, channels, &opusError);
-    if (opusError != OPUS_OK || decoder_ == nullptr) {
+    OpusDecoder* decoder = opus_decoder_create(sampleRate, channels, &opusError);
+    if (opusError != OPUS_OK || decoder == nullptr) {
         OH_LOG_ERROR(LOG_APP, "opus decoder create failed error=%{public}d", opusError);
-        decoder_ = nullptr;
         return -2;
     }
-    decodeBuffer_.assign(static_cast<size_t>(sampleRate) * static_cast<size_t>(channels), 0);
 
     OH_AudioStreamBuilder* builder = nullptr;
     if (OH_AudioStreamBuilder_Create(&builder, AUDIOSTREAM_TYPE_RENDERER) != AUDIOSTREAM_SUCCESS || builder == nullptr) {
         OH_LOG_ERROR(LOG_APP, "audio builder create failed");
-        releaseLocked();
+        opus_decoder_destroy(decoder);
         return -3;
     }
 
@@ -61,32 +68,58 @@ int AudioPlayer::start(int sampleRate, int channels) {
     callbacks.OH_AudioRenderer_OnWriteData = AudioPlayer::OnWriteData;
     OH_AudioStreamBuilder_SetRendererCallback(builder, callbacks, this);
 
-    OH_AudioStream_Result result = OH_AudioStreamBuilder_GenerateRenderer(builder, &renderer_);
+    OH_AudioRenderer* renderer = nullptr;
+    OH_AudioStream_Result result = OH_AudioStreamBuilder_GenerateRenderer(builder, &renderer);
     OH_AudioStreamBuilder_Destroy(builder);
-    if (result != AUDIOSTREAM_SUCCESS || renderer_ == nullptr) {
+    if (result != AUDIOSTREAM_SUCCESS || renderer == nullptr) {
         OH_LOG_ERROR(LOG_APP, "audio renderer create failed result=%{public}d", result);
-        renderer_ = nullptr;
-        releaseLocked();
+        if (renderer != nullptr) {
+            OH_AudioRenderer_Release(renderer);
+        }
+        opus_decoder_destroy(decoder);
         return -4;
     }
 
-    result = OH_AudioRenderer_Start(renderer_);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        renderer_ = renderer;
+        decoder_ = decoder;
+        decodeBuffer_.assign(static_cast<size_t>(sampleRate) * static_cast<size_t>(channels), 0);
+        sampleRate_ = sampleRate;
+        channels_ = channels;
+        running_ = true;
+    }
+
+    // Starting the renderer can invoke OnWriteData immediately. Do not hold
+    // mutex_ here because the callback needs it to fill the first buffer.
+    result = OH_AudioRenderer_Start(renderer);
     if (result != AUDIOSTREAM_SUCCESS) {
         OH_LOG_ERROR(LOG_APP, "audio renderer start failed result=%{public}d", result);
-        releaseLocked();
+        OH_AudioRenderer* failedRenderer = nullptr;
+        OpusDecoder* failedDecoder = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (renderer_ == renderer) {
+                detachLocked(failedRenderer, failedDecoder);
+            }
+        }
+        releaseDetached(failedRenderer, failedDecoder);
         return -5;
     }
 
-    sampleRate_ = sampleRate;
-    channels_ = channels;
-    running_ = true;
     OH_LOG_INFO(LOG_APP, "audio renderer started sampleRate=%{public}d channels=%{public}d", sampleRate, channels);
     return 0;
 }
 
 void AudioPlayer::stop() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    releaseLocked();
+    std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+    OH_AudioRenderer* renderer = nullptr;
+    OpusDecoder* decoder = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        detachLocked(renderer, decoder);
+    }
+    releaseDetached(renderer, decoder);
 }
 
 void AudioPlayer::pushOpusFrame(const uint8_t* data, int length) {
@@ -146,20 +179,25 @@ int32_t AudioPlayer::fillBuffer(void* buffer, int32_t length) {
     return length;
 }
 
-void AudioPlayer::releaseLocked() {
+void AudioPlayer::detachLocked(OH_AudioRenderer*& renderer, OpusDecoder*& decoder) {
     running_ = false;
     queue_.clear();
     sampleRate_ = 0;
     channels_ = 0;
     decodeBuffer_.clear();
-    if (decoder_ != nullptr) {
-        opus_decoder_destroy(decoder_);
-        decoder_ = nullptr;
+    renderer = renderer_;
+    renderer_ = nullptr;
+    decoder = decoder_;
+    decoder_ = nullptr;
+}
+
+void AudioPlayer::releaseDetached(OH_AudioRenderer* renderer, OpusDecoder* decoder) {
+    if (renderer != nullptr) {
+        OH_AudioRenderer_Stop(renderer);
+        OH_AudioRenderer_Release(renderer);
     }
-    if (renderer_ != nullptr) {
-        OH_AudioRenderer_Stop(renderer_);
-        OH_AudioRenderer_Release(renderer_);
-        renderer_ = nullptr;
+    if (decoder != nullptr) {
+        opus_decoder_destroy(decoder);
     }
 }
 

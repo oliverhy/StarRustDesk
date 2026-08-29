@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
@@ -6,14 +7,14 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hbb_common::config::{CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT, RS_PUB_KEY};
 use hbb_common::fs::{self, DataSource, JobType, TransferJob};
 use hbb_common::message_proto::{
     file_action, file_response, file_transfer_send_confirm_request, key_event, login_response,
     message, misc, supported_decoding, video_frame, AudioFormat, Clipboard, ClipboardFormat,
-    Auth2FA, CodecAbility, ControlKey, EncodedVideoFrames, FileAction, FileTransfer,
+    Auth2FA, CodecAbility, ControlKey, CursorData, EncodedVideoFrames, FileAction, FileTransfer,
     FileTransferSendConfirmRequest, Hash, ImageQuality, KeyEvent, IdPk, KeyboardMode, LoginRequest,
     Message as PeerMessage,
     Misc, MouseEvent, ReadDir,
@@ -35,8 +36,9 @@ use hbb_common::uuid::Uuid;
 use hbb_common::{AddrMangle, Stream};
 use protobuf::{Enum, Message};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc as tokio_mpsc;
 
-type FrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32);
+type FrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32, i32, i64);
 type EventCallback = extern "C" fn(*const c_char);
 type AudioStartCallback = extern "C" fn(i32, i32) -> i32;
 type AudioStopCallback = extern "C" fn();
@@ -51,6 +53,7 @@ static AUDIO_FRAME_CALLBACK: Mutex<Option<AudioFrameCallback>> = Mutex::new(None
 static PASSWORD_HASH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static CURRENT_PEER_ID: Mutex<String> = Mutex::new(String::new());
 static CURRENT_CLIENT_HWID: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static CURRENT_CLIENT_ID: Mutex<String> = Mutex::new(String::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
 static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32, bool)>> = Mutex::new(Vec::new());
@@ -58,20 +61,38 @@ static REMOTE_CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_VALID: AtomicBool = AtomicBool::new(false);
+static REMOTE_CURSOR_IMAGES: Mutex<BTreeMap<u64, RemoteCursorImage>> =
+    Mutex::new(BTreeMap::new());
+static REMOTE_CURSOR_IMAGE_ID: AtomicU64 = AtomicU64::new(0);
+static REMOTE_CURSOR_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static REMOTE_CURSOR_IMAGE_VALID: AtomicBool = AtomicBool::new(false);
 static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static REMOTE_DIRECTORY_RESULT: Mutex<String> = Mutex::new(String::new());
 static FILE_TRANSFER_STATUS: Mutex<String> = Mutex::new(String::new());
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static PEER_MESSAGE_SENDER: Mutex<Option<Sender<QueuedPeerCommand>>> = Mutex::new(None);
+static PEER_MESSAGE_SENDER: Mutex<Option<(u64, tokio_mpsc::UnboundedSender<QueuedPeerCommand>)>> = Mutex::new(None);
+static PEER_TASK_CONTROL: Mutex<Option<PeerTaskControl>> = Mutex::new(None);
 static FILE_MESSAGE_SENDER: Mutex<Option<Sender<QueuedPeerCommand>>> = Mutex::new(None);
 static CURRENT_CONNECTION_CONFIG: Mutex<Option<ConnectionConfig>> = Mutex::new(None);
 static SESSION_ID: AtomicU64 = AtomicU64::new(0);
+static PROTOCOL_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+// Conservative defaults keep older native shells safe until they report the
+// decoders that can actually be created on the current device.
+static H264_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(true);
+static VP9_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static VP8_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static AV1_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static H265_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
+// The HarmonyOS client draws a low-latency local cursor by default. Ask the
+// controlled peer to embed its cursor only when that local overlay is disabled,
+// otherwise the delayed video cursor and local cursor are both visible.
+static SHOW_REMOTE_CURSOR: AtomicBool = AtomicBool::new(true);
 
 const DIRECT_CONNECT_TIMEOUT: u64 = 6_000;
 const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 1_000;
@@ -92,6 +113,26 @@ enum QueuedPeerCommand {
         job: TransferJob,
         receive: PeerMessage,
     },
+    Close {
+        session_id: u64,
+        completed: Sender<()>,
+    },
+}
+
+struct PeerTaskControl {
+    session_id: u64,
+    abort_handle: tokio::task::AbortHandle,
+    completed: mpsc::Receiver<()>,
+}
+
+struct PeerTaskCompletion(Option<Sender<()>>);
+
+impl Drop for PeerTaskCompletion {
+    fn drop(&mut self) {
+        if let Some(completed) = self.0.take() {
+            let _ = completed.send(());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +143,7 @@ struct ConnectionConfig {
     relay_override: String,
     key: String,
     client_hwid: Vec<u8>,
+    client_id: String,
 }
 
 #[derive(serde::Serialize)]
@@ -136,8 +178,24 @@ static PERFORMANCE_CONFIG: Mutex<PerformanceConfig> = Mutex::new(PerformanceConf
     quality: ImageQuality::Low,
 });
 
+#[derive(Clone)]
+struct RemoteCursorImage {
+    id: u64,
+    hotx: i32,
+    hoty: i32,
+    width: i32,
+    height: i32,
+    colors: Vec<u8>,
+}
+
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
+}
+
+fn new_protocol_session_id() -> u64 {
+    let uuid = Uuid::new_v4().as_u128();
+    let session_id = (uuid as u64) ^ ((uuid >> 64) as u64);
+    if session_id == 0 { 1 } else { session_id }
 }
 
 fn reset_display_state() {
@@ -152,6 +210,12 @@ fn reset_display_state() {
     }
     REMOTE_CURSOR_VALID.store(false, Ordering::SeqCst);
     REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    REMOTE_CURSOR_IMAGE_VALID.store(false, Ordering::SeqCst);
+    REMOTE_CURSOR_IMAGE_ID.store(0, Ordering::SeqCst);
+    REMOTE_CURSOR_IMAGE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut guard) = REMOTE_CURSOR_IMAGES.try_lock() {
+        guard.clear();
+    }
 }
 
 fn clear_connection_for_session(session_id: u64) -> bool {
@@ -169,6 +233,14 @@ fn clear_connection_for_session(session_id: u64) -> bool {
 fn clear_peer_message_sender() {
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.try_lock() {
         *guard = None;
+    }
+}
+
+fn clear_peer_message_sender_for_session(session_id: u64) {
+    if let Ok(mut guard) = PEER_MESSAGE_SENDER.try_lock() {
+        if guard.as_ref().is_some_and(|(stored_session_id, _)| *stored_session_id == session_id) {
+            *guard = None;
+        }
     }
 }
 
@@ -204,6 +276,34 @@ pub extern "C" fn rust_set_audio_callbacks(
 }
 
 #[no_mangle]
+pub extern "C" fn rust_set_video_codec_support(
+    h264_supported: i32,
+    vp9_supported: i32,
+    vp8_supported: i32,
+    av1_supported: i32,
+    h265_supported: i32,
+) {
+    let h264 = h264_supported != 0;
+    let vp9 = vp9_supported != 0;
+    let vp8 = vp8_supported != 0;
+    let av1 = av1_supported != 0;
+    let h265 = h265_supported != 0;
+    H264_DECODER_SUPPORTED.store(h264, Ordering::SeqCst);
+    VP9_DECODER_SUPPORTED.store(vp9, Ordering::SeqCst);
+    VP8_DECODER_SUPPORTED.store(vp8, Ordering::SeqCst);
+    AV1_DECODER_SUPPORTED.store(av1, Ordering::SeqCst);
+    H265_DECODER_SUPPORTED.store(h265, Ordering::SeqCst);
+    emit_event(&format!(
+        "video decoder capabilities h264={} vp9={} vp8={} av1={} h265={}",
+        if h264 { "yes" } else { "no" },
+        if vp9 { "yes" } else { "no" },
+        if vp8 { "yes" } else { "no" },
+        if av1 { "yes" } else { "no" },
+        if h265 { "yes" } else { "no" }
+    ));
+}
+
+#[no_mangle]
 pub extern "C" fn rust_connect(
     peer_id: *const c_char,
     password: *const c_char,
@@ -211,6 +311,7 @@ pub extern "C" fn rust_connect(
     relay_server: *const c_char,
     server_key: *const c_char,
     client_hwid: *const c_char,
+    client_id: *const c_char,
 ) -> i32 {
     if peer_id.is_null() {
         return -1;
@@ -222,6 +323,7 @@ pub extern "C" fn rust_connect(
     };
     emit_event("rust_connect entered");
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    PROTOCOL_SESSION_ID.store(new_protocol_session_id(), Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     reset_display_state();
@@ -232,6 +334,7 @@ pub extern "C" fn rust_connect(
     let relay_override = cstr_to_string(relay_server).unwrap_or_default();
     let key = cstr_to_string(server_key).unwrap_or_default();
     let client_hwid = cstr_to_string(client_hwid).unwrap_or_default().into_bytes();
+    let client_id = cstr_to_string(client_id).unwrap_or_else(|| "harmony-client".to_string());
 
     let Ok(mut password_guard) = PASSWORD_HASH.try_lock() else {
         emit_event("connect failed: credential lock busy");
@@ -250,6 +353,9 @@ pub extern "C" fn rust_connect(
     if let Ok(mut hwid_guard) = CURRENT_CLIENT_HWID.lock() {
         *hwid_guard = client_hwid.clone();
     }
+    if let Ok(mut client_id_guard) = CURRENT_CLIENT_ID.lock() {
+        *client_id_guard = client_id.clone();
+    }
 
     clear_clipboard_state();
 
@@ -262,6 +368,7 @@ pub extern "C" fn rust_connect(
             relay_override: relay_override.clone(),
             key: key.clone(),
             client_hwid,
+            client_id,
         });
     }
     emit_event(&format!("connect start peer={peer} rendezvous={rendezvous_addr} relay_override={relay_override} key_set={}", !key.is_empty()));
@@ -554,7 +661,40 @@ pub extern "C" fn rust_set_performance_preset(preset: *const c_char) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_set_remote_cursor_visible(visible: i32) -> i32 {
+    let visible = visible != 0;
+    SHOW_REMOTE_CURSOR.store(visible, Ordering::SeqCst);
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return 0;
+    }
+
+    let mut misc = Misc::new();
+    misc.set_option(OptionMessage {
+        show_remote_cursor: if visible {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::No
+        }
+        .into(),
+        ..Default::default()
+    });
+    let mut msg = PeerMessage::new();
+    msg.set_misc(misc);
+    let result = queue_peer_message(msg);
+    if result == 0 {
+        emit_event(&format!(
+            "remote cursor visibility updated: {}",
+            if visible { "video" } else { "local-overlay" }
+        ));
+    }
+    result
+}
+
+#[no_mangle]
 pub extern "C" fn rust_disconnect() -> i32 {
+    let closing_session_id = SESSION_ID.load(Ordering::SeqCst);
+    let graceful_close_completed = request_graceful_peer_close(closing_session_id);
+    finish_peer_task(closing_session_id, graceful_close_completed);
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     set_file_transfer_status("idle", 0, 0, "");
     if let Ok(mut sender) = FILE_MESSAGE_SENDER.lock() {
@@ -998,6 +1138,10 @@ async fn send_file_command(
             set_file_transfer_status("transferring", 0, total, "");
             true
         }
+        QueuedPeerCommand::Close { completed, .. } => {
+            let _ = completed.send(());
+            false
+        }
     }
 }
 
@@ -1020,9 +1164,10 @@ async fn send_file_login(
     let mut login = LoginRequest {
         username: config.peer.clone(),
         password: response_password.into(),
-        my_id: "harmony-client".to_string(),
+        my_id: config.client_id.clone(),
         my_name: "StarRustDesk HarmonyOS".to_string(),
         my_platform: "HarmonyOS".to_string(),
+        session_id: PROTOCOL_SESSION_ID.load(Ordering::SeqCst),
         version: "1.2.0".to_string(),
         os_login: MessageField::some(OSLogin::new()),
         hwid: config.client_hwid.clone().into(),
@@ -1078,6 +1223,49 @@ pub extern "C" fn rust_get_remote_cursor_position(
 }
 
 #[no_mangle]
+pub extern "C" fn rust_get_remote_cursor_data(
+    id: *mut u64,
+    hotx: *mut i32,
+    hoty: *mut i32,
+    width: *mut i32,
+    height: *mut i32,
+    sequence: *mut u64,
+    colors: *mut c_uchar,
+    colors_capacity: i32,
+) -> i32 {
+    if !REMOTE_CURSOR_IMAGE_VALID.load(Ordering::SeqCst)
+        || id.is_null()
+        || hotx.is_null()
+        || hoty.is_null()
+        || width.is_null()
+        || height.is_null()
+        || sequence.is_null()
+    {
+        return 0;
+    }
+    let current_id = REMOTE_CURSOR_IMAGE_ID.load(Ordering::SeqCst);
+    let Ok(guard) = REMOTE_CURSOR_IMAGES.lock() else {
+        return 0;
+    };
+    let Some(cursor) = guard.get(&current_id) else {
+        return 0;
+    };
+    let required = cursor.colors.len().min(i32::MAX as usize) as i32;
+    unsafe {
+        *id = cursor.id;
+        *hotx = cursor.hotx;
+        *hoty = cursor.hoty;
+        *width = cursor.width;
+        *height = cursor.height;
+        *sequence = REMOTE_CURSOR_IMAGE_SEQUENCE.load(Ordering::SeqCst);
+        if !colors.is_null() && colors_capacity >= required && required > 0 {
+            std::ptr::copy_nonoverlapping(cursor.colors.as_ptr(), colors, required as usize);
+        }
+    }
+    required
+}
+
+#[no_mangle]
 pub extern "C" fn rust_is_remote_cursor_embedded() -> i32 {
     let current = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
     let index = current.max(0) as usize;
@@ -1108,19 +1296,6 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_refresh_video() -> i32 {
-    let display = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
-    let mut switch_misc = Misc::new();
-    switch_misc.set_switch_display(SwitchDisplay {
-        display,
-        ..Default::default()
-    });
-    let mut switch_msg = PeerMessage::new();
-    switch_msg.set_misc(switch_misc);
-    let switch_result = queue_peer_message(switch_msg);
-    if switch_result != 0 {
-        return switch_result;
-    }
-
     let mut refresh_misc = Misc::new();
     refresh_misc.set_refresh_video(true);
     let mut refresh_msg = PeerMessage::new();
@@ -1129,12 +1304,40 @@ pub extern "C" fn rust_refresh_video() -> i32 {
     if refresh_result != 0 {
         return refresh_result;
     }
+    queue_video_received()
+}
 
-    let mut received_misc = Misc::new();
-    received_misc.set_video_received(true);
-    let mut received_msg = PeerMessage::new();
-    received_msg.set_misc(received_misc);
-    queue_peer_message(received_msg)
+#[no_mangle]
+pub extern "C" fn rust_fallback_video_to_vp9() -> i32 {
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return -1;
+    }
+    if !VP9_DECODER_SUPPORTED.load(Ordering::SeqCst) {
+        emit_event("video fallback skipped: vp9 decoder unavailable");
+        return -3;
+    }
+    let performance = performance_config();
+    let mut option_misc = Misc::new();
+    option_misc.set_option(OptionMessage {
+        image_quality: performance.quality.into(),
+        custom_fps: performance.fps,
+        supported_decoding: MessageField::some(supported_decoding_options(true)),
+        show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::No
+        }
+        .into(),
+        ..Default::default()
+    });
+    let mut option_msg = PeerMessage::new();
+    option_msg.set_misc(option_misc);
+    let option_result = queue_peer_message(option_msg);
+    if option_result != 0 {
+        return option_result;
+    }
+    emit_event("video fallback: requested vp9");
+    rust_refresh_video()
 }
 
 #[no_mangle]
@@ -1593,47 +1796,27 @@ fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (hbb_common::bytes::Bytes, 
 }
 
 fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
-    let (tx, rx) = mpsc::channel::<QueuedPeerCommand>();
+    let (tx, mut rx) = tokio_mpsc::unbounded_channel::<QueuedPeerCommand>();
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.lock() {
-        *guard = Some(tx);
+        *guard = Some((session_id, tx));
     }
-    thread::spawn(move || {
-        let rt = runtime();
-        rt.block_on(async {
+    let (task_completed, task_completed_receiver) = mpsc::channel();
+    let task = runtime().spawn(async move {
+            let _task_completion = PeerTaskCompletion(Some(task_completed));
             let mut stale = false;
             let mut read_jobs: Vec<TransferJob> = Vec::new();
+            let receive_started_at = Instant::now();
+            let mut received_messages = 0_u64;
+            let mut video_messages = 0_u64;
+            let mut test_delay_messages = 0_u64;
+            let mut misc_messages = 0_u64;
+            let mut last_message_kind = "none";
+            let mut last_message_at = receive_started_at;
+            emit_event(&format!("receive loop started session_id={session_id}"));
             loop {
                 if SESSION_ID.load(Ordering::SeqCst) != session_id {
                     stale = true;
                     break;
-                }
-                while let Ok(command) = rx.try_recv() {
-                    let command_session_id = match &command {
-                        QueuedPeerCommand::Message { session_id, .. }
-                        | QueuedPeerCommand::StartUpload { session_id, .. } => *session_id,
-                    };
-                    if SESSION_ID.load(Ordering::SeqCst) != command_session_id {
-                        emit_event("skip stale peer command");
-                        continue;
-                    }
-                    match command {
-                        QueuedPeerCommand::Message { message, .. } => {
-                            if let Err(e) = stream.send(&message).await {
-                                emit_event(&format!("peer message send failed: {e}"));
-                                mark_connection_lost(command_session_id, &e.to_string());
-                                return;
-                            }
-                        }
-                        QueuedPeerCommand::StartUpload { job, receive, .. } => {
-                            read_jobs.clear();
-                            if let Err(e) = stream.send(&receive).await {
-                                set_file_transfer_status("failed", 0, job.total_size(), &e.to_string());
-                                continue;
-                            }
-                            read_jobs.push(job);
-                            set_file_transfer_status("transferring", 0, read_jobs[0].total_size(), "");
-                        }
-                    }
                 }
                 let had_upload = !read_jobs.is_empty();
                 if had_upload {
@@ -1647,49 +1830,183 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                         set_file_transfer_status("completed", total, total, "");
                     }
                 }
-                let bytes = stream.next_timeout(20).await;
-                if SESSION_ID.load(Ordering::SeqCst) != session_id {
-                    stale = true;
-                    break;
-                }
-
-                match bytes {
-                    Some(Ok(bytes)) => handle_peer_bytes(&bytes, &mut read_jobs, &mut stream).await,
-                    Some(Err(e)) => {
-                        emit_event(&format!("receive loop error: {e}"));
-                        break;
+                let keep_running = tokio::select! {
+                    command = rx.recv() => {
+                        let Some(command) = command else {
+                            emit_event("peer command channel closed");
+                            break;
+                        };
+                        let command_session_id = match &command {
+                            QueuedPeerCommand::Message { session_id, .. }
+                            | QueuedPeerCommand::StartUpload { session_id, .. }
+                            | QueuedPeerCommand::Close { session_id, .. } => *session_id,
+                        };
+                        if SESSION_ID.load(Ordering::SeqCst) != command_session_id {
+                            emit_event("skip stale peer command");
+                            true
+                        } else {
+                            match command {
+                                QueuedPeerCommand::Message { message, .. } => {
+                                    if let Err(e) = stream.send(&message).await {
+                                        emit_event(&format!("peer message send failed: {e}"));
+                                        mark_connection_lost(command_session_id, &e.to_string());
+                                        return;
+                                    }
+                                    true
+                                }
+                                QueuedPeerCommand::StartUpload { job, receive, .. } => {
+                                    read_jobs.clear();
+                                    if let Err(e) = stream.send(&receive).await {
+                                        set_file_transfer_status("failed", 0, job.total_size(), &e.to_string());
+                                    } else {
+                                        read_jobs.push(job);
+                                        set_file_transfer_status("transferring", 0, read_jobs[0].total_size(), "");
+                                    }
+                                    true
+                                }
+                                QueuedPeerCommand::Close { completed, .. } => {
+                                    let mut misc = Misc::new();
+                                    misc.set_close_reason(String::new());
+                                    let mut message = PeerMessage::new();
+                                    message.set_misc(misc);
+                                    let result = stream.send(&message).await;
+                                    if let Err(error) = result {
+                                        emit_event(&format!("close reason send failed: {error}"));
+                                    } else {
+                                        emit_event("close reason sent");
+                                        // EOF/reset is the observable point at which the host has
+                                        // completed old video-subscriber cleanup. The deadline is
+                                        // only a safety fallback for non-compliant peers.
+                                        let deadline = Instant::now() + Duration::from_millis(1200);
+                                        loop {
+                                            if Instant::now() >= deadline {
+                                                emit_event("close wait: peer close timeout");
+                                                break;
+                                            }
+                                            match hbb_common::timeout(20, stream.next()).await {
+                                                Ok(None) => {
+                                                    emit_event("close wait: peer eof observed");
+                                                    break;
+                                                }
+                                                Ok(Some(Err(_))) => {
+                                                    emit_event("close wait: peer close observed");
+                                                    break;
+                                                }
+                                                Ok(Some(Ok(_))) | Err(_) => continue,
+                                            }
+                                        }
+                                    }
+                                    let _ = completed.send(());
+                                    return;
+                                }
+                            }
+                        }
                     }
-                    None => continue,
+                    bytes = stream.next() => {
+                        match bytes {
+                            Some(Ok(bytes)) => {
+                                let message_kind =
+                                    handle_peer_bytes(&bytes, &mut read_jobs, &mut stream).await;
+                                received_messages += 1;
+                                if message_kind == "video_frame" {
+                                    video_messages += 1;
+                                } else if message_kind == "test_delay" {
+                                    test_delay_messages += 1;
+                                } else if message_kind.starts_with("misc_") {
+                                    misc_messages += 1;
+                                }
+                                last_message_kind = message_kind;
+                                last_message_at = Instant::now();
+                                true
+                            }
+                            Some(Err(e)) => {
+                                emit_event(&format!(
+                                    "receive loop error session_id={} elapsed_ms={} received={} video={} test_delay={} misc={} last_message={} last_message_age_ms={} route={} error={}",
+                                    session_id,
+                                    receive_started_at.elapsed().as_millis(),
+                                    received_messages,
+                                    video_messages,
+                                    test_delay_messages,
+                                    misc_messages,
+                                    last_message_kind,
+                                    last_message_at.elapsed().as_millis(),
+                                    CONNECTION_ROUTE.load(Ordering::SeqCst),
+                                    sanitize_remote_value(e.to_string(), 256),
+                                ));
+                                false
+                            }
+                            None => {
+                                emit_event(&format!(
+                                    "receive loop peer eof session_id={} elapsed_ms={} received={} video={} test_delay={} misc={} last_message={} last_message_age_ms={} route={} active={}",
+                                    session_id,
+                                    receive_started_at.elapsed().as_millis(),
+                                    received_messages,
+                                    video_messages,
+                                    test_delay_messages,
+                                    misc_messages,
+                                    last_message_kind,
+                                    last_message_at.elapsed().as_millis(),
+                                    CONNECTION_ROUTE.load(Ordering::SeqCst),
+                                    CONNECTION_ACTIVE.load(Ordering::SeqCst),
+                                ));
+                                false
+                            }
+                        }
+                    }
+                };
+                if !keep_running {
+                    break;
                 }
             }
             if stale {
                 emit_event("stale receive loop ended");
                 return;
             }
-            emit_event("receive loop ended");
+            emit_event(&format!(
+                "receive loop ended session_id={} elapsed_ms={} received={} video={} test_delay={} misc={} last_message={} last_message_age_ms={}",
+                session_id,
+                receive_started_at.elapsed().as_millis(),
+                received_messages,
+                video_messages,
+                test_delay_messages,
+                misc_messages,
+                last_message_kind,
+                last_message_at.elapsed().as_millis(),
+            ));
             if SESSION_ID.load(Ordering::SeqCst) == session_id {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
                 reset_audio_async();
                 reset_display_state();
-                clear_peer_message_sender();
+                clear_peer_message_sender_for_session(session_id);
             }
-        });
     });
+    if let Ok(mut guard) = PEER_TASK_CONTROL.lock() {
+        *guard = Some(PeerTaskControl {
+            session_id,
+            abort_handle: task.abort_handle(),
+            completed: task_completed_receiver,
+        });
+    }
 }
 
-async fn handle_peer_bytes(bytes: &[u8], read_jobs: &mut Vec<TransferJob>, stream: &mut Stream) {
+async fn handle_peer_bytes(
+    bytes: &[u8],
+    read_jobs: &mut Vec<TransferJob>,
+    stream: &mut Stream,
+) -> &'static str {
     let msg = match PeerMessage::parse_from_bytes(bytes) {
         Ok(m) => m,
         Err(e) => {
             emit_event(&format!("peer message parse failed len={} err={e}", bytes.len()));
-            return;
+            return "parse_error";
         }
     };
     match msg.union {
         Some(message::Union::Hash(hash)) => {
             emit_event("peer message: Hash");
             send_login(hash).await;
+            "hash"
         }
         Some(message::Union::LoginResponse(resp)) => {
             emit_event("peer message: LoginResponse");
@@ -1735,34 +2052,127 @@ async fn handle_peer_bytes(bytes: &[u8], read_jobs: &mut Vec<TransferJob>, strea
                     send_performance_options(true).await;
                 }
             }
+            "login_response"
         }
         Some(message::Union::VideoFrame(frame)) => {
             forward_video_frame(frame);
+            "video_frame"
         }
         Some(message::Union::TestDelay(delay)) => {
-            send_test_delay_response(delay).await;
+            send_test_delay_response(delay, stream).await;
+            "test_delay"
         }
         Some(message::Union::Clipboard(clipboard)) => {
             handle_remote_clipboards(vec![clipboard]);
+            "clipboard"
         }
         Some(message::Union::MultiClipboards(multi_clipboards)) => {
             handle_remote_clipboards(multi_clipboards.clipboards);
+            "multi_clipboards"
         }
         Some(message::Union::Misc(misc_msg)) => handle_misc_message(misc_msg),
-        Some(message::Union::AudioFrame(frame)) => handle_audio_frame(&frame.data),
+        Some(message::Union::AudioFrame(frame)) => {
+            handle_audio_frame(&frame.data);
+            "audio_frame"
+        }
         Some(message::Union::FileResponse(response)) => {
             handle_file_response(response, read_jobs, stream).await;
+            "file_response"
         }
-        Some(message::Union::CursorData(_)) => emit_event("peer message: CursorData"),
+        Some(message::Union::CursorData(cursor)) => {
+            handle_remote_cursor_data(cursor);
+            "cursor_data"
+        }
         Some(message::Union::CursorPosition(position)) => {
             REMOTE_CURSOR_X.store(position.x, Ordering::SeqCst);
             REMOTE_CURSOR_Y.store(position.y, Ordering::SeqCst);
             REMOTE_CURSOR_VALID.store(true, Ordering::SeqCst);
             REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+            "cursor_position"
         }
-        Some(message::Union::CursorId(_)) => emit_event("peer message: CursorId"),
-        Some(_) => {}
-        None => emit_event("peer message: empty"),
+        Some(message::Union::CursorId(id)) => {
+            select_remote_cursor_image(id);
+            "cursor_id"
+        }
+        Some(_) => {
+            emit_event("peer message: unhandled type");
+            "unhandled"
+        }
+        None => {
+            emit_event("peer message: empty");
+            "empty"
+        }
+    }
+}
+
+fn handle_remote_cursor_data(cursor: CursorData) {
+    if cursor.width <= 0 || cursor.height <= 0 || cursor.width > 512 || cursor.height > 512 {
+        emit_event(&format!(
+            "remote cursor rejected id={} size={}x{} reason=invalid_dimensions",
+            cursor.id, cursor.width, cursor.height
+        ));
+        return;
+    }
+    let Some(expected) = (cursor.width as usize)
+        .checked_mul(cursor.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        emit_event("remote cursor rejected reason=size_overflow");
+        return;
+    };
+    let colors = hbb_common::compress::decompress(&cursor.colors);
+    if colors.len() != expected {
+        emit_event(&format!(
+            "remote cursor rejected id={} size={}x{} rgba={} expected={}",
+            cursor.id,
+            cursor.width,
+            cursor.height,
+            colors.len(),
+            expected
+        ));
+        return;
+    }
+    let image = RemoteCursorImage {
+        id: cursor.id,
+        hotx: cursor.hotx.clamp(0, cursor.width.saturating_sub(1)),
+        hoty: cursor.hoty.clamp(0, cursor.height.saturating_sub(1)),
+        width: cursor.width,
+        height: cursor.height,
+        colors,
+    };
+    if let Ok(mut guard) = REMOTE_CURSOR_IMAGES.lock() {
+        guard.insert(image.id, image.clone());
+        while guard.len() > 64 {
+            if let Some(stale_id) = guard.keys().copied().find(|id| *id != image.id) {
+                guard.remove(&stale_id);
+            } else {
+                break;
+            }
+        }
+    } else {
+        emit_event("remote cursor cache unavailable");
+        return;
+    }
+    REMOTE_CURSOR_IMAGE_ID.store(image.id, Ordering::SeqCst);
+    REMOTE_CURSOR_IMAGE_VALID.store(true, Ordering::SeqCst);
+    REMOTE_CURSOR_IMAGE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    emit_event(&format!(
+        "remote cursor data id={} size={}x{} hotspot={},{}",
+        image.id, image.width, image.height, image.hotx, image.hoty
+    ));
+}
+
+fn select_remote_cursor_image(id: u64) {
+    let found = REMOTE_CURSOR_IMAGES
+        .lock()
+        .map(|guard| guard.contains_key(&id))
+        .unwrap_or(false);
+    if found {
+        REMOTE_CURSOR_IMAGE_ID.store(id, Ordering::SeqCst);
+        REMOTE_CURSOR_IMAGE_VALID.store(true, Ordering::SeqCst);
+        REMOTE_CURSOR_IMAGE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    } else {
+        emit_event(&format!("remote cursor id={} not cached", id));
     }
 }
 
@@ -1858,9 +2268,12 @@ fn set_file_transfer_status(state: &str, transferred: u64, total: u64, error: &s
     }
 }
 
-fn handle_misc_message(misc_msg: Misc) {
+fn handle_misc_message(misc_msg: Misc) -> &'static str {
     match misc_msg.union {
-        Some(misc::Union::AudioFormat(format)) => handle_audio_format(format),
+        Some(misc::Union::AudioFormat(format)) => {
+            handle_audio_format(format);
+            "misc_audio_format"
+        }
         Some(misc::Union::SwitchDisplay(display)) => {
             let index = display.display.max(0) as usize;
             if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
@@ -1884,8 +2297,24 @@ fn handle_misc_message(misc_msg: Misc) {
                 "switch display received display={} size={}x{} cursor_embedded={}",
                 display.display, display.width, display.height, display.cursor_embedded
             ));
+            "misc_switch_display"
         }
-        _ => emit_event("peer message: Misc"),
+        Some(misc::Union::CloseReason(reason)) => {
+            let reason = sanitize_remote_value(reason, 256);
+            emit_event(&format!(
+                "peer close reason received value={}",
+                if reason.is_empty() { "empty" } else { &reason }
+            ));
+            "misc_close_reason"
+        }
+        Some(_) => {
+            emit_event("peer message: Misc kind=other");
+            "misc_other"
+        }
+        None => {
+            emit_event("peer message: Misc kind=empty");
+            "misc_empty"
+        }
     }
 }
 
@@ -1990,6 +2419,10 @@ async fn send_login(hash: Hash) {
         Ok(guard) => guard.clone(),
         Err(_) => Vec::new(),
     };
+    let client_id = match CURRENT_CLIENT_ID.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => "harmony-client".to_string(),
+    };
     let mut response_password = Vec::new();
     if !password.is_empty() {
         let mut first = Sha256::new();
@@ -2006,29 +2439,24 @@ async fn send_login(hash: Hash) {
     let login = LoginRequest {
         username: peer_id,
         password: response_password.into(),
-        my_id: "harmony-client".to_string(),
+        my_id: client_id,
         my_name: "StarRustDesk HarmonyOS".to_string(),
         my_platform: "HarmonyOS".to_string(),
         option: MessageField::some(OptionMessage {
-            supported_decoding: MessageField::some(SupportedDecoding {
-                ability_vp8: 0,
-                ability_vp9: 0,
-                ability_av1: 0,
-                ability_h264: 1,
-                ability_h265: 0,
-                prefer: supported_decoding::PreferCodec::H264.into(),
-                i444: MessageField::some(CodecAbility {
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
+            supported_decoding: MessageField::some(supported_decoding_options(false)),
             image_quality: performance.quality.into(),
             custom_fps: performance.fps,
             disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
             enable_file_transfer: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
-            show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+            show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
+                hbb_common::message_proto::option_message::BoolOption::Yes
+            } else {
+                hbb_common::message_proto::option_message::BoolOption::No
+            }
+            .into(),
             ..Default::default()
         }),
+        session_id: PROTOCOL_SESSION_ID.load(Ordering::SeqCst),
         version: "1.2.0".to_string(),
         os_login: MessageField::some(OSLogin::new()),
         hwid: client_hwid.into(),
@@ -2049,26 +2477,30 @@ async fn send_performance_options(refresh_video: bool) {
     misc.set_option(OptionMessage {
         image_quality: performance.quality.into(),
         custom_fps: performance.fps,
-        supported_decoding: MessageField::some(SupportedDecoding {
-            ability_vp8: 0,
-            ability_vp9: 0,
-            ability_av1: 0,
-            ability_h264: 1,
-            ability_h265: 0,
-            prefer: supported_decoding::PreferCodec::H264.into(),
-            i444: MessageField::some(CodecAbility {
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
+        supported_decoding: MessageField::some(supported_decoding_options(false)),
         disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
-        show_remote_cursor: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
+        show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::No
+        }
+        .into(),
         ..Default::default()
     });
     let mut msg = PeerMessage::new();
     msg.set_misc(misc);
     match send_peer_message_async(msg).await {
-        Ok(_) => emit_event(&format!("performance options sent fps={} quality={} codec=h264", performance.fps, performance.quality.value())),
+        Ok(_) => emit_event(&format!(
+            "performance options sent fps={} quality={} codec={} h264={} vp9={} vp8={} av1={} h265={}",
+            performance.fps,
+            performance.quality.value(),
+            preferred_codec_name(false),
+            H264_DECODER_SUPPORTED.load(Ordering::SeqCst),
+            VP9_DECODER_SUPPORTED.load(Ordering::SeqCst),
+            VP8_DECODER_SUPPORTED.load(Ordering::SeqCst),
+            AV1_DECODER_SUPPORTED.load(Ordering::SeqCst),
+            H265_DECODER_SUPPORTED.load(Ordering::SeqCst)
+        )),
         Err(e) => emit_event(&format!("performance options send failed: {e}")),
     }
 
@@ -2083,6 +2515,49 @@ async fn send_performance_options(refresh_video: bool) {
             Ok(_) => emit_event("refresh video sent"),
             Err(e) => emit_event(&format!("refresh video send failed: {e}")),
         }
+        let mut received_misc = Misc::new();
+        received_misc.set_video_received(true);
+        let mut received_msg = PeerMessage::new();
+        received_msg.set_misc(received_misc);
+        match send_peer_message_async(received_msg).await {
+            Ok(_) => emit_event("initial video received ack sent"),
+            Err(e) => emit_event(&format!("initial video received ack failed: {e}")),
+        }
+    }
+}
+
+fn supported_decoding_options(prefer_vp9: bool) -> SupportedDecoding {
+    let h264_supported = H264_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let vp9_supported = VP9_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let vp8_supported = VP8_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let av1_supported = AV1_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let h265_supported = H265_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let use_vp9 = prefer_vp9 && vp9_supported || !h264_supported && vp9_supported;
+    SupportedDecoding {
+        ability_vp8: if vp8_supported { 1 } else { 0 },
+        ability_vp9: if vp9_supported { 1 } else { 0 },
+        ability_av1: if av1_supported { 1 } else { 0 },
+        ability_h264: if h264_supported { 1 } else { 0 },
+        ability_h265: if h265_supported { 1 } else { 0 },
+        prefer: if use_vp9 {
+            supported_decoding::PreferCodec::VP9.into()
+        } else {
+            supported_decoding::PreferCodec::H264.into()
+        },
+        i444: MessageField::some(CodecAbility {
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn preferred_codec_name(prefer_vp9: bool) -> &'static str {
+    let h264_supported = H264_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    let vp9_supported = VP9_DECODER_SUPPORTED.load(Ordering::SeqCst);
+    if prefer_vp9 && vp9_supported || !h264_supported && vp9_supported {
+        "vp9"
+    } else {
+        "h264"
     }
 }
 
@@ -2118,64 +2593,94 @@ fn performance_config() -> PerformanceConfig {
         })
 }
 
-async fn send_test_delay_response(delay: TestDelay) {
+async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream) {
+    let should_respond = !delay.from_client;
+    emit_event(&format!(
+        "test delay received time={} from_client={} last_delay={} target_bitrate={} action={}",
+        delay.time,
+        delay.from_client,
+        delay.last_delay,
+        delay.target_bitrate,
+        if should_respond { "respond" } else { "ignore" },
+    ));
+    if !should_respond {
+        send_auto_adjust_fps_if_due().await;
+        return;
+    }
     let mut msg = PeerMessage::new();
     msg.set_test_delay(delay);
-    if let Err(e) = send_peer_message_async(msg).await {
-        emit_event(&format!("test delay response send failed: {e}"));
+    if let Err(e) = stream.send(&msg).await {
+        emit_event(&format!(
+            "test delay response send failed: {}",
+            sanitize_remote_value(e.to_string(), 256)
+        ));
+    } else {
+        emit_event("test delay response sent");
     }
     send_auto_adjust_fps_if_due().await;
 }
 
 fn forward_video_frame(frame: VideoFrame) {
-    let (data, codec_tag) = match frame.union {
-        Some(video_frame::Union::Vp9s(frames)) => {
-            (first_encoded_frame(frames), b'V')
-        }
-        Some(video_frame::Union::H264s(frames)) => {
-            (first_encoded_frame(frames), b'H')
-        }
-        Some(video_frame::Union::H265s(frames)) => {
-            (first_encoded_frame(frames), b'5')
-        }
-        Some(video_frame::Union::Vp8s(frames)) => {
-            (first_encoded_frame(frames), b'8')
-        }
-        Some(video_frame::Union::Av1s(frames)) => {
-            (first_encoded_frame(frames), b'A')
-        }
+    let forwarded = match frame.union {
+        Some(video_frame::Union::Vp9s(frames)) => forward_encoded_frames(frames, b'V'),
+        Some(video_frame::Union::H264s(frames)) => forward_encoded_frames(frames, b'H'),
+        Some(video_frame::Union::H265s(frames)) => forward_encoded_frames(frames, b'5'),
+        Some(video_frame::Union::Vp8s(frames)) => forward_encoded_frames(frames, b'8'),
+        Some(video_frame::Union::Av1s(frames)) => forward_encoded_frames(frames, b'A'),
         Some(video_frame::Union::Rgb(_)) => {
             emit_event("video frame: rgb metadata without raw payload");
-            (Vec::new(), b'R')
+            0
         }
         Some(video_frame::Union::Yuv(_)) => {
             emit_event("video frame: yuv metadata without raw payload");
-            (Vec::new(), b'Y')
+            0
         }
         Some(_) => {
             emit_event("video frame: unknown union");
-            (Vec::new(), b'?')
+            0
         }
         None => {
             emit_event("video frame: empty union");
-            (Vec::new(), b'?')
+            0
         }
     };
-    if data.is_empty() {
+    if forwarded == 0 {
         emit_event("video frame: empty data");
         return;
     }
-    let mut tagged = Vec::with_capacity(data.len() + 5);
-    tagged.extend_from_slice(b"SRD0");
-    tagged.push(codec_tag);
-    tagged.extend_from_slice(&data);
-    if let Ok(guard) = FRAME_CALLBACK.lock() {
-        if let Some(cb) = *guard {
-            let (_, _, width, height) = current_display_rect();
-            cb(tagged.as_ptr(), tagged.len() as i32, width, height);
-        }
-    }
     queue_video_received_if_due();
+}
+
+fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8) -> usize {
+    let frame_count = frames.frames.len();
+    if frame_count > 1 {
+        emit_event(&format!("video frame: batch count={frame_count}"));
+    }
+    let callback = FRAME_CALLBACK.lock().ok().and_then(|guard| *guard);
+    let Some(cb) = callback else {
+        return 0;
+    };
+    let (_, _, width, height) = current_display_rect();
+    let mut forwarded = 0;
+    for frame in frames.frames {
+        if frame.data.is_empty() {
+            continue;
+        }
+        let mut tagged = Vec::with_capacity(frame.data.len() + 5);
+        tagged.extend_from_slice(b"SRD0");
+        tagged.push(codec_tag);
+        tagged.extend_from_slice(&frame.data);
+        cb(
+            tagged.as_ptr(),
+            tagged.len() as i32,
+            width,
+            height,
+            i32::from(frame.key),
+            frame.pts,
+        );
+        forwarded += 1;
+    }
+    forwarded
 }
 
 fn queue_video_received_if_due() {
@@ -2185,11 +2690,15 @@ fn queue_video_received_if_due() {
         return;
     }
     LAST_VIDEO_RECEIVED_MS.store(now, Ordering::Relaxed);
+    let _ = queue_video_received();
+}
+
+fn queue_video_received() -> i32 {
     let mut misc = Misc::new();
     misc.set_video_received(true);
     let mut msg = PeerMessage::new();
     msg.set_misc(misc);
-    let _ = queue_peer_message(msg);
+    queue_peer_message(msg)
 }
 
 fn current_display_rect() -> (i32, i32, i32, i32) {
@@ -2207,15 +2716,6 @@ fn current_display_origin() -> (i32, i32) {
     (x, y)
 }
 
-fn first_encoded_frame(frames: EncodedVideoFrames) -> Vec<u8> {
-    frames
-        .frames
-        .into_iter()
-        .next()
-        .map(|f| f.data.to_vec())
-        .unwrap_or_default()
-}
-
 fn queue_peer_message(msg: PeerMessage) -> i32 {
     if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         emit_event("peer message send failed: not connected");
@@ -2225,6 +2725,68 @@ fn queue_peer_message(msg: PeerMessage) -> i32 {
         emit_event(&format!("peer message send failed: {e}"));
         -2
     })
+}
+
+fn request_graceful_peer_close(session_id: u64) -> bool {
+    let sender = PEER_MESSAGE_SENDER
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|(stored_session_id, _)| *stored_session_id == session_id)
+                .map(|(_, sender)| sender.clone())
+        });
+    let Some(sender) = sender else {
+        emit_event("close request: active sender unavailable");
+        return false;
+    };
+    let (completed, receiver) = mpsc::channel();
+    if let Err(error) = sender
+        .send(QueuedPeerCommand::Close {
+            session_id,
+            completed,
+        })
+    {
+        emit_event(&format!("close request: command send failed: {error}"));
+        return false;
+    }
+    if receiver.recv_timeout(Duration::from_millis(250)).is_err() {
+        emit_event("close request: completion timeout");
+        return false;
+    }
+    true
+}
+
+fn finish_peer_task(session_id: u64, graceful_close_completed: bool) {
+    let control = PEER_TASK_CONTROL.lock().ok().and_then(|mut guard| {
+        if guard
+            .as_ref()
+            .is_some_and(|control| control.session_id == session_id)
+        {
+            guard.take()
+        } else {
+            None
+        }
+    });
+    let Some(control) = control else {
+        return;
+    };
+    if !graceful_close_completed {
+        emit_event("peer task abort: unresponsive session");
+        control.abort_handle.abort();
+    }
+    if control
+        .completed
+        .recv_timeout(Duration::from_millis(500))
+        .is_err()
+    {
+        emit_event("peer task abort: completion timeout");
+        control.abort_handle.abort();
+        let _ = control
+            .completed
+            .recv_timeout(Duration::from_millis(250));
+    }
 }
 
 fn mark_connection_lost(session_id: u64, reason: &str) {
@@ -2239,7 +2801,7 @@ fn mark_connection_lost(session_id: u64, reason: &str) {
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     reset_audio_async();
     reset_display_state();
-    clear_peer_message_sender();
+    clear_peer_message_sender_for_session(session_id);
     if let Ok(mut guard) = CONNECTION.try_lock() {
         *guard = None;
     }
@@ -2254,7 +2816,9 @@ fn enqueue_peer_message(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Erro
     let sender = PEER_MESSAGE_SENDER
         .lock()
         .map_err(|_| hbb_common::anyhow::anyhow!("sender lock poisoned"))?
-        .clone()
+        .as_ref()
+        .filter(|(stored_session_id, _)| *stored_session_id == session_id)
+        .map(|(_, sender)| sender.clone())
         .ok_or_else(|| hbb_common::anyhow::anyhow!("not connected"))?;
     sender
         .send(QueuedPeerCommand::Message {

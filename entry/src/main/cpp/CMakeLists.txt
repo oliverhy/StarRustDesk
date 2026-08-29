@@ -16,13 +16,38 @@ set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/opus EXCLUDE_FROM_ALL)
 target_compile_options(opus PRIVATE -O2)
 
+add_library(vpx STATIC IMPORTED)
+add_library(yuv STATIC IMPORTED)
+add_library(aom STATIC IMPORTED)
+if(CMAKE_OHOS_ARCH_ABI STREQUAL "x86_64")
+    set_target_properties(vpx PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/libvpx/libs/x86_64/libvpx.a")
+    set_target_properties(yuv PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/libyuv/libs/x86_64/libyuv.a")
+    set_target_properties(aom PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/aom/libs/x86_64/libaom.a")
+else()
+    set_target_properties(vpx PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/libvpx/libs/arm64-v8a/libvpx.a")
+    set_target_properties(yuv PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/libyuv/libs/arm64-v8a/libyuv.a")
+    set_target_properties(aom PROPERTIES IMPORTED_LOCATION
+        "${NATIVERENDER_ROOT_PATH}/third_party/aom/libs/arm64-v8a/libaom.a")
+endif()
+
 add_library(entry SHARED napi_init.cpp
                        core/config.cpp
+                       core/diagnostic_log.cpp
                        core/audio_player.cpp
                        core/video_render.cpp
+                       core/video_decoder_selector.cpp
                        core/xcomponent_render.cpp
                        core/h264_decoder.cpp
                        core/vp9_decoder.cpp
+                       core/system_video_decoder.cpp
+                       core/software_vp8_decoder.cpp
+                       core/software_vp9_decoder.cpp
+                       core/software_av1_decoder.cpp
                        crypto/encrypted_stream.cpp
                        crypto/aead.cpp
                        crypto/chacha20.cpp
@@ -32,9 +57,12 @@ target_include_directories(entry PRIVATE
                     ${NATIVERENDER_ROOT_PATH}
                     ${NATIVERENDER_ROOT_PATH}/include
                     ${NATIVERENDER_ROOT_PATH}/core
-                    ${NATIVERENDER_ROOT_PATH}/crypto)
+                    ${NATIVERENDER_ROOT_PATH}/crypto
+                    ${NATIVERENDER_ROOT_PATH}/third_party/libvpx/include
+                    ${NATIVERENDER_ROOT_PATH}/third_party/aom/include
+                    ${NATIVERENDER_ROOT_PATH}/third_party/libyuv/include)
 
-set(NATIVE_LIBS libace_napi.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec -lohaudio Opus::opus)
+set(NATIVE_LIBS libace_napi.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec -lohaudio Opus::opus vpx aom yuv)
 
 target_link_libraries(entry PUBLIC ${NATIVE_LIBS})
 
