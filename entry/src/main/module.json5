@@ -22,6 +22,9 @@
         "startWindowIcon": "$media:starrustdesk_start_icon",
         "startWindowBackground": "$color:start_window_background",
         "orientation": "auto_rotation",
+        "backgroundModes": [
+          "multiDeviceConnection"
+        ],
         "exported": true,
         "skills": [
           {
@@ -55,6 +58,16 @@
       },
       {
         "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "reason": "$string:permission_background_remote_session_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
       }
     ]
   }

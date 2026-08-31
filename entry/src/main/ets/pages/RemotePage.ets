@@ -5,6 +5,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
+import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
 import { FileTransferStatus, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
@@ -51,6 +52,7 @@ const LOG_DOMAIN: number = 0x0000;
 @Component
 struct RemotePage {
   @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('appForegroundEpoch') @Watch('onAppForegroundEpochChanged') appForegroundEpoch: number = 0;
   @State connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   @State showToolbar: boolean = true;
   @State zoomScale: number = 1.0;
@@ -308,6 +310,7 @@ struct RemotePage {
         this.connectingStartedAt = 0;
       }
       this.connectionStatus = status as ConnectionStatus;
+      RemoteSessionBackgroundTask.syncForConnectionStatus(this.connectionStatus);
       if (status !== this.lastLoggedConnectionStatus) {
         RustDeskNapi.appendDiagnosticLog('connection-ui', `status_changed from=${this.lastLoggedConnectionStatus} to=${status}`)
         this.lastLoggedConnectionStatus = status
@@ -416,6 +419,26 @@ struct RemotePage {
       }
     };
     this.frameTimer = setTimeout(poll, 100);
+  }
+
+  onAppForegroundEpochChanged(): void {
+    const status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus;
+    this.connectionStatus = status;
+    RemoteSessionBackgroundTask.syncForConnectionStatus(status);
+    if (status !== ConnectionStatus.CONNECTED) {
+      return;
+    }
+    RustDeskNapi.appendDiagnosticLog('remote-page', `foreground_resume epoch=${this.appForegroundEpoch}`)
+    this.showRemoteSurface = true;
+    setTimeout(() => {
+      if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
+        return;
+      }
+      this.bindSurfaceIfReady();
+      this.startFramePolling();
+      this.startRemoteCursorPolling();
+      this.startNativeMousePolling();
+    }, 180);
   }
 
   stopFramePolling(): void {

@@ -1,5 +1,6 @@
 import { RustDeskNapi } from './RustDeskNapi'
 import { ConnectionStatus } from '../model/ConnectionModel'
+import { RemoteSessionBackgroundTask } from './RemoteSessionBackgroundTask'
 
 export class ConnectionService {
   static connect(remoteId: string, password: string, performancePreset: string = 'smooth'): ConnectionStatus {
@@ -13,10 +14,13 @@ export class ConnectionService {
     } else {
       result = RustDeskNapi.connect(peerId, password)
     }
-    return result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
+    let status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
+    RemoteSessionBackgroundTask.syncForConnectionStatus(status)
+    return status
   }
 
   static disconnect(): void {
+    RemoteSessionBackgroundTask.stop()
     RustDeskNapi.disconnect()
   }
 

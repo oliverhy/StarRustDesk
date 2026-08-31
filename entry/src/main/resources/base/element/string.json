@@ -99,6 +99,10 @@
     {
       "name": "permission_microphone_reason",
       "value": "Microphone is used for audio communication during remote sessions"
+    },
+    {
+      "name": "permission_background_remote_session_reason",
+      "value": "Keep an active remote desktop session connected when the screen is off or the app is in the background"
     }
   ]
 }

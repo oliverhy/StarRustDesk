@@ -2,6 +2,7 @@ import { router } from '@kit.ArkUI'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { ConnectionService } from '../service/ConnectionService'
+import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
@@ -115,6 +116,7 @@ export struct ConnectionPage {
 
   syncConnectionState(): ConnectionStatus {
     let status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus
+    RemoteSessionBackgroundTask.syncForConnectionStatus(status)
     this.connectionStatusValue = status
     if (status === ConnectionStatus.CONNECTING) {
       this.connectionStatusText = translate('Connecting...')

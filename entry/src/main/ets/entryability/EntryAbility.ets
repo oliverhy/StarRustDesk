@@ -4,11 +4,14 @@ import { window } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { RustDeskNapi } from '../service/RustDeskNapi';
 import { RELEASE_NOTES_BUILD, RELEASE_NOTES_VERSION } from '../widget/ReleaseNotesDialog';
+import { ConnectionStatus } from '../model/ConnectionModel';
+import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    RemoteSessionBackgroundTask.initialize(this.context)
     try {
       const diagnosticLogEnabled: boolean = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
       RustDeskNapi.setDiagnosticLogEnabled(diagnosticLogEnabled)
@@ -28,10 +31,12 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate('isServiceRunning', false);
     AppStorage.setOrCreate('deviceId', '');
     AppStorage.setOrCreate('peerList', '[]');
+    AppStorage.setOrCreate('appForegroundEpoch', 0);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 
   onDestroy(): void {
+    RemoteSessionBackgroundTask.stop()
     RustDeskNapi.appendDiagnosticLog('app', 'ability_destroy')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
@@ -61,11 +66,15 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     this.updateColorMode(this.context.config.colorMode);
+    RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
+    let foregroundEpoch: number = AppStorage.get<number>('appForegroundEpoch') ?? 0
+    AppStorage.set<number>('appForegroundEpoch', foregroundEpoch + 1)
     RustDeskNapi.appendDiagnosticLog('app', 'foreground')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
+    RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
     RustDeskNapi.appendDiagnosticLog('app', 'background')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }
