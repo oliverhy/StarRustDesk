@@ -62,7 +62,7 @@ target_include_directories(entry PRIVATE
                     ${NATIVERENDER_ROOT_PATH}/third_party/aom/include
                     ${NATIVERENDER_ROOT_PATH}/third_party/libyuv/include)
 
-set(NATIVE_LIBS libace_napi.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec -lohaudio Opus::opus vpx aom yuv)
+set(NATIVE_LIBS libace_napi.z.so libace_ndk.z.so -lnative_window -lnative_buffer -lhilog_ndk.z -lnative_media_core -lnative_media_codecbase -lnative_media_vdec -lohaudio Opus::opus vpx aom yuv)
 
 target_link_libraries(entry PUBLIC ${NATIVE_LIBS})
 

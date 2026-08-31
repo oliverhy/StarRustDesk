@@ -438,7 +438,7 @@ export struct SettingsPage {
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Text('1.0.8')
+        Text('1.0.9')
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       }

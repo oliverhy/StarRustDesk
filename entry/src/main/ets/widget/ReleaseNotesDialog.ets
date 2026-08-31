@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.0.8'
-export const RELEASE_NOTES_BUILD: string = '1000815'
+export const RELEASE_NOTES_VERSION: string = '1.0.9'
+export const RELEASE_NOTES_BUILD: string = '1000900'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,17 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.0.9（1000900）· PC 鼠标体验', [
+            '修复 HarmonyOS PC 使用物理鼠标或触控板时，远端左键偶发无响应的问题。',
+            '修复关闭本地鼠标后，指针进入状态栏、工具栏、按钮或弹窗仍保持隐藏的问题。',
+            '隐藏本地指针时继续显示并同步远端真实鼠标，改善缩放和平移后的操作一致性。',
+          ])
+          this.buildSection('1000816 · 边缘跟随与输入', [
+            '新增放大画面后的边缘自动平移，鼠标在边缘短暂停留后视野会平滑跟随。',
+            '加入触发延迟、渐进速度和自动停止保护，降低画面意外移动。',
+            '调整远控工具栏，将“键盘”和“移动画面”按钮位置对调。',
+            '修复 PC 端物理鼠标或触控板偶发丢失左键抬起，导致后续点击失效的问题。',
+          ])
           this.buildSection('1000815 · 远端鼠标同步', [
             '显示远端真实鼠标样式，并修复缩放、平移和多显示器场景下的坐标漂移。',
             '分离本机鼠标指针开关与远端鼠标显示，关闭本机指针后远端鼠标仍然可见。',

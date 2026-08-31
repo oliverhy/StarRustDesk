@@ -41,6 +41,15 @@ export interface RemoteCursorData {
   colors?: ArrayBuffer
 }
 
+export interface NativeMouseInputEvent {
+  x: number
+  y: number
+  action: number
+  button: number
+  hover: number
+  timestamp: number
+}
+
 export interface RemoteDirectoryEntry {
   name: string
   entryType: number
@@ -121,6 +130,10 @@ export class RustDeskNapi {
 
   static sendMouseWheel(deltaX: number, deltaY: number): number {
     return (rustdeskNapi as ESObject).sendMouseWheel(deltaX, deltaY)
+  }
+
+  static takeNativeMouseEvents(): NativeMouseInputEvent[] {
+    return (rustdeskNapi as ESObject).takeNativeMouseEvents() as NativeMouseInputEvent[]
   }
 
   static getDisplayCount(): number {

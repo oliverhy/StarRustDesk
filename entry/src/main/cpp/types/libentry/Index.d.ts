@@ -36,6 +36,15 @@ export interface RemoteCursorData {
   colors?: ArrayBuffer;
 }
 
+export interface NativeMouseInputEvent {
+  x: number;
+  y: number;
+  action: number;
+  button: number;
+  hover: number;
+  timestamp: number;
+}
+
 export const initializeDiagnosticLog: (filesDirectory: string) => number;
 export const appendDiagnosticLog: (component: string, message: string) => number;
 export const getDiagnosticLog: () => string;
@@ -78,3 +87,4 @@ export const getVideoFrame: () => VideoFrameInfo;
 export const setSurfaceId: (surfaceId: string) => number;
 export const prepareSurfaceRebind: () => number;
 export const rebindSurface: (surfaceId: string) => number;
+export const takeNativeMouseEvents: () => NativeMouseInputEvent[];

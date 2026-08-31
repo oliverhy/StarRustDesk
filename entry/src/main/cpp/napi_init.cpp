@@ -25,10 +25,12 @@
 #include <mutex>
 #include <condition_variable>
 #include <vector>
+#include <deque>
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
 #include <hilog/log.h>
+#include <ace/xcomponent/native_interface_xcomponent.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -54,6 +56,86 @@ static std::mutex g_lastConnectionMessageMutex;
 static std::string g_lastConnectionMessage;
 static std::mutex g_connectionLifecycleMutex;
 static std::condition_variable g_disconnectFinished;
+
+struct NativeMouseInputEvent {
+    float x{0.0F};
+    float y{0.0F};
+    int32_t action{0};
+    int32_t button{0};
+    int32_t hover{-1};
+    int64_t timestamp{0};
+};
+
+static std::mutex g_nativeMouseInputMutex;
+static std::deque<NativeMouseInputEvent> g_nativeMouseInputEvents;
+static OH_NativeXComponent* g_registeredMouseXComponent = nullptr;
+
+static void QueueNativeMouseInput(const NativeMouseInputEvent& input) {
+    std::lock_guard<std::mutex> lock(g_nativeMouseInputMutex);
+    if (input.hover < 0 && input.action == OH_NATIVEXCOMPONENT_MOUSE_MOVE &&
+        !g_nativeMouseInputEvents.empty()) {
+        NativeMouseInputEvent& last = g_nativeMouseInputEvents.back();
+        if (last.hover < 0 && last.action == OH_NATIVEXCOMPONENT_MOUSE_MOVE) {
+            last = input;
+            return;
+        }
+    }
+    if (g_nativeMouseInputEvents.size() >= 256) {
+        g_nativeMouseInputEvents.pop_front();
+    }
+    g_nativeMouseInputEvents.push_back(input);
+}
+
+static void DispatchNativeMouseEvent(OH_NativeXComponent* component, void* window) {
+    OH_NativeXComponent_MouseEvent event{};
+    const int32_t result = OH_NativeXComponent_GetMouseEvent(component, window, &event);
+    if (result != OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
+        return;
+    }
+    QueueNativeMouseInput({event.x, event.y, static_cast<int32_t>(event.action),
+        static_cast<int32_t>(event.button), -1, event.timestamp});
+    if (event.action != OH_NATIVEXCOMPONENT_MOUSE_MOVE) {
+        DiagnosticLog::instance().append("I", "input-native",
+            "mouse action=" + std::to_string(static_cast<int32_t>(event.action)) +
+            " button=" + std::to_string(static_cast<int32_t>(event.button)) +
+            " x=" + std::to_string(event.x) + " y=" + std::to_string(event.y));
+    }
+}
+
+static void DispatchNativeHoverEvent(OH_NativeXComponent*, bool isHover) {
+    QueueNativeMouseInput({0.0F, 0.0F, 0, 0, isHover ? 1 : 0, 0});
+}
+
+static OH_NativeXComponent_MouseEvent_Callback g_nativeMouseCallbacks = {
+    .DispatchMouseEvent = DispatchNativeMouseEvent,
+    .DispatchHoverEvent = DispatchNativeHoverEvent,
+};
+
+static void TryRegisterNativeMouseInput(napi_env env, napi_value exports) {
+    bool hasNativeXComponent = false;
+    if (napi_has_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, &hasNativeXComponent) != napi_ok ||
+        !hasNativeXComponent) {
+        return;
+    }
+    napi_value nativeObject = nullptr;
+    OH_NativeXComponent* component = nullptr;
+    if (napi_get_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, &nativeObject) != napi_ok ||
+        nativeObject == nullptr ||
+        napi_unwrap(env, nativeObject, reinterpret_cast<void**>(&component)) != napi_ok ||
+        component == nullptr) {
+        DiagnosticLog::instance().append("W", "input-native", "xcomponent_unwrap_failed");
+        return;
+    }
+    if (component == g_registeredMouseXComponent) {
+        return;
+    }
+    const int32_t result = OH_NativeXComponent_RegisterMouseEventCallback(component, &g_nativeMouseCallbacks);
+    if (result == OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
+        g_registeredMouseXComponent = component;
+    }
+    DiagnosticLog::instance().append(result == OH_NATIVEXCOMPONENT_RESULT_SUCCESS ? "I" : "W", "input-native",
+        "mouse_callback_registered result=" + std::to_string(result));
+}
 
 static void SetLastConnectionMessage(const std::string& message) {
     std::lock_guard<std::mutex> lock(g_lastConnectionMessageMutex);
@@ -1211,10 +1293,48 @@ static napi_value RebindSurface(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value TakeNativeMouseEvents(napi_env env, napi_callback_info info) {
+    (void)info;
+    std::deque<NativeMouseInputEvent> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeMouseInputMutex);
+        pending.swap(g_nativeMouseInputEvents);
+    }
+
+    napi_value array;
+    napi_create_array_with_length(env, pending.size(), &array);
+    uint32_t index = 0;
+    for (const NativeMouseInputEvent& input : pending) {
+        napi_value object;
+        napi_create_object(env, &object);
+        napi_value x;
+        napi_create_double(env, input.x, &x);
+        napi_set_named_property(env, object, "x", x);
+        napi_value y;
+        napi_create_double(env, input.y, &y);
+        napi_set_named_property(env, object, "y", y);
+        napi_value action;
+        napi_create_int32(env, input.action, &action);
+        napi_set_named_property(env, object, "action", action);
+        napi_value button;
+        napi_create_int32(env, input.button, &button);
+        napi_set_named_property(env, object, "button", button);
+        napi_value hover;
+        napi_create_int32(env, input.hover, &hover);
+        napi_set_named_property(env, object, "hover", hover);
+        napi_value timestamp;
+        napi_create_int64(env, input.timestamp, &timestamp);
+        napi_set_named_property(env, object, "timestamp", timestamp);
+        napi_set_element(env, array, index++, object);
+    }
+    return array;
+}
+
 // ===== Module Registration =====
 
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
+    TryRegisterNativeMouseInput(env, exports);
     Config::instance().load();
     // Always subscribe to the controlled device's real cursor. The local
     // pointer preference only controls HarmonyOS' own physical mouse pointer.
@@ -1274,6 +1394,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setSurfaceId", nullptr, SetSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"prepareSurfaceRebind", nullptr, PrepareSurfaceRebind, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rebindSurface", nullptr, RebindSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeNativeMouseEvents", nullptr, TakeNativeMouseEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
