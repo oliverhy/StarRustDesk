@@ -31,11 +31,12 @@ const THREE_FINGER_MAX_DURATION: number = 1500;
 // origin for roughly 300 ms. Keep the locally predicted cursor during that
 // window so touchpad and physical-mouse movement remain visually responsive.
 const LOCAL_CURSOR_ECHO_GUARD_MS: number = 360;
-const PAN_MODE_ACTIVE_COLOR: string = '#169B62';
+const PAN_MODE_ACTIVE_COLOR: string = '#2468D8';
 const EDGE_AUTO_PAN_DWELL_MS: number = 320;
 const EDGE_AUTO_PAN_FRAME_MS: number = 16;
 const EDGE_AUTO_PAN_MIN_SPEED: number = 56;
 const EDGE_AUTO_PAN_MAX_SPEED: number = 280;
+const VIEWPORT_PAN_SPEED: number = 1.5;
 const NATIVE_MOUSE_ACTION_PRESS: number = 1;
 const NATIVE_MOUSE_ACTION_RELEASE: number = 2;
 const NATIVE_MOUSE_ACTION_MOVE: number = 3;
@@ -1241,10 +1242,7 @@ struct RemotePage {
         }
         this.buildInputModeButton(70, false)
         if (this.canPanViewport()) {
-          this.buildToolbarButton('边缘跟随', 78, this.edgeAutoPanEnabled, false,
-            this.inputMode === INPUT_MODE_MOUSE, () => {
-              this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled);
-            })
+          this.buildEdgeAutoPanButton(78)
         }
         this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
           this.toggleRemoteKeyboard();
@@ -1319,10 +1317,7 @@ struct RemotePage {
         }
         this.buildInputModeButton(80, true)
         if (this.canPanViewport()) {
-          this.buildToolbarButton('边缘跟随', 80, this.edgeAutoPanEnabled, false,
-            this.inputMode === INPUT_MODE_MOUSE, () => {
-              this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled);
-            })
+          this.buildEdgeAutoPanButton(80)
         }
         this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
           this.toggleRemoteKeyboard();
@@ -1386,11 +1381,34 @@ struct RemotePage {
       .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : this.primaryTextColor()))
       .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FDECEC') :
-        (selected ? (label === '结束移动' ? PAN_MODE_ACTIVE_COLOR : RustDeskTheme.ACCENT) : this.mutedSurfaceColor()))
+        (selected ? ((label === '结束移动' || label === '边缘跟随开') ?
+          PAN_MODE_ACTIVE_COLOR : RustDeskTheme.ACCENT) : this.mutedSurfaceColor()))
       .borderRadius(6)
       .enabled(enabled)
       .onClick(() => {
         onClick();
+      })
+  }
+
+  @Builder
+  buildEdgeAutoPanButton(buttonWidth: number) {
+    Button(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随')
+      .width(buttonWidth)
+      .height(40)
+      .padding({ left: 2, right: 2 })
+      .fontSize(12)
+      .fontWeight(this.edgeAutoPanEnabled ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+      .fontColor(this.edgeAutoPanEnabled ? Color.White : this.primaryTextColor())
+      .backgroundColor(this.edgeAutoPanEnabled ? PAN_MODE_ACTIVE_COLOR : this.mutedSurfaceColor())
+      .border({
+        width: 1,
+        color: this.edgeAutoPanEnabled ? PAN_MODE_ACTIVE_COLOR : this.themeBorderColor(),
+      })
+      .borderRadius(6)
+      .enabled(this.inputMode === INPUT_MODE_MOUSE)
+      .opacity(this.inputMode === INPUT_MODE_MOUSE ? 1 : 0.55)
+      .onClick(() => {
+        this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled);
       })
   }
 
@@ -3036,8 +3054,8 @@ struct RemotePage {
       return;
     }
     if (event.type === TouchType.Move && this.viewportPanActive) {
-      let deltaX: number = touch.x - this.viewportPanLastX;
-      let deltaY: number = touch.y - this.viewportPanLastY;
+      let deltaX: number = (touch.x - this.viewportPanLastX) * VIEWPORT_PAN_SPEED;
+      let deltaY: number = (touch.y - this.viewportPanLastY) * VIEWPORT_PAN_SPEED;
       this.viewportPanLastX = touch.x;
       this.viewportPanLastY = touch.y;
       this.offsetX = this.clampOffset(this.offsetX + deltaX, this.zoomScale, this.componentWidth);

@@ -848,6 +848,20 @@ static napi_value InitializeDiagnosticLog(napi_env env, napi_callback_info info)
     return ret;
 }
 
+static napi_value SetDiagnosticLogEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc > 0 && args[0] != nullptr) {
+        napi_get_value_bool(env, args[0], &enabled);
+    }
+    DiagnosticLog::instance().setEnabled(enabled);
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
 static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
@@ -1353,6 +1367,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"connect", nullptr, Connect, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"initializeDiagnosticLog", nullptr, InitializeDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDiagnosticLogEnabled", nullptr, SetDiagnosticLogEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"appendDiagnosticLog", nullptr, AppendDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDiagnosticLog", nullptr, GetDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearDiagnosticLog", nullptr, ClearDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},

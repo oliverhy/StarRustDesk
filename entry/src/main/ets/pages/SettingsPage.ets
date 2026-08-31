@@ -29,6 +29,7 @@ export struct SettingsPage {
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
   @State showLocalCursor: boolean = true
+  @State diagnosticLogEnabled: boolean = false
   @State diagnosticLogBusy: boolean = false
   @State pageWidth: number = 0
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
@@ -58,6 +59,8 @@ export struct SettingsPage {
       this.frameRate = parseInt(savedFps)
     }
     this.showLocalCursor = RustDeskNapi.getOption('show-local-cursor') !== '0'
+    this.diagnosticLogEnabled = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
+    RustDeskNapi.setDiagnosticLogEnabled(this.diagnosticLogEnabled)
   }
 
   build() {
@@ -291,12 +294,38 @@ export struct SettingsPage {
         .width('100%')
         .margin({ bottom: 4 })
 
-      Text('自动记录连接、网络通道、视频编码和解码状态。不会记录密码、验证码、剪贴板内容或密钥。')
+      Text('诊断默认关闭。开启后记录连接、网络通道、视频编码和解码状态；不会记录密码、验证码、剪贴板内容或密钥。')
         .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
         .lineHeight(19)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
         .margin({ bottom: 6 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('诊断日志')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text(this.diagnosticLogEnabled ? '正在记录，出现问题后可导出发送给开发者' : '已关闭，不会在后台写入诊断日志')
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.diagnosticLogEnabled })
+          .onChange((isOn: boolean) => {
+            this.setDiagnosticLogEnabled(isOn)
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
 
       Divider()
         .height(1)
@@ -357,6 +386,15 @@ export struct SettingsPage {
     .borderRadius(RustDeskTheme.CARD_RADIUS)
     .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
     .width('100%')
+  }
+
+  setDiagnosticLogEnabled(enabled: boolean): void {
+    this.diagnosticLogEnabled = enabled
+    RustDeskNapi.setOption('diagnostic-log-enabled', enabled ? '1' : '0')
+    RustDeskNapi.setDiagnosticLogEnabled(enabled)
+    if (enabled) {
+      RustDeskNapi.appendDiagnosticLog('support', 'diagnostic_log_enabled_by_user')
+    }
   }
 
   async exportDiagnosticLog(): Promise<void> {

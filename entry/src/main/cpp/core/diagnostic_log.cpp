@@ -37,6 +37,14 @@ DiagnosticLog& DiagnosticLog::instance() {
     return log;
 }
 
+void DiagnosticLog::setEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    enabled_ = enabled;
+    if (!enabled_) {
+        pendingLines_.clear();
+    }
+}
+
 void DiagnosticLog::initialize(const std::string& filesDirectory) {
     if (filesDirectory.empty()) {
         return;
@@ -58,8 +66,11 @@ void DiagnosticLog::initialize(const std::string& filesDirectory) {
 }
 
 void DiagnosticLog::append(const char* level, const char* component, const std::string& message) {
-    std::string line = makeLine(level, component, message);
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!enabled_) {
+        return;
+    }
+    std::string line = makeLine(level, component, message);
     if (!initialized_) {
         while (pendingLines_.size() >= MAX_PENDING_LINES) {
             pendingLines_.pop_front();

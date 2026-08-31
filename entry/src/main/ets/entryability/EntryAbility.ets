@@ -10,6 +10,8 @@ const DOMAIN = 0x0000;
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     try {
+      const diagnosticLogEnabled: boolean = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
+      RustDeskNapi.setDiagnosticLogEnabled(diagnosticLogEnabled)
       RustDeskNapi.initializeDiagnosticLog(this.context.filesDir)
       RustDeskNapi.appendDiagnosticLog('app',
         `startup version=${RELEASE_NOTES_VERSION} build=${RELEASE_NOTES_BUILD} ` +

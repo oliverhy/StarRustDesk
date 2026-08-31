@@ -9,6 +9,7 @@ class DiagnosticLog {
 public:
     static DiagnosticLog& instance();
 
+    void setEnabled(bool enabled);
     void initialize(const std::string& filesDirectory);
     void append(const char* level, const char* component, const std::string& message);
     std::string exportText();
@@ -29,6 +30,7 @@ private:
     std::string previousPath_;
     std::deque<std::string> pendingLines_;
     size_t currentBytes_{0};
+    bool enabled_{false};
     bool initialized_{false};
 };
 

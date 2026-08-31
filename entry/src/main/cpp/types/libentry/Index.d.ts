@@ -46,6 +46,7 @@ export interface NativeMouseInputEvent {
 }
 
 export const initializeDiagnosticLog: (filesDirectory: string) => number;
+export const setDiagnosticLogEnabled: (enabled: boolean) => number;
 export const appendDiagnosticLog: (component: string, message: string) => number;
 export const getDiagnosticLog: () => string;
 export const clearDiagnosticLog: () => number;

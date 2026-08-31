@@ -76,6 +76,10 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).initializeDiagnosticLog(filesDirectory)
   }
 
+  static setDiagnosticLogEnabled(enabled: boolean): number {
+    return (rustdeskNapi as ESObject).setDiagnosticLogEnabled(enabled)
+  }
+
   static appendDiagnosticLog(component: string, message: string): number {
     return (rustdeskNapi as ESObject).appendDiagnosticLog(component, message)
   }

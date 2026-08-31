@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.0.9'
-export const RELEASE_NOTES_BUILD: string = '1000900'
+export const RELEASE_NOTES_BUILD: string = '1000901'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.0.9（1000901）· 诊断与画面操作', [
+            '设置中新增诊断日志开关，默认关闭；仅在用户主动开启后记录连接和解码信息。',
+            '修复边缘跟随开启后按钮选中状态不刷新的问题，并统一所有选中按钮为主蓝色。',
+            '移动画面模式的单指平移速度提高 50%，改善手机和平板上的画面拖动效率。',
+          ])
           this.buildSection('1.0.9（1000900）· PC 鼠标体验', [
             '修复 HarmonyOS PC 使用物理鼠标或触控板时，远端左键偶发无响应的问题。',
             '修复关闭本地鼠标后，指针进入状态栏、工具栏、按钮或弹窗仍保持隐藏的问题。',
