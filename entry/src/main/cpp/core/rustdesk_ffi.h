@@ -30,6 +30,7 @@ char* rust_take_remote_directory_result(void);
 int rust_start_file_upload(const char* local_path, const char* file_name, const char* remote_directory);
 int rust_start_file_download_batch(const char* requests_json, const char* local_root);
 char* rust_get_file_transfer_status(void);
+int rust_cancel_file_transfer(void);
 char* rust_take_remote_clipboard_text(void);
 int rust_get_display_count(void);
 int rust_get_current_display(void);

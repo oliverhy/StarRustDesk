@@ -23,6 +23,11 @@ interface RemoteDownloadSelection extends FileDownloadRequest {
   key: string;
 }
 
+interface DownloadedFileCandidate {
+  path: string;
+  size: number;
+}
+
 const REMOTE_WHEEL_SCALE: number = 0.08;
 const TOUCH_SCROLL_SCALE: number = 0.12;
 const TOUCHPAD_POINTER_SPEED: number = 1.25;
@@ -37,10 +42,11 @@ const THREE_FINGER_MAX_DURATION: number = 1500;
 // window so touchpad and physical-mouse movement remain visually responsive.
 const LOCAL_CURSOR_ECHO_GUARD_MS: number = 360;
 const PAN_MODE_ACTIVE_COLOR: string = '#2468D8';
-const EDGE_AUTO_PAN_DWELL_MS: number = 320;
+const EDGE_AUTO_PAN_MOUSE_DWELL_MS: number = 90;
+const EDGE_AUTO_PAN_TOUCH_DWELL_MS: number = 260;
 const EDGE_AUTO_PAN_FRAME_MS: number = 16;
-const EDGE_AUTO_PAN_MIN_SPEED: number = 56;
-const EDGE_AUTO_PAN_MAX_SPEED: number = 280;
+const EDGE_AUTO_PAN_MIN_SPEED: number = 88;
+const EDGE_AUTO_PAN_MAX_SPEED: number = 640;
 const VIEWPORT_PAN_SPEED: number = 1.5;
 const NATIVE_MOUSE_ACTION_PRESS: number = 1;
 const NATIVE_MOUSE_ACTION_RELEASE: number = 2;
@@ -102,6 +108,12 @@ struct RemotePage {
   @State transferProgress: number = 0;
   @State transferActive: boolean = false;
   @State transferDirection: string = 'upload';
+  @State transferTransferredBytes: number = 0;
+  @State transferTotalBytes: number = 0;
+  @State transferSpeedBytesPerSecond: number = 0;
+  @State transferCompletedItems: number = 0;
+  @State transferTotalItems: number = 0;
+  @State transferCancelling: boolean = false;
   @State connectedPeerId: string = '';
   @State twoFaCode: string = '';
   @State twoFaError: string = '';
@@ -121,6 +133,7 @@ struct RemotePage {
   private nativeMousePollGeneration: number = 0;
   private hardwareModifierTrackingActive: boolean = false;
   private hardwareCapsLockInitialized: boolean = false;
+  private lastHardwareKeySyncAt: number = 0;
   private hardwareCapsLockOn: boolean = false;
   private pointerHoverExitTimer: number = -1;
   private clipboardTimer: number = -1;
@@ -213,6 +226,8 @@ struct RemotePage {
   private pendingDownloadSingleFile: boolean = false;
   private pendingDownloadAsArchive: boolean = false;
   private pendingDownloadArchivePath: string = '';
+  private lastTransferSampleAt: number = 0;
+  private lastTransferSampleBytes: number = 0;
   private lastRemoteCursorSequence: number = -1;
   private lastRemoteCursorImageSequence: number = -1;
   private remoteCursorAbsX: number = 0;
@@ -607,13 +622,18 @@ struct RemotePage {
 
   startNativeMousePolling(): void {
     this.stopNativeMousePolling();
+    this.lastHardwareKeySyncAt = 0;
     const generation: number = ++this.nativeMousePollGeneration;
     let poll = () => {
       if (generation !== this.nativeMousePollGeneration) {
         return;
       }
       try {
-        this.syncHardwareKeyState();
+        const now: number = Date.now();
+        if (now - this.lastHardwareKeySyncAt >= 500) {
+          this.lastHardwareKeySyncAt = now;
+          this.syncHardwareKeyState();
+        }
         let events: NativeMouseInputEvent[] = RustDeskNapi.takeNativeMouseEvents();
         for (let event of events) {
           this.handleNativeMouseInput(event);
@@ -699,14 +719,15 @@ struct RemotePage {
 
     let remotePoint: RemotePoint = this.updatePointerFromLocal(event.x, event.y);
     this.edgePanTouchActive = false;
-    this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, false);
     if (event.action === NATIVE_MOUSE_ACTION_MOVE) {
+      this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, false);
       if (this.lastNativeMouseEventAt - this.lastMoveSentAt > 8) {
         this.lastMoveSentAt = this.lastNativeMouseEventAt;
         ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
       }
       return;
     }
+    this.stopEdgeAutoPan();
     if (event.action === NATIVE_MOUSE_ACTION_CANCEL) {
       this.releaseHeldMouseButtons('native_cancel');
       return;
@@ -763,7 +784,18 @@ struct RemotePage {
     }
     const scanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
     if (scanCode > 0) {
-      ConnectionService.sendPhysicalKeyEvent(scanCode, action);
+      const eventModifierMask: number | undefined = event.modifierValid ? event.modifierMask : undefined;
+      const letter: string = this.mapHarmonyKeyCodeToLetter(event.keyCode);
+      if (letter.length > 0) {
+        ConnectionService.sendLetterKeyEvent(letter, scanCode, action, eventModifierMask);
+      } else {
+        ConnectionService.sendPhysicalKeyEvent(scanCode, action, eventModifierMask);
+      }
+      if (action === 0) {
+        RustDeskNapi.appendDiagnosticLog('input',
+          `native_key_forwarded code=${event.keyCode} scan=${scanCode} modifiers=${event.modifierMask} ` +
+          `modifier_valid=${event.modifierValid ? 1 : 0}`);
+      }
     }
   }
 
@@ -1169,29 +1201,50 @@ struct RemotePage {
           .width('100%')
           .justifyContent(FlexAlign.Center)
         } else {
-          List({ space: 2 }) {
+          List({ space: 6 }) {
             ForEach(this.getVisibleRemoteEntries(), (entry: RemoteDirectoryEntry) => {
               ListItem() {
-                Row({ space: 12 }) {
+                Row({ space: 10 }) {
                   if (this.remoteFileBrowserMode === 'download' && entry.entryType !== 3) {
                     Toggle({ type: ToggleType.Checkbox, isOn: this.isRemoteEntrySelected(entry) })
-                      .width(28)
-                      .height(28)
+                      .width(24)
+                      .height(24)
                       .selectedColor(RustDeskTheme.ACCENT)
                       .onChange(() => {
                         this.toggleRemoteDownloadEntry(entry);
                       })
                   }
-                  Text(this.remoteEntryTypeLabel(entry))
-                    .fontSize(12)
-                    .fontColor(this.secondaryTextColor())
-                    .width(52)
-                  Text(entry.name)
+                  Column() {
+                    Text(this.remoteEntryBadge(entry))
+                      .fontSize(this.remoteEntryBadge(entry).length > 3 ? 10 : 12)
+                      .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+                      .fontColor(this.isRemoteDirectory(entry) ? RustDeskTheme.ACCENT : this.secondaryTextColor())
+                      .maxLines(1)
+                  }
+                  .width(44)
+                  .height(44)
+                  .justifyContent(FlexAlign.Center)
+                  .backgroundColor(this.isRemoteDirectory(entry) ?
+                    (this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT) :
+                    this.mutedSurfaceColor())
+                  .borderRadius(10)
+
+                  Column({ space: 4 }) {
+                    Text(entry.name)
+                      .width('100%')
+                      .fontSize(15)
+                      .fontWeight(500)
+                      .fontColor(this.primaryTextColor())
+                      .maxLines(2)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    Text(this.remoteEntryMetadata(entry))
+                      .width('100%')
+                      .fontSize(12)
+                      .fontColor(this.secondaryTextColor())
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
                     .layoutWeight(1)
-                    .fontSize(15)
-                    .fontColor(this.primaryTextColor())
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
                     .onClick(() => {
                       if (this.isRemoteDirectory(entry)) {
                         this.openRemoteDirectory(this.joinRemotePath(entry.name));
@@ -1200,17 +1253,23 @@ struct RemotePage {
                       }
                     })
                   if (this.isRemoteDirectory(entry)) {
-                    Text('打开 ›')
-                      .fontSize(13)
+                    Text('›')
+                      .width(28)
+                      .fontSize(24)
                       .fontColor(RustDeskTheme.ACCENT)
+                      .textAlign(TextAlign.Center)
                       .onClick(() => {
                         this.openRemoteDirectory(this.joinRemotePath(entry.name));
                       })
                   }
                 }
                 .width('100%')
-                .height(48)
-                .padding({ left: 12, right: 12 })
+                .constraintSize({ minHeight: 68 })
+                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                .backgroundColor(this.isRemoteEntrySelected(entry) ?
+                  (this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT) :
+                  Color.Transparent)
+                .borderRadius(8)
               }
             }, (entry: RemoteDirectoryEntry) => `${entry.entryType}:${entry.name}`)
           }
@@ -1253,8 +1312,8 @@ struct RemotePage {
         }
         .width('100%')
       }
-      .width(this.isLargeLayout() ? 560 : '92%')
-      .height(this.isLargeLayout() ? '78%' : '84%')
+      .width(this.isLargeLayout() ? 680 : '96%')
+      .height(this.isLargeLayout() ? '84%' : '90%')
       .padding(16)
       .backgroundColor(this.panelColor())
       .border({ width: 1, color: this.themeBorderColor() })
@@ -1268,27 +1327,58 @@ struct RemotePage {
 
   @Builder
   buildTransferProgress() {
-    Row({ space: 10 }) {
-      Text(this.transferDirection === 'download' ? '正在取回文件' : '正在发送文件')
-        .fontSize(13)
-        .fontColor(this.primaryTextColor())
+    Column({ space: 7 }) {
+      Row({ space: 10 }) {
+        Text(this.transferDirection === 'download' ? '正在取回文件' : '正在发送文件')
+          .fontSize(14)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.primaryTextColor())
+        if (this.transferTotalItems > 1) {
+          Text(`${this.transferCompletedItems}/${this.transferTotalItems} 项`)
+            .fontSize(12)
+            .fontColor(this.secondaryTextColor())
+        }
+        Blank()
+        Text(this.transferCancelling ? '正在取消…' : this.formatTransferSpeed(this.transferSpeedBytesPerSecond))
+          .fontSize(12)
+          .fontColor(this.transferCancelling ? this.secondaryTextColor() : RustDeskTheme.ACCENT)
+        Button('取消')
+          .height(30)
+          .fontSize(12)
+          .fontColor('#C83B45')
+          .backgroundColor(this.isDarkMode ? '#3A2025' : '#FFF0F1')
+          .borderRadius(8)
+          .enabled(!this.transferCancelling)
+          .onClick(() => {
+            this.cancelActiveFileTransfer();
+          })
+      }
+      .width('100%')
+
       Progress({ value: this.transferProgress, total: 100, type: ProgressType.Linear })
-        .layoutWeight(1)
-        .height(6)
+        .width('100%')
+        .height(7)
         .color(RustDeskTheme.ACCENT)
-      Text(`${Math.floor(this.transferProgress)}%`)
-        .width(44)
-        .fontSize(13)
-        .fontColor(this.primaryTextColor())
-        .textAlign(TextAlign.End)
+
+      Row() {
+        Text(`${this.formatFileSize(this.transferTransferredBytes)} / ${this.transferTotalBytes > 0 ?
+          this.formatFileSize(this.transferTotalBytes) : '计算中'}`)
+          .fontSize(12)
+          .fontColor(this.secondaryTextColor())
+        Blank()
+        Text(`${Math.floor(this.transferProgress)}%`)
+          .fontSize(12)
+          .fontColor(this.primaryTextColor())
+      }
+      .width('100%')
     }
-    .width(this.isLargeLayout() ? 420 : '88%')
-    .height(44)
-    .padding({ left: 12, right: 12 })
+    .width(this.isLargeLayout() ? 520 : '94%')
+    .padding({ left: 14, right: 14, top: 10, bottom: 10 })
     .backgroundColor(this.panelColor())
     .border({ width: 1, color: this.themeBorderColor() })
-    .borderRadius(8)
-    .position({ x: this.isLargeLayout() ? 24 : '6%', y: 16 })
+    .borderRadius(12)
+    .shadow({ radius: 14, color: '#300C1524', offsetX: 0, offsetY: 5 })
+    .position({ x: this.isLargeLayout() ? 24 : '3%', y: 16 })
   }
 
   @Builder
@@ -1384,8 +1474,15 @@ struct RemotePage {
     .clip(true)
     .backgroundColor('#090D14')
     .onAreaChange((oldValue: Area, newValue: Area) => {
+      let previousWidth: number = this.componentWidth;
+      let previousHeight: number = this.componentHeight;
       this.componentWidth = newValue.width as number;
       this.componentHeight = newValue.height as number;
+      if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
+        Math.abs(this.componentHeight - previousHeight) > 0.5) {
+        this.stopEdgeAutoPan();
+        this.clampViewportOffset();
+      }
       this.scheduleSurfaceRebindIfSizeChanged();
     })
     .translate({ x: this.offsetX, y: this.offsetY })
@@ -1711,7 +1808,7 @@ struct RemotePage {
               .fontColor(this.primaryTextColor())
               .width('100%')
             Text(this.inputMode === INPUT_MODE_MOUSE ?
-              '画面放大后，鼠标在边缘停留片刻，视野平滑跟随；默认关闭以防误触' : '仅在鼠标模式下生效')
+              '画面超出可视区域时，鼠标靠近边缘即可平滑跟随；越靠近边缘移动越快' : '仅在鼠标模式下生效')
               .fontSize(11)
               .fontColor(this.secondaryTextColor())
               .width('100%')
@@ -1728,7 +1825,7 @@ struct RemotePage {
         .padding({ left: 2, right: 2, top: 2, bottom: 2 })
 
         if (this.inputMode === INPUT_MODE_MOUSE) {
-          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 边缘跟随开启后：鼠标在放大画面边缘停留片刻，视野自动平移\n• 放大后点“移动画面”：按钮变绿，单指平移视野且远端鼠标保持显示\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端')
+          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 边缘跟随开启后：画面超出可视区域时，鼠标靠近边缘会自动平移，越靠边越快\n• 放大后点“移动画面”：按钮变蓝，单指平移视野且远端鼠标保持显示\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端')
             .fontSize(14)
             .lineHeight(24)
             .fontColor(this.secondaryTextColor())
@@ -2551,7 +2648,11 @@ struct RemotePage {
       event.y - this.getDisplayTop() : event.y;
     let remotePoint: RemotePoint = this.updatePointerFromLocal(localX, localY);
     this.edgePanTouchActive = false;
-    this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, false);
+    if (event.action === MouseAction.Move || event.action === MouseAction.Hover) {
+      this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, false);
+    } else {
+      this.stopEdgeAutoPan();
+    }
     this.reconcilePhysicalMouseButtons(event, remotePoint.x, remotePoint.y);
     if (action < 0) {
       return;
@@ -2799,7 +2900,12 @@ struct RemotePage {
     let text: string = this.getKeyEventText(event);
     let physicalScanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
     if (physicalScanCode > 0) {
-      ConnectionService.sendPhysicalKeyEvent(physicalScanCode, action);
+      let letter: string = this.mapHarmonyKeyCodeToLetter(event.keyCode);
+      if (letter.length > 0) {
+        ConnectionService.sendLetterKeyEvent(letter, physicalScanCode, action);
+      } else {
+        ConnectionService.sendPhysicalKeyEvent(physicalScanCode, action);
+      }
       return true;
     }
 
@@ -2931,6 +3037,13 @@ struct RemotePage {
       case 2064: return 0x35;
       default: return 0;
     }
+  }
+
+  mapHarmonyKeyCodeToLetter(keyCode: number): string {
+    if (keyCode >= 2017 && keyCode <= 2042) {
+      return 'abcdefghijklmnopqrstuvwxyz'.charAt(keyCode - 2017);
+    }
+    return '';
   }
 
   mapControlKeyCode(keyCode: number): number {
@@ -3106,8 +3219,8 @@ struct RemotePage {
     }
 
     let visualPoint: RemotePoint = this.remotePointToVisual(remoteX, remoteY);
-    let edgeZone: number = Math.max(24, Math.min(42,
-      Math.min(this.componentWidth, this.componentHeight) * 0.055));
+    let edgeZone: number = Math.max(32, Math.min(56,
+      Math.min(this.componentWidth, this.componentHeight) * 0.065));
     let vectorX: number = 0;
     let vectorY: number = 0;
     if (visualPoint.x <= edgeZone) {
@@ -3127,6 +3240,16 @@ struct RemotePage {
     // deliberately close to the border before the dwell timer starts.
     if (Math.abs(vectorX) < 0.18) vectorX = 0;
     if (Math.abs(vectorY) < 0.18) vectorY = 0;
+    let panLimitX: number = this.getHorizontalPanLimit(this.zoomScale);
+    let panLimitY: number = this.getVerticalPanLimit(this.zoomScale);
+    if ((vectorX < 0 && this.offsetX >= panLimitX - 0.5) ||
+      (vectorX > 0 && this.offsetX <= -panLimitX + 0.5)) {
+      vectorX = 0;
+    }
+    if ((vectorY < 0 && this.offsetY >= panLimitY - 0.5) ||
+      (vectorY > 0 && this.offsetY <= -panLimitY + 0.5)) {
+      vectorY = 0;
+    }
     if (vectorX === 0 && vectorY === 0) {
       this.stopEdgeAutoPan();
       return;
@@ -3202,7 +3325,8 @@ struct RemotePage {
     }
 
     let now: number = Date.now();
-    if (now - this.edgePanEnteredAt < EDGE_AUTO_PAN_DWELL_MS) {
+    let dwellMs: number = this.edgePanFromTouch ? EDGE_AUTO_PAN_TOUCH_DWELL_MS : EDGE_AUTO_PAN_MOUSE_DWELL_MS;
+    if (now - this.edgePanEnteredAt < dwellMs) {
       this.scheduleEdgeAutoPan();
       return;
     }
@@ -3210,7 +3334,8 @@ struct RemotePage {
       this.edgePanMoving = true;
       this.edgePanLastTickAt = now;
       RustDeskNapi.appendDiagnosticLog('input',
-        `edge_auto_pan_started x=${this.edgePanVectorX.toFixed(2)} y=${this.edgePanVectorY.toFixed(2)} zoom=${this.zoomScale.toFixed(2)}`);
+        `edge_auto_pan_started x=${this.edgePanVectorX.toFixed(2)} y=${this.edgePanVectorY.toFixed(2)} ` +
+        `zoom=${this.zoomScale.toFixed(2)} dwell=${dwellMs}`);
     }
 
     let elapsedSeconds: number = Math.max(0.008,
@@ -3218,12 +3343,10 @@ struct RemotePage {
     this.edgePanLastTickAt = now;
     let speedX: number = this.edgePanSpeed(this.edgePanVectorX);
     let speedY: number = this.edgePanSpeed(this.edgePanVectorY);
-    let nextOffsetX: number = this.clampOffset(
-      this.offsetX - Math.sign(this.edgePanVectorX) * speedX * elapsedSeconds,
-      this.zoomScale, this.componentWidth);
-    let nextOffsetY: number = this.clampOffset(
-      this.offsetY - Math.sign(this.edgePanVectorY) * speedY * elapsedSeconds,
-      this.zoomScale, this.componentHeight);
+    let nextOffsetX: number = this.clampHorizontalOffset(
+      this.offsetX - Math.sign(this.edgePanVectorX) * speedX * elapsedSeconds, this.zoomScale);
+    let nextOffsetY: number = this.clampVerticalOffset(
+      this.offsetY - Math.sign(this.edgePanVectorY) * speedY * elapsedSeconds, this.zoomScale);
     let moved: boolean = Math.abs(nextOffsetX - this.offsetX) > 0.01 ||
       Math.abs(nextOffsetY - this.offsetY) > 0.01;
     this.offsetX = nextOffsetX;
@@ -3279,7 +3402,8 @@ struct RemotePage {
   }
 
   canPanViewport(): boolean {
-    return this.zoomScale > 1.001;
+    return this.getHorizontalPanLimit(this.zoomScale) > 0.5 ||
+      this.getVerticalPanLimit(this.zoomScale) > 0.5;
   }
 
   setPanMode(enabled: boolean): void {
@@ -3319,8 +3443,8 @@ struct RemotePage {
       let deltaY: number = (touch.y - this.viewportPanLastY) * VIEWPORT_PAN_SPEED;
       this.viewportPanLastX = touch.x;
       this.viewportPanLastY = touch.y;
-      this.offsetX = this.clampOffset(this.offsetX + deltaX, this.zoomScale, this.componentWidth);
-      this.offsetY = this.clampOffset(this.offsetY + deltaY, this.zoomScale, this.componentHeight);
+      this.offsetX = this.clampHorizontalOffset(this.offsetX + deltaX, this.zoomScale);
+      this.offsetY = this.clampVerticalOffset(this.offsetY + deltaY, this.zoomScale);
       return;
     }
     if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
@@ -3343,8 +3467,8 @@ struct RemotePage {
     let nextOffsetX: number = this.offsetX + deltaX + (anchorX - centerX) * (this.zoomScale - nextScale);
     let nextOffsetY: number = this.offsetY + deltaY + (anchorY - centerY) * (this.zoomScale - nextScale);
     this.zoomScale = nextScale;
-    this.offsetX = this.clampOffset(nextOffsetX, nextScale, this.componentWidth);
-    this.offsetY = this.clampOffset(nextOffsetY, nextScale, this.componentHeight);
+    this.offsetX = this.clampHorizontalOffset(nextOffsetX, nextScale);
+    this.offsetY = this.clampVerticalOffset(nextOffsetY, nextScale);
     if (!this.canPanViewport() && this.isPanMode) {
       this.isPanMode = false;
       this.viewportPanActive = false;
@@ -3379,15 +3503,37 @@ struct RemotePage {
   }
 
   clampViewportOffset(): void {
-    this.offsetX = this.clampOffset(this.offsetX, this.zoomScale, this.componentWidth);
-    this.offsetY = this.clampOffset(this.offsetY, this.zoomScale, this.componentHeight);
+    this.offsetX = this.clampHorizontalOffset(this.offsetX, this.zoomScale);
+    this.offsetY = this.clampVerticalOffset(this.offsetY, this.zoomScale);
   }
 
-  clampOffset(value: number, scale: number, size: number): number {
-    if (size <= 0 || scale <= 1.0) {
+  getHorizontalPanLimit(scale: number): number {
+    return this.getPanLimit(this.getDisplayWidth(), this.componentWidth, scale);
+  }
+
+  getVerticalPanLimit(scale: number): number {
+    return this.getPanLimit(this.getDisplayHeight(), this.componentHeight, scale);
+  }
+
+  getPanLimit(displaySize: number, viewportSize: number, scale: number): number {
+    if (displaySize <= 0 || viewportSize <= 0 || scale <= 0) {
       return 0;
     }
-    let limit: number = Math.max(0, size * (scale - 1.0) / 2 + 96);
+    return Math.max(0, (displaySize * scale - viewportSize) / 2);
+  }
+
+  clampHorizontalOffset(value: number, scale: number): number {
+    return this.clampOffsetToLimit(value, this.getHorizontalPanLimit(scale));
+  }
+
+  clampVerticalOffset(value: number, scale: number): number {
+    return this.clampOffsetToLimit(value, this.getVerticalPanLimit(scale));
+  }
+
+  clampOffsetToLimit(value: number, limit: number): number {
+    if (limit <= 0) {
+      return 0;
+    }
     return Math.max(-limit, Math.min(limit, value));
   }
 
@@ -3632,7 +3778,97 @@ struct RemotePage {
   remoteEntryTypeLabel(entry: RemoteDirectoryEntry): string {
     if (entry.entryType === 3) return '磁盘';
     if (entry.entryType === 0 || entry.entryType === 2) return '文件夹';
-    return '文件';
+    let extension: string = this.remoteFileExtension(entry.name);
+    switch (extension) {
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+      case 'webp':
+      case 'bmp':
+        return '图片';
+      case 'mp4':
+      case 'mkv':
+      case 'mov':
+      case 'avi':
+      case 'webm':
+        return '视频';
+      case 'mp3':
+      case 'wav':
+      case 'flac':
+      case 'aac':
+        return '音频';
+      case 'zip':
+      case '7z':
+      case 'rar':
+      case 'tar':
+      case 'gz':
+        return '压缩包';
+      case 'pdf':
+        return 'PDF 文档';
+      case 'doc':
+      case 'docx':
+        return 'Word 文档';
+      case 'xls':
+      case 'xlsx':
+      case 'csv':
+        return '表格';
+      case 'ppt':
+      case 'pptx':
+        return '演示文稿';
+      case 'txt':
+      case 'md':
+      case 'log':
+        return '文本';
+      case 'exe':
+      case 'msi':
+      case 'hap':
+      case 'app':
+      case 'apk':
+        return '安装包';
+      default:
+        return extension.length > 0 ? `${extension.toUpperCase()} 文件` : '文件';
+    }
+  }
+
+  remoteEntryBadge(entry: RemoteDirectoryEntry): string {
+    if (entry.entryType === 3) return '盘';
+    if (entry.entryType === 0 || entry.entryType === 2) return '夹';
+    let extension: string = this.remoteFileExtension(entry.name).toUpperCase();
+    return extension.length > 0 ? extension.substring(0, 4) : '文件';
+  }
+
+  remoteFileExtension(name: string): string {
+    let dotIndex: number = name.lastIndexOf('.');
+    if (dotIndex <= 0 || dotIndex >= name.length - 1) return '';
+    return name.substring(dotIndex + 1).toLowerCase();
+  }
+
+  remoteEntryMetadata(entry: RemoteDirectoryEntry): string {
+    let typeText: string = this.remoteEntryTypeLabel(entry);
+    let sizeText: string = this.isRemoteDirectory(entry) ? '目录' : this.formatFileSize(entry.size);
+    let modifiedText: string = this.formatRemoteModifiedTime(entry.modifiedTime);
+    return `${typeText} · ${sizeText} · ${modifiedText}`;
+  }
+
+  formatRemoteModifiedTime(timestamp: number): string {
+    if (timestamp <= 0) return '时间未知';
+    let milliseconds: number = timestamp > 100000000000 ? timestamp : timestamp * 1000;
+    let date: Date = new Date(milliseconds);
+    let pad = (value: number): string => value.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  formatFileSize(bytes: number): string {
+    if (bytes <= 0) return '0 B';
+    if (bytes < 1024) return `${Math.floor(bytes)} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  formatTransferSpeed(bytesPerSecond: number): string {
+    return bytesPerSecond > 0 ? `${this.formatFileSize(bytesPerSecond)}/s` : '等待数据';
   }
 
   remoteEntryKey(entry: RemoteDirectoryEntry): string {
@@ -3788,7 +4024,7 @@ struct RemotePage {
       }
       this.transferDirection = 'download';
       this.transferActive = true;
-      this.transferProgress = 0;
+      this.resetTransferTracking(requests.length);
       this.closeRemoteFileBrowser(false);
       this.showFileToast(asArchive ? `开始取回，完成后将生成 ${archiveName}` : '开始取回文件');
     } catch (_e) {
@@ -3819,8 +4055,8 @@ struct RemotePage {
         };
         RustDeskNapi.appendDiagnosticLog('file-download', `archive_start items=${itemCount}`);
         await zlib.compressFile(this.pendingDownloadRoot, this.pendingDownloadArchivePath, archiveOptions);
-        fileIo.copyFileSync(this.pendingDownloadArchivePath, this.pendingDownloadDestinationUri);
-        let archiveSize: number = fileIo.statSync(this.pendingDownloadArchivePath).size;
+        let archiveSize: number = this.copyDownloadedFileToDestination(
+          this.pendingDownloadArchivePath, this.pendingDownloadDestinationUri);
         if (archiveSize <= 0) {
           throw new Error('archive is empty');
         }
@@ -3828,8 +4064,16 @@ struct RemotePage {
           'file-download', `archive_saved items=${itemCount} bytes=${archiveSize}`);
       } else {
         let item: FileDownloadRequest = this.pendingDownloadItems[0];
-        let sourcePath: string = `${this.pendingDownloadRoot}/${item.localName}`;
-        fileIo.copyFileSync(sourcePath, this.pendingDownloadDestinationUri);
+        let source: DownloadedFileCandidate = this.resolveSingleDownloadedFile(
+          this.pendingDownloadRoot, item.localName);
+        let directPath: string = `${this.pendingDownloadRoot}/${item.localName}`;
+        RustDeskNapi.appendDiagnosticLog(
+          'file-download',
+          `single_source layout=${source.path === directPath ? 'direct' : 'nested'} bytes=${source.size}`
+        );
+        let savedSize: number = this.copyDownloadedFileToDestination(
+          source.path, this.pendingDownloadDestinationUri);
+        RustDeskNapi.appendDiagnosticLog('file-download', `single_saved bytes=${savedSize}`);
       }
       this.cleanupPendingDownloadFiles();
       this.showFileToast(asArchive ?
@@ -3838,6 +4082,72 @@ struct RemotePage {
       this.logDownloadExportError(asArchive ? 'archive' : 'single-file', error);
       this.showFileToast(asArchive ?
         '文件已取回，但压缩或保存 ZIP 失败' : '文件已取回，但保存到所选位置失败');
+    }
+  }
+
+  resolveSingleDownloadedFile(root: string, localName: string): DownloadedFileCandidate {
+    let directPath: string = `${root}/${localName}`;
+    try {
+      let directStat: fileIo.Stat = fileIo.statSync(directPath);
+      if (directStat.isFile() && directStat.size > 0) {
+        return { path: directPath, size: directStat.size };
+      }
+    } catch (_e) {
+    }
+
+    let candidates: DownloadedFileCandidate[] = [];
+    this.collectDownloadedFiles(root, candidates, 0);
+    if (candidates.length <= 0) {
+      throw new Error('downloaded source file is missing');
+    }
+    candidates.sort((left: DownloadedFileCandidate, right: DownloadedFileCandidate) => right.size - left.size);
+    if (candidates[0].size <= 0) {
+      throw new Error('downloaded source file is empty');
+    }
+    return candidates[0];
+  }
+
+  collectDownloadedFiles(path: string, candidates: DownloadedFileCandidate[], depth: number): void {
+    if (depth > 32) return;
+    let stat: fileIo.Stat = fileIo.statSync(path);
+    if (stat.isDirectory()) {
+      fileIo.listFileSync(path).forEach((name: string) => {
+        if (!name.endsWith('.digest')) {
+          this.collectDownloadedFiles(`${path}/${name}`, candidates, depth + 1);
+        }
+      });
+      return;
+    }
+    if (stat.isFile()) {
+      candidates.push({ path: path, size: stat.size });
+    }
+  }
+
+  copyDownloadedFileToDestination(sourcePath: string, destinationUri: string): number {
+    let source: fileIo.File | undefined = undefined;
+    let destination: fileIo.File | undefined = undefined;
+    try {
+      source = fileIo.openSync(sourcePath, fileIo.OpenMode.READ_ONLY);
+      let sourceSize: number = fileIo.statSync(source.fd).size;
+      if (sourceSize <= 0) {
+        throw new Error('downloaded source file is empty');
+      }
+      destination = fileIo.openSync(
+        destinationUri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+      fileIo.copyFileSync(source.fd, destination.fd);
+      fileIo.fsyncSync(destination.fd);
+      let destinationSize: number = fileIo.statSync(destination.fd).size;
+      if (destinationSize !== sourceSize) {
+        throw new Error(`saved file size mismatch source=${sourceSize} destination=${destinationSize}`);
+      }
+      return destinationSize;
+    } finally {
+      if (destination !== undefined) {
+        fileIo.closeSync(destination);
+      }
+      if (source !== undefined) {
+        fileIo.closeSync(source);
+      }
     }
   }
 
@@ -3897,9 +4207,32 @@ struct RemotePage {
     }
     this.transferActive = true;
     this.transferDirection = 'upload';
-    this.transferProgress = 0;
+    this.resetTransferTracking(1);
     this.closeRemoteFileBrowser(false);
     this.showFileToast('文件开始传输');
+  }
+
+  resetTransferTracking(totalItems: number): void {
+    this.transferProgress = 0;
+    this.transferTransferredBytes = 0;
+    this.transferTotalBytes = 0;
+    this.transferSpeedBytesPerSecond = 0;
+    this.transferCompletedItems = 0;
+    this.transferTotalItems = totalItems;
+    this.transferCancelling = false;
+    this.lastTransferSampleAt = Date.now();
+    this.lastTransferSampleBytes = 0;
+  }
+
+  cancelActiveFileTransfer(): void {
+    if (!this.transferActive || this.transferCancelling) return;
+    let result: number = RustDeskNapi.cancelFileTransfer();
+    if (result !== 0) {
+      this.showFileToast(`无法取消文件传输 (${result})`);
+      return;
+    }
+    this.transferCancelling = true;
+    RustDeskNapi.appendDiagnosticLog('file-transfer', `cancel_requested direction=${this.transferDirection}`);
   }
 
   closeRemoteFileBrowser(removePendingFile: boolean): void {
@@ -3923,9 +4256,12 @@ struct RemotePage {
     try {
       let status: FileTransferStatus = JSON.parse(raw) as FileTransferStatus;
       this.transferDirection = status.direction ?? this.transferDirection;
+      this.updateTransferMetrics(status);
       this.transferProgress = status.total > 0 ? Math.min(100, status.transferred * 100 / status.total) : 0;
       if (status.state === 'completed') {
         this.transferActive = false;
+        this.transferCancelling = false;
+        this.transferSpeedBytesPerSecond = 0;
         this.transferProgress = 100;
         if (this.transferDirection === 'download') {
           this.showFileToast(this.pendingDownloadAsArchive ?
@@ -3938,13 +4274,47 @@ struct RemotePage {
         }
       } else if (status.state === 'failed') {
         this.transferActive = false;
+        this.transferCancelling = false;
+        this.transferSpeedBytesPerSecond = 0;
         if (this.transferDirection === 'download') {
           this.cleanupPendingDownloadFiles();
         }
         this.showFileToast(status.error.length > 0 ? `文件传输失败：${status.error}` : '文件传输失败');
+      } else if (status.state === 'cancelled') {
+        this.transferActive = false;
+        this.transferCancelling = false;
+        this.transferSpeedBytesPerSecond = 0;
+        if (this.transferDirection === 'download') {
+          this.cleanupPendingDownloadFiles();
+        } else {
+          this.cleanupPendingUploadFile();
+          this.pendingUploadName = '';
+        }
+        this.showFileToast('文件传输已取消');
       }
     } catch (_e) {
     }
+  }
+
+  updateTransferMetrics(status: FileTransferStatus): void {
+    let now: number = Date.now();
+    let elapsed: number = now - this.lastTransferSampleAt;
+    if (status.transferred < this.lastTransferSampleBytes) {
+      this.lastTransferSampleBytes = status.transferred;
+      this.lastTransferSampleAt = now;
+      this.transferSpeedBytesPerSecond = 0;
+    } else if (elapsed >= 500) {
+      let delta: number = status.transferred - this.lastTransferSampleBytes;
+      let instantSpeed: number = delta * 1000 / elapsed;
+      this.transferSpeedBytesPerSecond = this.transferSpeedBytesPerSecond > 0 ?
+        this.transferSpeedBytesPerSecond * 0.4 + instantSpeed * 0.6 : instantSpeed;
+      this.lastTransferSampleBytes = status.transferred;
+      this.lastTransferSampleAt = now;
+    }
+    this.transferTransferredBytes = status.transferred;
+    this.transferTotalBytes = status.total;
+    this.transferCompletedItems = status.completedItems ?? 0;
+    this.transferTotalItems = status.totalItems ?? this.transferTotalItems;
   }
 
   showFileToast(message: string): void {

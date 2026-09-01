@@ -15,7 +15,7 @@ use hbb_common::message_proto::{
     file_action, file_response, file_transfer_send_confirm_request, key_event, login_response,
     message, misc, supported_decoding, video_frame, AudioFormat, Clipboard, ClipboardFormat,
     Auth2FA, CodecAbility, ControlKey, CursorData, EncodedVideoFrames, FileAction, FileTransfer,
-    FileTransferSendConfirmRequest, Hash, ImageQuality, KeyEvent, IdPk, KeyboardMode, LoginRequest,
+    FileTransferCancel, FileTransferSendConfirmRequest, Hash, ImageQuality, KeyEvent, IdPk, KeyboardMode, LoginRequest,
     Message as PeerMessage,
     Misc, MouseEvent, ReadDir,
     OptionMessage, OSLogin, PublicKey, SupportedDecoding, SwitchDisplay,
@@ -117,6 +117,9 @@ enum QueuedPeerCommand {
     StartDownload {
         session_id: u64,
         jobs: Vec<DownloadJobCommand>,
+    },
+    CancelTransfer {
+        session_id: u64,
     },
     Close {
         session_id: u64,
@@ -1100,6 +1103,18 @@ pub extern "C" fn rust_get_file_transfer_status() -> *mut c_char {
         .into_raw()
 }
 
+#[no_mangle]
+pub extern "C" fn rust_cancel_file_transfer() -> i32 {
+    let Some(sender) = FILE_MESSAGE_SENDER.lock().ok().and_then(|guard| guard.clone()) else {
+        return -1;
+    };
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
+    sender
+        .send(QueuedPeerCommand::CancelTransfer { session_id })
+        .map(|_| 0)
+        .unwrap_or(-2)
+}
+
 fn ensure_file_session() -> Option<Sender<QueuedPeerCommand>> {
     if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         return None;
@@ -1303,6 +1318,53 @@ async fn send_file_command(
             }
             set_download_transfer_status("transferring", write_jobs, download_state, "");
             emit_event(&format!("file-session:download-started items={}", download_state.total_jobs));
+            true
+        }
+        QueuedPeerCommand::CancelTransfer { session_id: command_session } => {
+            if command_session != session_id {
+                return true;
+            }
+            let is_download = download_state.active || !write_jobs.is_empty();
+            let direction = if is_download { "download" } else { "upload" };
+            let completed_items = download_state.completed_jobs;
+            let total_items = if is_download { download_state.total_jobs } else { 1 };
+            let completed_bytes = download_state.completed_bytes;
+            let active_finished = write_jobs.iter().map(TransferJob::finished_size).sum::<u64>();
+            let active_total = write_jobs.iter().map(TransferJob::total_size).sum::<u64>();
+            let upload_finished = read_jobs.iter().map(TransferJob::finished_size).sum::<u64>();
+            let upload_total = read_jobs.iter().map(TransferJob::total_size).sum::<u64>();
+
+            for job in read_jobs.iter().chain(write_jobs.iter()) {
+                let mut action = FileAction::new();
+                action.set_cancel(FileTransferCancel {
+                    id: job.id(),
+                    ..Default::default()
+                });
+                let mut message = PeerMessage::new();
+                message.set_file_action(action);
+                let _ = stream.send(&message).await;
+            }
+            for job in write_jobs.iter() {
+                job.remove_download_file();
+            }
+            read_jobs.clear();
+            write_jobs.clear();
+            *download_state = DownloadBatchState::default();
+
+            let transferred = if is_download {
+                completed_bytes.saturating_add(active_finished)
+            } else {
+                upload_finished
+            };
+            let total = if is_download {
+                completed_bytes.saturating_add(active_total)
+            } else {
+                upload_total
+            };
+            set_file_transfer_status_detail(
+                direction, "cancelled", transferred, total, "", completed_items, total_items,
+            );
+            emit_event(&format!("file-session:transfer-cancelled direction={direction}"));
             true
         }
         QueuedPeerCommand::Close { completed, .. } => {
@@ -2007,6 +2069,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                             QueuedPeerCommand::Message { session_id, .. }
                             | QueuedPeerCommand::StartUpload { session_id, .. }
                             | QueuedPeerCommand::StartDownload { session_id, .. }
+                            | QueuedPeerCommand::CancelTransfer { session_id }
                             | QueuedPeerCommand::Close { session_id, .. } => *session_id,
                         };
                         if SESSION_ID.load(Ordering::SeqCst) != command_session_id {
@@ -2038,6 +2101,12 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                                     set_file_transfer_status_detail(
                                         "download", "failed", 0, 0,
                                         "下载请求进入了错误的连接通道", 0, 0,
+                                    );
+                                    true
+                                }
+                                QueuedPeerCommand::CancelTransfer { .. } => {
+                                    set_file_transfer_status_detail(
+                                        "download", "cancelled", 0, 0, "", 0, 0,
                                     );
                                     true
                                 }
@@ -2863,7 +2932,12 @@ fn supported_decoding_options(prefer_vp9: bool) -> SupportedDecoding {
     let vp8_supported = VP8_DECODER_SUPPORTED.load(Ordering::SeqCst);
     let av1_supported = AV1_DECODER_SUPPORTED.load(Ordering::SeqCst);
     let h265_supported = H265_DECODER_SUPPORTED.load(Ordering::SeqCst);
-    let use_vp9 = prefer_vp9 && vp9_supported || !h264_supported && vp9_supported;
+    // Match the official RustDesk negotiation policy: advertise every decoder
+    // that is actually available and let the controlled peer choose the best
+    // mutually supported codec. The server's Auto preference favors H.265
+    // over H.264 when hardware encoding is available. VP9 is pinned only by
+    // the explicit decoder-recovery path.
+    let use_vp9 = prefer_vp9 && vp9_supported;
     SupportedDecoding {
         ability_vp8: if vp8_supported { 1 } else { 0 },
         ability_vp9: if vp9_supported { 1 } else { 0 },
@@ -2873,7 +2947,7 @@ fn supported_decoding_options(prefer_vp9: bool) -> SupportedDecoding {
         prefer: if use_vp9 {
             supported_decoding::PreferCodec::VP9.into()
         } else {
-            supported_decoding::PreferCodec::H264.into()
+            supported_decoding::PreferCodec::Auto.into()
         },
         i444: MessageField::some(CodecAbility {
             ..Default::default()
@@ -2883,12 +2957,11 @@ fn supported_decoding_options(prefer_vp9: bool) -> SupportedDecoding {
 }
 
 fn preferred_codec_name(prefer_vp9: bool) -> &'static str {
-    let h264_supported = H264_DECODER_SUPPORTED.load(Ordering::SeqCst);
     let vp9_supported = VP9_DECODER_SUPPORTED.load(Ordering::SeqCst);
-    if prefer_vp9 && vp9_supported || !h264_supported && vp9_supported {
+    if prefer_vp9 && vp9_supported {
         "vp9"
     } else {
-        "h264"
+        "auto"
     }
 }
 

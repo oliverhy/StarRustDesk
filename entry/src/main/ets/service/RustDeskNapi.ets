@@ -305,6 +305,10 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).getFileTransferStatus()
   }
 
+  static cancelFileTransfer(): number {
+    return (rustdeskNapi as ESObject).cancelFileTransfer()
+  }
+
   static takeRemoteClipboardText(): string {
     return (rustdeskNapi as ESObject).takeRemoteClipboardText()
   }

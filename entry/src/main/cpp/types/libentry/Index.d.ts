@@ -83,6 +83,7 @@ export const takeRemoteDirectoryResult: () => string;
 export const startFileUpload: (path: string, name: string, remoteDirectory: string) => number;
 export const startFileDownloadBatch: (requestsJson: string, localRoot: string) => number;
 export const getFileTransferStatus: () => string;
+export const cancelFileTransfer: () => number;
 export const sendMouseEvent: (x: number, y: number, action: number, modifierMask?: number) => number;
 export const sendMouseWheel: (deltaX: number, deltaY: number, modifierMask?: number) => number;
 export const getDisplayCount: () => number;

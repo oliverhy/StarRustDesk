@@ -313,7 +313,20 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
     OH_NativeXComponent_GetKeyEventTimestamp(event, &timestamp);
     int32_t modifierMask = 0;
     bool capsLockOn = false;
-    const bool modifierValid = TryGetNativeKeyModifiers(event, modifierMask);
+    bool modifierValid = TryGetNativeKeyModifiers(event, modifierMask);
+    const HardwareKeyState hardwareState = GetHardwareKeyState();
+    if (!modifierValid) {
+        modifierMask = hardwareState.modifierMask;
+        // Some HarmonyOS PC versions do not export the native key modifier
+        // query API. A pressed hardware modifier is still authoritative; an
+        // empty snapshot is not, because a few builds always report zero.
+        modifierValid = hardwareState.valid && hardwareState.modifierMask != 0;
+    } else if (hardwareState.modifierMask != 0) {
+        // The native event snapshot can lag behind the physical Shift/Ctrl
+        // state. Preserve any modifier confirmed by the hardware query for
+        // the printable key that is being queued.
+        modifierMask |= hardwareState.modifierMask;
+    }
     const bool capsLockValid = TryGetNativeCapsLockState(event, capsLockOn);
     QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
         modifierMask, modifierValid, capsLockOn, capsLockValid});
@@ -770,7 +783,8 @@ static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
         napi_get_value_int32(env, args[2], &modifierMask);
     }
     int result = rust_send_key_event(keyCode, action, modifierMask);
-    if (keyCode == 16 || keyCode == 17 || keyCode == 18 || keyCode == 20 || keyCode == 91) {
+    if (keyCode == 16 || keyCode == 17 || keyCode == 18 || keyCode == 20 || keyCode == 91 ||
+        (keyCode >= 'A' && keyCode <= 'Z') || (keyCode >= 'a' && keyCode <= 'z')) {
         OH_LOG_INFO(LOG_APP,
             "InputTrace napi_key key=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
             keyCode, action, modifierMask, result);
@@ -1290,6 +1304,13 @@ static napi_value GetFileTransferStatus(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value CancelFileTransfer(napi_env env, napi_callback_info info) {
+    int result = rust_cancel_file_transfer();
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static napi_value TakeRemoteClipboardText(napi_env env, napi_callback_info info) {
     char* text = rust_take_remote_clipboard_text();
     napi_value ret;
@@ -1739,6 +1760,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"startFileUpload", nullptr, StartFileUpload, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startFileDownloadBatch", nullptr, StartFileDownloadBatch, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getFileTransferStatus", nullptr, GetFileTransferStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelFileTransfer", nullptr, CancelFileTransfer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeRemoteClipboardText", nullptr, TakeRemoteClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOption", nullptr, SetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getOption", nullptr, GetOption, nullptr, nullptr, nullptr, napi_default, nullptr},

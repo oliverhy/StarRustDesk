@@ -16,6 +16,7 @@ export class ConnectionService {
   private static heldModifierMask: number = 0
   private static capsLockEnabled: boolean = false
   private static capsLockKeyHeld: boolean = false
+  private static legacyShiftLetterScanCodes: number[] = []
 
   static connect(remoteId: string, password: string, performancePreset: string = 'smooth'): ConnectionStatus {
     ConnectionService.resetTransientInputState()
@@ -68,8 +69,44 @@ export class ConnectionService {
     RustDeskNapi.sendKeyEvent(keyCode, action, ConnectionService.getKeyModifierMask())
   }
 
-  static sendPhysicalKeyEvent(scanCode: number, action: number): void {
-    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, ConnectionService.getKeyModifierMask())
+  static sendPhysicalKeyEvent(scanCode: number, action: number, eventModifierMask?: number): void {
+    let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
+    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, modifierMask)
+  }
+
+  static sendLetterKeyEvent(letter: string, scanCode: number, action: number,
+    eventModifierMask?: number): void {
+    if (letter.length !== 1) {
+      return
+    }
+    let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
+    let trackedIndex: number = ConnectionService.legacyShiftLetterScanCodes.indexOf(scanCode)
+    let useLegacyCharacter: boolean
+    if (action === 0) {
+      useLegacyCharacter = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
+      if (useLegacyCharacter && trackedIndex < 0) {
+        ConnectionService.legacyShiftLetterScanCodes.push(scanCode)
+      }
+    } else {
+      // The key-up must use the same protocol path as its key-down even when
+      // Shift was released first.
+      useLegacyCharacter = trackedIndex >= 0
+      if (trackedIndex >= 0) {
+        ConnectionService.legacyShiftLetterScanCodes.splice(trackedIndex, 1)
+      }
+    }
+    if (!useLegacyCharacter) {
+      RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, modifierMask)
+      return
+    }
+    let lower: string = letter.toLowerCase()
+    let shiftEnabled: boolean = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
+    let capsEnabled: boolean = (modifierMask & ConnectionService.MODIFIER_CAPS_LOCK) !== 0
+    let character: string = shiftEnabled !== capsEnabled ? lower.toUpperCase() : lower
+    let result: number = RustDeskNapi.sendKeyEvent(character.charCodeAt(0), action, modifierMask)
+    hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+      'InputTrace letter char=%{public}s action=%{public}d mask=%{public}d result=%{public}d',
+      character, action, modifierMask, result)
   }
 
   static syncHeldModifierState(control: boolean, shift: boolean, alt: boolean): void {
@@ -187,12 +224,25 @@ export class ConnectionService {
       (ConnectionService.capsLockEnabled ? ConnectionService.MODIFIER_CAPS_LOCK : 0)
   }
 
+  private static getEffectiveKeyModifierMask(eventModifierMask?: number): number {
+    let modifierMask: number = ConnectionService.getKeyModifierMask()
+    if (eventModifierMask !== undefined) {
+      // Keep the modifier snapshot captured with this key event. It closes the
+      // race where polling observes Shift slightly before/after the letter.
+      modifierMask |= eventModifierMask &
+        (ConnectionService.MODIFIER_CONTROL | ConnectionService.MODIFIER_SHIFT |
+          ConnectionService.MODIFIER_ALT | ConnectionService.MODIFIER_META)
+    }
+    return modifierMask
+  }
+
   private static resetTransientInputState(): void {
     ConnectionService.directModifierMask = 0
     ConnectionService.pointerModifierMask = 0
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
     ConnectionService.capsLockKeyHeld = false
+    ConnectionService.legacyShiftLetterScanCodes = []
   }
 
   private static applyModifierSnapshot(snapshot: number, pointerSource: boolean, source: string): void {
