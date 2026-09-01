@@ -1,12 +1,12 @@
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
 import { window } from '@kit.ArkUI';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, zlib } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
-import { FileTransferStatus, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { FileDownloadRequest, FileTransferStatus, HardwareKeyState, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo } from '@kit.CoreFileKit';
@@ -17,6 +17,10 @@ import pointer from '@ohos.multimodalInput.pointer';
 interface RemotePoint {
   x: number;
   y: number;
+}
+
+interface RemoteDownloadSelection extends FileDownloadRequest {
+  key: string;
 }
 
 const REMOTE_WHEEL_SCALE: number = 0.08;
@@ -93,8 +97,11 @@ struct RemotePage {
   @State remoteDirectoryPath: string = '';
   @State remoteDirectoryEntries: RemoteDirectoryEntry[] = [];
   @State remoteDirectoryLoading: boolean = false;
+  @State remoteFileBrowserMode: string = 'upload';
+  @State selectedRemoteDownloads: RemoteDownloadSelection[] = [];
   @State transferProgress: number = 0;
   @State transferActive: boolean = false;
+  @State transferDirection: string = 'upload';
   @State connectedPeerId: string = '';
   @State twoFaCode: string = '';
   @State twoFaError: string = '';
@@ -112,6 +119,9 @@ struct RemotePage {
   private cursorTimer: number = -1;
   private nativeMouseTimer: number = -1;
   private nativeMousePollGeneration: number = 0;
+  private hardwareModifierTrackingActive: boolean = false;
+  private hardwareCapsLockInitialized: boolean = false;
+  private hardwareCapsLockOn: boolean = false;
   private pointerHoverExitTimer: number = -1;
   private clipboardTimer: number = -1;
   private surfaceRebindTimer: number = -1;
@@ -197,6 +207,12 @@ struct RemotePage {
   private isLeavingAfterDisconnect: boolean = false;
   private pendingUploadPath: string = '';
   private pendingUploadName: string = '';
+  private pendingDownloadRoot: string = '';
+  private pendingDownloadDestinationUri: string = '';
+  private pendingDownloadItems: FileDownloadRequest[] = [];
+  private pendingDownloadSingleFile: boolean = false;
+  private pendingDownloadAsArchive: boolean = false;
+  private pendingDownloadArchivePath: string = '';
   private lastRemoteCursorSequence: number = -1;
   private lastRemoteCursorImageSequence: number = -1;
   private remoteCursorAbsX: number = 0;
@@ -249,6 +265,8 @@ struct RemotePage {
     this.stopNativeMousePolling();
     this.cancelPointerHoverExit();
     this.stopEdgeAutoPan();
+    this.releaseHeldMouseButtons('page_disappear');
+    ConnectionService.releaseModifiers();
     if (this.surfaceRebindTimer !== -1) {
       clearTimeout(this.surfaceRebindTimer);
       this.surfaceRebindTimer = -1;
@@ -260,6 +278,7 @@ struct RemotePage {
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.cleanupPendingUploadFile();
+    this.cleanupPendingDownloadFiles();
     this.releaseRemoteCursorImages();
     this.pointerOverRemoteViewport = false;
     this.setSystemPointerHidden(false);
@@ -594,15 +613,57 @@ struct RemotePage {
         return;
       }
       try {
+        this.syncHardwareKeyState();
         let events: NativeMouseInputEvent[] = RustDeskNapi.takeNativeMouseEvents();
         for (let event of events) {
           this.handleNativeMouseInput(event);
+        }
+        let keyEvents: NativeKeyInputEvent[] = RustDeskNapi.takeNativeKeyEvents();
+        for (let event of keyEvents) {
+          this.handleNativeKeyInput(event);
         }
       } catch (_e) {
       }
       this.nativeMouseTimer = setTimeout(poll, 16);
     };
     this.nativeMouseTimer = setTimeout(poll, 16);
+  }
+
+  syncHardwareKeyState(): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+      this.hardwareModifierTrackingActive = false;
+      this.hardwareCapsLockInitialized = false;
+      return;
+    }
+    const state: HardwareKeyState = RustDeskNapi.getHardwareKeyState();
+    // Some HarmonyOS PC builds return a successful but permanently empty
+    // global-key snapshot. Do not let that overwrite a real modifier captured
+    // from the pointer/key event. Once polling observes a pressed modifier it
+    // becomes authoritative until it observes the corresponding release.
+    if (state.valid && (state.modifierMask !== 0 || this.hardwareModifierTrackingActive)) {
+      ConnectionService.syncHardwareModifierState(
+        (state.modifierMask & 1) !== 0,
+        (state.modifierMask & 2) !== 0,
+        (state.modifierMask & 4) !== 0
+      );
+      this.hardwareModifierTrackingActive = state.modifierMask !== 0;
+    }
+    if (!state.capsLockValid) {
+      return;
+    }
+    if (!this.hardwareCapsLockInitialized) {
+      this.hardwareCapsLockInitialized = true;
+      this.hardwareCapsLockOn = state.capsLockOn;
+      ConnectionService.syncCapsLockState(state.capsLockOn);
+      return;
+    }
+    if (state.capsLockOn === this.hardwareCapsLockOn) {
+      return;
+    }
+    this.hardwareCapsLockOn = state.capsLockOn;
+    ConnectionService.sendCapsLockEvent(0, state.capsLockOn);
+    ConnectionService.sendCapsLockEvent(1, state.capsLockOn);
+    hilog.info(LOG_DOMAIN, 'StarRustDesk', `hardware CapsLock changed state=${state.capsLockOn}`);
   }
 
   stopNativeMousePolling(): void {
@@ -619,6 +680,13 @@ struct RemotePage {
       return;
     }
     this.lastNativeMouseEventAt = Date.now();
+    if (event.modifierValid) {
+      ConnectionService.syncHeldModifierState(
+        (event.modifierMask & 1) !== 0,
+        (event.modifierMask & 2) !== 0,
+        (event.modifierMask & 4) !== 0
+      );
+    }
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel ||
       this.remoteWidth <= 0 || this.remoteHeight <= 0) {
       return;
@@ -666,6 +734,36 @@ struct RemotePage {
     if (forwardedAction > 0) {
       RustDeskNapi.appendDiagnosticLog('input',
         `native_mouse_forwarded action=${forwardedAction} x=${Math.round(remotePoint.x)} y=${Math.round(remotePoint.y)}`);
+    }
+  }
+
+  handleNativeKeyInput(event: NativeKeyInputEvent): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+      return;
+    }
+    if (event.capsLockValid) {
+      ConnectionService.syncCapsLockState(event.capsLockOn);
+    }
+    const action: number = event.action === 0 ? 0 : 1;
+    const controlCode: number = this.mapControlKeyCode(event.keyCode);
+    if (controlCode === 20) {
+      ConnectionService.sendCapsLockEvent(action, event.capsLockValid ? event.capsLockOn : undefined);
+      return;
+    }
+    if (controlCode > 0) {
+      ConnectionService.sendKeyEvent(controlCode, action);
+      return;
+    }
+    if (event.modifierValid) {
+      ConnectionService.syncHeldModifierState(
+        (event.modifierMask & 1) !== 0,
+        (event.modifierMask & 2) !== 0,
+        (event.modifierMask & 4) !== 0
+      );
+    }
+    const scanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
+    if (scanCode > 0) {
+      ConnectionService.sendPhysicalKeyEvent(scanCode, action);
     }
   }
 
@@ -1009,6 +1107,11 @@ struct RemotePage {
   buildRemoteFileBrowser() {
     Stack({ alignContent: Alignment.Center }) {
       Column({ space: 12 }) {
+        Text(this.remoteFileBrowserMode === 'download' ? '从远端取回文件' : '选择远端保存位置')
+          .width('100%')
+          .fontSize(18)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.primaryTextColor())
         Row({ space: 8 }) {
           Button('上一级')
             .height(40)
@@ -1028,6 +1131,36 @@ struct RemotePage {
         }
         .width('100%')
 
+        if (this.remoteFileBrowserMode === 'download' && !this.remoteDirectoryLoading) {
+          Row({ space: 8 }) {
+            Button(this.areAllRemoteEntriesSelected() ? '取消全选' : '全选')
+              .height(36)
+              .fontSize(13)
+              .fontColor(RustDeskTheme.ACCENT)
+              .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+              .borderRadius(8)
+              .enabled(this.getSelectableRemoteEntries().length > 0)
+              .onClick(() => {
+                this.toggleSelectAllRemoteEntries();
+              })
+            Button('取回当前文件夹')
+              .height(36)
+              .fontSize(13)
+              .fontColor(RustDeskTheme.ACCENT)
+              .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+              .borderRadius(8)
+              .enabled(this.remoteDirectoryPath.length > 0 && this.remoteDirectoryPath !== '/')
+              .onClick(() => {
+                this.prepareCurrentRemoteFolderDownload();
+              })
+            Blank()
+            Text(`已选 ${this.selectedRemoteDownloads.length} 项`)
+              .fontSize(13)
+              .fontColor(this.secondaryTextColor())
+          }
+          .width('100%')
+        }
+
         if (this.remoteDirectoryLoading) {
           Column() {
             LoadingProgress().width(40).height(40).color(RustDeskTheme.ACCENT)
@@ -1037,10 +1170,19 @@ struct RemotePage {
           .justifyContent(FlexAlign.Center)
         } else {
           List({ space: 2 }) {
-            ForEach(this.getRemoteFolders(), (entry: RemoteDirectoryEntry) => {
+            ForEach(this.getVisibleRemoteEntries(), (entry: RemoteDirectoryEntry) => {
               ListItem() {
                 Row({ space: 12 }) {
-                  Text(entry.entryType === 3 ? '磁盘' : '文件夹')
+                  if (this.remoteFileBrowserMode === 'download' && entry.entryType !== 3) {
+                    Toggle({ type: ToggleType.Checkbox, isOn: this.isRemoteEntrySelected(entry) })
+                      .width(28)
+                      .height(28)
+                      .selectedColor(RustDeskTheme.ACCENT)
+                      .onChange(() => {
+                        this.toggleRemoteDownloadEntry(entry);
+                      })
+                  }
+                  Text(this.remoteEntryTypeLabel(entry))
                     .fontSize(12)
                     .fontColor(this.secondaryTextColor())
                     .width(52)
@@ -1050,13 +1192,25 @@ struct RemotePage {
                     .fontColor(this.primaryTextColor())
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .onClick(() => {
+                      if (this.isRemoteDirectory(entry)) {
+                        this.openRemoteDirectory(this.joinRemotePath(entry.name));
+                      } else if (this.remoteFileBrowserMode === 'download') {
+                        this.toggleRemoteDownloadEntry(entry);
+                      }
+                    })
+                  if (this.isRemoteDirectory(entry)) {
+                    Text('打开 ›')
+                      .fontSize(13)
+                      .fontColor(RustDeskTheme.ACCENT)
+                      .onClick(() => {
+                        this.openRemoteDirectory(this.joinRemotePath(entry.name));
+                      })
+                  }
                 }
                 .width('100%')
                 .height(48)
                 .padding({ left: 12, right: 12 })
-                .onClick(() => {
-                  this.openRemoteDirectory(this.joinRemotePath(entry.name));
-                })
               }
             }, (entry: RemoteDirectoryEntry) => `${entry.entryType}:${entry.name}`)
           }
@@ -1075,15 +1229,27 @@ struct RemotePage {
             .onClick(() => {
               this.closeRemoteFileBrowser(true);
             })
-          Button('发送到这里')
-            .layoutWeight(1)
-            .height(42)
-            .borderRadius(8)
-            .enabled(this.remoteDirectoryPath.length > 0 && this.remoteDirectoryPath !== '/' && !this.remoteDirectoryLoading)
-            .backgroundColor(RustDeskTheme.ACCENT)
-            .onClick(() => {
-              this.startPendingFileUpload();
-            })
+          if (this.remoteFileBrowserMode === 'download') {
+            Button(`取回所选 (${this.selectedRemoteDownloads.length})`)
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(8)
+              .enabled(this.selectedRemoteDownloads.length > 0 && !this.remoteDirectoryLoading)
+              .backgroundColor(RustDeskTheme.ACCENT)
+              .onClick(() => {
+                this.prepareRemoteDownload(this.selectedRemoteDownloads);
+              })
+          } else {
+            Button('发送到这里')
+              .layoutWeight(1)
+              .height(42)
+              .borderRadius(8)
+              .enabled(this.remoteDirectoryPath.length > 0 && this.remoteDirectoryPath !== '/' && !this.remoteDirectoryLoading)
+              .backgroundColor(RustDeskTheme.ACCENT)
+              .onClick(() => {
+                this.startPendingFileUpload();
+              })
+          }
         }
         .width('100%')
       }
@@ -1103,7 +1269,7 @@ struct RemotePage {
   @Builder
   buildTransferProgress() {
     Row({ space: 10 }) {
-      Text('正在发送文件')
+      Text(this.transferDirection === 'download' ? '正在取回文件' : '正在发送文件')
         .fontSize(13)
         .fontColor(this.primaryTextColor())
       Progress({ value: this.transferProgress, total: 100, type: ProgressType.Linear })
@@ -1179,8 +1345,11 @@ struct RemotePage {
           .width(this.getDisplayWidth())
           .height(this.getDisplayHeight())
           .hitTestBehavior(HitTestMode.None)
+          .id('remoteNativeInputCapture')
+          .focusable(true)
           .onLoad(() => {
             this.onSurfaceReady();
+            setTimeout(() => this.requestRemoteInputFocus(), 60);
           })
       }
 
@@ -1287,6 +1456,9 @@ struct RemotePage {
         this.buildToolbarButton('发送文件', 82, false, false, !this.transferActive, () => {
           this.pickFileForUpload();
         })
+        this.buildToolbarButton('取回文件', 82, false, false, !this.transferActive, () => {
+          this.openRemoteDownloadBrowser();
+        })
         this.buildToolbarButton(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关', 82, this.clipboardSyncEnabled, false, true, () => {
           this.toggleClipboardSync();
         })
@@ -1361,6 +1533,9 @@ struct RemotePage {
         }
         this.buildToolbarButton('发送文件', 80, false, false, !this.transferActive, () => {
           this.pickFileForUpload();
+        })
+        this.buildToolbarButton('取回文件', 80, false, false, !this.transferActive, () => {
+          this.openRemoteDownloadBrowser();
         })
         this.buildToolbarButton(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关', 80, this.clipboardSyncEnabled, false, true, () => {
           this.toggleClipboardSync();
@@ -2327,6 +2502,7 @@ struct RemotePage {
       this.remoteWidth <= 0 || this.remoteHeight <= 0) {
       return;
     }
+    this.syncModifiersFromPointerEvent(event);
     let localX: number = this.inputMode === INPUT_MODE_MOUSE && !coordinatesFromSurface ?
       event.x - this.getDisplayLeft() : event.x;
     let localY: number = this.inputMode === INPUT_MODE_MOUSE && !coordinatesFromSurface ?
@@ -2352,6 +2528,9 @@ struct RemotePage {
         (event.sourceTool === SourceTool.Finger || event.sourceTool === SourceTool.Pen))) {
       return;
     }
+    // Read the modifier state from the mouse event itself. This remains valid
+    // even if ArkUI routes Ctrl/Shift key events to another focused component.
+    this.syncModifiersFromPointerEvent(event);
     // The Native XComponent callback is authoritative on HarmonyOS PC. Avoid
     // forwarding the compatibility ArkUI event a second time when both paths
     // report the same physical mouse input.
@@ -2411,6 +2590,7 @@ struct RemotePage {
     if (event.action !== AxisAction.UPDATE && event.action !== AxisAction.BEGIN) {
       return;
     }
+    this.syncModifiersFromPointerEvent(event);
 
     let deltaX: number = this.scaleRemoteWheelDeltaX(event.getHorizontalAxisValue());
     let deltaY: number = this.scaleRemoteWheelDeltaY(event.getVerticalAxisValue());
@@ -2593,29 +2773,40 @@ struct RemotePage {
     }
 
     let controlCode: number = this.mapControlKeyCode(event.keyCode);
+    let action: number = event.type === KeyType.Down ? 0 : 1;
+    if (controlCode === 20) {
+      ConnectionService.sendCapsLockEvent(action, event.isCapsLockOn);
+      return true;
+    }
+    if (!this.isModifierControlCode(controlCode)) {
+      this.syncModifiersFromKeyEvent(event);
+      if (event.isCapsLockOn !== undefined) {
+        ConnectionService.syncCapsLockState(event.isCapsLockOn);
+      }
+    }
     if (this.showKeyboardPanel) {
       if (this.isModifierControlCode(controlCode)) {
-        ConnectionService.sendKeyEvent(controlCode, event.type === KeyType.Down ? 0 : 1);
+        ConnectionService.sendKeyEvent(controlCode, action);
         return true;
       }
       return false;
     }
     if (controlCode > 0) {
-      ConnectionService.sendKeyEvent(controlCode, event.type === KeyType.Down ? 0 : 1);
-      return true;
-    }
-
-    let physicalScanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
-    if (physicalScanCode > 0) {
-      ConnectionService.sendPhysicalKeyEvent(physicalScanCode, event.type === KeyType.Down ? 0 : 1);
+      ConnectionService.sendKeyEvent(controlCode, action);
       return true;
     }
 
     let text: string = this.getKeyEventText(event);
+    let physicalScanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
+    if (physicalScanCode > 0) {
+      ConnectionService.sendPhysicalKeyEvent(physicalScanCode, action);
+      return true;
+    }
+
     if (text.length > 0) {
       let scanCode: number = this.mapAsciiToWindowsScanCode(text);
       if (scanCode > 0) {
-        ConnectionService.sendPhysicalKeyEvent(scanCode, event.type === KeyType.Down ? 0 : 1);
+        ConnectionService.sendPhysicalKeyEvent(scanCode, action);
       } else if (event.type === KeyType.Down) {
         ConnectionService.sendText(text);
       }
@@ -2624,11 +2815,43 @@ struct RemotePage {
     return false;
   }
 
+  syncModifiersFromKeyEvent(event: KeyEvent): void {
+    if (event.getModifierKeyState === undefined) {
+      return;
+    }
+    try {
+      ConnectionService.syncHeldModifierState(
+        event.getModifierKeyState(['Ctrl']),
+        event.getModifierKeyState(['Shift']),
+        event.getModifierKeyState(['Alt'])
+      );
+    } catch (_e) {
+    }
+  }
+
+  syncModifiersFromPointerEvent(event: BaseEvent): void {
+    if (event.getModifierKeyState === undefined) {
+      return;
+    }
+    try {
+      ConnectionService.syncHeldModifierState(
+        event.getModifierKeyState(['Ctrl']),
+        event.getModifierKeyState(['Shift']),
+        event.getModifierKeyState(['Alt'])
+      );
+    } catch (_e) {
+    }
+  }
+
   requestRemoteInputFocus(): void {
     try {
-      this.getUIContext()?.getFocusController().requestFocus('remoteInputCapture');
+      this.getUIContext()?.getFocusController().requestFocus('remoteNativeInputCapture');
     } catch (_e) {
-      // Some windows reject focus while relayout or navigation is in progress.
+      try {
+        this.getUIContext()?.getFocusController().requestFocus('remoteInputCapture');
+      } catch (_ignored) {
+        // Some windows reject focus while relayout or navigation is in progress.
+      }
     }
   }
 
@@ -2694,7 +2917,20 @@ struct RemotePage {
     if (keyCode >= 2000 && keyCode <= 2009) {
       return this.mapAsciiToWindowsScanCode((keyCode - 2000).toString());
     }
-    return 0;
+    switch (keyCode) {
+      case 2043: return 0x33;
+      case 2044: return 0x34;
+      case 2056: return 0x29;
+      case 2057: return 0x0C;
+      case 2058: return 0x0D;
+      case 2059: return 0x1A;
+      case 2060: return 0x1B;
+      case 2061: return 0x2B;
+      case 2062: return 0x27;
+      case 2063: return 0x28;
+      case 2064: return 0x35;
+      default: return 0;
+    }
   }
 
   mapControlKeyCode(keyCode: number): number {
@@ -2728,6 +2964,8 @@ struct RemotePage {
       case 2072:
       case 2073:
         return 17;
+      case 2074:
+        return 20;
       case 2076:
       case 2077:
         return 91;
@@ -3310,6 +3548,8 @@ struct RemotePage {
       this.cleanupPendingUploadFile();
       this.pendingUploadPath = cachedPath;
       this.pendingUploadName = fileName;
+      this.remoteFileBrowserMode = 'upload';
+      this.selectedRemoteDownloads = [];
       this.showRemoteFileBrowser = true;
       this.openRemoteDirectory('/');
     } catch (_e) {
@@ -3320,6 +3560,9 @@ struct RemotePage {
   openRemoteDirectory(path: string): void {
     this.remoteDirectoryLoading = true;
     this.remoteDirectoryEntries = [];
+    if (this.remoteFileBrowserMode === 'download') {
+      this.selectedRemoteDownloads = [];
+    }
     if (this.remoteDirectoryTimer !== -1) {
       clearTimeout(this.remoteDirectoryTimer);
     }
@@ -3361,10 +3604,84 @@ struct RemotePage {
     }, 100);
   }
 
-  getRemoteFolders(): RemoteDirectoryEntry[] {
+  openRemoteDownloadBrowser(): void {
+    if (this.transferActive) return;
+    this.remoteFileBrowserMode = 'download';
+    this.selectedRemoteDownloads = [];
+    this.showRemoteFileBrowser = true;
+    this.openRemoteDirectory('/');
+  }
+
+  getVisibleRemoteEntries(): RemoteDirectoryEntry[] {
+    if (this.remoteFileBrowserMode === 'download') {
+      return this.remoteDirectoryEntries;
+    }
     return this.remoteDirectoryEntries.filter((entry: RemoteDirectoryEntry) => {
-      return entry.entryType === 0 || entry.entryType === 2 || entry.entryType === 3;
+      return this.isRemoteDirectory(entry);
     });
+  }
+
+  getSelectableRemoteEntries(): RemoteDirectoryEntry[] {
+    return this.remoteDirectoryEntries.filter((entry: RemoteDirectoryEntry) => entry.entryType !== 3);
+  }
+
+  isRemoteDirectory(entry: RemoteDirectoryEntry): boolean {
+    return entry.entryType === 0 || entry.entryType === 2 || entry.entryType === 3;
+  }
+
+  remoteEntryTypeLabel(entry: RemoteDirectoryEntry): string {
+    if (entry.entryType === 3) return '磁盘';
+    if (entry.entryType === 0 || entry.entryType === 2) return '文件夹';
+    return '文件';
+  }
+
+  remoteEntryKey(entry: RemoteDirectoryEntry): string {
+    return this.joinRemotePath(entry.name);
+  }
+
+  isRemoteEntrySelected(entry: RemoteDirectoryEntry): boolean {
+    let key: string = this.remoteEntryKey(entry);
+    return this.selectedRemoteDownloads.some((item: RemoteDownloadSelection) => item.key === key);
+  }
+
+  toggleRemoteDownloadEntry(entry: RemoteDirectoryEntry): void {
+    if (entry.entryType === 3) return;
+    let key: string = this.remoteEntryKey(entry);
+    if (this.isRemoteEntrySelected(entry)) {
+      this.selectedRemoteDownloads = this.selectedRemoteDownloads.filter(
+        (item: RemoteDownloadSelection) => item.key !== key);
+      return;
+    }
+    let selection: RemoteDownloadSelection = {
+      key: key,
+      remotePath: key,
+      localName: entry.name,
+      isDirectory: this.isRemoteDirectory(entry)
+    };
+    this.selectedRemoteDownloads = [...this.selectedRemoteDownloads, selection];
+  }
+
+  areAllRemoteEntriesSelected(): boolean {
+    let entries: RemoteDirectoryEntry[] = this.getSelectableRemoteEntries();
+    return entries.length > 0 && entries.every((entry: RemoteDirectoryEntry) => this.isRemoteEntrySelected(entry));
+  }
+
+  toggleSelectAllRemoteEntries(): void {
+    if (this.areAllRemoteEntriesSelected()) {
+      this.selectedRemoteDownloads = [];
+      return;
+    }
+    let selections: RemoteDownloadSelection[] = [];
+    this.getSelectableRemoteEntries().forEach((entry: RemoteDirectoryEntry) => {
+      let key: string = this.remoteEntryKey(entry);
+      selections.push({
+        key: key,
+        remotePath: key,
+        localName: entry.name,
+        isDirectory: this.isRemoteDirectory(entry)
+      });
+    });
+    this.selectedRemoteDownloads = selections;
   }
 
   joinRemotePath(name: string): string {
@@ -3391,6 +3708,182 @@ struct RemotePage {
     return parent;
   }
 
+  prepareCurrentRemoteFolderDownload(): void {
+    if (this.remoteDirectoryPath.length === 0 || this.remoteDirectoryPath === '/') return;
+    let name: string = this.remoteFolderDisplayName(this.remoteDirectoryPath);
+    let selection: RemoteDownloadSelection = {
+      key: this.remoteDirectoryPath,
+      remotePath: this.remoteDirectoryPath,
+      localName: name,
+      isDirectory: true
+    };
+    this.prepareRemoteDownload([selection]);
+  }
+
+  remoteFolderDisplayName(path: string): string {
+    let value: string = path;
+    while (value.length > 1 && (value.endsWith('\\') || value.endsWith('/'))) {
+      value = value.substring(0, value.length - 1);
+    }
+    if (/^[A-Za-z]:$/.test(value)) return value.substring(0, 1);
+    let index: number = Math.max(value.lastIndexOf('\\'), value.lastIndexOf('/'));
+    return index >= 0 ? value.substring(index + 1) : value;
+  }
+
+  safeDownloadName(name: string): string {
+    let safeName: string = name.replace(/[\\/:*?"<>|]/g, '_').replace(/[. ]+$/g, '').trim();
+    if (safeName.length === 0 || safeName === '.' || safeName === '..') {
+      safeName = `远端文件-${Date.now()}`;
+    }
+    return safeName.substring(0, 180);
+  }
+
+  async prepareRemoteDownload(items: RemoteDownloadSelection[]): Promise<void> {
+    if (items.length <= 0 || this.transferActive) return;
+    try {
+      let context = getContext(this) as common.UIAbilityContext;
+      let requests: FileDownloadRequest[] = [];
+      let usedNames: Map<string, number> = new Map<string, number>();
+      items.forEach((item: RemoteDownloadSelection) => {
+        let baseName: string = this.safeDownloadName(item.localName);
+        let count: number = usedNames.get(baseName) ?? 0;
+        usedNames.set(baseName, count + 1);
+        let localName: string = count === 0 ? baseName : `${baseName}-${count + 1}`;
+        requests.push({
+          remotePath: item.remotePath,
+          localName: localName,
+          isDirectory: item.isDirectory
+        });
+      });
+
+      let documentPicker = new picker.DocumentViewPicker(context);
+      let options = new picker.DocumentSaveOptions();
+      let singleFile: boolean = requests.length === 1 && !requests[0].isDirectory;
+      let asArchive: boolean = !singleFile;
+      let archiveName: string = requests.length === 1 ?
+        `${requests[0].localName}.zip` : `StarRustDesk-批量取回-${this.downloadTimestamp()}.zip`;
+      if (singleFile) {
+        options.newFileNames = [requests[0].localName];
+      } else {
+        options.newFileNames = [archiveName];
+      }
+      let uris: string[] = await documentPicker.save(options);
+      if (uris.length <= 0) return;
+
+      this.cleanupPendingDownloadFiles();
+      let localRoot: string = `${context.cacheDir}/StarRustDesk-取回-${Date.now()}`;
+      fileIo.mkdirSync(localRoot);
+      this.pendingDownloadRoot = localRoot;
+      this.pendingDownloadDestinationUri = uris[0];
+      this.pendingDownloadItems = requests;
+      this.pendingDownloadSingleFile = singleFile;
+      this.pendingDownloadAsArchive = asArchive;
+      this.pendingDownloadArchivePath = asArchive ? `${localRoot}.zip` : '';
+
+      let result: number = RustDeskNapi.startFileDownloadBatch(requests, localRoot);
+      if (result !== 0) {
+        this.cleanupPendingDownloadFiles();
+        this.showFileToast(`取回文件失败 (${result})`);
+        return;
+      }
+      this.transferDirection = 'download';
+      this.transferActive = true;
+      this.transferProgress = 0;
+      this.closeRemoteFileBrowser(false);
+      this.showFileToast(asArchive ? `开始取回，完成后将生成 ${archiveName}` : '开始取回文件');
+    } catch (_e) {
+      this.cleanupPendingDownloadFiles();
+      this.showFileToast('未选择保存位置或无法创建下载任务');
+    }
+  }
+
+  downloadTimestamp(): string {
+    let now: Date = new Date();
+    let pad = (value: number): string => value.toString().padStart(2, '0');
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  }
+
+  async exportDownloadedItems(): Promise<void> {
+    if (this.pendingDownloadRoot.length === 0 || this.pendingDownloadDestinationUri.length === 0) {
+      this.showFileToast('下载完成，但保存位置无效');
+      return;
+    }
+    let itemCount: number = this.pendingDownloadItems.length;
+    let asArchive: boolean = this.pendingDownloadAsArchive;
+    try {
+      if (asArchive) {
+        let archiveOptions: zlib.Options = {
+          level: zlib.CompressLevel.COMPRESS_LEVEL_DEFAULT_COMPRESSION,
+          memLevel: zlib.MemLevel.MEM_LEVEL_DEFAULT,
+          strategy: zlib.CompressStrategy.COMPRESS_STRATEGY_DEFAULT_STRATEGY
+        };
+        RustDeskNapi.appendDiagnosticLog('file-download', `archive_start items=${itemCount}`);
+        await zlib.compressFile(this.pendingDownloadRoot, this.pendingDownloadArchivePath, archiveOptions);
+        fileIo.copyFileSync(this.pendingDownloadArchivePath, this.pendingDownloadDestinationUri);
+        let archiveSize: number = fileIo.statSync(this.pendingDownloadArchivePath).size;
+        if (archiveSize <= 0) {
+          throw new Error('archive is empty');
+        }
+        RustDeskNapi.appendDiagnosticLog(
+          'file-download', `archive_saved items=${itemCount} bytes=${archiveSize}`);
+      } else {
+        let item: FileDownloadRequest = this.pendingDownloadItems[0];
+        let sourcePath: string = `${this.pendingDownloadRoot}/${item.localName}`;
+        fileIo.copyFileSync(sourcePath, this.pendingDownloadDestinationUri);
+      }
+      this.cleanupPendingDownloadFiles();
+      this.showFileToast(asArchive ?
+        `${itemCount} 项已压缩并保存` : '文件已保存到所选位置');
+    } catch (error) {
+      this.logDownloadExportError(asArchive ? 'archive' : 'single-file', error);
+      this.showFileToast(asArchive ?
+        '文件已取回，但压缩或保存 ZIP 失败' : '文件已取回，但保存到所选位置失败');
+    }
+  }
+
+  logDownloadExportError(name: string, error: Object): void {
+    let businessError: BusinessError = error as BusinessError;
+    RustDeskNapi.appendDiagnosticLog(
+      'file-download',
+      `export_error name=${name} code=${businessError.code ?? -1} message=${businessError.message ?? 'unknown'}`
+    );
+  }
+
+  cleanupPendingDownloadFiles(): void {
+    let root: string = this.pendingDownloadRoot;
+    let archivePath: string = this.pendingDownloadArchivePath;
+    this.pendingDownloadRoot = '';
+    this.pendingDownloadDestinationUri = '';
+    this.pendingDownloadItems = [];
+    this.pendingDownloadSingleFile = false;
+    this.pendingDownloadAsArchive = false;
+    this.pendingDownloadArchivePath = '';
+    if (root.length > 0) {
+      this.removeSandboxTree(root);
+    }
+    if (archivePath.length > 0) {
+      try {
+        fileIo.unlinkSync(archivePath);
+      } catch (_e) {
+      }
+    }
+  }
+
+  removeSandboxTree(path: string): void {
+    try {
+      let stat: fileIo.Stat = fileIo.statSync(path);
+      if (stat.isDirectory()) {
+        fileIo.listFileSync(path).forEach((name: string) => {
+          this.removeSandboxTree(`${path}/${name}`);
+        });
+        fileIo.rmdirSync(path);
+      } else {
+        fileIo.unlinkSync(path);
+      }
+    } catch (_e) {
+    }
+  }
+
   startPendingFileUpload(): void {
     if (this.pendingUploadPath.length === 0 || this.pendingUploadName.length === 0) return;
     let result: number = RustDeskNapi.startFileUpload(
@@ -3403,6 +3896,7 @@ struct RemotePage {
       return;
     }
     this.transferActive = true;
+    this.transferDirection = 'upload';
     this.transferProgress = 0;
     this.closeRemoteFileBrowser(false);
     this.showFileToast('文件开始传输');
@@ -3411,6 +3905,7 @@ struct RemotePage {
   closeRemoteFileBrowser(removePendingFile: boolean): void {
     this.showRemoteFileBrowser = false;
     this.remoteDirectoryLoading = false;
+    this.selectedRemoteDownloads = [];
     if (this.remoteDirectoryTimer !== -1) {
       clearTimeout(this.remoteDirectoryTimer);
       this.remoteDirectoryTimer = -1;
@@ -3427,15 +3922,25 @@ struct RemotePage {
     if (raw.length === 0) return;
     try {
       let status: FileTransferStatus = JSON.parse(raw) as FileTransferStatus;
+      this.transferDirection = status.direction ?? this.transferDirection;
       this.transferProgress = status.total > 0 ? Math.min(100, status.transferred * 100 / status.total) : 0;
       if (status.state === 'completed') {
         this.transferActive = false;
         this.transferProgress = 100;
-        this.cleanupPendingUploadFile();
-        this.pendingUploadName = '';
-        this.showFileToast('文件传输完成');
+        if (this.transferDirection === 'download') {
+          this.showFileToast(this.pendingDownloadAsArchive ?
+            '取回完成，正在生成 ZIP 文件' : '取回完成，正在保存到所选位置');
+          this.exportDownloadedItems();
+        } else {
+          this.cleanupPendingUploadFile();
+          this.pendingUploadName = '';
+          this.showFileToast('文件传输完成');
+        }
       } else if (status.state === 'failed') {
         this.transferActive = false;
+        if (this.transferDirection === 'download') {
+          this.cleanupPendingDownloadFiles();
+        }
         this.showFileToast(status.error.length > 0 ? `文件传输失败：${status.error}` : '文件传输失败');
       }
     } catch (_e) {
@@ -3460,6 +3965,7 @@ struct RemotePage {
     this.isLeavingAfterDisconnect = true;
     this.stopEdgeAutoPan();
     this.releaseHeldMouseButtons('disconnect');
+    ConnectionService.releaseModifiers();
     if (this.isFullScreen) {
       this.isFullScreen = false;
       this.applyFullscreenWindow(false);

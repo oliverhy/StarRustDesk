@@ -47,7 +47,7 @@ export class RemoteSessionBackgroundTask {
           abilityName: context.abilityInfo.name,
         }],
         actionType: wantAgent.OperationType.START_ABILITY,
-        requestCode: 1000901,
+        requestCode: 1000902,
         actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
       }
       const notificationAgent: WantAgent = await wantAgent.getWantAgent(agentInfo)

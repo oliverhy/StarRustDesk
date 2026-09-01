@@ -48,6 +48,25 @@ export interface NativeMouseInputEvent {
   button: number
   hover: number
   timestamp: number
+  modifierMask: number
+  modifierValid: boolean
+}
+
+export interface NativeKeyInputEvent {
+  keyCode: number
+  action: number
+  timestamp: number
+  modifierMask: number
+  modifierValid: boolean
+  capsLockOn: boolean
+  capsLockValid: boolean
+}
+
+export interface HardwareKeyState {
+  valid: boolean
+  modifierMask: number
+  capsLockOn: boolean
+  capsLockValid: boolean
 }
 
 export interface RemoteDirectoryEntry {
@@ -69,6 +88,15 @@ export interface FileTransferStatus {
   transferred: number
   total: number
   error: string
+  direction?: string
+  completedItems?: number
+  totalItems?: number
+}
+
+export interface FileDownloadRequest {
+  remotePath: string
+  localName: string
+  isDirectory: boolean
 }
 
 export class RustDeskNapi {
@@ -108,12 +136,12 @@ export class RustDeskNapi {
     return rustdeskNapi.disconnect()
   }
 
-  static sendKeyEvent(keyCode: number, action: number): number {
-    return rustdeskNapi.sendKeyEvent(keyCode, action)
+  static sendKeyEvent(keyCode: number, action: number, modifierMask: number = 0): number {
+    return rustdeskNapi.sendKeyEvent(keyCode, action, modifierMask)
   }
 
-  static sendPhysicalKeyEvent(scanCode: number, action: number): number {
-    return (rustdeskNapi as ESObject).sendPhysicalKeyEvent(scanCode, action)
+  static sendPhysicalKeyEvent(scanCode: number, action: number, modifierMask: number = 0): number {
+    return (rustdeskNapi as ESObject).sendPhysicalKeyEvent(scanCode, action, modifierMask)
   }
 
   static sendText(text: string): number {
@@ -128,16 +156,24 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).getEnableTrustedDevices()
   }
 
-  static sendMouseEvent(x: number, y: number, action: number): number {
-    return rustdeskNapi.sendMouseEvent(x, y, action)
+  static sendMouseEvent(x: number, y: number, action: number, modifierMask: number = 0): number {
+    return rustdeskNapi.sendMouseEvent(x, y, action, modifierMask)
   }
 
-  static sendMouseWheel(deltaX: number, deltaY: number): number {
-    return (rustdeskNapi as ESObject).sendMouseWheel(deltaX, deltaY)
+  static sendMouseWheel(deltaX: number, deltaY: number, modifierMask: number = 0): number {
+    return (rustdeskNapi as ESObject).sendMouseWheel(deltaX, deltaY, modifierMask)
   }
 
   static takeNativeMouseEvents(): NativeMouseInputEvent[] {
     return (rustdeskNapi as ESObject).takeNativeMouseEvents() as NativeMouseInputEvent[]
+  }
+
+  static takeNativeKeyEvents(): NativeKeyInputEvent[] {
+    return (rustdeskNapi as ESObject).takeNativeKeyEvents() as NativeKeyInputEvent[]
+  }
+
+  static getHardwareKeyState(): HardwareKeyState {
+    return (rustdeskNapi as ESObject).getHardwareKeyState() as HardwareKeyState
   }
 
   static getDisplayCount(): number {
@@ -259,6 +295,10 @@ export class RustDeskNapi {
 
   static startFileUpload(path: string, name: string, remoteDirectory: string): number {
     return (rustdeskNapi as ESObject).startFileUpload(path, name, remoteDirectory)
+  }
+
+  static startFileDownloadBatch(requests: FileDownloadRequest[], localRoot: string): number {
+    return (rustdeskNapi as ESObject).startFileDownloadBatch(JSON.stringify(requests), localRoot)
   }
 
   static getFileTransferStatus(): string {

@@ -29,8 +29,10 @@
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <hilog/log.h>
 #include <ace/xcomponent/native_interface_xcomponent.h>
+#include <multimodalinput/oh_input_manager.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -64,11 +66,175 @@ struct NativeMouseInputEvent {
     int32_t button{0};
     int32_t hover{-1};
     int64_t timestamp{0};
+    int32_t modifierMask{0};
+    bool modifierValid{false};
+};
+
+struct NativeKeyInputEvent {
+    int32_t keyCode{-1};
+    int32_t action{-1};
+    int64_t timestamp{0};
+    int32_t modifierMask{0};
+    bool modifierValid{false};
+    bool capsLockOn{false};
+    bool capsLockValid{false};
 };
 
 static std::mutex g_nativeMouseInputMutex;
 static std::deque<NativeMouseInputEvent> g_nativeMouseInputEvents;
 static OH_NativeXComponent* g_registeredMouseXComponent = nullptr;
+static std::mutex g_nativeKeyInputMutex;
+static std::deque<NativeKeyInputEvent> g_nativeKeyInputEvents;
+static OH_NativeXComponent* g_registeredKeyXComponent = nullptr;
+
+using GetExtraMouseEventInfoFn = int32_t (*)(
+    OH_NativeXComponent*, OH_NativeXComponent_ExtraMouseEventInfo**);
+using GetMouseModifierKeyStatesFn = int32_t (*)(
+    OH_NativeXComponent_ExtraMouseEventInfo*, uint64_t*);
+using GetKeyModifierKeyStatesFn = int32_t (*)(OH_NativeXComponent_KeyEvent*, uint64_t*);
+using GetKeyCapsLockStateFn = int32_t (*)(OH_NativeXComponent_KeyEvent*, bool*);
+
+struct HardwareKeyState {
+    bool valid{false};
+    int32_t modifierMask{0};
+    bool capsLockOn{false};
+    bool capsLockValid{false};
+    int32_t querySuccessCount{0};
+};
+
+static bool QueryHardwareKeyState(int32_t keyCode, int32_t& pressed, int32_t& keySwitch) {
+    Input_KeyState* state = OH_Input_CreateKeyState();
+    if (state == nullptr) {
+        return false;
+    }
+    OH_Input_SetKeyCode(state, keyCode);
+    const Input_Result result = OH_Input_GetKeyState(state);
+    if (result == INPUT_SUCCESS) {
+        pressed = OH_Input_GetKeyPressed(state);
+        keySwitch = OH_Input_GetKeySwitch(state);
+    }
+    OH_Input_DestroyKeyState(&state);
+    return result == INPUT_SUCCESS;
+}
+
+static HardwareKeyState GetHardwareKeyState() {
+    HardwareKeyState state;
+    int32_t pressed = KEY_DEFAULT;
+    int32_t keySwitch = KEY_DEFAULT;
+    bool anyValid = false;
+    if (QueryHardwareKeyState(KEYCODE_CTRL_LEFT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 1;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_CTRL_RIGHT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 1;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_SHIFT_LEFT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 2;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_SHIFT_RIGHT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 2;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_ALT_LEFT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 4;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_ALT_RIGHT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 4;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_CAPS_LOCK, pressed, keySwitch)) {
+        state.capsLockValid = keySwitch == KEY_SWITCH_ON || keySwitch == KEY_SWITCH_OFF;
+        state.capsLockOn = keySwitch == KEY_SWITCH_ON;
+        anyValid = true;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    state.valid = anyValid;
+    const int32_t signature = (state.querySuccessCount << 8) |
+        (state.capsLockValid ? 1 << 7 : 0) | (state.capsLockOn ? 1 << 6 : 0) |
+        (state.modifierMask & 0x0F);
+    static std::atomic<int32_t> lastSignature{-1};
+    if (lastSignature.exchange(signature) != signature) {
+        OH_LOG_INFO(LOG_APP,
+            "InputTrace hardware queries=%{public}d valid=%{public}d mask=%{public}d capsValid=%{public}d caps=%{public}d",
+            state.querySuccessCount, state.valid ? 1 : 0, state.modifierMask,
+            state.capsLockValid ? 1 : 0, state.capsLockOn ? 1 : 0);
+    }
+    return state;
+}
+
+static int32_t ToInputModifierMask(uint64_t keys) {
+    int32_t mask = 0;
+    if ((keys & ARKUI_MODIFIER_KEY_CTRL) != 0) {
+        mask |= 1;
+    }
+    if ((keys & ARKUI_MODIFIER_KEY_SHIFT) != 0) {
+        mask |= 2;
+    }
+    if ((keys & ARKUI_MODIFIER_KEY_ALT) != 0) {
+        mask |= 4;
+    }
+    return mask;
+}
+
+static bool TryGetNativeMouseModifiers(OH_NativeXComponent* component, int32_t& modifierMask) {
+    static auto getExtraInfo = reinterpret_cast<GetExtraMouseEventInfoFn>(
+        dlsym(RTLD_DEFAULT, "OH_NativeXComponent_GetExtraMouseEventInfo"));
+    static auto getModifierStates = reinterpret_cast<GetMouseModifierKeyStatesFn>(
+        dlsym(RTLD_DEFAULT, "OH_NativeXComponent_GetMouseEventModifierKeyStates"));
+    if (getExtraInfo == nullptr || getModifierStates == nullptr) {
+        return false;
+    }
+    OH_NativeXComponent_ExtraMouseEventInfo* extraInfo = nullptr;
+    uint64_t keys = 0;
+    if (getExtraInfo(component, &extraInfo) != 0 || extraInfo == nullptr ||
+        getModifierStates(extraInfo, &keys) != 0) {
+        return false;
+    }
+    modifierMask = ToInputModifierMask(keys);
+    return true;
+}
+
+static bool TryGetNativeKeyModifiers(OH_NativeXComponent_KeyEvent* event, int32_t& modifierMask) {
+    static auto getModifierStates = reinterpret_cast<GetKeyModifierKeyStatesFn>(
+        dlsym(RTLD_DEFAULT, "OH_NativeXComponent_GetKeyEventModifierKeyStates"));
+    if (getModifierStates == nullptr) {
+        return false;
+    }
+    uint64_t keys = 0;
+    if (getModifierStates(event, &keys) != 0) {
+        return false;
+    }
+    modifierMask = ToInputModifierMask(keys);
+    return true;
+}
+
+static bool TryGetNativeCapsLockState(OH_NativeXComponent_KeyEvent* event, bool& capsLockOn) {
+    static auto getCapsLockState = reinterpret_cast<GetKeyCapsLockStateFn>(
+        dlsym(RTLD_DEFAULT, "OH_NativeXComponent_GetKeyEventCapsLockState"));
+    return getCapsLockState != nullptr && getCapsLockState(event, &capsLockOn) == 0;
+}
 
 static void QueueNativeMouseInput(const NativeMouseInputEvent& input) {
     std::lock_guard<std::mutex> lock(g_nativeMouseInputMutex);
@@ -92,18 +258,30 @@ static void DispatchNativeMouseEvent(OH_NativeXComponent* component, void* windo
     if (result != OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
         return;
     }
+    int32_t modifierMask = 0;
+    bool modifierValid = TryGetNativeMouseModifiers(component, modifierMask);
+    if (!modifierValid) {
+        const HardwareKeyState hardwareState = GetHardwareKeyState();
+        modifierMask = hardwareState.modifierMask;
+        // A non-zero fallback is useful evidence. An empty fallback is not
+        // authoritative on all HarmonyOS PC builds and must not clear a real
+        // modifier snapshot captured by ArkUI.
+        modifierValid = hardwareState.valid && hardwareState.modifierMask != 0;
+    }
     QueueNativeMouseInput({event.x, event.y, static_cast<int32_t>(event.action),
-        static_cast<int32_t>(event.button), -1, event.timestamp});
+        static_cast<int32_t>(event.button), -1, event.timestamp, modifierMask, modifierValid});
     if (event.action != OH_NATIVEXCOMPONENT_MOUSE_MOVE) {
         DiagnosticLog::instance().append("I", "input-native",
             "mouse action=" + std::to_string(static_cast<int32_t>(event.action)) +
             " button=" + std::to_string(static_cast<int32_t>(event.button)) +
-            " x=" + std::to_string(event.x) + " y=" + std::to_string(event.y));
+            " x=" + std::to_string(event.x) + " y=" + std::to_string(event.y) +
+            " modifiers=" + std::to_string(modifierMask) +
+            " modifier_valid=" + std::to_string(modifierValid ? 1 : 0));
     }
 }
 
 static void DispatchNativeHoverEvent(OH_NativeXComponent*, bool isHover) {
-    QueueNativeMouseInput({0.0F, 0.0F, 0, 0, isHover ? 1 : 0, 0});
+    QueueNativeMouseInput({0.0F, 0.0F, 0, 0, isHover ? 1 : 0, 0, 0, false});
 }
 
 static OH_NativeXComponent_MouseEvent_Callback g_nativeMouseCallbacks = {
@@ -111,7 +289,51 @@ static OH_NativeXComponent_MouseEvent_Callback g_nativeMouseCallbacks = {
     .DispatchHoverEvent = DispatchNativeHoverEvent,
 };
 
-static void TryRegisterNativeMouseInput(napi_env env, napi_value exports) {
+static void QueueNativeKeyInput(const NativeKeyInputEvent& input) {
+    std::lock_guard<std::mutex> lock(g_nativeKeyInputMutex);
+    if (g_nativeKeyInputEvents.size() >= 256) {
+        g_nativeKeyInputEvents.pop_front();
+    }
+    g_nativeKeyInputEvents.push_back(input);
+}
+
+static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
+    OH_NativeXComponent_KeyEvent* event = nullptr;
+    if (OH_NativeXComponent_GetKeyEvent(component, &event) != OH_NATIVEXCOMPONENT_RESULT_SUCCESS ||
+        event == nullptr) {
+        return;
+    }
+    OH_NativeXComponent_KeyAction action = OH_NATIVEXCOMPONENT_KEY_ACTION_UNKNOWN;
+    OH_NativeXComponent_KeyCode code = KEY_UNKNOWN;
+    int64_t timestamp = 0;
+    if (OH_NativeXComponent_GetKeyEventAction(event, &action) != OH_NATIVEXCOMPONENT_RESULT_SUCCESS ||
+        OH_NativeXComponent_GetKeyEventCode(event, &code) != OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
+        return;
+    }
+    OH_NativeXComponent_GetKeyEventTimestamp(event, &timestamp);
+    int32_t modifierMask = 0;
+    bool capsLockOn = false;
+    const bool modifierValid = TryGetNativeKeyModifiers(event, modifierMask);
+    const bool capsLockValid = TryGetNativeCapsLockState(event, capsLockOn);
+    QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
+        modifierMask, modifierValid, capsLockOn, capsLockValid});
+    if (code == KEY_CTRL_LEFT || code == KEY_CTRL_RIGHT || code == KEY_SHIFT_LEFT ||
+        code == KEY_SHIFT_RIGHT || code == KEY_CAPS_LOCK) {
+        OH_LOG_INFO(LOG_APP,
+            "NativeKey code=%{public}d action=%{public}d modifiers=%{public}d valid=%{public}d caps=%{public}d",
+            static_cast<int32_t>(code), static_cast<int32_t>(action), modifierMask,
+            modifierValid ? 1 : 0, capsLockOn ? 1 : 0);
+    }
+    DiagnosticLog::instance().append("I", "input-native",
+        "key code=" + std::to_string(static_cast<int32_t>(code)) +
+        " action=" + std::to_string(static_cast<int32_t>(action)) +
+        " modifiers=" + std::to_string(modifierMask) +
+        " modifier_valid=" + std::to_string(modifierValid ? 1 : 0) +
+        " caps=" + std::to_string(capsLockOn ? 1 : 0) +
+        " caps_valid=" + std::to_string(capsLockValid ? 1 : 0));
+}
+
+static void TryRegisterNativeInput(napi_env env, napi_value exports) {
     bool hasNativeXComponent = false;
     if (napi_has_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, &hasNativeXComponent) != napi_ok ||
         !hasNativeXComponent) {
@@ -126,15 +348,23 @@ static void TryRegisterNativeMouseInput(napi_env env, napi_value exports) {
         DiagnosticLog::instance().append("W", "input-native", "xcomponent_unwrap_failed");
         return;
     }
-    if (component == g_registeredMouseXComponent) {
-        return;
+    if (component != g_registeredMouseXComponent) {
+        const int32_t mouseResult = OH_NativeXComponent_RegisterMouseEventCallback(component, &g_nativeMouseCallbacks);
+        if (mouseResult == OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
+            g_registeredMouseXComponent = component;
+        }
+        DiagnosticLog::instance().append(mouseResult == OH_NATIVEXCOMPONENT_RESULT_SUCCESS ? "I" : "W",
+            "input-native", "mouse_callback_registered result=" + std::to_string(mouseResult));
     }
-    const int32_t result = OH_NativeXComponent_RegisterMouseEventCallback(component, &g_nativeMouseCallbacks);
-    if (result == OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
-        g_registeredMouseXComponent = component;
+    if (component != g_registeredKeyXComponent) {
+        const int32_t keyResult = OH_NativeXComponent_RegisterKeyEventCallback(component, DispatchNativeKeyEvent);
+        if (keyResult == OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
+            g_registeredKeyXComponent = component;
+        }
+        OH_LOG_INFO(LOG_APP, "Native key callback registration result=%{public}d", keyResult);
+        DiagnosticLog::instance().append(keyResult == OH_NATIVEXCOMPONENT_RESULT_SUCCESS ? "I" : "W",
+            "input-native", "key_callback_registered result=" + std::to_string(keyResult));
     }
-    DiagnosticLog::instance().append(result == OH_NATIVEXCOMPONENT_RESULT_SUCCESS ? "I" : "W", "input-native",
-        "mouse_callback_registered result=" + std::to_string(result));
 }
 
 static void SetLastConnectionMessage(const std::string& message) {
@@ -292,7 +522,7 @@ static void OnRustEvent(const char* message) {
         return;
     }
     const std::string text(message);
-    if (IsSafeRustLifecycleEvent(text)) {
+    if (IsSafeRustLifecycleEvent(text) || text.rfind("input-trace:", 0) == 0) {
         OH_LOG_INFO(LOG_APP, "rust_event: %{public}s", message);
         if (text != "peer message: CursorData" && text != "peer message: CursorId" &&
             text != "peer message: Misc") {
@@ -530,13 +760,21 @@ static napi_value Disconnect(napi_env env, napi_callback_info info) {
 // ===== Input Events =====
 
 static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
+    size_t argc = 3;
+    napi_value args[3] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    int32_t keyCode = 0, action = 0;
+    int32_t keyCode = 0, action = 0, modifierMask = 0;
     napi_get_value_int32(env, args[0], &keyCode);
     napi_get_value_int32(env, args[1], &action);
-    int result = rust_send_key_event(keyCode, action);
+    if (argc >= 3) {
+        napi_get_value_int32(env, args[2], &modifierMask);
+    }
+    int result = rust_send_key_event(keyCode, action, modifierMask);
+    if (keyCode == 16 || keyCode == 17 || keyCode == 18 || keyCode == 20 || keyCode == 91) {
+        OH_LOG_INFO(LOG_APP,
+            "InputTrace napi_key key=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
+            keyCode, action, modifierMask, result);
+    }
     if (result != 0) {
         OH_LOG_WARN(LOG_APP, "SendKeyEvent key=%{public}d action=%{public}d result=%{public}d", keyCode, action, result);
     }
@@ -546,13 +784,19 @@ static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
 }
 
 static napi_value SendPhysicalKeyEvent(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
+    size_t argc = 3;
+    napi_value args[3] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    int32_t scanCode = 0, action = 0;
+    int32_t scanCode = 0, action = 0, modifierMask = 0;
     napi_get_value_int32(env, args[0], &scanCode);
     napi_get_value_int32(env, args[1], &action);
-    int result = rust_send_physical_key_event(scanCode, action);
+    if (argc >= 3) {
+        napi_get_value_int32(env, args[2], &modifierMask);
+    }
+    int result = rust_send_physical_key_event(scanCode, action, modifierMask);
+    OH_LOG_INFO(LOG_APP,
+        "InputTrace napi_physical scan=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
+        scanCode, action, modifierMask, result);
     if (result != 0) {
         OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent scan=%{public}d action=%{public}d result=%{public}d", scanCode, action, result);
     }
@@ -624,15 +868,23 @@ static napi_value GetEnableTrustedDevices(napi_env env, napi_callback_info info)
 }
 
 static napi_value SendMouseEvent(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value args[3] = {nullptr};
+    size_t argc = 4;
+    napi_value args[4] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     double x = 0, y = 0;
-    int32_t action = 0;
+    int32_t action = 0, modifierMask = 0;
     napi_get_value_double(env, args[0], &x);
     napi_get_value_double(env, args[1], &y);
     napi_get_value_int32(env, args[2], &action);
-    int result = rust_send_mouse_event(x, y, action);
+    if (argc >= 4) {
+        napi_get_value_int32(env, args[3], &modifierMask);
+    }
+    int result = rust_send_mouse_event(x, y, action, modifierMask);
+    if (action != 0) {
+        OH_LOG_INFO(LOG_APP,
+            "InputTrace napi_mouse action=%{public}d modifiers=%{public}d x=%{public}.1f y=%{public}.1f result=%{public}d",
+            action, modifierMask, x, y, result);
+    }
     if (result != 0) {
         OH_LOG_WARN(LOG_APP, "SendMouseEvent x=%{public}.1f y=%{public}.1f action=%{public}d result=%{public}d", x, y, action, result);
     }
@@ -642,13 +894,17 @@ static napi_value SendMouseEvent(napi_env env, napi_callback_info info) {
 }
 
 static napi_value SendMouseWheel(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
+    size_t argc = 3;
+    napi_value args[3] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     double deltaX = 0, deltaY = 0;
+    int32_t modifierMask = 0;
     napi_get_value_double(env, args[0], &deltaX);
     napi_get_value_double(env, args[1], &deltaY);
-    int result = rust_send_mouse_wheel(deltaX, deltaY);
+    if (argc >= 3) {
+        napi_get_value_int32(env, args[2], &modifierMask);
+    }
+    int result = rust_send_mouse_wheel(deltaX, deltaY, modifierMask);
     if (result != 0) {
         OH_LOG_WARN(LOG_APP, "SendMouseWheel x=%{public}.1f y=%{public}.1f result=%{public}d", deltaX, deltaY, result);
     }
@@ -1009,6 +1265,23 @@ static napi_value StartFileUpload(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value StartFileDownloadBatch(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 2) {
+        napi_value ret;
+        napi_create_int32(env, -1, &ret);
+        return ret;
+    }
+    std::string requestsJson = GetStringArgument(env, args[0]);
+    std::string localRoot = GetStringArgument(env, args[1]);
+    int result = rust_start_file_download_batch(requestsJson.c_str(), localRoot.c_str());
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static napi_value GetFileTransferStatus(napi_env env, napi_callback_info info) {
     char* value = rust_get_file_transfer_status();
     napi_value ret;
@@ -1339,16 +1612,82 @@ static napi_value TakeNativeMouseEvents(napi_env env, napi_callback_info info) {
         napi_value timestamp;
         napi_create_int64(env, input.timestamp, &timestamp);
         napi_set_named_property(env, object, "timestamp", timestamp);
+        napi_value modifierMask;
+        napi_create_int32(env, input.modifierMask, &modifierMask);
+        napi_set_named_property(env, object, "modifierMask", modifierMask);
+        napi_value modifierValid;
+        napi_get_boolean(env, input.modifierValid, &modifierValid);
+        napi_set_named_property(env, object, "modifierValid", modifierValid);
         napi_set_element(env, array, index++, object);
     }
     return array;
+}
+
+static napi_value TakeNativeKeyEvents(napi_env env, napi_callback_info info) {
+    (void)info;
+    std::deque<NativeKeyInputEvent> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeKeyInputMutex);
+        pending.swap(g_nativeKeyInputEvents);
+    }
+
+    napi_value array;
+    napi_create_array_with_length(env, pending.size(), &array);
+    uint32_t index = 0;
+    for (const NativeKeyInputEvent& input : pending) {
+        napi_value object;
+        napi_create_object(env, &object);
+        napi_value keyCode;
+        napi_create_int32(env, input.keyCode, &keyCode);
+        napi_set_named_property(env, object, "keyCode", keyCode);
+        napi_value action;
+        napi_create_int32(env, input.action, &action);
+        napi_set_named_property(env, object, "action", action);
+        napi_value timestamp;
+        napi_create_int64(env, input.timestamp, &timestamp);
+        napi_set_named_property(env, object, "timestamp", timestamp);
+        napi_value modifierMask;
+        napi_create_int32(env, input.modifierMask, &modifierMask);
+        napi_set_named_property(env, object, "modifierMask", modifierMask);
+        napi_value modifierValid;
+        napi_get_boolean(env, input.modifierValid, &modifierValid);
+        napi_set_named_property(env, object, "modifierValid", modifierValid);
+        napi_value capsLockOn;
+        napi_get_boolean(env, input.capsLockOn, &capsLockOn);
+        napi_set_named_property(env, object, "capsLockOn", capsLockOn);
+        napi_value capsLockValid;
+        napi_get_boolean(env, input.capsLockValid, &capsLockValid);
+        napi_set_named_property(env, object, "capsLockValid", capsLockValid);
+        napi_set_element(env, array, index++, object);
+    }
+    return array;
+}
+
+static napi_value GetHardwareKeyStateForJs(napi_env env, napi_callback_info info) {
+    (void)info;
+    const HardwareKeyState state = GetHardwareKeyState();
+    napi_value object;
+    napi_create_object(env, &object);
+    napi_value valid;
+    napi_get_boolean(env, state.valid, &valid);
+    napi_set_named_property(env, object, "valid", valid);
+    napi_value modifierMask;
+    napi_create_int32(env, state.modifierMask, &modifierMask);
+    napi_set_named_property(env, object, "modifierMask", modifierMask);
+    napi_value capsLockOn;
+    napi_get_boolean(env, state.capsLockOn, &capsLockOn);
+    napi_set_named_property(env, object, "capsLockOn", capsLockOn);
+    napi_value capsLockValid;
+    napi_get_boolean(env, state.capsLockValid, &capsLockValid);
+    napi_set_named_property(env, object, "capsLockValid", capsLockValid);
+    return object;
 }
 
 // ===== Module Registration =====
 
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
-    TryRegisterNativeMouseInput(env, exports);
+    TryRegisterNativeInput(env, exports);
     Config::instance().load();
     // Always subscribe to the controlled device's real cursor. The local
     // pointer preference only controls HarmonyOS' own physical mouse pointer.
@@ -1398,6 +1737,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"requestRemoteDirectory", nullptr, RequestRemoteDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeRemoteDirectoryResult", nullptr, TakeRemoteDirectoryResult, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startFileUpload", nullptr, StartFileUpload, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startFileDownloadBatch", nullptr, StartFileDownloadBatch, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getFileTransferStatus", nullptr, GetFileTransferStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeRemoteClipboardText", nullptr, TakeRemoteClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOption", nullptr, SetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1410,6 +1750,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"prepareSurfaceRebind", nullptr, PrepareSurfaceRebind, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rebindSurface", nullptr, RebindSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeNativeMouseEvents", nullptr, TakeNativeMouseEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeNativeKeyEvents", nullptr, TakeNativeKeyEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getHardwareKeyState", nullptr, GetHardwareKeyStateForJs, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

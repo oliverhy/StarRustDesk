@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.0.9'
-export const RELEASE_NOTES_BUILD: string = '1000901'
+export const RELEASE_NOTES_BUILD: string = '1000902'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,7 +44,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
-          this.buildSection('1.0.9（1000901）· 诊断、画面与后台连接', [
+          this.buildSection('1.0.9（1000902）· 远端取回、输入与连接', [
+            '新增从远端取回文件，支持单文件、多选批量取回以及整个文件夹递归下载。',
+            '批量或文件夹取回完成后在本机压缩为一个 ZIP，保留目录层级并只需选择一次保存位置。',
+            '修复批量文件实际保存成功却提示失败的问题，并补充取回、压缩和保存阶段的诊断记录。',
+            '修复 HarmonyOS PC 使用 Ctrl、Shift 和 CapsLock 配合鼠标或键盘时，组合操作未正确传递到远端的问题。',
             '新增远控会话后台保持：锁屏或切换到其他应用后继续维持连接，解锁返回时自动恢复视频画面。',
             '设置中新增诊断日志开关，默认关闭；仅在用户主动开启后记录连接和解码信息。',
             '修复边缘跟随开启后按钮选中状态不刷新的问题，并统一所有选中按钮为主蓝色。',

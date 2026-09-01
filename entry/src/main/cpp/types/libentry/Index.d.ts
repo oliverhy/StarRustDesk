@@ -43,6 +43,25 @@ export interface NativeMouseInputEvent {
   button: number;
   hover: number;
   timestamp: number;
+  modifierMask: number;
+  modifierValid: boolean;
+}
+
+export interface NativeKeyInputEvent {
+  keyCode: number;
+  action: number;
+  timestamp: number;
+  modifierMask: number;
+  modifierValid: boolean;
+  capsLockOn: boolean;
+  capsLockValid: boolean;
+}
+
+export interface HardwareKeyState {
+  valid: boolean;
+  modifierMask: number;
+  capsLockOn: boolean;
+  capsLockValid: boolean;
 }
 
 export const initializeDiagnosticLog: (filesDirectory: string) => number;
@@ -52,8 +71,8 @@ export const getDiagnosticLog: () => string;
 export const clearDiagnosticLog: () => number;
 export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string) => number;
 export const disconnect: () => number;
-export const sendKeyEvent: (keyCode: number, action: number) => number;
-export const sendPhysicalKeyEvent: (scanCode: number, action: number) => number;
+export const sendKeyEvent: (keyCode: number, action: number, modifierMask?: number) => number;
+export const sendPhysicalKeyEvent: (scanCode: number, action: number, modifierMask?: number) => number;
 export const sendText: (text: string) => number;
 export const send2FA: (code: string, trustThisDevice: boolean) => number;
 export const getEnableTrustedDevices: () => boolean;
@@ -62,9 +81,10 @@ export const takeRemoteClipboardText: () => string;
 export const requestRemoteDirectory: (path: string) => number;
 export const takeRemoteDirectoryResult: () => string;
 export const startFileUpload: (path: string, name: string, remoteDirectory: string) => number;
+export const startFileDownloadBatch: (requestsJson: string, localRoot: string) => number;
 export const getFileTransferStatus: () => string;
-export const sendMouseEvent: (x: number, y: number, action: number) => number;
-export const sendMouseWheel: (deltaX: number, deltaY: number) => number;
+export const sendMouseEvent: (x: number, y: number, action: number, modifierMask?: number) => number;
+export const sendMouseWheel: (deltaX: number, deltaY: number, modifierMask?: number) => number;
 export const getDisplayCount: () => number;
 export const getCurrentDisplay: () => number;
 export const getRemoteCursorPosition: () => RemoteCursorPosition;
@@ -89,3 +109,5 @@ export const setSurfaceId: (surfaceId: string) => number;
 export const prepareSurfaceRebind: () => number;
 export const rebindSurface: (surfaceId: string) => number;
 export const takeNativeMouseEvents: () => NativeMouseInputEvent[];
+export const takeNativeKeyEvents: () => NativeKeyInputEvent[];
+export const getHardwareKeyState: () => HardwareKeyState;

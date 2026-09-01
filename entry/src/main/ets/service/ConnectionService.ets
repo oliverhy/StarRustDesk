@@ -1,9 +1,24 @@
 import { RustDeskNapi } from './RustDeskNapi'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { RemoteSessionBackgroundTask } from './RemoteSessionBackgroundTask'
+import { hilog } from '@kit.PerformanceAnalysisKit'
 
 export class ConnectionService {
+  private static readonly MODIFIER_CONTROL: number = 1
+  private static readonly MODIFIER_SHIFT: number = 2
+  private static readonly MODIFIER_ALT: number = 4
+  private static readonly MODIFIER_META: number = 8
+  private static readonly MODIFIER_CAPS_LOCK: number = 16
+  private static readonly LOG_DOMAIN: number = 0x0000
+  private static directModifierMask: number = 0
+  private static pointerModifierMask: number = 0
+  private static hardwareModifierMask: number = 0
+  private static heldModifierMask: number = 0
+  private static capsLockEnabled: boolean = false
+  private static capsLockKeyHeld: boolean = false
+
   static connect(remoteId: string, password: string, performancePreset: string = 'smooth'): ConnectionStatus {
+    ConnectionService.resetTransientInputState()
     let peerId: string = remoteId.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
     let rendezvousServer: string = RustDeskNapi.getOption('custom-rendezvous-server').trim()
     let relayServer: string = RustDeskNapi.getOption('relay-server').trim()
@@ -20,16 +35,89 @@ export class ConnectionService {
   }
 
   static disconnect(): void {
+    ConnectionService.releaseModifiers()
     RemoteSessionBackgroundTask.stop()
     RustDeskNapi.disconnect()
+    ConnectionService.resetTransientInputState()
   }
 
   static sendKeyEvent(keyCode: number, action: number): void {
-    RustDeskNapi.sendKeyEvent(keyCode, action)
+    if (keyCode === 20) {
+      ConnectionService.sendCapsLockEvent(action)
+      return
+    }
+    let modifierBit: number = ConnectionService.getModifierBit(keyCode)
+    if (modifierBit !== 0) {
+      let previousMask: number = ConnectionService.heldModifierMask
+      if (action === 0) {
+        ConnectionService.directModifierMask |= modifierBit
+      } else if (action === 1) {
+        // A real key-up is authoritative. Clear stale snapshots from pointer
+        // and polling sources as well so a modifier cannot remain stuck.
+        ConnectionService.directModifierMask &= ~modifierBit
+        ConnectionService.pointerModifierMask &= ~modifierBit
+        ConnectionService.hardwareModifierMask &= ~modifierBit
+      }
+      ConnectionService.recomputeHeldModifierMask()
+      if (previousMask === ConnectionService.heldModifierMask) {
+        return
+      }
+      ConnectionService.sendRawModifierEvent(keyCode, action, 'key')
+      return
+    }
+    RustDeskNapi.sendKeyEvent(keyCode, action, ConnectionService.getKeyModifierMask())
   }
 
   static sendPhysicalKeyEvent(scanCode: number, action: number): void {
-    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action)
+    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, ConnectionService.getKeyModifierMask())
+  }
+
+  static syncHeldModifierState(control: boolean, shift: boolean, alt: boolean): void {
+    let snapshot: number =
+      (control ? ConnectionService.MODIFIER_CONTROL : 0) |
+      (shift ? ConnectionService.MODIFIER_SHIFT : 0) |
+      (alt ? ConnectionService.MODIFIER_ALT : 0)
+    ConnectionService.applyModifierSnapshot(snapshot, true, 'pointer')
+  }
+
+  static syncHardwareModifierState(control: boolean, shift: boolean, alt: boolean): void {
+    let snapshot: number =
+      (control ? ConnectionService.MODIFIER_CONTROL : 0) |
+      (shift ? ConnectionService.MODIFIER_SHIFT : 0) |
+      (alt ? ConnectionService.MODIFIER_ALT : 0)
+    ConnectionService.applyModifierSnapshot(snapshot, false, 'hardware')
+  }
+
+  static syncCapsLockState(enabled: boolean): void {
+    if (ConnectionService.capsLockEnabled !== enabled) {
+      hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+        'InputTrace caps_snapshot enabled=%{public}d', enabled ? 1 : 0)
+    }
+    ConnectionService.capsLockEnabled = enabled
+  }
+
+  static sendCapsLockEvent(action: number, enabled?: boolean): void {
+    if (action === 0) {
+      if (ConnectionService.capsLockKeyHeld) {
+        return
+      }
+      ConnectionService.capsLockKeyHeld = true
+      ConnectionService.capsLockEnabled = enabled !== undefined ? enabled : !ConnectionService.capsLockEnabled
+    } else if (action === 1) {
+      if (!ConnectionService.capsLockKeyHeld) {
+        return
+      }
+      ConnectionService.capsLockKeyHeld = false
+      if (enabled !== undefined) {
+        ConnectionService.capsLockEnabled = enabled
+      }
+    }
+    // RustDesk transports the local CapsLock state in subsequent key-event
+    // modifiers. Sending CapsLock itself as well would make the peer synchronize
+    // the state and then toggle it a second time.
+    hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+      'InputTrace caps_event action=%{public}d enabled=%{public}d',
+      action, ConnectionService.capsLockEnabled ? 1 : 0)
   }
 
   static sendText(text: string): void {
@@ -41,11 +129,30 @@ export class ConnectionService {
   }
 
   static sendMouseEvent(x: number, y: number, action: number): void {
-    RustDeskNapi.sendMouseEvent(x, y, action)
+    RustDeskNapi.sendMouseEvent(x, y, action, ConnectionService.heldModifierMask)
   }
 
   static sendMouseWheel(deltaX: number, deltaY: number): void {
-    RustDeskNapi.sendMouseWheel(deltaX, deltaY)
+    RustDeskNapi.sendMouseWheel(deltaX, deltaY, ConnectionService.heldModifierMask)
+  }
+
+  static releaseModifiers(): void {
+    let previousMask: number = ConnectionService.heldModifierMask
+    ConnectionService.directModifierMask = 0
+    ConnectionService.pointerModifierMask = 0
+    ConnectionService.hardwareModifierMask = 0
+    ConnectionService.heldModifierMask = 0
+    let modifiers: number[] = [17, 16, 18, 91]
+    for (let keyCode of modifiers) {
+      let modifierBit: number = ConnectionService.getModifierBit(keyCode)
+      if ((previousMask & modifierBit) === 0) {
+        continue
+      }
+      RustDeskNapi.sendKeyEvent(keyCode, 1, ConnectionService.getKeyModifierMask())
+      hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+        'InputTrace modifier_release key=%{public}d previous=%{public}d', keyCode, previousMask)
+    }
+    ConnectionService.capsLockKeyHeld = false
   }
 
   static getConnectionStatus(): ConnectionStatus {
@@ -63,5 +170,69 @@ export class ConnectionService {
 
   static getLastConnectionError(): string {
     return RustDeskNapi.getLastConnectionError()
+  }
+
+  private static getModifierBit(keyCode: number): number {
+    switch (keyCode) {
+      case 17: return ConnectionService.MODIFIER_CONTROL
+      case 16: return ConnectionService.MODIFIER_SHIFT
+      case 18: return ConnectionService.MODIFIER_ALT
+      case 91: return ConnectionService.MODIFIER_META
+      default: return 0
+    }
+  }
+
+  private static getKeyModifierMask(): number {
+    return ConnectionService.heldModifierMask |
+      (ConnectionService.capsLockEnabled ? ConnectionService.MODIFIER_CAPS_LOCK : 0)
+  }
+
+  private static resetTransientInputState(): void {
+    ConnectionService.directModifierMask = 0
+    ConnectionService.pointerModifierMask = 0
+    ConnectionService.hardwareModifierMask = 0
+    ConnectionService.heldModifierMask = 0
+    ConnectionService.capsLockKeyHeld = false
+  }
+
+  private static applyModifierSnapshot(snapshot: number, pointerSource: boolean, source: string): void {
+    let previousMask: number = ConnectionService.heldModifierMask
+    if (pointerSource) {
+      ConnectionService.pointerModifierMask = snapshot
+    } else {
+      ConnectionService.hardwareModifierMask = snapshot
+    }
+    ConnectionService.recomputeHeldModifierMask()
+    ConnectionService.sendModifierTransitions(previousMask, ConnectionService.heldModifierMask, source)
+  }
+
+  private static recomputeHeldModifierMask(): void {
+    ConnectionService.heldModifierMask = ConnectionService.directModifierMask |
+      ConnectionService.pointerModifierMask |
+      ConnectionService.hardwareModifierMask
+  }
+
+  private static sendModifierTransitions(previousMask: number, nextMask: number, source: string): void {
+    if (previousMask === nextMask) {
+      return
+    }
+    let keyCodes: number[] = [17, 16, 18, 91]
+    for (let keyCode of keyCodes) {
+      let bit: number = ConnectionService.getModifierBit(keyCode)
+      let wasHeld: boolean = (previousMask & bit) !== 0
+      let isHeld: boolean = (nextMask & bit) !== 0
+      if (wasHeld === isHeld) {
+        continue
+      }
+      ConnectionService.sendRawModifierEvent(keyCode, isHeld ? 0 : 1, source)
+    }
+  }
+
+  private static sendRawModifierEvent(keyCode: number, action: number, source: string): void {
+    let packetMask: number = ConnectionService.getKeyModifierMask()
+    let result: number = RustDeskNapi.sendKeyEvent(keyCode, action, packetMask)
+    hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+      'InputTrace modifier source=%{public}s key=%{public}d action=%{public}d mask=%{public}d result=%{public}d',
+      source, keyCode, action, packetMask, result)
   }
 }

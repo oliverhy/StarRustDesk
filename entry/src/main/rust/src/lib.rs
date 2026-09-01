@@ -34,7 +34,7 @@ use hbb_common::protobuf::MessageField;
 use hbb_common::socket_client::{check_port, connect_tcp, connect_tcp_local, ipv4_to_ipv6};
 use hbb_common::uuid::Uuid;
 use hbb_common::{AddrMangle, Stream};
-use protobuf::{Enum, Message};
+use protobuf::{Enum, EnumOrUnknown, Message};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -70,6 +70,7 @@ static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static REMOTE_DIRECTORY_RESULT: Mutex<String> = Mutex::new(String::new());
 static FILE_TRANSFER_STATUS: Mutex<String> = Mutex::new(String::new());
+static NEXT_FILE_JOB_ID: AtomicI32 = AtomicI32::new(10_000);
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static PEER_MESSAGE_SENDER: Mutex<Option<(u64, tokio_mpsc::UnboundedSender<QueuedPeerCommand>)>> = Mutex::new(None);
 static PEER_TASK_CONTROL: Mutex<Option<PeerTaskControl>> = Mutex::new(None);
@@ -113,10 +114,28 @@ enum QueuedPeerCommand {
         job: TransferJob,
         receive: PeerMessage,
     },
+    StartDownload {
+        session_id: u64,
+        jobs: Vec<DownloadJobCommand>,
+    },
     Close {
         session_id: u64,
         completed: Sender<()>,
     },
+}
+
+struct DownloadJobCommand {
+    job: TransferJob,
+    send: PeerMessage,
+}
+
+#[derive(Default)]
+struct DownloadBatchState {
+    active: bool,
+    total_jobs: usize,
+    completed_jobs: usize,
+    completed_bytes: u64,
+    total_bytes: u64,
 }
 
 struct PeerTaskControl {
@@ -171,6 +190,17 @@ struct FileTransferStatus {
     transferred: u64,
     total: u64,
     error: String,
+    direction: String,
+    completed_items: usize,
+    total_items: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileDownloadRequest {
+    remote_path: String,
+    local_name: String,
+    is_directory: bool,
 }
 
 static PERFORMANCE_CONFIG: Mutex<PerformanceConfig> = Mutex::new(PerformanceConfig {
@@ -728,7 +758,12 @@ pub extern "C" fn rust_get_connection_route() -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_mouse_event(x: f64, y: f64, action: i32) -> i32 {
+pub extern "C" fn rust_send_mouse_event(
+    x: f64,
+    y: f64,
+    action: i32,
+    modifier_mask: i32,
+) -> i32 {
     let mask = match action {
         0 => 0,             // move
         1 => (1 << 3) | 1,  // left down
@@ -743,29 +778,36 @@ pub extern "C" fn rust_send_mouse_event(x: f64, y: f64, action: i32) -> i32 {
         mask,
         x: x as i32 + offset_x,
         y: y as i32 + offset_y,
+        modifiers: modifier_mask_to_controls(modifier_mask),
         ..Default::default()
     });
     queue_peer_message(msg)
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_mouse_wheel(delta_x: f64, delta_y: f64) -> i32 {
+pub extern "C" fn rust_send_mouse_wheel(
+    delta_x: f64,
+    delta_y: f64,
+    modifier_mask: i32,
+) -> i32 {
     let mut msg = PeerMessage::new();
     msg.set_mouse_event(MouseEvent {
         mask: 3,
         x: delta_x.round() as i32,
         y: delta_y.round() as i32,
+        modifiers: modifier_mask_to_controls(modifier_mask),
         ..Default::default()
     });
     queue_peer_message(msg)
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_key_event(key_code: i32, action: i32) -> i32 {
+pub extern "C" fn rust_send_key_event(key_code: i32, action: i32, modifier_mask: i32) -> i32 {
     let mut event = KeyEvent {
         down: action == 0,
         press: action == 2,
         mode: KeyboardMode::Legacy.into(),
+        modifiers: modifier_mask_to_controls(modifier_mask),
         ..Default::default()
     };
     match key_code_to_control(key_code) {
@@ -778,11 +820,16 @@ pub extern "C" fn rust_send_key_event(key_code: i32, action: i32) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_physical_key_event(scan_code: i32, action: i32) -> i32 {
+pub extern "C" fn rust_send_physical_key_event(
+    scan_code: i32,
+    action: i32,
+    modifier_mask: i32,
+) -> i32 {
     let mut event = KeyEvent {
         down: action == 0,
         press: action == 2,
         mode: KeyboardMode::Map.into(),
+        modifiers: modifier_mask_to_controls(modifier_mask),
         ..Default::default()
     };
     event.union = Some(key_event::Union::Chr(scan_code.max(0) as u32));
@@ -976,6 +1023,76 @@ pub extern "C" fn rust_start_file_upload(
 }
 
 #[no_mangle]
+pub extern "C" fn rust_start_file_download_batch(
+    requests_json: *const c_char,
+    local_root: *const c_char,
+) -> i32 {
+    let Some(requests_json) = cstr_to_string(requests_json) else { return -1 };
+    let Some(local_root) = cstr_to_string(local_root) else { return -1 };
+    if local_root.is_empty() || local_root.len() > 4096 || local_root.bytes().any(|byte| byte == 0) {
+        return -2;
+    }
+    let Ok(requests) = serde_json::from_str::<Vec<FileDownloadRequest>>(&requests_json) else {
+        return -3;
+    };
+    if requests.is_empty() || requests.len() > 100 {
+        return -4;
+    }
+    if std::fs::create_dir_all(&local_root).is_err() {
+        return -5;
+    }
+
+    let mut commands = Vec::with_capacity(requests.len());
+    for request in requests {
+        if request.remote_path.is_empty()
+            || request.remote_path.len() > 4096
+            || request.remote_path.bytes().any(|byte| byte == 0)
+            || request.local_name.is_empty()
+            || request.local_name.len() > 255
+            || request.local_name == "."
+            || request.local_name == ".."
+            || request.local_name.contains(['/', '\\', '\0'])
+        {
+            return -6;
+        }
+        let local_path = PathBuf::from(&local_root).join(&request.local_name);
+        if request.is_directory && std::fs::create_dir_all(&local_path).is_err() {
+            return -7;
+        }
+        let id = next_file_job_id();
+        let mut job = TransferJob::new_write(
+            id,
+            JobType::Generic,
+            request.remote_path.clone(),
+            DataSource::FilePath(local_path),
+            0,
+            false,
+            true,
+            true,
+        );
+        job.set_overwrite_strategy(Some(true));
+        let send = fs::new_send(id, JobType::Generic, request.remote_path, 0, false);
+        commands.push(DownloadJobCommand { job, send });
+    }
+
+    let Some(sender) = ensure_file_session() else { return -8 };
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
+    set_file_transfer_status_detail("download", "starting", 0, 0, "", 0, commands.len());
+    sender
+        .send(QueuedPeerCommand::StartDownload { session_id, jobs: commands })
+        .map(|_| 0)
+        .unwrap_or(-9)
+}
+
+fn next_file_job_id() -> i32 {
+    let id = NEXT_FILE_JOB_ID.fetch_add(1, Ordering::SeqCst);
+    if id >= i32::MAX - 1_000 {
+        NEXT_FILE_JOB_ID.store(10_000, Ordering::SeqCst);
+    }
+    id.max(1)
+}
+
+#[no_mangle]
 pub extern "C" fn rust_get_file_transfer_status() -> *mut c_char {
     let value = FILE_TRANSFER_STATUS.lock().map(|status| status.clone()).unwrap_or_default();
     CString::new(value)
@@ -1030,13 +1147,22 @@ async fn run_file_session(
     let mut authenticated = false;
     let mut pending = Vec::new();
     let mut read_jobs: Vec<TransferJob> = Vec::new();
+    let mut write_jobs: Vec<TransferJob> = Vec::new();
+    let mut download_state = DownloadBatchState::default();
     loop {
         if SESSION_ID.load(Ordering::SeqCst) != session_id {
             return;
         }
         while let Ok(command) = receiver.try_recv() {
             if authenticated {
-                if !send_file_command(command, session_id, &mut stream, &mut read_jobs).await {
+                if !send_file_command(
+                    command,
+                    session_id,
+                    &mut stream,
+                    &mut read_jobs,
+                    &mut write_jobs,
+                    &mut download_state,
+                ).await {
                     return;
                 }
             } else {
@@ -1080,14 +1206,27 @@ async fn run_file_session(
                                 if is_root_directory_command(&command) {
                                     continue;
                                 }
-                                if !send_file_command(command, session_id, &mut stream, &mut read_jobs).await {
+                                if !send_file_command(
+                                    command,
+                                    session_id,
+                                    &mut stream,
+                                    &mut read_jobs,
+                                    &mut write_jobs,
+                                    &mut download_state,
+                                ).await {
                                     return;
                                 }
                             }
                         }
                     },
                     Some(message::Union::FileResponse(response)) => {
-                        handle_file_response(response, &mut read_jobs, &mut stream).await;
+                        handle_file_session_response(
+                            response,
+                            &mut read_jobs,
+                            &mut write_jobs,
+                            &mut download_state,
+                            &mut stream,
+                        ).await;
                     }
                     Some(message::Union::FileAction(action)) => {
                         if let Some(file_action::Union::SendConfirm(confirm)) = action.union {
@@ -1123,6 +1262,8 @@ async fn send_file_command(
     session_id: u64,
     stream: &mut Stream,
     read_jobs: &mut Vec<TransferJob>,
+    write_jobs: &mut Vec<TransferJob>,
+    download_state: &mut DownloadBatchState,
 ) -> bool {
     match command {
         QueuedPeerCommand::Message { session_id: command_session, message } => {
@@ -1133,9 +1274,35 @@ async fn send_file_command(
                 return false;
             }
             read_jobs.clear();
+            write_jobs.clear();
+            *download_state = DownloadBatchState::default();
             let total = job.total_size();
             read_jobs.push(job);
             set_file_transfer_status("transferring", 0, total, "");
+            true
+        }
+        QueuedPeerCommand::StartDownload { session_id: command_session, jobs } => {
+            if command_session != session_id || jobs.is_empty() {
+                return false;
+            }
+            read_jobs.clear();
+            write_jobs.clear();
+            *download_state = DownloadBatchState {
+                active: true,
+                total_jobs: jobs.len(),
+                ..Default::default()
+            };
+            for command in jobs {
+                if stream.send(&command.send).await.is_err() {
+                    set_download_transfer_status("failed", write_jobs, download_state, "发送下载请求失败");
+                    write_jobs.clear();
+                    download_state.active = false;
+                    return false;
+                }
+                write_jobs.push(command.job);
+            }
+            set_download_transfer_status("transferring", write_jobs, download_state, "");
+            emit_event(&format!("file-session:download-started items={}", download_state.total_jobs));
             true
         }
         QueuedPeerCommand::Close { completed, .. } => {
@@ -1839,6 +2006,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                         let command_session_id = match &command {
                             QueuedPeerCommand::Message { session_id, .. }
                             | QueuedPeerCommand::StartUpload { session_id, .. }
+                            | QueuedPeerCommand::StartDownload { session_id, .. }
                             | QueuedPeerCommand::Close { session_id, .. } => *session_id,
                         };
                         if SESSION_ID.load(Ordering::SeqCst) != command_session_id {
@@ -1847,11 +2015,13 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                         } else {
                             match command {
                                 QueuedPeerCommand::Message { message, .. } => {
+                                    trace_input_message("network_send", &message);
                                     if let Err(e) = stream.send(&message).await {
                                         emit_event(&format!("peer message send failed: {e}"));
                                         mark_connection_lost(command_session_id, &e.to_string());
                                         return;
                                     }
+                                    trace_input_message("network_sent", &message);
                                     true
                                 }
                                 QueuedPeerCommand::StartUpload { job, receive, .. } => {
@@ -1862,6 +2032,13 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                                         read_jobs.push(job);
                                         set_file_transfer_status("transferring", 0, read_jobs[0].total_size(), "");
                                     }
+                                    true
+                                }
+                                QueuedPeerCommand::StartDownload { .. } => {
+                                    set_file_transfer_status_detail(
+                                        "download", "failed", 0, 0,
+                                        "下载请求进入了错误的连接通道", 0, 0,
+                                    );
                                     true
                                 }
                                 QueuedPeerCommand::Close { completed, .. } => {
@@ -2176,6 +2353,117 @@ fn select_remote_cursor_image(id: u64) {
     }
 }
 
+async fn handle_file_session_response(
+    response: hbb_common::message_proto::FileResponse,
+    read_jobs: &mut Vec<TransferJob>,
+    write_jobs: &mut Vec<TransferJob>,
+    download_state: &mut DownloadBatchState,
+    stream: &mut Stream,
+) {
+    match response.union {
+        Some(file_response::Union::Dir(directory)) => {
+            if fs::get_job_immutable(directory.id, write_jobs).is_none() {
+                let mut response = hbb_common::message_proto::FileResponse::new();
+                response.set_dir(directory);
+                handle_file_response(response, read_jobs, stream).await;
+                return;
+            }
+            let mut entries = directory.entries;
+            fs::transform_windows_path(&mut entries);
+            let mut error = String::new();
+            if let Some(job) = fs::get_job(directory.id, write_jobs) {
+                let previous_total = job.total_size();
+                match job.set_files(entries) {
+                    Ok(()) => {
+                        job.set_finished_size_on_resume();
+                        download_state.total_bytes = download_state
+                            .total_bytes
+                            .saturating_sub(previous_total)
+                            .saturating_add(job.total_size());
+                    }
+                    Err(err) => error = err.to_string(),
+                }
+            }
+            if error.is_empty() {
+                set_download_transfer_status("transferring", write_jobs, download_state, "");
+            } else {
+                set_download_transfer_status("failed", write_jobs, download_state, &error);
+                write_jobs.clear();
+                download_state.active = false;
+            }
+        }
+        Some(file_response::Union::Digest(digest)) if !digest.is_upload => {
+            if let Some(job) = fs::get_job(digest.id, write_jobs) {
+                job.set_digest(digest.file_size, digest.last_modified);
+                let confirm = FileTransferSendConfirmRequest {
+                    id: digest.id,
+                    file_num: digest.file_num,
+                    union: Some(file_transfer_send_confirm_request::Union::OffsetBlk(0)),
+                    ..Default::default()
+                };
+                job.confirm(&confirm).await;
+                if let Err(error) = stream.send(&fs::new_send_confirm(confirm)).await {
+                    set_download_transfer_status("failed", write_jobs, download_state, &error.to_string());
+                    write_jobs.clear();
+                    download_state.active = false;
+                }
+            }
+        }
+        Some(file_response::Union::Block(block)) => {
+            let mut error = String::new();
+            if let Some(job) = fs::get_job(block.id, write_jobs) {
+                if let Err(err) = job.write(block).await {
+                    error = err.to_string();
+                }
+            }
+            if error.is_empty() {
+                set_download_transfer_status("transferring", write_jobs, download_state, "");
+            } else {
+                set_download_transfer_status("failed", write_jobs, download_state, &error);
+                write_jobs.clear();
+                download_state.active = false;
+            }
+        }
+        Some(file_response::Union::Done(done)) => {
+            if let Some(job) = fs::remove_job(done.id, write_jobs) {
+                job.modify_time();
+                download_state.completed_bytes = download_state.completed_bytes.saturating_add(job.finished_size());
+                download_state.completed_jobs = download_state.completed_jobs.saturating_add(1);
+            }
+            if download_state.active
+                && download_state.completed_jobs >= download_state.total_jobs
+                && write_jobs.is_empty()
+            {
+                set_download_transfer_status("completed", write_jobs, download_state, "");
+                download_state.active = false;
+                emit_event(&format!(
+                    "file-session:download-completed items={} bytes={}",
+                    download_state.completed_jobs, download_state.completed_bytes
+                ));
+            } else {
+                set_download_transfer_status("transferring", write_jobs, download_state, "");
+            }
+        }
+        Some(file_response::Union::Error(error)) => {
+            if fs::remove_job(error.id, write_jobs).is_some() {
+                let message = sanitize_remote_value(error.error, 512);
+                set_download_transfer_status("failed", write_jobs, download_state, &message);
+                write_jobs.clear();
+                download_state.active = false;
+            } else {
+                let mut response = hbb_common::message_proto::FileResponse::new();
+                response.set_error(error);
+                handle_file_response(response, read_jobs, stream).await;
+            }
+        }
+        union => {
+            let mut response = hbb_common::message_proto::FileResponse::new();
+            response.union = union;
+            handle_file_response(response, read_jobs, stream).await;
+        }
+    }
+}
+
 async fn handle_file_response(
     response: hbb_common::message_proto::FileResponse,
     read_jobs: &mut Vec<TransferJob>,
@@ -2254,12 +2542,55 @@ fn set_remote_directory_result(result: RemoteDirectoryResult) {
 }
 
 fn set_file_transfer_status(state: &str, transferred: u64, total: u64, error: &str) {
+    set_file_transfer_status_detail("upload", state, transferred, total, error, 0, 1);
+}
+
+fn set_download_transfer_status(
+    state: &str,
+    write_jobs: &[TransferJob],
+    download_state: &DownloadBatchState,
+    error: &str,
+) {
+    let active_finished = write_jobs
+        .iter()
+        .map(TransferJob::finished_size)
+        .sum::<u64>();
+    let active_total = write_jobs
+        .iter()
+        .map(TransferJob::total_size)
+        .sum::<u64>();
+    let total = download_state.total_bytes.max(
+        download_state.completed_bytes.saturating_add(active_total),
+    );
+    set_file_transfer_status_detail(
+        "download",
+        state,
+        download_state.completed_bytes.saturating_add(active_finished),
+        total,
+        error,
+        download_state.completed_jobs,
+        download_state.total_jobs,
+    );
+}
+
+fn set_file_transfer_status_detail(
+    direction: &str,
+    state: &str,
+    transferred: u64,
+    total: u64,
+    error: &str,
+    completed_items: usize,
+    total_items: usize,
+) {
     let status = FileTransferStatus {
         session_id: SESSION_ID.load(Ordering::SeqCst),
         state: state.to_string(),
         transferred,
         total,
         error: sanitize_remote_value(error.to_string(), 512),
+        direction: direction.to_string(),
+        completed_items,
+        total_items,
     };
     if let Ok(json) = serde_json::to_string(&status) {
         if let Ok(mut value) = FILE_TRANSFER_STATUS.lock() {
@@ -2717,6 +3048,7 @@ fn current_display_origin() -> (i32, i32) {
 }
 
 fn queue_peer_message(msg: PeerMessage) -> i32 {
+    trace_input_message("queue", &msg);
     if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         emit_event("peer message send failed: not connected");
         return -1;
@@ -2833,6 +3165,7 @@ fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
         16 => Some(ControlKey::Shift),
         17 => Some(ControlKey::Control),
         18 => Some(ControlKey::Alt),
+        20 => Some(ControlKey::CapsLock),
         13 => Some(ControlKey::Return),
         27 => Some(ControlKey::Escape),
         32 => Some(ControlKey::Space),
@@ -2845,6 +3178,65 @@ fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
         46 => Some(ControlKey::Delete),
         91 => Some(ControlKey::Meta),
         _ => None,
+    }
+}
+
+fn modifier_mask_to_controls(modifier_mask: i32) -> Vec<EnumOrUnknown<ControlKey>> {
+    let mut modifiers = Vec::new();
+    if modifier_mask & 1 != 0 {
+        modifiers.push(ControlKey::Control.into());
+    }
+    if modifier_mask & 2 != 0 {
+        modifiers.push(ControlKey::Shift.into());
+    }
+    if modifier_mask & 4 != 0 {
+        modifiers.push(ControlKey::Alt.into());
+    }
+    if modifier_mask & 8 != 0 {
+        modifiers.push(ControlKey::Meta.into());
+    }
+    if modifier_mask & 16 != 0 {
+        modifiers.push(ControlKey::CapsLock.into());
+    }
+    modifiers
+}
+
+fn trace_input_message(stage: &str, msg: &PeerMessage) {
+    match &msg.union {
+        Some(message::Union::MouseEvent(event)) if event.mask & 7 != 0 => {
+            let modifiers = event
+                .modifiers
+                .iter()
+                .map(|modifier| modifier.value().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            emit_event(&format!(
+                "input-trace: stage={stage} type=mouse mask={} x={} y={} modifiers=[{}]",
+                event.mask, event.x, event.y, modifiers
+            ));
+        }
+        Some(message::Union::KeyEvent(event)) => {
+            let key = match &event.union {
+                Some(key_event::Union::ControlKey(control)) => format!("control:{}", control.value()),
+                Some(key_event::Union::Chr(chr)) => format!("scan:{chr}"),
+                Some(_) => "other".to_string(),
+                None => "none".to_string(),
+            };
+            let modifiers = event
+                .modifiers
+                .iter()
+                .map(|modifier| modifier.value().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            emit_event(&format!(
+                "input-trace: stage={stage} type=key key={key} down={} press={} mode={} modifiers=[{}]",
+                event.down,
+                event.press,
+                event.mode.value(),
+                modifiers
+            ));
+        }
+        _ => {}
     }
 }
 
