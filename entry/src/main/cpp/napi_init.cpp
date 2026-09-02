@@ -54,6 +54,8 @@ static std::atomic<uint64_t> g_frameCallbackCompletedGeneration{0};
 static std::atomic<int64_t> g_lastVideoHealthLogMs{0};
 static std::atomic<uint64_t> g_lastVideoHealthFrameCount{0};
 static std::atomic<uint64_t> g_lastVideoHealthDecodedCount{0};
+static std::atomic<bool> g_backgroundVideoMode{false};
+static std::atomic<bool> g_remoteAudioEnabled{true};
 static std::mutex g_lastConnectionMessageMutex;
 static std::string g_lastConnectionMessage;
 static std::mutex g_connectionLifecycleMutex;
@@ -443,6 +445,9 @@ static void OnRustVideoFrame(const unsigned char* data, int length, int width, i
     if (data == nullptr || length <= 0) {
         return;
     }
+    if (g_backgroundVideoMode.load()) {
+        return;
+    }
     g_videoFrameCount.fetch_add(1);
     g_videoByteCount.fetch_add(static_cast<uint64_t>(length));
     uint64_t generation = g_connectionGeneration.load();
@@ -515,6 +520,7 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "video frame:",
         "video fallback:",
         "remote cursor visibility updated:",
+        "online state query ",
         "connection lost:",
         "login request send failed:",
         "performance options send failed:",
@@ -581,6 +587,9 @@ static void OnRustEvent(const char* message) {
 }
 
 static int OnRustAudioStart(int sampleRate, int channels) {
+    if (!g_remoteAudioEnabled.load()) {
+        return -1;
+    }
     OH_LOG_INFO(LOG_APP, "audio start entered sampleRate=%{public}d channels=%{public}d", sampleRate, channels);
     const int result = audio_player_start(sampleRate, channels);
     OH_LOG_INFO(LOG_APP, "audio start completed result=%{public}d", result);
@@ -598,7 +607,9 @@ static void OnRustAudioStop() {
 }
 
 static void OnRustAudioFrame(const unsigned char* data, int length) {
-    audio_player_push_opus_frame(data, length);
+    if (g_remoteAudioEnabled.load()) {
+        audio_player_push_opus_frame(data, length);
+    }
 }
 
 static std::string ConnectionResultToMessage(int result) {
@@ -1089,6 +1100,50 @@ static napi_value SendClipboardText(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value SetRemoteAudioEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = true;
+    if (argc > 0 && args[0] != nullptr) {
+        napi_get_value_bool(env, args[0], &enabled);
+    }
+    g_remoteAudioEnabled.store(enabled);
+    const int result = rust_set_audio_enabled(enabled ? 1 : 0);
+    if (!enabled) {
+        audio_player_stop();
+    }
+    DiagnosticLog::instance().append("I", "audio",
+        std::string("remote_audio_enabled=") + (enabled ? "true" : "false"));
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value IsRemoteAudioActive(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_get_boolean(env, AudioPlayer::instance().hasRecentFrames(6000), &ret);
+    return ret;
+}
+
+static napi_value SetBackgroundVideoMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc > 0 && args[0] != nullptr) {
+        napi_get_value_bool(env, args[0], &enabled);
+    }
+    g_backgroundVideoMode.store(enabled);
+    const int result = rust_set_background_video_mode(enabled ? 1 : 0);
+    DiagnosticLog::instance().append("I", "video",
+        std::string("background_mode=") + (enabled ? "true" : "false") +
+        " result=" + std::to_string(result));
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
 static napi_value FallbackVideoToVp9(napi_env env, napi_callback_info info) {
     int result = rust_fallback_video_to_vp9();
     OH_LOG_WARN(LOG_APP, "FallbackVideoToVp9 result=%{public}d", result);
@@ -1103,6 +1158,38 @@ static std::string GetStringArgument(napi_env env, napi_value value) {
     std::vector<char> buffer(length + 1, '\0');
     napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length);
     return std::string(buffer.data(), length);
+}
+
+static napi_value QueryPeerOnlineStates(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1 || args[0] == nullptr) {
+        napi_value ret;
+        napi_create_int32(env, -1, &ret);
+        return ret;
+    }
+    const std::string peersJson = GetStringArgument(env, args[0]);
+    const std::string rendezvousServer = argc > 1 && args[1] != nullptr
+        ? GetStringArgument(env, args[1]) : "";
+    const std::string clientId = GetOrCreateClientId();
+    const int result = rust_query_peer_online_states(
+        peersJson.c_str(), rendezvousServer.c_str(), clientId.c_str());
+    DiagnosticLog::instance().append(result == 0 || result == 1 ? "I" : "E", "online-state",
+        "query_requested result=" + std::to_string(result));
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value TakePeerOnlineStates(napi_env env, napi_callback_info info) {
+    char* value = rust_take_peer_online_states();
+    napi_value ret;
+    napi_create_string_utf8(env, value == nullptr ? "" : value, NAPI_AUTO_LENGTH, &ret);
+    if (value != nullptr) {
+        rust_free_string(value);
+    }
+    return ret;
 }
 
 static napi_value InitializeDiagnosticLog(napi_env env, napi_callback_info info) {
@@ -1746,8 +1833,13 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getRemoteCursorData", nullptr, GetRemoteCursorData, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"refreshVideo", nullptr, RefreshVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setRemoteAudioEnabled", nullptr, SetRemoteAudioEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isRemoteAudioActive", nullptr, IsRemoteAudioActive, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setBackgroundVideoMode", nullptr, SetBackgroundVideoMode, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"fallbackVideoToVp9", nullptr, FallbackVideoToVp9, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPeerList", nullptr, GetPeerList, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"queryPeerOnlineStates", nullptr, QueryPeerOnlineStates, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takePeerOnlineStates", nullptr, TakePeerOnlineStates, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionStatus", nullptr, GetConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionRoute", nullptr, GetConnectionRoute, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLastConnectionError", nullptr, GetLastConnectionError, nullptr, nullptr, nullptr, napi_default, nullptr},

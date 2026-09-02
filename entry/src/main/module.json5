@@ -23,7 +23,9 @@
         "startWindowBackground": "$color:start_window_background",
         "orientation": "auto_rotation",
         "backgroundModes": [
-          "multiDeviceConnection"
+          "multiDeviceConnection",
+          "audioPlayback",
+          "dataTransfer"
         ],
         "exported": true,
         "skills": [

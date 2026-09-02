@@ -1,5 +1,6 @@
 #include "audio_player.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <hilog/log.h>
 #include <ohaudio/native_audiostreambuilder.h>
@@ -11,6 +12,11 @@
 
 namespace {
 constexpr size_t MAX_BUFFERED_SAMPLES = 48000 * 2;
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 }
 
 AudioPlayer& AudioPlayer::instance() {
@@ -139,6 +145,7 @@ void AudioPlayer::pushOpusFrame(const uint8_t* data, int length) {
     }
     int sampleCount = frameSize * channels_;
     queue_.insert(queue_.end(), decodeBuffer_.data(), decodeBuffer_.data() + sampleCount);
+    lastFrameAtMs_ = NowMs();
     while (queue_.size() > MAX_BUFFERED_SAMPLES) {
         queue_.pop_front();
     }
@@ -147,6 +154,11 @@ void AudioPlayer::pushOpusFrame(const uint8_t* data, int length) {
 bool AudioPlayer::isRunning() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return running_;
+}
+
+bool AudioPlayer::hasRecentFrames(int64_t maxAgeMs) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return running_ && lastFrameAtMs_ > 0 && NowMs() - lastFrameAtMs_ <= maxAgeMs;
 }
 
 int32_t AudioPlayer::OnWriteData(OH_AudioRenderer*, void* userData, void* buffer, int32_t length) {
@@ -181,6 +193,7 @@ int32_t AudioPlayer::fillBuffer(void* buffer, int32_t length) {
 
 void AudioPlayer::detachLocked(OH_AudioRenderer*& renderer, OpusDecoder*& decoder) {
     running_ = false;
+    lastFrameAtMs_ = 0;
     queue_.clear();
     sampleRate_ = 0;
     channels_ = 0;

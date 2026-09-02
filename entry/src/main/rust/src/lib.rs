@@ -22,8 +22,8 @@ use hbb_common::message_proto::{
     TestDelay, VideoFrame,
 };
 use hbb_common::rendezvous_proto::{
-    punch_hole_response, rendezvous_message, ConnType, NatType, PunchHoleRequest, RequestRelay,
-    RendezvousMessage,
+    punch_hole_response, rendezvous_message, ConnType, NatType, OnlineRequest, PunchHoleRequest,
+    RequestRelay, RendezvousMessage,
 };
 use hbb_common::sha2::{Digest, Sha256};
 use hbb_common::sodiumoxide::{
@@ -70,6 +70,8 @@ static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
 static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static REMOTE_DIRECTORY_RESULT: Mutex<String> = Mutex::new(String::new());
 static FILE_TRANSFER_STATUS: Mutex<String> = Mutex::new(String::new());
+static PEER_ONLINE_RESULT: Mutex<String> = Mutex::new(String::new());
+static PEER_ONLINE_QUERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_FILE_JOB_ID: AtomicI32 = AtomicI32::new(10_000);
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static PEER_MESSAGE_SENDER: Mutex<Option<(u64, tokio_mpsc::UnboundedSender<QueuedPeerCommand>)>> = Mutex::new(None);
@@ -83,6 +85,8 @@ static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static REMOTE_AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
+static BACKGROUND_VIDEO_MODE: AtomicBool = AtomicBool::new(false);
 // Conservative defaults keep older native shells safe until they report the
 // decoders that can actually be created on the current device.
 static H264_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(true);
@@ -196,6 +200,20 @@ struct FileTransferStatus {
     direction: String,
     completed_items: usize,
     total_items: usize,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerOnlineState {
+    id: String,
+    online: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerOnlineResult {
+    peers: Vec<PeerOnlineState>,
+    error: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -721,6 +739,82 @@ pub extern "C" fn rust_set_remote_cursor_visible(visible: i32) -> i32 {
         ));
     }
     result
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_audio_enabled(enabled: i32) -> i32 {
+    let enabled = enabled != 0;
+    REMOTE_AUDIO_ENABLED.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        reset_audio_async();
+    }
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return 0;
+    }
+
+    let mut misc = Misc::new();
+    misc.set_option(OptionMessage {
+        disable_audio: if enabled {
+            hbb_common::message_proto::option_message::BoolOption::No
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        }
+        .into(),
+        ..Default::default()
+    });
+    let mut msg = PeerMessage::new();
+    msg.set_misc(misc);
+    let result = queue_peer_message(msg);
+    if result == 0 {
+        emit_event(&format!("remote audio updated: {}", if enabled { "enabled" } else { "disabled" }));
+    }
+    result
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_background_video_mode(enabled: i32) -> i32 {
+    let enabled = enabled != 0;
+    BACKGROUND_VIDEO_MODE.store(enabled, Ordering::SeqCst);
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return 0;
+    }
+
+    let performance = performance_config();
+    let mut misc = Misc::new();
+    misc.set_option(OptionMessage {
+        image_quality: performance.quality.into(),
+        custom_fps: performance.fps,
+        supported_decoding: MessageField::some(supported_decoding_options(false)),
+        disable_audio: if REMOTE_AUDIO_ENABLED.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::No
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        }
+        .into(),
+        show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::No
+        }
+        .into(),
+        ..Default::default()
+    });
+    let mut msg = PeerMessage::new();
+    msg.set_misc(misc);
+    let result = queue_peer_message(msg);
+    if result != 0 {
+        return result;
+    }
+    emit_event(&format!("background video mode updated: {} fps={}", enabled, performance.fps));
+    if enabled {
+        let mut fps_misc = Misc::new();
+        fps_misc.set_auto_adjust_fps(performance.fps as u32);
+        let mut fps_msg = PeerMessage::new();
+        fps_msg.set_misc(fps_misc);
+        queue_peer_message(fps_msg)
+    } else {
+        rust_refresh_video()
+    }
 }
 
 #[no_mangle]
@@ -1551,6 +1645,12 @@ pub extern "C" fn rust_fallback_video_to_vp9() -> i32 {
         image_quality: performance.quality.into(),
         custom_fps: performance.fps,
         supported_decoding: MessageField::some(supported_decoding_options(true)),
+        disable_audio: if REMOTE_AUDIO_ENABLED.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::No
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        }
+        .into(),
         show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
             hbb_common::message_proto::option_message::BoolOption::Yes
         } else {
@@ -1567,6 +1667,119 @@ pub extern "C" fn rust_fallback_video_to_vp9() -> i32 {
     }
     emit_event("video fallback: requested vp9");
     rust_refresh_video()
+}
+
+#[no_mangle]
+pub extern "C" fn rust_query_peer_online_states(
+    peers_json: *const c_char,
+    rendezvous_server: *const c_char,
+    requester_id: *const c_char,
+) -> i32 {
+    let peers_json = match cstr_to_string(peers_json) {
+        Some(value) if !value.is_empty() => value,
+        _ => return -1,
+    };
+    let mut peers: Vec<String> = match serde_json::from_str(&peers_json) {
+        Ok(value) => value,
+        Err(_) => return -2,
+    };
+    peers.retain(|peer| !peer.trim().is_empty());
+    peers.sort();
+    peers.dedup();
+    if peers.is_empty() || peers.len() > 512 {
+        return -3;
+    }
+    if PEER_ONLINE_QUERY_ACTIVE.swap(true, Ordering::SeqCst) {
+        return 1;
+    }
+
+    let server = cstr_to_string(rendezvous_server).unwrap_or_default();
+    // OnlineRequest is handled by hbbs on the auxiliary NAT-test port, which
+    // is one lower than the normal rendezvous port (21115 for the default
+    // 21116 service). Sending it to the main port makes hbbs close the stream
+    // without an OnlineResponse.
+    let rendezvous_addr = online_query_addr(&server);
+    let requester_id = cstr_to_string(requester_id).unwrap_or_else(|| "harmony-client".to_string());
+    if let Ok(mut guard) = PEER_ONLINE_RESULT.lock() {
+        guard.clear();
+    }
+    emit_event(&format!("online state query started count={}", peers.len()));
+
+    runtime().spawn(async move {
+        let result = query_peer_online_states(peers, rendezvous_addr, requester_id).await;
+        let payload = match result {
+            Ok(states) => {
+                emit_event(&format!("online state query completed count={}", states.len()));
+                PeerOnlineResult {
+                    peers: states,
+                    error: String::new(),
+                }
+            }
+            Err(error) => {
+                emit_event(&format!("online state query failed: {error}"));
+                PeerOnlineResult {
+                    peers: Vec::new(),
+                    error,
+                }
+            }
+        };
+        if let Ok(serialized) = serde_json::to_string(&payload) {
+            if let Ok(mut guard) = PEER_ONLINE_RESULT.lock() {
+                *guard = serialized;
+            }
+        }
+        PEER_ONLINE_QUERY_ACTIVE.store(false, Ordering::SeqCst);
+    });
+    0
+}
+
+async fn query_peer_online_states(
+    peers: Vec<String>,
+    rendezvous_addr: String,
+    requester_id: String,
+) -> Result<Vec<PeerOnlineState>, String> {
+    let mut connection = connect_tcp(rendezvous_addr, CONNECT_TIMEOUT)
+        .await
+        .map_err(|error| format!("connect failed: {error}"))?;
+    let mut request = RendezvousMessage::new();
+    request.set_online_request(OnlineRequest {
+        id: requester_id,
+        peers: peers.clone(),
+        ..Default::default()
+    });
+    connection
+        .send(&request)
+        .await
+        .map_err(|error| format!("send failed: {error}"))?;
+    let response = next_rendezvous(&mut connection, READ_TIMEOUT)
+        .await
+        .ok_or_else(|| "response timeout".to_string())?;
+    let online = match response.union {
+        Some(rendezvous_message::Union::OnlineResponse(value)) => value,
+        _ => return Err("unexpected response".to_string()),
+    };
+    let states = online.states.as_ref();
+    Ok(peers
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let byte = states.get(index / 8).copied().unwrap_or(0);
+            let mask = 0x80_u8 >> (index % 8);
+            PeerOnlineState {
+                id,
+                online: byte & mask != 0,
+            }
+        })
+        .collect())
+}
+
+#[no_mangle]
+pub extern "C" fn rust_take_peer_online_states() -> *mut c_char {
+    let result = PEER_ONLINE_RESULT
+        .lock()
+        .map(|mut guard| std::mem::take(&mut *guard))
+        .unwrap_or_default();
+    CString::new(result).unwrap_or_default().into_raw()
 }
 
 #[no_mangle]
@@ -1628,6 +1841,31 @@ fn with_port(host: &str, port: i32) -> String {
         }
     }
     format!("{host}:{port}")
+}
+
+fn online_query_addr(server: &str) -> String {
+    let rendezvous_addr = with_port(
+        if server.trim().is_empty() {
+            "rustdesk.com"
+        } else {
+            server
+        },
+        21116,
+    );
+    if let Ok(mut addr) = rendezvous_addr.parse::<SocketAddr>() {
+        if addr.port() > 1 {
+            addr.set_port(addr.port() - 1);
+        }
+        return addr.to_string();
+    }
+    if let Some((host, port_text)) = rendezvous_addr.rsplit_once(':') {
+        if let Ok(port) = port_text.parse::<u16>() {
+            if port > 1 {
+                return format!("{host}:{}", port - 1);
+            }
+        }
+    }
+    with_port(server, 21115)
 }
 
 fn rendezvous_message_kind(union: &Option<rendezvous_message::Union>) -> &'static str {
@@ -2846,7 +3084,12 @@ async fn send_login(hash: Hash) {
             supported_decoding: MessageField::some(supported_decoding_options(false)),
             image_quality: performance.quality.into(),
             custom_fps: performance.fps,
-            disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
+            disable_audio: if REMOTE_AUDIO_ENABLED.load(Ordering::SeqCst) {
+                hbb_common::message_proto::option_message::BoolOption::No
+            } else {
+                hbb_common::message_proto::option_message::BoolOption::Yes
+            }
+            .into(),
             enable_file_transfer: hbb_common::message_proto::option_message::BoolOption::Yes.into(),
             show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
                 hbb_common::message_proto::option_message::BoolOption::Yes
@@ -2878,7 +3121,12 @@ async fn send_performance_options(refresh_video: bool) {
         image_quality: performance.quality.into(),
         custom_fps: performance.fps,
         supported_decoding: MessageField::some(supported_decoding_options(false)),
-        disable_audio: hbb_common::message_proto::option_message::BoolOption::No.into(),
+        disable_audio: if REMOTE_AUDIO_ENABLED.load(Ordering::SeqCst) {
+            hbb_common::message_proto::option_message::BoolOption::No
+        } else {
+            hbb_common::message_proto::option_message::BoolOption::Yes
+        }
+        .into(),
         show_remote_cursor: if SHOW_REMOTE_CURSOR.load(Ordering::SeqCst) {
             hbb_common::message_proto::option_message::BoolOption::Yes
         } else {
@@ -2988,13 +3236,21 @@ async fn send_auto_adjust_fps_if_due() {
 }
 
 fn performance_config() -> PerformanceConfig {
-    PERFORMANCE_CONFIG
+    let configured = PERFORMANCE_CONFIG
         .lock()
         .map(|guard| *guard)
         .unwrap_or(PerformanceConfig {
             fps: 45,
             quality: ImageQuality::Low,
-        })
+        });
+    if BACKGROUND_VIDEO_MODE.load(Ordering::SeqCst) {
+        PerformanceConfig {
+            fps: 2,
+            quality: ImageQuality::Low,
+        }
+    } else {
+        configured
+    }
 }
 
 async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream) {

@@ -12,6 +12,8 @@ import { common } from '@kit.AbilityKit'
 import { pasteboard } from '@kit.BasicServicesKit'
 import { promptAction } from '@kit.ArkUI'
 import { fileIo, picker } from '@kit.CoreFileKit'
+import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog'
+import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
@@ -29,6 +31,7 @@ export struct SettingsPage {
   @State showResolutionPicker: boolean = false
   @State showFrameRatePicker: boolean = false
   @State showLocalCursor: boolean = true
+  @State remoteAudioEnabled: boolean = true
   @State diagnosticLogEnabled: boolean = false
   @State diagnosticLogBusy: boolean = false
   @State pageWidth: number = 0
@@ -48,6 +51,12 @@ export struct SettingsPage {
     customStyle: true,
     cornerRadius: 10,
   })
+  private fileTransferHistoryDialogController: CustomDialogController = new CustomDialogController({
+    builder: FileTransferHistoryDialog(),
+    autoCancel: true,
+    customStyle: true,
+    cornerRadius: 10,
+  })
 
   aboutToAppear(): void {
     let savedRes: string = RustDeskNapi.getOption('resolution')
@@ -59,6 +68,8 @@ export struct SettingsPage {
       this.frameRate = parseInt(savedFps)
     }
     this.showLocalCursor = RustDeskNapi.getOption('show-local-cursor') !== '0'
+    this.remoteAudioEnabled = RustDeskNapi.getOption('remote-audio-enabled') !== '0'
+    RustDeskNapi.setRemoteAudioEnabled(this.remoteAudioEnabled)
     this.diagnosticLogEnabled = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
     RustDeskNapi.setDiagnosticLogEnabled(this.diagnosticLogEnabled)
   }
@@ -90,6 +101,7 @@ export struct SettingsPage {
           ])
           this.buildDisplayCard()
           this.buildInputCard()
+          this.buildAudioCard()
           this.buildServerConfigCard()
           this.buildDiagnosticsCard()
           this.buildThemeToggle()
@@ -272,6 +284,43 @@ export struct SettingsPage {
           .onChange((isOn: boolean) => {
             this.showLocalCursor = isOn
             RustDeskNapi.setOption('show-local-cursor', isOn ? '1' : '0')
+          })
+      }
+      .width('100%')
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
+    .borderRadius(RustDeskTheme.CARD_RADIUS)
+    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .width('100%')
+  }
+
+  @Builder
+  buildAudioCard() {
+    Column({ space: 4 }) {
+      Row() {
+        Column({ space: 4 }) {
+          Text('播放远端声音')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('播放远端设备的系统声音；有真实音频时接入系统播控中心')
+            .fontSize(12)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.remoteAudioEnabled })
+          .onChange((isOn: boolean) => {
+            this.remoteAudioEnabled = isOn
+            RustDeskNapi.setOption('remote-audio-enabled', isOn ? '1' : '0')
+            RustDeskNapi.setRemoteAudioEnabled(isOn)
+            if (!isOn) {
+              RemoteSessionBackgroundTask.setAudioPlaybackActive(false)
+            }
           })
       }
       .width('100%')
@@ -509,6 +558,34 @@ export struct SettingsPage {
       .padding({ top: 10, bottom: 10 })
       .onClick(() => {
         this.releaseNotesDialogController.open()
+      })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('文件传输历史')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('查看发送、取回、失败和取消记录')
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Text('>')
+          .fontSize(16)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .margin({ left: 4 })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .onClick(() => {
+        this.fileTransferHistoryDialogController.open()
       })
 
       Divider()

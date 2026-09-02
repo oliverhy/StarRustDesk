@@ -16,6 +16,7 @@ public:
     void stop();
     void pushOpusFrame(const uint8_t* data, int length);
     bool isRunning() const;
+    bool hasRecentFrames(int64_t maxAgeMs) const;
 
 private:
     AudioPlayer() = default;
@@ -37,6 +38,7 @@ private:
     int sampleRate_ = 0;
     int channels_ = 0;
     bool running_ = false;
+    int64_t lastFrameAtMs_ = 0;
 };
 
 extern "C" int audio_player_start(int sampleRate, int channels);

@@ -99,6 +99,16 @@ export interface FileDownloadRequest {
   isDirectory: boolean
 }
 
+export interface PeerOnlineState {
+  id: string
+  online: boolean
+}
+
+export interface PeerOnlineResult {
+  peers: PeerOnlineState[]
+  error: string
+}
+
 export class RustDeskNapi {
   static initializeDiagnosticLog(filesDirectory: string): number {
     return (rustdeskNapi as ESObject).initializeDiagnosticLog(filesDirectory)
@@ -200,12 +210,32 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).refreshVideo()
   }
 
+  static setRemoteAudioEnabled(enabled: boolean): number {
+    return (rustdeskNapi as ESObject).setRemoteAudioEnabled(enabled)
+  }
+
+  static isRemoteAudioActive(): boolean {
+    return (rustdeskNapi as ESObject).isRemoteAudioActive()
+  }
+
+  static setBackgroundVideoMode(enabled: boolean): number {
+    return (rustdeskNapi as ESObject).setBackgroundVideoMode(enabled)
+  }
+
   static fallbackVideoToVp9(): number {
     return (rustdeskNapi as ESObject).fallbackVideoToVp9()
   }
 
   static getPeerList(): PeerInfo[] {
     return rustdeskNapi.getPeerList()
+  }
+
+  static queryPeerOnlineStates(peerIds: string[], rendezvousServer: string): number {
+    return (rustdeskNapi as ESObject).queryPeerOnlineStates(JSON.stringify(peerIds), rendezvousServer)
+  }
+
+  static takePeerOnlineStates(): string {
+    return (rustdeskNapi as ESObject).takePeerOnlineStates()
   }
 
   static getConnectionStatus(): number {

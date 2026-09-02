@@ -36,7 +36,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
-    RemoteSessionBackgroundTask.stop()
+    RemoteSessionBackgroundTask.shutdown()
     RustDeskNapi.appendDiagnosticLog('app', 'ability_destroy')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
@@ -66,6 +66,7 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     this.updateColorMode(this.context.config.colorMode);
+    RemoteSessionBackgroundTask.setAppBackground(false)
     RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
     let foregroundEpoch: number = AppStorage.get<number>('appForegroundEpoch') ?? 0
     AppStorage.set<number>('appForegroundEpoch', foregroundEpoch + 1)
@@ -75,6 +76,7 @@ export default class EntryAbility extends UIAbility {
 
   onBackground(): void {
     RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
+    RemoteSessionBackgroundTask.setAppBackground(true)
     RustDeskNapi.appendDiagnosticLog('app', 'background')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }

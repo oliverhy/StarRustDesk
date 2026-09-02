@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.0.9'
-export const RELEASE_NOTES_BUILD: string = '1000903'
+export const RELEASE_NOTES_BUILD: string = '1000904'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,7 +44,8 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
-          this.buildSection('1.0.9（1000903）· 文件取回、输入与视频', [
+          this.buildSection('1.0.9（1000904）· 连接状态、文件取回、输入与视频', [
+            '已保存连接新增在线状态灯，并修复状态查询端口错误导致设备可以连接却一直显示黄色的问题；绿色表示在线，灰色表示离线。',
             '修复远端文件已经传输完成，但保存到手机后变成 0 字节或提示保存失败的问题。',
             '重新设计远端文件选择界面，补充文件类型、大小、修改时间和更完整的文件名显示。',
             '文件传输进度新增实时速度、已传输大小和批量任务数量，并支持随时取消；取消取回时会清理未完成文件。',

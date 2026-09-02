@@ -15,6 +15,8 @@ void rust_set_video_codec_support(int h264_supported, int vp9_supported,
                                   int vp8_supported, int av1_supported, int h265_supported);
 int rust_set_performance_preset(const char* preset);
 int rust_set_remote_cursor_visible(int visible);
+int rust_set_audio_enabled(int enabled);
+int rust_set_background_video_mode(int enabled);
 int rust_disconnect(void);
 int rust_get_connection_status(void);
 int rust_get_connection_route(void);
@@ -42,6 +44,9 @@ int rust_is_remote_cursor_embedded(void);
 int rust_switch_display(int display);
 int rust_refresh_video(void);
 int rust_fallback_video_to_vp9(void);
+int rust_query_peer_online_states(const char* peers_json, const char* rendezvous_server,
+                                  const char* requester_id);
+char* rust_take_peer_online_states(void);
 typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int width, int height,
                                       int is_key, int64_t pts);
 void rust_set_frame_callback(rust_frame_callback_t callback);

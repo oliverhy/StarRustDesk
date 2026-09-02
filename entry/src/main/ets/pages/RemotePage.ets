@@ -13,6 +13,8 @@ import { fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import pointer from '@ohos.multimodalInput.pointer';
+import { FileTransferHistoryRecord, FileTransferHistoryService } from '../service/FileTransferHistoryService';
+import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog';
 
 interface RemotePoint {
   x: number;
@@ -21,6 +23,7 @@ interface RemotePoint {
 
 interface RemoteDownloadSelection extends FileDownloadRequest {
   key: string;
+  size: number;
 }
 
 interface DownloadedFileCandidate {
@@ -228,6 +231,19 @@ struct RemotePage {
   private pendingDownloadArchivePath: string = '';
   private lastTransferSampleAt: number = 0;
   private lastTransferSampleBytes: number = 0;
+  private transferHistoryStartedAt: number = 0;
+  private transferHistoryDisplayName: string = '';
+  private transferHistoryFileType: string = '';
+  private transferHistoryItemCount: number = 0;
+  private transferHistoryEstimatedBytes: number = 0;
+  private transferHistoryDirection: string = 'upload';
+  private remoteAudioEnabled: boolean = true;
+  private fileTransferHistoryDialogController: CustomDialogController = new CustomDialogController({
+    builder: FileTransferHistoryDialog(),
+    autoCancel: true,
+    customStyle: true,
+    cornerRadius: 10,
+  });
   private lastRemoteCursorSequence: number = -1;
   private lastRemoteCursorImageSequence: number = -1;
   private remoteCursorAbsX: number = 0;
@@ -259,6 +275,8 @@ struct RemotePage {
     this.loadInputMode();
     this.loadLocalCursorPreference();
     this.loadEdgeAutoPanPreference();
+    this.remoteAudioEnabled = RustDeskNapi.getOption('remote-audio-enabled') !== '0';
+    RustDeskNapi.setRemoteAudioEnabled(this.remoteAudioEnabled);
     this.showGestureHelp = RustDeskNapi.getOption('mobile-gesture-help-shown') !== '1';
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
@@ -345,6 +363,9 @@ struct RemotePage {
       }
       this.connectionStatus = status as ConnectionStatus;
       RemoteSessionBackgroundTask.syncForConnectionStatus(this.connectionStatus);
+      RemoteSessionBackgroundTask.setAudioPlaybackActive(
+        status === ConnectionStatus.CONNECTED && this.remoteAudioEnabled && RustDeskNapi.isRemoteAudioActive(),
+        this.connectedPeerId);
       if (status !== this.lastLoggedConnectionStatus) {
         RustDeskNapi.appendDiagnosticLog('connection-ui', `status_changed from=${this.lastLoggedConnectionStatus} to=${status}`)
         this.lastLoggedConnectionStatus = status
@@ -1139,11 +1160,23 @@ struct RemotePage {
   buildRemoteFileBrowser() {
     Stack({ alignContent: Alignment.Center }) {
       Column({ space: 12 }) {
-        Text(this.remoteFileBrowserMode === 'download' ? '从远端取回文件' : '选择远端保存位置')
-          .width('100%')
-          .fontSize(18)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.primaryTextColor())
+        Row({ space: 8 }) {
+          Text(this.remoteFileBrowserMode === 'download' ? '从远端取回文件' : '选择远端保存位置')
+            .layoutWeight(1)
+            .fontSize(18)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.primaryTextColor())
+          Button('历史')
+            .height(34)
+            .fontSize(13)
+            .fontColor(RustDeskTheme.ACCENT)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+            .borderRadius(7)
+            .onClick(() => {
+              this.fileTransferHistoryDialogController.open();
+            })
+        }
+        .width('100%')
         Row({ space: 8 }) {
           Button('上一级')
             .height(40)
@@ -3892,7 +3925,8 @@ struct RemotePage {
       key: key,
       remotePath: key,
       localName: entry.name,
-      isDirectory: this.isRemoteDirectory(entry)
+      isDirectory: this.isRemoteDirectory(entry),
+      size: this.isRemoteDirectory(entry) ? 0 : entry.size
     };
     this.selectedRemoteDownloads = [...this.selectedRemoteDownloads, selection];
   }
@@ -3914,7 +3948,8 @@ struct RemotePage {
         key: key,
         remotePath: key,
         localName: entry.name,
-        isDirectory: this.isRemoteDirectory(entry)
+        isDirectory: this.isRemoteDirectory(entry),
+        size: this.isRemoteDirectory(entry) ? 0 : entry.size
       });
     });
     this.selectedRemoteDownloads = selections;
@@ -3951,7 +3986,8 @@ struct RemotePage {
       key: this.remoteDirectoryPath,
       remotePath: this.remoteDirectoryPath,
       localName: name,
-      isDirectory: true
+      isDirectory: true,
+      size: 0
     };
     this.prepareRemoteDownload([selection]);
   }
@@ -4016,14 +4052,28 @@ struct RemotePage {
       this.pendingDownloadAsArchive = asArchive;
       this.pendingDownloadArchivePath = asArchive ? `${localRoot}.zip` : '';
 
+      let estimatedBytes: number = 0;
+      items.forEach((item: RemoteDownloadSelection) => {
+        estimatedBytes += item.size;
+      });
+      this.beginFileTransferHistory(
+        'download',
+        singleFile ? requests[0].localName : archiveName,
+        asArchive ? 'ZIP 压缩包' : this.fileTypeFromName(requests[0].localName),
+        requests.length,
+        estimatedBytes
+      );
+
       let result: number = RustDeskNapi.startFileDownloadBatch(requests, localRoot);
       if (result !== 0) {
+        this.finishFileTransferHistory('failed', `无法启动取回任务 (${result})`);
         this.cleanupPendingDownloadFiles();
         this.showFileToast(`取回文件失败 (${result})`);
         return;
       }
       this.transferDirection = 'download';
       this.transferActive = true;
+      RemoteSessionBackgroundTask.setDataTransferActive(true);
       this.resetTransferTracking(requests.length);
       this.closeRemoteFileBrowser(false);
       this.showFileToast(asArchive ? `开始取回，完成后将生成 ${archiveName}` : '开始取回文件');
@@ -4041,6 +4091,7 @@ struct RemotePage {
 
   async exportDownloadedItems(): Promise<void> {
     if (this.pendingDownloadRoot.length === 0 || this.pendingDownloadDestinationUri.length === 0) {
+      this.finishFileTransferHistory('failed', '下载完成，但保存位置无效');
       this.showFileToast('下载完成，但保存位置无效');
       return;
     }
@@ -4075,11 +4126,14 @@ struct RemotePage {
           source.path, this.pendingDownloadDestinationUri);
         RustDeskNapi.appendDiagnosticLog('file-download', `single_saved bytes=${savedSize}`);
       }
+      this.finishFileTransferHistory('completed', '');
       this.cleanupPendingDownloadFiles();
       this.showFileToast(asArchive ?
         `${itemCount} 项已压缩并保存` : '文件已保存到所选位置');
     } catch (error) {
       this.logDownloadExportError(asArchive ? 'archive' : 'single-file', error);
+      this.finishFileTransferHistory('failed', asArchive ?
+        '文件已取回，但压缩或保存 ZIP 失败' : '文件已取回，但保存到所选位置失败');
       this.showFileToast(asArchive ?
         '文件已取回，但压缩或保存 ZIP 失败' : '文件已取回，但保存到所选位置失败');
     }
@@ -4196,16 +4250,25 @@ struct RemotePage {
 
   startPendingFileUpload(): void {
     if (this.pendingUploadPath.length === 0 || this.pendingUploadName.length === 0) return;
+    let uploadSize: number = 0;
+    try {
+      uploadSize = fileIo.statSync(this.pendingUploadPath).size;
+    } catch (_e) {
+    }
+    this.beginFileTransferHistory(
+      'upload', this.pendingUploadName, this.fileTypeFromName(this.pendingUploadName), 1, uploadSize);
     let result: number = RustDeskNapi.startFileUpload(
       this.pendingUploadPath,
       this.pendingUploadName,
       this.remoteDirectoryPath
     );
     if (result !== 0) {
+      this.finishFileTransferHistory('failed', `无法启动发送任务 (${result})`);
       this.showFileToast(`发送文件失败 (${result})`);
       return;
     }
     this.transferActive = true;
+    RemoteSessionBackgroundTask.setDataTransferActive(true);
     this.transferDirection = 'upload';
     this.resetTransferTracking(1);
     this.closeRemoteFileBrowser(false);
@@ -4222,6 +4285,52 @@ struct RemotePage {
     this.transferCancelling = false;
     this.lastTransferSampleAt = Date.now();
     this.lastTransferSampleBytes = 0;
+  }
+
+  beginFileTransferHistory(direction: string, displayName: string, fileType: string,
+    itemCount: number, estimatedBytes: number): void {
+    this.transferTransferredBytes = 0;
+    this.transferTotalBytes = 0;
+    this.transferHistoryStartedAt = Date.now();
+    this.transferHistoryDirection = direction;
+    this.transferHistoryDisplayName = displayName;
+    this.transferHistoryFileType = fileType;
+    this.transferHistoryItemCount = itemCount;
+    this.transferHistoryEstimatedBytes = estimatedBytes;
+  }
+
+  finishFileTransferHistory(status: string, error: string): void {
+    if (this.transferHistoryStartedAt <= 0) return;
+    let finishedAt: number = Date.now();
+    let durationMs: number = Math.max(1, finishedAt - this.transferHistoryStartedAt);
+    let totalBytes: number = Math.max(
+      this.transferHistoryEstimatedBytes, this.transferTotalBytes, this.transferTransferredBytes);
+    let record: FileTransferHistoryRecord = {
+      id: `${this.transferHistoryStartedAt}-${finishedAt}`,
+      direction: this.transferHistoryDirection,
+      peerId: this.connectedPeerId,
+      displayName: this.transferHistoryDisplayName,
+      fileType: this.transferHistoryFileType,
+      totalBytes: totalBytes,
+      itemCount: Math.max(1, this.transferHistoryItemCount),
+      startedAt: this.transferHistoryStartedAt,
+      finishedAt: finishedAt,
+      durationMs: durationMs,
+      averageSpeed: totalBytes > 0 ? totalBytes * 1000 / durationMs : 0,
+      status: status,
+      error: error
+    };
+    FileTransferHistoryService.add(record);
+    this.transferHistoryStartedAt = 0;
+    this.transferHistoryDisplayName = '';
+    this.transferHistoryFileType = '';
+    this.transferHistoryItemCount = 0;
+    this.transferHistoryEstimatedBytes = 0;
+  }
+
+  fileTypeFromName(name: string): string {
+    let extension: string = this.remoteFileExtension(name);
+    return extension.length > 0 ? `${extension.toUpperCase()} 文件` : '文件';
   }
 
   cancelActiveFileTransfer(): void {
@@ -4260,6 +4369,7 @@ struct RemotePage {
       this.transferProgress = status.total > 0 ? Math.min(100, status.transferred * 100 / status.total) : 0;
       if (status.state === 'completed') {
         this.transferActive = false;
+        RemoteSessionBackgroundTask.setDataTransferActive(false);
         this.transferCancelling = false;
         this.transferSpeedBytesPerSecond = 0;
         this.transferProgress = 100;
@@ -4268,22 +4378,27 @@ struct RemotePage {
             '取回完成，正在生成 ZIP 文件' : '取回完成，正在保存到所选位置');
           this.exportDownloadedItems();
         } else {
+          this.finishFileTransferHistory('completed', '');
           this.cleanupPendingUploadFile();
           this.pendingUploadName = '';
           this.showFileToast('文件传输完成');
         }
       } else if (status.state === 'failed') {
         this.transferActive = false;
+        RemoteSessionBackgroundTask.setDataTransferActive(false);
         this.transferCancelling = false;
         this.transferSpeedBytesPerSecond = 0;
+        this.finishFileTransferHistory('failed', status.error.length > 0 ? status.error : '文件传输失败');
         if (this.transferDirection === 'download') {
           this.cleanupPendingDownloadFiles();
         }
         this.showFileToast(status.error.length > 0 ? `文件传输失败：${status.error}` : '文件传输失败');
       } else if (status.state === 'cancelled') {
         this.transferActive = false;
+        RemoteSessionBackgroundTask.setDataTransferActive(false);
         this.transferCancelling = false;
         this.transferSpeedBytesPerSecond = 0;
+        this.finishFileTransferHistory('cancelled', '用户取消了文件传输');
         if (this.transferDirection === 'download') {
           this.cleanupPendingDownloadFiles();
         } else {
@@ -4333,6 +4448,9 @@ struct RemotePage {
       return;
     }
     this.isLeavingAfterDisconnect = true;
+    if (this.transferHistoryStartedAt > 0) {
+      this.finishFileTransferHistory('cancelled', '远控连接已断开');
+    }
     this.stopEdgeAutoPan();
     this.releaseHeldMouseButtons('disconnect');
     ConnectionService.releaseModifiers();

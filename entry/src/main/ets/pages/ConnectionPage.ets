@@ -4,7 +4,7 @@ import { translate } from '../utils/I18n'
 import { ConnectionService } from '../service/ConnectionService'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { ConnectionStatus } from '../model/ConnectionModel'
-import { RustDeskNapi } from '../service/RustDeskNapi'
+import { PeerOnlineResult, PeerOnlineState, RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
 
 interface SavedConnectionInfo {
@@ -37,6 +37,13 @@ interface SavedConnectionGroupRow {
   expanded: boolean
 }
 
+const PEER_STATE_CHECKING: number = 0
+const PEER_STATE_ONLINE: number = 1
+const PEER_STATE_OFFLINE: number = 2
+const PEER_STATE_UNKNOWN: number = 3
+const PEER_STATE_REFRESH_MS: number = 30000
+const PEER_STATE_QUERY_TIMEOUT_MS: number = 12000
+
 @Component
 export struct ConnectionPage {
   @State connectionName: string = ''
@@ -58,6 +65,7 @@ export struct ConnectionPage {
   @State selectedConnectionId: string = ''
   @State selectedGroupId: string = ''
   @State savedConnectionsVersion: number = 0
+  @State peerOnlineStatesVersion: number = 0
   @State connectionGroups: SavedConnectionGroup[] = []
   @State savedConnectionsExpanded: boolean = true
   @State ungroupedExpanded: boolean = true
@@ -71,6 +79,10 @@ export struct ConnectionPage {
   @State groupPickerConnectionId: string = ''
   @State groupPickerForForm: boolean = false
   private statusTimer: number = -1
+  private peerOnlineStates: Record<string, number> = {}
+  private peerOnlineQueryInFlight: boolean = false
+  private peerOnlineQueryStartedAt: number = 0
+  private nextPeerOnlineRefreshAt: number = 0
 
   aboutToAppear(): void {
     this.checkServerConfig()
@@ -101,6 +113,10 @@ export struct ConnectionPage {
 
   startStatusPolling(): void {
     let poll = () => {
+      this.pollPeerOnlineStates()
+      if (Date.now() >= this.nextPeerOnlineRefreshAt) {
+        this.refreshSavedConnectionOnlineStates()
+      }
       let status: ConnectionStatus = this.syncConnectionState()
       if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.WAITING_2FA) {
         if (!this.hasOpenedRemotePage) {
@@ -640,18 +656,30 @@ export struct ConnectionPage {
       if (groupId.length <= 0 ? this.ungroupedExpanded : expanded) {
         ForEach(this.connectionsForGroup(groupId), (item: SavedConnectionInfo) => {
           Row({ space: 8 }) {
-            Column() {
-              Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
-                .fontSize(15)
-                .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-                .fontColor(RustDeskTheme.ACCENT)
+            Stack() {
+              Column() {
+                Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
+                  .fontSize(15)
+                  .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+                  .fontColor(RustDeskTheme.ACCENT)
+              }
+              .width(36)
+              .height(36)
+              .justifyContent(FlexAlign.Center)
+              .alignItems(HorizontalAlign.Center)
+              .backgroundColor(this.isDarkMode ? '#26364E' : RustDeskTheme.ACCENT_SOFT)
+              .borderRadius(6)
+
+              Row()
+                .width(10)
+                .height(10)
+                .backgroundColor(this.peerOnlineStateColor(item.remoteId))
+                .border({ width: 2, color: this.isDarkMode ? '#1E2938' : '#F7F9FD' })
+                .borderRadius(5)
+                .position({ x: 27, y: 27 })
             }
-            .width(36)
-            .height(36)
-            .justifyContent(FlexAlign.Center)
-            .alignItems(HorizontalAlign.Center)
-            .backgroundColor(this.isDarkMode ? '#26364E' : RustDeskTheme.ACCENT_SOFT)
-            .borderRadius(6)
+            .width(38)
+            .height(38)
 
             Column({ space: 3 }) {
               Text(item.name.length > 0 ? item.name : item.remoteId)
@@ -700,7 +728,8 @@ export struct ConnectionPage {
           .height(58)
           .padding({ left: 8, right: 4 })
           .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
-        }, (item: SavedConnectionInfo) => `${item.id}-${this.savedConnectionsVersion}`)
+        }, (item: SavedConnectionInfo) =>
+          `${item.id}-${this.savedConnectionsVersion}-${this.peerOnlineStatesVersion}`)
       }
     }
     .width('100%')
@@ -1210,6 +1239,8 @@ export struct ConnectionPage {
       this.savedConnectionsVersion++
       this.persistSavedConnections(list)
       RustDeskNapi.setOption('password', '')
+      this.nextPeerOnlineRefreshAt = 0
+      this.refreshSavedConnectionOnlineStates(true)
     } catch (_e) {
       this.savedConnections = []
       this.savedConnectionsVersion++
@@ -1229,6 +1260,95 @@ export struct ConnectionPage {
       })
     })
     RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
+  }
+
+  refreshSavedConnectionOnlineStates(force: boolean = false): void {
+    if (this.peerOnlineQueryInFlight || this.savedConnections.length <= 0) {
+      return
+    }
+    let peerIds: string[] = []
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      if (!peerIds.includes(item.remoteId)) {
+        peerIds.push(item.remoteId)
+      }
+    })
+    if (peerIds.length <= 0) {
+      return
+    }
+    if (force) {
+      let checkingStates: Record<string, number> = {}
+      peerIds.forEach((peerId: string) => {
+        checkingStates[peerId] = this.peerOnlineStates[peerId] ?? PEER_STATE_CHECKING
+      })
+      this.peerOnlineStates = checkingStates
+      this.peerOnlineStatesVersion++
+    }
+    let result: number = RustDeskNapi.queryPeerOnlineStates(peerIds, this.customServerHint)
+    if (result === 0 || result === 1) {
+      this.peerOnlineQueryInFlight = true
+      this.peerOnlineQueryStartedAt = Date.now()
+      this.nextPeerOnlineRefreshAt = Date.now() + PEER_STATE_REFRESH_MS
+      return
+    }
+    this.markAllPeerStatesUnknown()
+    this.nextPeerOnlineRefreshAt = Date.now() + 10000
+  }
+
+  pollPeerOnlineStates(): void {
+    if (!this.peerOnlineQueryInFlight) {
+      return
+    }
+    let raw: string = RustDeskNapi.takePeerOnlineStates()
+    if (raw.length <= 0) {
+      if (Date.now() - this.peerOnlineQueryStartedAt >= PEER_STATE_QUERY_TIMEOUT_MS) {
+        this.peerOnlineQueryInFlight = false
+        this.markAllPeerStatesUnknown()
+        this.nextPeerOnlineRefreshAt = Date.now() + 10000
+      }
+      return
+    }
+    this.peerOnlineQueryInFlight = false
+    try {
+      let result: PeerOnlineResult = JSON.parse(raw) as PeerOnlineResult
+      if (result.error.length > 0) {
+        this.markAllPeerStatesUnknown()
+        this.nextPeerOnlineRefreshAt = Date.now() + 10000
+        return
+      }
+      let states: Record<string, number> = {}
+      this.savedConnections.forEach((item: SavedConnectionInfo) => {
+        states[item.remoteId] = PEER_STATE_UNKNOWN
+      })
+      result.peers.forEach((peer: PeerOnlineState) => {
+        states[peer.id] = peer.online ? PEER_STATE_ONLINE : PEER_STATE_OFFLINE
+      })
+      this.peerOnlineStates = states
+      this.peerOnlineStatesVersion++
+      this.nextPeerOnlineRefreshAt = Date.now() + PEER_STATE_REFRESH_MS
+    } catch (_error) {
+      this.markAllPeerStatesUnknown()
+      this.nextPeerOnlineRefreshAt = Date.now() + 10000
+    }
+  }
+
+  markAllPeerStatesUnknown(): void {
+    let states: Record<string, number> = {}
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      states[item.remoteId] = PEER_STATE_UNKNOWN
+    })
+    this.peerOnlineStates = states
+    this.peerOnlineStatesVersion++
+  }
+
+  peerOnlineStateColor(remoteId: string): ResourceColor {
+    let state: number = this.peerOnlineStates[remoteId] ?? PEER_STATE_CHECKING
+    if (state === PEER_STATE_ONLINE) {
+      return RustDeskTheme.SUCCESS
+    }
+    if (state === PEER_STATE_OFFLINE) {
+      return this.isDarkMode ? '#697386' : '#A5ADBA'
+    }
+    return RustDeskTheme.WARNING
   }
 
   applySavedConnection(item: SavedConnectionInfo): void {
@@ -1275,6 +1395,8 @@ export struct ConnectionPage {
     this.selectedConnectionId = targetId
     await CredentialStore.save(targetId, password)
     this.persistSavedConnections(list)
+    this.nextPeerOnlineRefreshAt = 0
+    this.refreshSavedConnectionOnlineStates(true)
   }
 
   async deleteSavedConnection(id: string): Promise<void> {
@@ -1291,6 +1413,8 @@ export struct ConnectionPage {
     }
     await CredentialStore.remove(id)
     this.persistSavedConnections(list)
+    this.nextPeerOnlineRefreshAt = 0
+    this.refreshSavedConnectionOnlineStates(true)
   }
 
   clearConnectionForm(): void {
