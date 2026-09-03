@@ -35,6 +35,8 @@ const REMOTE_WHEEL_SCALE: number = 0.08;
 const TOUCH_SCROLL_SCALE: number = 0.12;
 const TOUCHPAD_POINTER_SPEED: number = 1.25;
 const TOUCH_MOVE_THRESHOLD: number = 12;
+const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 400;
+const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 48;
 const MULTI_TOUCH_MOVE_THRESHOLD: number = 8;
 const PINCH_DISTANCE_THRESHOLD: number = 12;
 const THREE_FINGER_SWIPE_THRESHOLD: number = 70;
@@ -83,6 +85,7 @@ struct RemotePage {
   @State inputMode: string = INPUT_MODE_MOUSE;
   @State showGestureHelp: boolean = false;
   @State showLocalCursor: boolean = true;
+  @State showLeftButtonHoldIndicator: boolean = false;
   @State keyboardInput: string = '';
   @State showCursor: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
@@ -149,6 +152,7 @@ struct RemotePage {
   private pendingTapRemoteY: number = 0;
   private pendingTapLocalX: number = 0;
   private pendingTapLocalY: number = 0;
+  private touchpadDragCandidate: boolean = false;
   private pinchStartDistance: number = 0;
   private pinchStartScale: number = 1.0;
   private lastPinchCenterX: number = 0;
@@ -175,6 +179,8 @@ struct RemotePage {
   private lastMappedPhysicalLeftUpAt: number = 0;
   private lastLocalPointerInputAt: number = 0;
   private localPointerGestureActive: boolean = false;
+  private leftButtonHeldAt: number = 0;
+  private preferAuthoritativeCursor: boolean = false;
   private lastPinchUpdateAt: number = 0;
   private lastWheelSentAt: number = 0;
   private wheelRemainderX: number = 0;
@@ -535,6 +541,10 @@ struct RemotePage {
     this.lastLocalPointerInputAt = 0;
     this.leftButtonHeld = false;
     this.rightButtonHeld = false;
+    this.leftButtonHeldAt = 0;
+    this.preferAuthoritativeCursor = false;
+    this.showLeftButtonHoldIndicator = false;
+    this.touchpadDragCandidate = false;
     this.decoderHealthInitialized = false;
     this.lastDecoderInputFrames = 0;
     this.lastDecodedFrames = 0;
@@ -608,11 +618,19 @@ struct RemotePage {
           if (cursor.embedded && !this.isPanMode) {
             this.showCursor = false;
           } else if (cursor.valid && cursor.sequence !== this.lastRemoteCursorSequence) {
-            this.lastRemoteCursorSequence = cursor.sequence;
             if (cursor.x >= 0 && cursor.y >= 0 && cursor.x < this.remoteWidth && cursor.y < this.remoteHeight) {
-              const keepLocalPrediction: boolean = this.localPointerGestureActive ||
-                Date.now() - this.lastLocalPointerInputAt < LOCAL_CURSOR_ECHO_GUARD_MS;
+              const now: number = Date.now();
+              const dragReadyForRemoteSync: boolean = this.leftButtonHeld && this.leftButtonHeldAt > 0 &&
+                now - this.leftButtonHeldAt >= LOCAL_CURSOR_ECHO_GUARD_MS;
+              const keepLocalPrediction: boolean = !this.preferAuthoritativeCursor &&
+                !dragReadyForRemoteSync && (this.localPointerGestureActive ||
+                now - this.lastLocalPointerInputAt < LOCAL_CURSOR_ECHO_GUARD_MS);
               if (!keepLocalPrediction) {
+                this.lastRemoteCursorSequence = cursor.sequence;
+                if (dragReadyForRemoteSync && !this.preferAuthoritativeCursor) {
+                  this.preferAuthoritativeCursor = true;
+                  RustDeskNapi.appendDiagnosticLog('input', 'cursor_prediction switched_to_remote_during_drag');
+                }
                 this.remoteCursorAbsX = cursor.x;
                 this.remoteCursorAbsY = cursor.y;
                 this.hasAuthoritativeRemoteCursor = true;
@@ -1446,6 +1464,10 @@ struct RemotePage {
           this.handleRemoteHover(isHovering);
         })
         .onBlur(() => {
+          if (this.localPointerGestureActive) {
+            RustDeskNapi.appendDiagnosticLog('input', 'input_blur ignored_during_touch_gesture');
+            return;
+          }
           this.releaseHeldMouseButtons('input_blur');
         })
         .onAxisEvent((event: AxisEvent) => {
@@ -1500,6 +1522,25 @@ struct RemotePage {
       if (this.showCursor && (!this.remoteCursorEmbedded || this.isPanMode) &&
         this.inputMode === INPUT_MODE_MOUSE) {
         this.buildCursorOverlay();
+      }
+
+      if (this.showLeftButtonHoldIndicator && this.inputMode === INPUT_MODE_MOUSE && !this.isPanMode) {
+        Row({ space: 6 }) {
+          Circle()
+            .width(8)
+            .height(8)
+            .backgroundColor(Color.White)
+          Text('左键按住')
+            .fontSize(12)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(Color.White)
+        }
+        .padding({ left: 11, right: 11, top: 7, bottom: 7 })
+        .borderRadius(16)
+        .backgroundColor(PAN_MODE_ACTIVE_COLOR)
+        .position({ x: 12, y: 12 })
+        .zIndex(30)
+        .hitTestBehavior(HitTestMode.None)
       }
     }
     .width('100%')
@@ -2250,6 +2291,7 @@ struct RemotePage {
     this.pinchStartDistance = 0;
     this.touchMoved = false;
     this.longPressTriggered = false;
+    this.touchpadDragCandidate = false;
     this.ignoreTouchUntilNextDown = false;
     this.viewportPanActive = false;
     this.viewportPanLastX = 0;
@@ -2384,9 +2426,12 @@ struct RemotePage {
       this.lastTouchY = touch.y;
       this.touchMoved = false;
       this.longPressTriggered = false;
-      if (this.isSecondTapNear(touch.x, touch.y)) {
+      const secondTap: boolean = this.isSecondTapNear(touch.x, touch.y);
+      this.touchpadDragCandidate = secondTap;
+      RustDeskNapi.appendDiagnosticLog('input',
+        `touchpad_down second_tap=${secondTap ? 1 : 0} pending=${this.tapTimer !== -1 ? 1 : 0}`);
+      if (secondTap) {
         this.clearTapTimer();
-        this.sendLeftClick(this.pendingTapRemoteX, this.pendingTapRemoteY);
         this.sendLeftDown(this.lastAbsX, this.lastAbsY);
       } else {
         this.flushPendingTap();
@@ -2400,6 +2445,10 @@ struct RemotePage {
       if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCH_MOVE_THRESHOLD) {
         this.touchMoved = true;
         this.clearLongPressTimer();
+        if (this.touchpadDragCandidate && !this.leftButtonHeld) {
+          this.sendLeftDown(this.lastAbsX, this.lastAbsY);
+          RustDeskNapi.appendDiagnosticLog('input', 'touchpad_drag left_down_recovered_on_move');
+        }
       }
       let deltaX: number = touch.x - this.lastTouchX;
       let deltaY: number = touch.y - this.lastTouchY;
@@ -2468,14 +2517,27 @@ struct RemotePage {
   }
 
   finishTouchpadTouch(localX: number, localY: number, cancelled: boolean): void {
+    const wasDragCandidate: boolean = this.touchpadDragCandidate;
     this.edgePanTouchActive = false;
     this.stopEdgeAutoPan();
     this.clearLongPressTimer();
     if (this.leftButtonHeld) {
       this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+      if (wasDragCandidate && !cancelled && !this.touchMoved) {
+        // The first tap is intentionally held back while deciding whether this
+        // is a drag. Complete a normal double-click only when the second tap
+        // is released without movement; a drag must remain a clean
+        // left-down -> move -> left-up sequence for desktop marquee selection.
+        this.sendLeftClick(this.lastAbsX, this.lastAbsY);
+      }
     } else if (!cancelled && !this.longPressTriggered && !this.touchMoved) {
       this.queueTouchpadTap(this.lastAbsX, this.lastAbsY, localX, localY);
     }
+    if (wasDragCandidate) {
+      RustDeskNapi.appendDiagnosticLog('input',
+        `touchpad_drag finished cancelled=${cancelled ? 1 : 0} moved=${this.touchMoved ? 1 : 0}`);
+    }
+    this.touchpadDragCandidate = false;
     this.longPressTriggered = false;
     this.touchMoved = false;
     this.endLocalPointerGesture();
@@ -2500,7 +2562,7 @@ struct RemotePage {
     }
     let dx: number = localX - this.pendingTapLocalX;
     let dy: number = localY - this.pendingTapLocalY;
-    return Math.sqrt(dx * dx + dy * dy) < 24;
+    return Math.sqrt(dx * dx + dy * dy) <= TOUCHPAD_DOUBLE_TAP_DISTANCE;
   }
 
   startRightClickTimer(remoteX: number, remoteY: number): void {
@@ -2521,6 +2583,7 @@ struct RemotePage {
   }
 
   queueTouchpadTap(remoteX: number, remoteY: number, localX: number, localY: number): void {
+    this.clearTapTimer();
     this.pendingTapRemoteX = remoteX;
     this.pendingTapRemoteY = remoteY;
     this.pendingTapLocalX = localX;
@@ -2528,7 +2591,7 @@ struct RemotePage {
     this.tapTimer = setTimeout(() => {
       this.sendLeftClick(this.pendingTapRemoteX, this.pendingTapRemoteY);
       this.tapTimer = -1;
-    }, 240);
+    }, TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS);
   }
 
   flushPendingTap(): void {
@@ -2549,6 +2612,8 @@ struct RemotePage {
     if (this.leftButtonHeld) {
       ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
       this.leftButtonHeld = false;
+      this.leftButtonHeldAt = 0;
+      this.showLeftButtonHoldIndicator = false;
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
@@ -2560,6 +2625,9 @@ struct RemotePage {
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
     this.leftButtonHeld = true;
+    this.leftButtonHeldAt = Date.now();
+    this.preferAuthoritativeCursor = false;
+    this.showLeftButtonHoldIndicator = this.inputMode === INPUT_MODE_MOUSE;
   }
 
   sendLeftUp(remoteX: number, remoteY: number, force: boolean = false): void {
@@ -2568,6 +2636,8 @@ struct RemotePage {
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
     this.leftButtonHeld = false;
+    this.leftButtonHeldAt = 0;
+    this.showLeftButtonHoldIndicator = false;
   }
 
   sendRightDown(remoteX: number, remoteY: number): void {
@@ -2591,8 +2661,10 @@ struct RemotePage {
     if (this.leftButtonHeld) {
       ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 2);
       this.leftButtonHeld = false;
+      this.leftButtonHeldAt = 0;
       released = true;
     }
+    this.showLeftButtonHoldIndicator = false;
     if (this.rightButtonHeld) {
       ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 4);
       this.rightButtonHeld = false;
@@ -2859,9 +2931,11 @@ struct RemotePage {
     let remoteDeltaY: number = deltaY * this.remoteHeight / displayHeight * TOUCHPAD_POINTER_SPEED;
     this.lastAbsX = Math.max(0, Math.min(this.remoteWidth - 1, this.lastAbsX + remoteDeltaX));
     this.lastAbsY = Math.max(0, Math.min(this.remoteHeight - 1, this.lastAbsY + remoteDeltaY));
-    this.remoteCursorAbsX = this.lastAbsX;
-    this.remoteCursorAbsY = this.lastAbsY;
-    this.updateCursorOverlayFromRemote();
+    if (!this.preferAuthoritativeCursor) {
+      this.remoteCursorAbsX = this.lastAbsX;
+      this.remoteCursorAbsY = this.lastAbsY;
+      this.updateCursorOverlayFromRemote();
+    }
     return { x: this.lastAbsX, y: this.lastAbsY };
   }
 
@@ -2887,13 +2961,16 @@ struct RemotePage {
 
   beginLocalPointerGesture(): void {
     this.localPointerGestureActive = true;
+    this.preferAuthoritativeCursor = false;
     this.markLocalPointerInput();
   }
 
   endLocalPointerGesture(): void {
     if (this.localPointerGestureActive) {
       this.localPointerGestureActive = false;
-      this.markLocalPointerInput();
+      if (!this.preferAuthoritativeCursor) {
+        this.markLocalPointerInput();
+      }
     }
   }
 

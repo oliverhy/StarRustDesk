@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.0.9'
-export const RELEASE_NOTES_BUILD: string = '1000904'
+export const RELEASE_NOTES_BUILD: string = '1000906'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,17 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.0.9（1000906）· 鼠标拖动显示', [
+            '修复鼠标模式按住拖动时，本地预测鼠标与远端真实鼠标同时出现并逐渐岔开的问题。',
+            '拖动开始时保留短暂的本地预测以维持跟手感，随后自动切换到远端真实鼠标坐标进行校正。',
+            '保留双击按住框选、左键拖动和“左键按住”状态提示，不影响远端文件框选操作。',
+          ])
+          this.buildSection('1.0.9（1000905）· 鼠标框选与拖拽', [
+            '优化手机鼠标模式的双击按住拖动，扩大识别时间和触点容错范围，降低框选手势识别失败的概率。',
+            '修复远端文件管理器无法拉出文件选框的问题，框选时使用干净的“左键按下、移动、抬起”事件序列。',
+            '触摸拖拽期间不再因输入焦点短暂切换提前释放左键，并在异常释放后自动恢复左键按下状态。',
+            '拖拽生效时新增蓝色“左键按住”提示，并补充双击、拖拽和左键恢复诊断日志。',
+          ])
           this.buildSection('1.0.9（1000904）· 连接状态、文件取回、输入与视频', [
             '已保存连接新增在线状态灯，并修复状态查询端口错误导致设备可以连接却一直显示黄色的问题；绿色表示在线，灰色表示离线。',
             '修复远端文件已经传输完成，但保存到手机后变成 0 字节或提示保存失败的问题。',
