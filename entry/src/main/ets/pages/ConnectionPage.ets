@@ -1,4 +1,7 @@
-import { router } from '@kit.ArkUI'
+import { common } from '@kit.AbilityKit'
+import { promptAction, router } from '@kit.ArkUI'
+import { fileIo, picker } from '@kit.CoreFileKit'
+import { util } from '@kit.ArkTS'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { ConnectionService } from '../service/ConnectionService'
@@ -6,6 +9,12 @@ import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundT
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { PeerOnlineResult, PeerOnlineState, RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
+import {
+  ConnectionBackupGroup,
+  ConnectionBackupItem,
+  ConnectionBackupPayload,
+  ConnectionBackupService
+} from '../service/ConnectionBackupService'
 
 interface SavedConnectionInfo {
   id: string
@@ -35,6 +44,12 @@ interface SavedConnectionGroupRow {
   id: string
   name: string
   expanded: boolean
+}
+
+interface NormalizedImportData {
+  groups: SavedConnectionGroup[]
+  connections: SavedConnectionInfo[]
+  importedCount: number
 }
 
 const PEER_STATE_CHECKING: number = 0
@@ -68,6 +83,7 @@ export struct ConnectionPage {
   @State peerOnlineStatesVersion: number = 0
   @State connectionGroups: SavedConnectionGroup[] = []
   @State savedConnectionsExpanded: boolean = true
+  @State connectionFormExpanded: boolean = true
   @State ungroupedExpanded: boolean = true
   @State showGroupNameDialog: boolean = false
   @State editingGroupId: string = ''
@@ -78,6 +94,19 @@ export struct ConnectionPage {
   @State showGroupPicker: boolean = false
   @State groupPickerConnectionId: string = ''
   @State groupPickerForForm: boolean = false
+  @State showBackupPasswordDialog: boolean = false
+  @State backupPasswordMode: string = ''
+  @State backupPasswordDraft: string = ''
+  @State backupPasswordConfirm: string = ''
+  @State backupPasswordError: string = ''
+  @State backupBusy: boolean = false
+  @State showImportPreviewDialog: boolean = false
+  @State importReplaceExisting: boolean = false
+  @State importPreviewGroupCount: number = 0
+  @State importPreviewConnectionCount: number = 0
+  @State importPreviewIncludesPasswords: boolean = false
+  private pendingEncryptedBackup: string = ''
+  private pendingImportPayload: ConnectionBackupPayload | undefined = undefined
   private statusTimer: number = -1
   private peerOnlineStates: Record<string, number> = {}
   private peerOnlineQueryInFlight: boolean = false
@@ -86,6 +115,7 @@ export struct ConnectionPage {
 
   aboutToAppear(): void {
     this.checkServerConfig()
+    this.loadConnectionFormState()
     this.loadConnectionGroups()
     this.loadSavedConnections()
     this.syncConnectionState()
@@ -179,6 +209,7 @@ export struct ConnectionPage {
             }
             .layoutWeight(1)
             .height('100%')
+            .align(Alignment.Top)
             .scrollBar(BarState.Off)
             .edgeEffect(EdgeEffect.Spring)
 
@@ -191,6 +222,7 @@ export struct ConnectionPage {
             }
             .layoutWeight(1.2)
             .height('100%')
+            .align(Alignment.Top)
             .scrollBar(BarState.Off)
             .edgeEffect(EdgeEffect.Spring)
           }
@@ -208,6 +240,7 @@ export struct ConnectionPage {
           }
           .width('100%')
           .layoutWeight(1)
+          .align(Alignment.Top)
           .scrollBar(BarState.Off)
           .edgeEffect(EdgeEffect.Spring)
         }
@@ -217,13 +250,14 @@ export struct ConnectionPage {
       .padding({ left: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING })
       .alignItems(HorizontalAlign.Center)
 
-      if (this.showGroupNameDialog || this.showGroupPicker) {
+      if (this.showGroupNameDialog || this.showGroupPicker ||
+        this.showBackupPasswordDialog || this.showImportPreviewDialog) {
         Column()
           .width('100%')
           .height('100%')
           .backgroundColor('#66000000')
           .onClick(() => {
-            this.closeGroupDialogs()
+            this.closeAllDialogs()
           })
           .zIndex(10)
 
@@ -231,6 +265,10 @@ export struct ConnectionPage {
           this.buildGroupNameDialog()
         } else if (this.showGroupPicker) {
           this.buildGroupPickerDialog()
+        } else if (this.showBackupPasswordDialog) {
+          this.buildBackupPasswordDialog()
+        } else if (this.showImportPreviewDialog) {
+          this.buildImportPreviewDialog()
         }
       }
     }
@@ -283,6 +321,21 @@ export struct ConnectionPage {
   buildConnectionForm() {
     Column({ space: 12 }) {
       Row() {
+        Button() {
+          Image(this.connectionFormExpanded ?
+            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+            .width(12)
+            .height(12)
+            .objectFit(ImageFit.Contain)
+        }
+          .width(44)
+          .height(34)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding(0)
+          .onClick(() => {
+            this.setConnectionFormExpanded(!this.connectionFormExpanded)
+          })
         Text(this.selectedConnectionId.length > 0 ? '编辑连接' : '新建连接')
           .fontSize(18)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -295,17 +348,19 @@ export struct ConnectionPage {
       .width('100%')
       .margin({ bottom: 2 })
 
-      this.buildRemoteIdInput()
-      this.buildConnectionNameInput()
-      this.buildConnectionGroupSelector()
-      this.buildPasswordInput()
-      this.buildPerformancePresetSelector()
-      this.buildConnectionEditActions()
-      if (this.connectionStatusText.length > 0) {
-        this.buildConnectionStatus()
-      }
-      if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
-        this.buildCustomServerIndicator()
+      if (this.connectionFormExpanded) {
+        this.buildRemoteIdInput()
+        this.buildConnectionNameInput()
+        this.buildConnectionGroupSelector()
+        this.buildPasswordInput()
+        this.buildPerformancePresetSelector()
+        this.buildConnectionEditActions()
+        if (this.connectionStatusText.length > 0) {
+          this.buildConnectionStatus()
+        }
+        if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
+          this.buildCustomServerIndicator()
+        }
       }
     }
     .width('100%')
@@ -555,6 +610,37 @@ export struct ConnectionPage {
         Text(`${this.savedConnections.length} 个设备`)
           .fontSize(12)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        Button('备份')
+          .height(30)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding(0)
+          .margin({ left: 8 })
+          .bindMenu([
+            {
+              value: '普通导出（不含密码）',
+              action: () => {
+                this.exportPlainBackup()
+              }
+            },
+            {
+              value: '加密导出（包含密码）',
+              action: () => {
+                this.openEncryptedExportDialog()
+              }
+            },
+            {
+              value: '导入备份',
+              action: () => {
+                this.selectBackupForImport()
+              }
+            }
+          ], {
+            placement: Placement.BottomRight,
+            enableArrow: true
+          })
         Button('+ 分组')
           .height(30)
           .fontSize(12)
@@ -696,32 +782,44 @@ export struct ConnectionPage {
             }
             .layoutWeight(1)
 
-            Button('使用')
+            Button('连接')
               .height(32)
               .fontSize(12)
-              .fontColor(item.id === this.selectedConnectionId ? Color.White : RustDeskTheme.ACCENT)
-              .backgroundColor(item.id === this.selectedConnectionId ? RustDeskTheme.ACCENT : (this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT))
+              .fontColor(Color.White)
+              .backgroundColor(RustDeskTheme.ACCENT)
               .borderRadius(6)
               .onClick(() => {
-                this.applySavedConnection(item)
+                this.connectSavedConnection(item)
               })
 
-            Button('移动')
+            Button('更多')
               .height(32)
               .fontSize(12)
               .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-              .backgroundColor(Color.Transparent)
-              .onClick(() => {
-                this.openGroupPickerForConnection(item.id)
-              })
-
-            Button('删除')
-              .height(32)
-              .fontSize(12)
-              .fontColor(RustDeskTheme.ERROR)
-              .backgroundColor(Color.Transparent)
-              .onClick(() => {
-                this.deleteSavedConnection(item.id)
+              .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.SURFACE_MUTED)
+              .borderRadius(6)
+              .bindMenu([
+                {
+                  value: '移动到分组',
+                  action: () => {
+                    this.openGroupPickerForConnection(item.id)
+                  }
+                },
+                {
+                  value: '修改连接',
+                  action: () => {
+                    this.editSavedConnection(item)
+                  }
+                },
+                {
+                  value: '删除连接',
+                  action: () => {
+                    this.deleteSavedConnection(item.id)
+                  }
+                }
+              ], {
+                placement: Placement.BottomRight,
+                enableArrow: true
               })
           }
           .width('100%')
@@ -844,6 +942,187 @@ export struct ConnectionPage {
         })
     }
     .width(this.pageWidth >= 820 ? 420 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
+  }
+
+  @Builder
+  buildBackupPasswordDialog() {
+    Column({ space: 12 }) {
+      Text(this.backupPasswordMode === 'export' ? '设置备份密码' : '输入备份密码')
+        .fontSize(19)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      Text(this.backupPasswordMode === 'export' ?
+        '连接密码将被加密写入备份。备份密码不会保存在应用中，忘记后无法恢复。' :
+        '请输入创建该加密备份时设置的密码。')
+        .fontSize(13)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+
+      TextInput({ placeholder: '至少 8 位备份密码', text: this.backupPasswordDraft })
+        .type(InputType.Password)
+        .width('100%')
+        .height(46)
+        .fontSize(15)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+        .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
+        .borderRadius(7)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => {
+          this.backupPasswordDraft = value
+          this.backupPasswordError = ''
+        })
+
+      if (this.backupPasswordMode === 'export') {
+        TextInput({ placeholder: '再次输入备份密码', text: this.backupPasswordConfirm })
+          .type(InputType.Password)
+          .width('100%')
+          .height(46)
+          .fontSize(15)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
+          .borderRadius(7)
+          .padding({ left: 12, right: 12 })
+          .onChange((value: string) => {
+            this.backupPasswordConfirm = value
+            this.backupPasswordError = ''
+          })
+      }
+
+      if (this.backupPasswordError.length > 0) {
+        Text(this.backupPasswordError)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%')
+      }
+
+      Row({ space: 10 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
+          .onClick(() => {
+            this.closeBackupDialogs()
+          })
+        Button(this.backupBusy ? '处理中…' : (this.backupPasswordMode === 'export' ? '加密并导出' : '解密'))
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(Color.White)
+          .backgroundColor(this.backupBusy ? RustDeskTheme.DARK_GRAY : RustDeskTheme.ACCENT)
+          .borderRadius(6)
+          .onClick(() => {
+            this.confirmBackupPassword()
+          })
+      }
+      .width('100%')
+    }
+    .width(this.pageWidth >= 820 ? 440 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
+    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
+  }
+
+  @Builder
+  buildImportPreviewDialog() {
+    Column({ space: 12 }) {
+      Text('确认导入连接')
+        .fontSize(19)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      Text(`备份包含 ${this.importPreviewGroupCount} 个分组、${this.importPreviewConnectionCount} 个连接`)
+        .fontSize(14)
+        .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      Text(this.importPreviewIncludesPasswords ?
+        '这是加密备份，连接密码将恢复到系统安全凭据库。' :
+        '普通备份不包含密码；新增连接需要重新填写密码。')
+        .fontSize(12)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+
+      Row({ space: 4 }) {
+        Button('合并导入')
+          .layoutWeight(1)
+          .height(38)
+          .fontSize(13)
+          .fontColor(!this.importReplaceExisting ? Color.White :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
+          .backgroundColor(!this.importReplaceExisting ? RustDeskTheme.ACCENT : Color.Transparent)
+          .borderRadius(5)
+          .onClick(() => {
+            this.importReplaceExisting = false
+          })
+        Button('覆盖现有')
+          .layoutWeight(1)
+          .height(38)
+          .fontSize(13)
+          .fontColor(this.importReplaceExisting ? Color.White :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
+          .backgroundColor(this.importReplaceExisting ? RustDeskTheme.ACCENT : Color.Transparent)
+          .borderRadius(5)
+          .onClick(() => {
+            this.importReplaceExisting = true
+          })
+      }
+      .width('100%')
+      .padding(3)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+      .borderRadius(7)
+
+      if (this.importReplaceExisting) {
+        Text('覆盖后，当前已保存的连接、分组和连接密码将被替换。')
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%')
+      } else {
+        Text('相同远程 ID 会更新名称、分组和连接模式，并优先保留本机已有密码。')
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          .width('100%')
+      }
+
+      Row({ space: 10 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
+          .onClick(() => {
+            this.closeBackupDialogs()
+          })
+        Button(this.backupBusy ? '导入中…' : '开始导入')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(Color.White)
+          .backgroundColor(this.backupBusy ? RustDeskTheme.DARK_GRAY : RustDeskTheme.ACCENT)
+          .borderRadius(6)
+          .onClick(() => {
+            this.importPreparedBackup()
+          })
+      }
+      .width('100%')
+    }
+    .width(this.pageWidth >= 820 ? 440 : '88%')
     .padding(20)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
     .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
@@ -994,6 +1273,19 @@ export struct ConnectionPage {
       this.hasOpenedRemotePage = true
       router.pushUrl({ url: 'pages/RemotePage' })
     }
+  }
+
+  loadConnectionFormState(): void {
+    try {
+      this.connectionFormExpanded = RustDeskNapi.getOption('connection-form-expanded') !== '0'
+    } catch (_error) {
+      this.connectionFormExpanded = true
+    }
+  }
+
+  setConnectionFormExpanded(expanded: boolean): void {
+    this.connectionFormExpanded = expanded
+    RustDeskNapi.setOption('connection-form-expanded', expanded ? '1' : '0')
   }
 
   loadConnectionGroups(): void {
@@ -1205,6 +1497,352 @@ export struct ConnectionPage {
     this.groupPickerForForm = false
   }
 
+  closeAllDialogs(): void {
+    this.closeGroupDialogs()
+    this.closeBackupDialogs()
+  }
+
+  closeBackupDialogs(): void {
+    if (this.backupBusy) {
+      return
+    }
+    this.showBackupPasswordDialog = false
+    this.showImportPreviewDialog = false
+    this.backupPasswordMode = ''
+    this.backupPasswordDraft = ''
+    this.backupPasswordConfirm = ''
+    this.backupPasswordError = ''
+    this.pendingEncryptedBackup = ''
+    this.pendingImportPayload = undefined
+    this.importReplaceExisting = false
+  }
+
+  openEncryptedExportDialog(): void {
+    if (this.savedConnections.length <= 0 || this.backupBusy) {
+      promptAction.showToast({ message: '暂无可导出的连接' })
+      return
+    }
+    this.closeGroupDialogs()
+    this.backupPasswordMode = 'export'
+    this.backupPasswordDraft = ''
+    this.backupPasswordConfirm = ''
+    this.backupPasswordError = ''
+    this.showImportPreviewDialog = false
+    this.showBackupPasswordDialog = true
+  }
+
+  async exportPlainBackup(): Promise<void> {
+    if (this.savedConnections.length <= 0 || this.backupBusy) {
+      promptAction.showToast({ message: '暂无可导出的连接' })
+      return
+    }
+    this.backupBusy = true
+    try {
+      let payload: ConnectionBackupPayload = this.buildBackupPayload(false)
+      let content: string = ConnectionBackupService.createPlainText(payload)
+      await this.saveBackupFile(content, `StarRustDesk连接备份-${this.backupTimestamp()}.json`)
+      promptAction.showToast({ message: '连接已导出，备份中不包含密码' })
+    } catch (_error) {
+      promptAction.showToast({ message: '导出失败，请重新选择保存位置' })
+    } finally {
+      this.backupBusy = false
+    }
+  }
+
+  async confirmBackupPassword(): Promise<void> {
+    if (this.backupBusy) {
+      return
+    }
+    let password: string = this.backupPasswordDraft
+    if (password.length < 8) {
+      this.backupPasswordError = '备份密码至少需要 8 位'
+      return
+    }
+    if (this.backupPasswordMode === 'export' && password !== this.backupPasswordConfirm) {
+      this.backupPasswordError = '两次输入的备份密码不一致'
+      return
+    }
+
+    this.backupBusy = true
+    if (this.backupPasswordMode === 'export') {
+      try {
+        let payload: ConnectionBackupPayload = this.buildBackupPayload(true)
+        let content: string = await ConnectionBackupService.encrypt(payload, password)
+        await this.saveBackupFile(content, `StarRustDesk加密备份-${this.backupTimestamp()}.srdbak`)
+        this.backupBusy = false
+        this.closeBackupDialogs()
+        promptAction.showToast({ message: '加密备份导出成功，请妥善保管备份密码' })
+      } catch (_error) {
+        this.backupBusy = false
+        this.backupPasswordError = '加密导出失败，请重试'
+      }
+      return
+    }
+
+    try {
+      let payload: ConnectionBackupPayload = await ConnectionBackupService.decrypt(
+        this.pendingEncryptedBackup, password)
+      this.backupBusy = false
+      this.showBackupPasswordDialog = false
+      this.backupPasswordDraft = ''
+      this.backupPasswordConfirm = ''
+      this.backupPasswordError = ''
+      this.pendingEncryptedBackup = ''
+      this.prepareImportPreview(payload)
+    } catch (_error) {
+      this.backupBusy = false
+      this.backupPasswordError = '备份密码错误或文件已损坏'
+    }
+  }
+
+  async selectBackupForImport(): Promise<void> {
+    if (this.backupBusy) {
+      return
+    }
+    this.backupBusy = true
+    let source: fileIo.File | undefined = undefined
+    try {
+      let context = getContext(this) as common.UIAbilityContext
+      let documentPicker = new picker.DocumentViewPicker(context)
+      let options = new picker.DocumentSelectOptions()
+      options.maxSelectNumber = 1
+      options.fileSuffixFilters = ['StarRustDesk backup (*.json;*.srdbak)|.json,.srdbak']
+      let uris: string[] = await documentPicker.select(options)
+      if (uris.length <= 0) {
+        return
+      }
+      source = fileIo.openSync(uris[0], fileIo.OpenMode.READ_ONLY)
+      let fileSize: number = fileIo.statSync(source.fd).size
+      if (fileSize <= 0 || fileSize > 5 * 1024 * 1024) {
+        throw new Error('备份文件大小异常')
+      }
+      let buffer: ArrayBuffer = new ArrayBuffer(fileSize)
+      let readSize: number = fileIo.readSync(source.fd, buffer)
+      let raw: string = util.TextDecoder.create('utf-8', { ignoreBOM: true })
+        .decodeToString(new Uint8Array(buffer, 0, readSize), { stream: false })
+      if (ConnectionBackupService.isEncrypted(raw)) {
+        this.pendingEncryptedBackup = raw
+        this.backupPasswordMode = 'import'
+        this.backupPasswordDraft = ''
+        this.backupPasswordConfirm = ''
+        this.backupPasswordError = ''
+        this.showImportPreviewDialog = false
+        this.showBackupPasswordDialog = true
+      } else {
+        this.prepareImportPreview(ConnectionBackupService.parsePlainText(raw))
+      }
+    } catch (_error) {
+      promptAction.showToast({ message: '无法读取备份，请确认文件格式正确' })
+    } finally {
+      if (source !== undefined) {
+        try {
+          fileIo.closeSync(source)
+        } catch (_error) {
+        }
+      }
+      this.backupBusy = false
+    }
+  }
+
+  prepareImportPreview(payload: ConnectionBackupPayload): void {
+    let validCount: number = 0
+    payload.connections.forEach((item: ConnectionBackupItem) => {
+      if (this.normalizeRemoteId(item.remoteId).length > 0) {
+        validCount++
+      }
+    })
+    if (validCount <= 0) {
+      throw new Error('备份中没有有效连接')
+    }
+    this.pendingImportPayload = payload
+    this.importPreviewGroupCount = payload.groups.length
+    this.importPreviewConnectionCount = validCount
+    this.importPreviewIncludesPasswords = payload.includesPasswords
+    this.importReplaceExisting = false
+    this.showBackupPasswordDialog = false
+    this.showImportPreviewDialog = true
+  }
+
+  async importPreparedBackup(): Promise<void> {
+    if (this.backupBusy || this.pendingImportPayload === undefined) {
+      return
+    }
+    this.backupBusy = true
+    try {
+      let importedCount: number = this.importReplaceExisting ?
+        await this.replaceConnectionsFromBackup(this.pendingImportPayload) :
+        await this.mergeConnectionsFromBackup(this.pendingImportPayload)
+      this.backupBusy = false
+      this.closeBackupDialogs()
+      this.savedConnectionsVersion++
+      this.nextPeerOnlineRefreshAt = 0
+      this.refreshSavedConnectionOnlineStates(true)
+      promptAction.showToast({ message: `已导入 ${importedCount} 个连接` })
+    } catch (_error) {
+      this.backupBusy = false
+      promptAction.showToast({ message: '导入失败，请检查备份后重试' })
+    }
+  }
+
+  async replaceConnectionsFromBackup(payload: ConnectionBackupPayload): Promise<number> {
+    let oldConnections: SavedConnectionInfo[] = this.cloneSavedConnections(this.savedConnections)
+    let imported: NormalizedImportData = this.normalizeImportedData(payload, [], [])
+    for (let item of oldConnections) {
+      await CredentialStore.remove(item.id)
+    }
+    for (let item of imported.connections) {
+      await CredentialStore.save(item.id, item.password)
+    }
+    this.connectionGroups = imported.groups
+    this.savedConnections = imported.connections
+    this.persistConnectionGroups()
+    this.persistSavedConnections(imported.connections)
+    this.clearConnectionForm()
+    return imported.connections.length
+  }
+
+  async mergeConnectionsFromBackup(payload: ConnectionBackupPayload): Promise<number> {
+    let existingConnections: SavedConnectionInfo[] = this.cloneSavedConnections(this.savedConnections)
+    let imported: NormalizedImportData = this.normalizeImportedData(payload,
+      this.cloneConnectionGroups(this.connectionGroups), existingConnections)
+    for (let item of imported.connections) {
+      let existing: SavedConnectionInfo | undefined = existingConnections.find(
+        (current: SavedConnectionInfo) => current.id === item.id)
+      if (existing === undefined || existing.password !== item.password) {
+        await CredentialStore.save(item.id, item.password)
+      }
+    }
+    this.connectionGroups = imported.groups
+    this.savedConnections = imported.connections
+    this.persistConnectionGroups()
+    this.persistSavedConnections(imported.connections)
+    return imported.importedCount
+  }
+
+  normalizeImportedData(payload: ConnectionBackupPayload, baseGroups: SavedConnectionGroup[],
+    baseConnections: SavedConnectionInfo[]): NormalizedImportData {
+    let groups: SavedConnectionGroup[] = this.cloneConnectionGroups(baseGroups)
+    let groupIdMap: Record<string, string> = {}
+    payload.groups.forEach((source: ConnectionBackupGroup) => {
+      let name: string = source.name.trim().substring(0, 100)
+      let sameName: SavedConnectionGroup | undefined = groups.find((group: SavedConnectionGroup) =>
+        group.name.toLowerCase() === name.toLowerCase())
+      if (sameName !== undefined) {
+        groupIdMap[source.id] = sameName.id
+        return
+      }
+      let id: string = source.id.trim()
+      if (id.length === 0 || groups.some((group: SavedConnectionGroup) => group.id === id)) {
+        id = `group-${Date.now()}-${groups.length}`
+      }
+      groups.push({ id: id, name: name, expanded: true })
+      groupIdMap[source.id] = id
+    })
+
+    let connections: SavedConnectionInfo[] = this.cloneSavedConnections(baseConnections)
+    let importedCount: number = 0
+    payload.connections.forEach((source: ConnectionBackupItem) => {
+      let remoteId: string = this.normalizeRemoteId(source.remoteId)
+      if (remoteId.length <= 0) {
+        return
+      }
+      let existingIndex: number = connections.findIndex((item: SavedConnectionInfo) => item.remoteId === remoteId)
+      let groupId: string = groupIdMap[source.groupId] ?? ''
+      let preset: string = this.normalizePerformancePreset(source.performancePreset)
+      let name: string = source.name.trim().length > 0 ? source.name.trim().substring(0, 200) : remoteId
+      if (existingIndex >= 0) {
+        let existing: SavedConnectionInfo = connections[existingIndex]
+        connections[existingIndex] = {
+          id: existing.id,
+          name: name,
+          remoteId: remoteId,
+          password: existing.password.length > 0 ? existing.password :
+            (payload.includesPasswords ? source.password : ''),
+          performancePreset: preset,
+          groupId: groupId
+        }
+      } else {
+        let id: string = source.id.trim()
+        if (id.length === 0 || connections.some((item: SavedConnectionInfo) => item.id === id)) {
+          id = this.makeConnectionId(remoteId)
+        }
+        connections.push({
+          id: id,
+          name: name,
+          remoteId: remoteId,
+          password: payload.includesPasswords ? source.password : '',
+          performancePreset: preset,
+          groupId: groupId
+        })
+      }
+      importedCount++
+    })
+    let result: NormalizedImportData = {
+      groups: groups,
+      connections: connections,
+      importedCount: importedCount
+    }
+    return result
+  }
+
+  normalizePerformancePreset(value: string): string {
+    return value === 'stable' || value === 'high_fps' || value === 'silky' || value === 'smooth' ? value : 'smooth'
+  }
+
+  buildBackupPayload(includesPasswords: boolean): ConnectionBackupPayload {
+    let groups: ConnectionBackupGroup[] = []
+    this.connectionGroups.forEach((group: SavedConnectionGroup) => {
+      groups.push({ id: group.id, name: group.name })
+    })
+    let connections: ConnectionBackupItem[] = []
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      connections.push({
+        id: item.id,
+        name: item.name,
+        remoteId: item.remoteId,
+        password: includesPasswords ? item.password : '',
+        performancePreset: item.performancePreset,
+        groupId: item.groupId
+      })
+    })
+    return ConnectionBackupService.createPayload(groups, connections, includesPasswords)
+  }
+
+  async saveBackupFile(content: string, fileName: string): Promise<void> {
+    let outputFile: fileIo.File | undefined = undefined
+    try {
+      let context = getContext(this) as common.UIAbilityContext
+      let documentPicker = new picker.DocumentViewPicker(context)
+      let saveUris: string[] = await documentPicker.save({ newFileNames: [fileName] })
+      if (saveUris.length <= 0) {
+        throw new Error('未选择保存位置')
+      }
+      outputFile = fileIo.openSync(saveUris[0],
+        fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC)
+      fileIo.writeSync(outputFile.fd, content)
+      fileIo.fsyncSync(outputFile.fd)
+    } finally {
+      if (outputFile !== undefined) {
+        try {
+          fileIo.closeSync(outputFile)
+        } catch (_error) {
+        }
+      }
+    }
+  }
+
+  backupTimestamp(): string {
+    let now: Date = new Date()
+    let pad: (value: number) => string = (value: number): string => value < 10 ? `0${value}` : value.toString()
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-` +
+      `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  }
+
+  editSavedConnection(item: SavedConnectionInfo): void {
+    this.applySavedConnection(item)
+    this.setConnectionFormExpanded(true)
+  }
+
   async loadSavedConnections(): Promise<void> {
     let raw: string = RustDeskNapi.getOption('saved-connections')
     if (raw.length <= 0) {
@@ -1359,6 +1997,11 @@ export struct ConnectionPage {
     this.performancePreset = item.performancePreset.length > 0 ? item.performancePreset : 'smooth'
     this.selectedGroupId = this.validGroupId(item.groupId)
     this.isIdEmpty = this.remoteId.length === 0
+  }
+
+  connectSavedConnection(item: SavedConnectionInfo): void {
+    this.applySavedConnection(item)
+    this.onConnect()
   }
 
   async saveCurrentConnection(): Promise<void> {

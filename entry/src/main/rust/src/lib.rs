@@ -22,8 +22,8 @@ use hbb_common::message_proto::{
     TestDelay, VideoFrame,
 };
 use hbb_common::rendezvous_proto::{
-    punch_hole_response, rendezvous_message, ConnType, NatType, OnlineRequest, PunchHoleRequest,
-    RequestRelay, RendezvousMessage,
+    punch_hole_response, rendezvous_message, ConnType, KeyExchange, NatType, OnlineRequest,
+    PunchHoleRequest, RequestRelay, RendezvousMessage,
 };
 use hbb_common::sha2::{Digest, Sha256};
 use hbb_common::sodiumoxide::{
@@ -57,6 +57,8 @@ static CURRENT_CLIENT_ID: Mutex<String> = Mutex::new(String::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
 static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32, bool)>> = Mutex::new(Vec::new());
+static PEER_IS_ANDROID: AtomicBool = AtomicBool::new(false);
+static CURRENT_PEER_VERSION: Mutex<String> = Mutex::new(String::new());
 static REMOTE_CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -259,6 +261,10 @@ fn reset_display_state() {
     if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
         guard.clear();
     }
+    PEER_IS_ANDROID.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = CURRENT_PEER_VERSION.try_lock() {
+        guard.clear();
+    }
     REMOTE_CURSOR_VALID.store(false, Ordering::SeqCst);
     REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     REMOTE_CURSOR_IMAGE_VALID.store(false, Ordering::SeqCst);
@@ -440,7 +446,10 @@ pub extern "C" fn rust_connect(
         let mut req = RendezvousMessage::new();
         req.set_punch_hole_request(PunchHoleRequest {
             id: peer.clone(),
-            token: pass,
+            // RustDesk's rendezvous token is the signed-in account/server
+            // access token, not the remote-control password. This client does
+            // not currently expose account login, so keep it empty.
+            token: String::new(),
             nat_type: NatType::UNKNOWN_NAT.into(),
             licence_key: key.clone(),
             conn_type: ConnType::DEFAULT_CONN.into(),
@@ -613,6 +622,7 @@ pub extern "C" fn rust_connect(
                         &rendezvous_addr,
                         !signed_id_pk.is_empty(),
                         &key,
+                        "",
                     )
                     .await
                     {
@@ -640,6 +650,7 @@ pub extern "C" fn rust_connect(
                 &rendezvous_addr,
                 !signed_id_pk.is_empty(),
                 &key,
+                "",
             )
             .await
             {
@@ -991,6 +1002,133 @@ pub extern "C" fn rust_send_clipboard_text(text: *const c_char) -> i32 {
     msg.set_clipboard(clipboard);
     emit_event("local clipboard text sent");
     queue_peer_message(msg)
+}
+
+fn queue_mouse_mask(mask: i32) -> i32 {
+    let mut msg = PeerMessage::new();
+    msg.set_mouse_event(MouseEvent {
+        mask,
+        ..Default::default()
+    });
+    queue_peer_message(msg)
+}
+
+fn queue_mapped_key(scan_code: u32, down: bool) -> i32 {
+    let mut event = KeyEvent {
+        down,
+        mode: KeyboardMode::Map.into(),
+        ..Default::default()
+    };
+    event.union = Some(key_event::Union::Chr(scan_code));
+    let mut msg = PeerMessage::new();
+    msg.set_key_event(event);
+    queue_peer_message(msg)
+}
+
+fn version_at_least(version: &str, required: [u32; 3]) -> bool {
+    if version.trim().is_empty() {
+        return true;
+    }
+    let mut parsed = [0_u32; 3];
+    for (index, part) in version.split('.').take(3).enumerate() {
+        let digits: String = part.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        parsed[index] = digits.parse::<u32>().unwrap_or(0);
+    }
+    parsed >= required
+}
+
+/// Sends the Android controlled-side actions used by the official RustDesk
+/// client. Android's accessibility service maps the back mouse button to Back,
+/// a short middle-button click to Home, and a held middle-button click to
+/// Recents. Volume and power use Flutter's USB HID usages in map mode.
+#[no_mangle]
+pub extern "C" fn rust_send_mobile_action(action: i32) -> i32 {
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return -1;
+    }
+    if !PEER_IS_ANDROID.load(Ordering::SeqCst) {
+        return -2;
+    }
+
+    const BACK_UP: i32 = (8 << 3) | 2;
+    const RIGHT_UP: i32 = (2 << 3) | 2;
+    const MIDDLE_DOWN: i32 = (4 << 3) | 1;
+    const MIDDLE_UP: i32 = (4 << 3) | 2;
+    const HID_POWER: u32 = 0x66;
+    const HID_VOLUME_UP: u32 = 0x80;
+    const HID_VOLUME_DOWN: u32 = 0x81;
+
+    let result = match action {
+        0 => {
+            let peer_version = CURRENT_PEER_VERSION
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            // RustDesk before 1.3.8 used right-button release for Android Back.
+            queue_mouse_mask(if version_at_least(&peer_version, [1, 3, 8]) {
+                BACK_UP
+            } else {
+                RIGHT_UP
+            })
+        }
+        1 => {
+            let down_result = queue_mouse_mask(MIDDLE_DOWN);
+            if down_result == 0 {
+                queue_mouse_mask(MIDDLE_UP)
+            } else {
+                down_result
+            }
+        }
+        2 => {
+            let down_result = queue_mouse_mask(MIDDLE_DOWN);
+            if down_result == 0 {
+                let session_id = SESSION_ID.load(Ordering::SeqCst);
+                runtime().spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if SESSION_ID.load(Ordering::SeqCst) == session_id
+                        && CONNECTION_ACTIVE.load(Ordering::SeqCst)
+                    {
+                        let _ = queue_mouse_mask(MIDDLE_UP);
+                    }
+                });
+            }
+            down_result
+        }
+        3 | 4 | 5 => {
+            let scan_code = match action {
+                3 => HID_VOLUME_UP,
+                4 => HID_VOLUME_DOWN,
+                _ => HID_POWER,
+            };
+            let down_result = queue_mapped_key(scan_code, true);
+            if down_result == 0 {
+                let session_id = SESSION_ID.load(Ordering::SeqCst);
+                runtime().spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if SESSION_ID.load(Ordering::SeqCst) == session_id
+                        && CONNECTION_ACTIVE.load(Ordering::SeqCst)
+                    {
+                        let _ = queue_mapped_key(scan_code, false);
+                    }
+                });
+            }
+            down_result
+        }
+        _ => -3,
+    };
+    emit_event(&format!("mobile action: action={action} result={result}"));
+    result
+}
+
+#[no_mangle]
+pub extern "C" fn rust_is_peer_android() -> i32 {
+    if CONNECTION_ACTIVE.load(Ordering::SeqCst)
+        && PEER_IS_ANDROID.load(Ordering::SeqCst)
+    {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1938,7 +2076,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     let mut request = RendezvousMessage::new();
     request.set_punch_hole_request(PunchHoleRequest {
         id: config.peer.clone(),
-        token: config.password.clone(),
+        token: String::new(),
         nat_type: NatType::UNKNOWN_NAT.into(),
         licence_key: config.key.clone(),
         conn_type: ConnType::FILE_TRANSFER.into(),
@@ -2022,6 +2160,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
                 &config.rendezvous_addr,
                 !signed_id_pk.is_empty(),
                 &config.key,
+                "",
                 ConnType::FILE_TRANSFER,
             )
             .await
@@ -2035,6 +2174,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
             &config.rendezvous_addr,
             !signed_id_pk.is_empty(),
             &config.key,
+            "",
             ConnType::FILE_TRANSFER,
         )
         .await
@@ -2054,6 +2194,7 @@ async fn request_relay(
     rendezvous_server: &str,
     secure: bool,
     key: &str,
+    token: &str,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
     request_relay_with_type(
         peer,
@@ -2061,6 +2202,7 @@ async fn request_relay(
         rendezvous_server,
         secure,
         key,
+        token,
         ConnType::DEFAULT_CONN,
     )
     .await
@@ -2072,38 +2214,117 @@ async fn request_relay_with_type(
     rendezvous_server: &str,
     secure: bool,
     key: &str,
+    token: &str,
     conn_type: ConnType,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
-    let mut rv_conn = connect_tcp(rendezvous_server.to_string(), CONNECT_TIMEOUT).await?;
-    let ipv4 = rv_conn.local_addr().is_ipv4();
-    let uuid = Uuid::new_v4().to_string();
+    let mut last_error = "relay request timeout".to_string();
 
-    let mut req = RendezvousMessage::new();
-    req.set_request_relay(RequestRelay {
-        id: peer.to_string(),
-        uuid: uuid.clone(),
-        relay_server: relay_server.to_string(),
-        secure,
-        conn_type: conn_type.into(),
-        ..Default::default()
-    });
-    rv_conn.send(&req).await?;
+    for attempt in 1..=3 {
+        // hbbs pairs every retry by a fresh source socket and UUID. Reusing the
+        // first rendezvous socket can leave a valid peer waiting on another
+        // relay slot, which is why the official clients reconnect per attempt.
+        let mut rv_conn = connect_tcp(rendezvous_server.to_string(), CONNECT_TIMEOUT).await?;
+        if !key.is_empty() && !token.is_empty() {
+            secure_rendezvous_connection(&mut rv_conn, key).await?;
+        }
+        let ipv4 = rv_conn.local_addr().is_ipv4();
+        let uuid = Uuid::new_v4().to_string();
+        emit_event(&format!(
+            "relay request attempt={attempt}/3 secure={secure} token_set={} conn_type={}",
+            !token.is_empty(),
+            conn_type.value()
+        ));
 
-    match next_rendezvous(&mut rv_conn, CONNECT_TIMEOUT).await {
-        Some(msg) => match msg.union {
-            Some(rendezvous_message::Union::RelayResponse(resp)) if resp.refuse_reason.is_empty() => {}
-            Some(rendezvous_message::Union::RelayResponse(resp)) => {
-                hbb_common::bail!("relay refused: {}", resp.refuse_reason)
+        let mut req = RendezvousMessage::new();
+        req.set_request_relay(RequestRelay {
+            id: peer.to_string(),
+            token: token.to_string(),
+            uuid: uuid.clone(),
+            relay_server: relay_server.to_string(),
+            secure,
+            conn_type: conn_type.into(),
+            ..Default::default()
+        });
+        rv_conn.send(&req).await?;
+
+        match next_rendezvous(&mut rv_conn, CONNECT_TIMEOUT).await {
+            Some(msg) => match msg.union {
+                Some(rendezvous_message::Union::RelayResponse(resp))
+                    if resp.refuse_reason.is_empty() =>
+                {
+                    emit_event(&format!("relay request accepted attempt={attempt}/3"));
+                    return create_relay_with_type(
+                        peer,
+                        &uuid,
+                        relay_server,
+                        key,
+                        ipv4,
+                        conn_type,
+                    )
+                    .await;
+                }
+                Some(rendezvous_message::Union::RelayResponse(resp)) => {
+                    hbb_common::bail!("relay refused: {}", resp.refuse_reason)
+                }
+                other => {
+                    last_error = format!(
+                        "unexpected rendezvous response kind={}",
+                        rendezvous_message_kind(&other)
+                    );
+                    emit_event(&format!(
+                        "relay request attempt={attempt}/3 failed: {last_error}"
+                    ));
+                }
+            },
+            None => {
+                last_error = "relay request timeout".to_string();
+                emit_event(&format!(
+                    "relay request attempt={attempt}/3 failed: {last_error}"
+                ));
             }
-            other => hbb_common::bail!(
-                "relay refused: unexpected rendezvous response kind={}",
-                rendezvous_message_kind(&other)
-            ),
-        },
-        None => hbb_common::bail!("relay request timeout"),
+        }
     }
 
-    create_relay_with_type(peer, &uuid, relay_server, key, ipv4, conn_type).await
+    hbb_common::bail!("{last_error} after 3 attempts")
+}
+
+async fn secure_rendezvous_connection(
+    conn: &mut Stream,
+    key: &str,
+) -> Result<(), hbb_common::anyhow::Error> {
+    let Some(rs_pk) = get_rs_pk(key) else {
+        hbb_common::bail!("invalid rendezvous server public key");
+    };
+
+    let Some(Ok(bytes)) = conn.next_timeout(READ_TIMEOUT).await else {
+        // Older self-hosted servers may not advertise transport encryption.
+        // Keep the plain TCP path available in that case, matching upstream.
+        return Ok(());
+    };
+    let Ok(message) = RendezvousMessage::parse_from_bytes(&bytes) else {
+        return Ok(());
+    };
+    let Some(rendezvous_message::Union::KeyExchange(exchange)) = message.union else {
+        return Ok(());
+    };
+    if exchange.keys.len() != 1 {
+        hbb_common::bail!("invalid rendezvous key exchange message");
+    }
+
+    let their_pk = verify_signed_payload(&exchange.keys[0], &rs_pk)?;
+    let Some(their_pk) = get_pk(&their_pk) else {
+        hbb_common::bail!("invalid rendezvous key length");
+    };
+    let (asymmetric_value, symmetric_value, secret_key) = create_symmetric_key_msg(their_pk);
+    let mut response = RendezvousMessage::new();
+    response.set_key_exchange(KeyExchange {
+        keys: vec![asymmetric_value, symmetric_value],
+        ..Default::default()
+    });
+    conn.send(&response).await?;
+    conn.set_key(secret_key);
+    emit_event("rendezvous relay request encrypted");
+    Ok(())
 }
 
 async fn create_relay(
@@ -2509,6 +2730,11 @@ async fn handle_peer_bytes(
                     }
                 }
                 Some(login_response::Union::PeerInfo(info)) => {
+                    let is_android = info.platform.eq_ignore_ascii_case("android");
+                    PEER_IS_ANDROID.store(is_android, Ordering::SeqCst);
+                    if let Ok(mut guard) = CURRENT_PEER_VERSION.try_lock() {
+                        *guard = info.version.clone();
+                    }
                     let display_count = info.displays.len().max(1) as i32;
                     let displays: Vec<(i32, i32, i32, i32, bool)> = info
                         .displays
@@ -2525,7 +2751,9 @@ async fn handle_peer_bytes(
                         *guard = displays;
                     }
                     emit_event(&format!(
-                        "login response: ok/peer info displays={} current={}",
+                        "login response: ok/peer info platform={} version={} displays={} current={}",
+                        info.platform,
+                        info.version,
                         display_count,
                         info.current_display
                     ));

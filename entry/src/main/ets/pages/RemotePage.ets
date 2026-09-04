@@ -61,6 +61,12 @@ const NATIVE_MOUSE_BUTTON_LEFT: number = 1;
 const NATIVE_MOUSE_BUTTON_RIGHT: number = 2;
 const INPUT_MODE_MOUSE: string = 'mouse';
 const INPUT_MODE_TOUCH: string = 'touch';
+const MOBILE_ACTION_BACK: number = 0;
+const MOBILE_ACTION_HOME: number = 1;
+const MOBILE_ACTION_RECENTS: number = 2;
+const MOBILE_ACTION_VOLUME_UP: number = 3;
+const MOBILE_ACTION_VOLUME_DOWN: number = 4;
+const MOBILE_ACTION_POWER: number = 5;
 const LOG_DOMAIN: number = 0x0000;
 
 @Entry
@@ -84,11 +90,14 @@ struct RemotePage {
   @State showKeyboardPanel: boolean = false;
   @State inputMode: string = INPUT_MODE_MOUSE;
   @State showGestureHelp: boolean = false;
+  @State showMobileActions: boolean = false;
+  @State isPeerAndroid: boolean = false;
   @State showLocalCursor: boolean = true;
   @State showLeftButtonHoldIndicator: boolean = false;
   @State keyboardInput: string = '';
   @State showCursor: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
+  @State embeddedCursorOverlayFallback: boolean = false;
   @State cursorX: number = 0;
   @State cursorY: number = 0;
   @State cursorImageWidth: number = 20;
@@ -336,6 +345,10 @@ struct RemotePage {
       this.showGestureHelp = false;
       return true;
     }
+    if (this.showMobileActions) {
+      this.showMobileActions = false;
+      return true;
+    }
     if (this.isFullScreen) {
       this.exitFullScreen();
       return true;
@@ -404,6 +417,7 @@ struct RemotePage {
           }
         }
         this.updateConnectionRoute();
+        this.isPeerAndroid = RustDeskNapi.isPeerAndroid();
       }
       if (status === ConnectionStatus.CONNECTED) {
         this.ensureClipboardSyncRunning();
@@ -411,6 +425,8 @@ struct RemotePage {
       }
       if (status !== ConnectionStatus.CONNECTED) {
         this.displayStateInitialized = false;
+        this.isPeerAndroid = false;
+        this.showMobileActions = false;
         this.hasVideo = false;
         this.routeText = '未连接';
         this.pauseClipboardSync();
@@ -529,6 +545,7 @@ struct RemotePage {
     this.remoteHeight = 0;
     this.showCursor = false;
     this.remoteCursorEmbedded = false;
+    this.embeddedCursorOverlayFallback = false;
     this.lastRemoteCursorSequence = -1;
     this.lastRemoteCursorImageSequence = -1;
     this.hasAuthoritativeRemoteCursor = false;
@@ -615,11 +632,15 @@ struct RemotePage {
         try {
           let cursor: RemoteCursorPosition = RustDeskNapi.getRemoteCursorPosition();
           this.remoteCursorEmbedded = cursor.embedded;
-          if (cursor.embedded && !this.isPanMode) {
-            this.showCursor = false;
-          } else if (cursor.valid && cursor.sequence !== this.lastRemoteCursorSequence) {
+          const now: number = Date.now();
+          if (cursor.embedded && !this.embeddedCursorOverlayFallback && this.lastLocalPointerInputAt > 0 &&
+            now - this.lastLocalPointerInputAt < 1000) {
+            this.embeddedCursorOverlayFallback = true;
+            RustDeskNapi.appendDiagnosticLog('input',
+              `embedded_cursor_overlay_fallback display=${this.currentDisplay}`);
+          }
+          if (cursor.valid && cursor.sequence !== this.lastRemoteCursorSequence) {
             if (cursor.x >= 0 && cursor.y >= 0 && cursor.x < this.remoteWidth && cursor.y < this.remoteHeight) {
-              const now: number = Date.now();
               const dragReadyForRemoteSync: boolean = this.leftButtonHeld && this.leftButtonHeldAt > 0 &&
                 now - this.leftButtonHeldAt >= LOCAL_CURSOR_ECHO_GUARD_MS;
               const keepLocalPrediction: boolean = !this.preferAuthoritativeCursor &&
@@ -645,11 +666,15 @@ struct RemotePage {
               this.showCursor = false;
             }
           }
+          if (cursor.embedded && !this.embeddedCursorOverlayFallback && !this.isPanMode) {
+            this.showCursor = false;
+          }
           this.pollRemoteCursorImage();
         } catch (_e) {
         }
       } else {
         this.remoteCursorEmbedded = false;
+        this.embeddedCursorOverlayFallback = false;
         this.lastRemoteCursorSequence = -1;
         this.lastRemoteCursorImageSequence = -1;
         this.hasAuthoritativeRemoteCursor = false;
@@ -931,6 +956,9 @@ struct RemotePage {
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildGestureHelpOverlay();
       }
+      if (this.showMobileActions && this.connectionStatus === ConnectionStatus.CONNECTED && this.isPeerAndroid) {
+        this.buildMobileActionsOverlay();
+      }
     }
     .width('100%')
     .height('100%')
@@ -1088,6 +1116,19 @@ struct RemotePage {
         .height('100%')
 
         Row({ space: 8 }) {
+          if (this.isPeerAndroid) {
+            Button('手机操作')
+              .width(92)
+              .height(36)
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor('#99000000')
+              .border({ width: 1, color: '#66FFFFFF' })
+              .borderRadius(18)
+              .onClick(() => {
+                this.showMobileActions = true;
+              })
+          }
           if (this.canPanViewport()) {
             Button(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随')
               .width(92)
@@ -1141,7 +1182,11 @@ struct RemotePage {
               this.exitFullScreen();
             })
         }
-        .position({ x: Math.max(12, this.pageWidth - (this.canPanViewport() ? 300 : 100)), y: 12 })
+        .position({
+          x: Math.max(12, this.pageWidth - (this.canPanViewport() ?
+            (this.isPeerAndroid ? 400 : 300) : (this.isPeerAndroid ? 200 : 100))),
+          y: 12,
+        })
         .onHover((isHovering: boolean) => {
           this.handleNonRemoteHover(isHovering);
         })
@@ -1519,7 +1564,7 @@ struct RemotePage {
         .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
       }
 
-      if (this.showCursor && (!this.remoteCursorEmbedded || this.isPanMode) &&
+      if (this.showCursor && (!this.remoteCursorEmbedded || this.embeddedCursorOverlayFallback || this.isPanMode) &&
         this.inputMode === INPUT_MODE_MOUSE) {
         this.buildCursorOverlay();
       }
@@ -1610,6 +1655,11 @@ struct RemotePage {
         this.buildToolbarButton('键盘', 64, this.showKeyboardPanel, false, true, () => {
           this.toggleRemoteKeyboard();
         })
+        if (this.isPeerAndroid) {
+          this.buildToolbarButton('手机操作', 76, this.showMobileActions, false, true, () => {
+            this.showMobileActions = true;
+          })
+        }
         this.buildToolbarButton('手势', 54, false, false, true, () => {
           this.showGestureHelp = true;
         })
@@ -1688,6 +1738,11 @@ struct RemotePage {
         this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
           this.toggleRemoteKeyboard();
         })
+        if (this.isPeerAndroid) {
+          this.buildToolbarButton('手机操作', 80, this.showMobileActions, false, true, () => {
+            this.showMobileActions = true;
+          })
+        }
         this.buildToolbarButton('手势说明', 80, false, false, true, () => {
           this.showGestureHelp = true;
         })
@@ -1923,6 +1978,96 @@ struct RemotePage {
           })
       }
       .width(this.isLargeLayout() ? 420 : '88%')
+      .padding(20)
+      .backgroundColor(this.panelColor())
+      .border({ width: 1, color: this.themeBorderColor() })
+      .borderRadius(12)
+      .shadow({ radius: 28, color: '#66000000', offsetX: 0, offsetY: 10 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#99000000')
+    .onHover((isHovering: boolean) => {
+      this.handleNonRemoteHover(isHovering);
+    })
+  }
+
+  sendMobileAction(action: number, label: string): void {
+    const result: number = RustDeskNapi.sendMobileAction(action);
+    if (result !== 0) {
+      this.showFileToast(`${label}发送失败 (${result})`);
+      return;
+    }
+    RustDeskNapi.appendDiagnosticLog('mobile-action', `sent action=${action} label=${label}`);
+    this.showMobileActions = false;
+  }
+
+  @Builder
+  buildMobileActionButton(label: string, action: number, danger: boolean = false) {
+    Button(label)
+      .layoutWeight(1)
+      .height(44)
+      .fontSize(14)
+      .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+      .fontColor(danger ? RustDeskTheme.ERROR : this.primaryTextColor())
+      .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FDECEC') :
+        this.mutedSurfaceColor())
+      .border({ width: 1, color: danger ? RustDeskTheme.ERROR : this.themeBorderColor() })
+      .borderRadius(8)
+      .onClick(() => {
+        this.sendMobileAction(action, label);
+      })
+  }
+
+  @Builder
+  buildMobileActionsOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 14 }) {
+        Row() {
+          Column({ space: 3 }) {
+            Text('安卓手机操作')
+              .fontSize(20)
+              .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+              .fontColor(this.primaryTextColor())
+            Text('通过被控端的无障碍服务执行系统操作')
+              .fontSize(12)
+              .fontColor(this.secondaryTextColor())
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          Button('关闭')
+            .height(36)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.mutedSurfaceColor())
+            .borderRadius(7)
+            .onClick(() => {
+              this.showMobileActions = false;
+            })
+        }
+        .width('100%')
+
+        Row({ space: 10 }) {
+          this.buildMobileActionButton('返回', MOBILE_ACTION_BACK)
+          this.buildMobileActionButton('主页', MOBILE_ACTION_HOME)
+          this.buildMobileActionButton('最近任务', MOBILE_ACTION_RECENTS)
+        }
+        .width('100%')
+
+        Row({ space: 10 }) {
+          this.buildMobileActionButton('音量 −', MOBILE_ACTION_VOLUME_DOWN)
+          this.buildMobileActionButton('音量 +', MOBILE_ACTION_VOLUME_UP)
+          this.buildMobileActionButton('电源菜单', MOBILE_ACTION_POWER, true)
+        }
+        .width('100%')
+
+        Text('若按钮无响应，请在安卓被控端开启 RustDesk 的“输入控制/无障碍服务”。')
+          .fontSize(12)
+          .lineHeight(19)
+          .fontColor(this.secondaryTextColor())
+          .width('100%')
+      }
+      .width(this.isLargeLayout() ? 460 : '92%')
       .padding(20)
       .backgroundColor(this.panelColor())
       .border({ width: 1, color: this.themeBorderColor() })
@@ -2976,6 +3121,11 @@ struct RemotePage {
 
   markLocalPointerInput(): void {
     this.lastLocalPointerInputAt = Date.now();
+    if (this.remoteCursorEmbedded && !this.embeddedCursorOverlayFallback) {
+      this.embeddedCursorOverlayFallback = true;
+      RustDeskNapi.appendDiagnosticLog('input',
+        `embedded_cursor_overlay_fallback display=${this.currentDisplay}`);
+    }
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
@@ -4549,6 +4699,8 @@ struct RemotePage {
     this.surfaceEpoch += 1;
     this.connectionStatus = ConnectionStatus.DISCONNECTED;
     this.showKeyboardPanel = false;
+    this.showMobileActions = false;
+    this.isPeerAndroid = false;
     this.showCursor = false;
     this.pointerOverRemoteViewport = false;
     this.setSystemPointerHidden(false);
@@ -4675,12 +4827,25 @@ struct RemotePage {
     if (display < 0 || display >= this.displayCount || display === this.currentDisplay) {
       return;
     }
+    this.cancelActiveTouchGesture();
     this.stopEdgeAutoPan();
     this.currentDisplay = display;
     this.showCursor = false;
     this.remoteCursorEmbedded = false;
+    this.embeddedCursorOverlayFallback = false;
     this.lastRemoteCursorSequence = -1;
+    this.lastRemoteCursorImageSequence = -1;
+    this.hasAuthoritativeRemoteCursor = false;
+    this.remoteCursorAbsX = 0;
+    this.remoteCursorAbsY = 0;
+    this.lastAbsX = 0;
+    this.lastAbsY = 0;
+    this.pointerInitialized = false;
+    this.localPointerGestureActive = false;
+    this.lastLocalPointerInputAt = 0;
+    this.preferAuthoritativeCursor = false;
     this.lastStatsTime = 0;
+    RustDeskNapi.appendDiagnosticLog('input', `display_cursor_state_reset display=${display}`);
     const result = RustDeskNapi.switchDisplay(display);
     if (result !== 0) {
       hilog.error(LOG_DOMAIN, 'StarRustDesk', `Switch display failed display=${display} result=${result}`);

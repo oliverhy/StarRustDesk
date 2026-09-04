@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.0.9'
-export const RELEASE_NOTES_BUILD: string = '1000906'
+export const RELEASE_NOTES_VERSION: string = '1.1.0'
+export const RELEASE_NOTES_BUILD: string = '1001000'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.1.0（1001000）· 连接管理、安卓控制与多屏鼠标', [
+            '新建连接区域支持展开和折叠；已保存连接改为一键直连，并将移动、修改和删除统一收纳到“更多”菜单。',
+            '新增已保存连接的导入与导出：普通备份不包含密码，加密备份可包含密码，并支持合并或覆盖导入。',
+            '增强自建服务器中继连接兼容性，中继失败时使用新的连接和会话标识自动重试。',
+            '连接安卓被控端时新增返回、主页、最近任务、音量和电源等系统操作。',
+            '修复多显示器切换后鼠标状态残留，以及部分屏幕错误声明已嵌入鼠标而导致远端鼠标不显示的问题。',
+          ])
           this.buildSection('1.0.9（1000906）· 鼠标拖动显示', [
             '修复鼠标模式按住拖动时，本地预测鼠标与远端真实鼠标同时出现并逐渐岔开的问题。',
             '拖动开始时保留短暂的本地预测以维持跟手感，随后自动切换到远端真实鼠标坐标进行校正。',

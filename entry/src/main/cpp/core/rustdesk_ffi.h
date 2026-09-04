@@ -22,6 +22,8 @@ int rust_get_connection_status(void);
 int rust_get_connection_route(void);
 int rust_send_mouse_event(double x, double y, int action, int modifier_mask);
 int rust_send_mouse_wheel(double delta_x, double delta_y, int modifier_mask);
+int rust_send_mobile_action(int action);
+int rust_is_peer_android(void);
 int rust_send_key_event(int key_code, int action, int modifier_mask);
 int rust_send_physical_key_event(int scan_code, int action, int modifier_mask);
 int rust_send_text(const char* text);

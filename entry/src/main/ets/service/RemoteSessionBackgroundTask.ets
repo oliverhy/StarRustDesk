@@ -306,7 +306,7 @@ export class RemoteSessionBackgroundTask {
         abilityName: context.abilityInfo.name,
       }],
       actionType: wantAgent.OperationType.START_ABILITY,
-      requestCode: 1000906,
+      requestCode: 1001000,
       actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG],
     }
     return wantAgent.getWantAgent(agentInfo)

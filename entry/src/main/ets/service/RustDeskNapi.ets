@@ -174,6 +174,14 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).sendMouseWheel(deltaX, deltaY, modifierMask)
   }
 
+  static sendMobileAction(action: number): number {
+    return (rustdeskNapi as ESObject).sendMobileAction(action)
+  }
+
+  static isPeerAndroid(): boolean {
+    return (rustdeskNapi as ESObject).isPeerAndroid()
+  }
+
   static takeNativeMouseEvents(): NativeMouseInputEvent[] {
     return (rustdeskNapi as ESObject).takeNativeMouseEvents() as NativeMouseInputEvent[]
   }

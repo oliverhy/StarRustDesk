@@ -1120,6 +1120,27 @@ static napi_value SetRemoteAudioEnabled(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value SendMobileAction(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t action = -1;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &action);
+    }
+    int result = rust_send_mobile_action(action);
+    OH_LOG_INFO(LOG_APP, "SendMobileAction action=%{public}d result=%{public}d", action, result);
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value IsPeerAndroid(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_get_boolean(env, rust_is_peer_android() != 0, &ret);
+    return ret;
+}
+
 static napi_value IsRemoteAudioActive(napi_env env, napi_callback_info info) {
     napi_value ret;
     napi_get_boolean(env, AudioPlayer::instance().hasRecentFrames(6000), &ret);
@@ -1827,6 +1848,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getEnableTrustedDevices", nullptr, GetEnableTrustedDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseEvent", nullptr, SendMouseEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseWheel", nullptr, SendMouseWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendMobileAction", nullptr, SendMobileAction, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isPeerAndroid", nullptr, IsPeerAndroid, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDisplayCount", nullptr, GetDisplayCount, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getCurrentDisplay", nullptr, GetCurrentDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getRemoteCursorPosition", nullptr, GetRemoteCursorPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
