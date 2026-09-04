@@ -74,6 +74,8 @@ const LOG_DOMAIN: number = 0x0000;
 struct RemotePage {
   @StorageLink('isDarkMode') isDarkMode: boolean = false;
   @StorageLink('appForegroundEpoch') @Watch('onAppForegroundEpochChanged') appForegroundEpoch: number = 0;
+  @StorageLink('mobileActionsOffsetX') mobileActionsOffsetX: number = 0;
+  @StorageLink('mobileActionsOffsetY') mobileActionsOffsetY: number = 0;
   @State connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED;
   @State showToolbar: boolean = true;
   @State zoomScale: number = 1.0;
@@ -113,6 +115,7 @@ struct RemotePage {
   @State codecText: string = '等待视频';
   @State routeText: string = '未知';
   @State pageWidth: number = 0;
+  @State pageHeight: number = 0;
   @State clipboardSyncEnabled: boolean = true;
   @State showRemoteFileBrowser: boolean = false;
   @State remoteDirectoryPath: string = '';
@@ -200,6 +203,8 @@ struct RemotePage {
   // selection after the initial sync instead of overwriting it during polling.
   private displayStateInitialized: boolean = false;
   private connectingStartedAt: number = 0;
+  private mobileActionsDragStartX: number = 0;
+  private mobileActionsDragStartY: number = 0;
   private lastSurfaceWidth: number = 0;
   private lastSurfaceHeight: number = 0;
   private touchStartX: number = 0;
@@ -969,6 +974,9 @@ struct RemotePage {
     })
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.pageWidth = newValue.width as number;
+      this.pageHeight = newValue.height as number;
+      this.mobileActionsOffsetX = this.clampMobileActionsOffsetX(this.mobileActionsOffsetX);
+      this.mobileActionsOffsetY = this.clampMobileActionsOffsetY(this.mobileActionsOffsetY);
       this.scheduleSurfaceRebindIfSizeChanged();
     });
   }
@@ -1999,21 +2007,68 @@ struct RemotePage {
       return;
     }
     RustDeskNapi.appendDiagnosticLog('mobile-action', `sent action=${action} label=${label}`);
-    this.showMobileActions = false;
+  }
+
+  getMobileActionsWidth(): number {
+    const availableWidth: number = (this.pageWidth > 0 ? this.pageWidth : 360) - 16;
+    return Math.min(this.isLargeLayout() ? 430 : 352, Math.max(272, availableWidth));
+  }
+
+  getMobileActionsHeight(): number {
+    return 54;
+  }
+
+  getMobileActionsBottomInset(): number {
+    return this.isFullScreen ? 62 : 68;
+  }
+
+  getMobileActionsBaseX(): number {
+    return Math.max(8, ((this.pageWidth > 0 ? this.pageWidth : 360) - this.getMobileActionsWidth()) / 2);
+  }
+
+  getMobileActionsBaseY(): number {
+    const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
+    return Math.max(8, height - this.getMobileActionsHeight() - this.getMobileActionsBottomInset());
+  }
+
+  clampMobileActionsOffsetX(offset: number): number {
+    const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
+    const baseX: number = this.getMobileActionsBaseX();
+    const minOffset: number = 8 - baseX;
+    const maxOffset: number = width - this.getMobileActionsWidth() - 8 - baseX;
+    return Math.max(minOffset, Math.min(maxOffset, offset));
+  }
+
+  clampMobileActionsOffsetY(offset: number): number {
+    const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
+    const baseY: number = this.getMobileActionsBaseY();
+    const minOffset: number = 8 - baseY;
+    const maxOffset: number = height - this.getMobileActionsHeight() - 8 - baseY;
+    return Math.max(minOffset, Math.min(maxOffset, offset));
+  }
+
+  beginMobileActionsDrag(): void {
+    this.mobileActionsDragStartX = this.clampMobileActionsOffsetX(this.mobileActionsOffsetX);
+    this.mobileActionsDragStartY = this.clampMobileActionsOffsetY(this.mobileActionsOffsetY);
+  }
+
+  updateMobileActionsDrag(offsetX: number, offsetY: number): void {
+    this.mobileActionsOffsetX = this.clampMobileActionsOffsetX(this.mobileActionsDragStartX + offsetX);
+    this.mobileActionsOffsetY = this.clampMobileActionsOffsetY(this.mobileActionsDragStartY + offsetY);
   }
 
   @Builder
   buildMobileActionButton(label: string, action: number, danger: boolean = false) {
     Button(label)
       .layoutWeight(1)
-      .height(44)
-      .fontSize(14)
+      .height(40)
+      .padding({ left: 1, right: 1 })
+      .fontSize(11)
       .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
       .fontColor(danger ? RustDeskTheme.ERROR : this.primaryTextColor())
-      .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FDECEC') :
-        this.mutedSurfaceColor())
-      .border({ width: 1, color: danger ? RustDeskTheme.ERROR : this.themeBorderColor() })
-      .borderRadius(8)
+      .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FFF3F3') :
+        Color.Transparent)
+      .borderRadius(9)
       .onClick(() => {
         this.sendMobileAction(action, label);
       })
@@ -2021,62 +2076,51 @@ struct RemotePage {
 
   @Builder
   buildMobileActionsOverlay() {
-    Stack({ alignContent: Alignment.Center }) {
-      Column({ space: 14 }) {
-        Row() {
-          Column({ space: 3 }) {
-            Text('安卓手机操作')
-              .fontSize(20)
-              .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-              .fontColor(this.primaryTextColor())
-            Text('通过被控端的无障碍服务执行系统操作')
-              .fontSize(12)
-              .fontColor(this.secondaryTextColor())
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-          Button('关闭')
-            .height(36)
-            .fontSize(13)
-            .fontColor(this.primaryTextColor())
-            .backgroundColor(this.mutedSurfaceColor())
-            .borderRadius(7)
-            .onClick(() => {
-              this.showMobileActions = false;
-            })
-        }
-        .width('100%')
-
-        Row({ space: 10 }) {
-          this.buildMobileActionButton('返回', MOBILE_ACTION_BACK)
-          this.buildMobileActionButton('主页', MOBILE_ACTION_HOME)
-          this.buildMobileActionButton('最近任务', MOBILE_ACTION_RECENTS)
-        }
-        .width('100%')
-
-        Row({ space: 10 }) {
-          this.buildMobileActionButton('音量 −', MOBILE_ACTION_VOLUME_DOWN)
-          this.buildMobileActionButton('音量 +', MOBILE_ACTION_VOLUME_UP)
-          this.buildMobileActionButton('电源菜单', MOBILE_ACTION_POWER, true)
-        }
-        .width('100%')
-
-        Text('若按钮无响应，请在安卓被控端开启 RustDesk 的“输入控制/无障碍服务”。')
-          .fontSize(12)
-          .lineHeight(19)
-          .fontColor(this.secondaryTextColor())
-          .width('100%')
-      }
-      .width(this.isLargeLayout() ? 460 : '92%')
-      .padding(20)
-      .backgroundColor(this.panelColor())
-      .border({ width: 1, color: this.themeBorderColor() })
-      .borderRadius(12)
-      .shadow({ radius: 28, color: '#66000000', offsetX: 0, offsetY: 10 })
+    Row({ space: 2 }) {
+      Text('⋮')
+        .width(14)
+        .fontSize(19)
+        .fontColor(this.secondaryTextColor())
+        .textAlign(TextAlign.Center)
+      this.buildMobileActionButton('返回', MOBILE_ACTION_BACK)
+      this.buildMobileActionButton('主页', MOBILE_ACTION_HOME)
+      this.buildMobileActionButton('任务', MOBILE_ACTION_RECENTS)
+      this.buildMobileActionButton('音量−', MOBILE_ACTION_VOLUME_DOWN)
+      this.buildMobileActionButton('音量+', MOBILE_ACTION_VOLUME_UP)
+      this.buildMobileActionButton('电源', MOBILE_ACTION_POWER, true)
+      Button('⌄')
+        .width(34)
+        .height(40)
+        .padding(0)
+        .fontSize(20)
+        .fontColor(this.primaryTextColor())
+        .backgroundColor(this.mutedSurfaceColor())
+        .borderRadius(9)
+        .onClick(() => {
+          this.showMobileActions = false;
+        })
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#99000000')
+    .width(this.getMobileActionsWidth())
+    .height(this.getMobileActionsHeight())
+    .padding({ left: 5, right: 5, top: 7, bottom: 7 })
+    .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F7FFFFFF')
+    .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
+    .borderRadius(15)
+    .shadow({ radius: 20, color: '#55000000', offsetX: 0, offsetY: 7 })
+    .position({
+      x: this.getMobileActionsBaseX() + this.clampMobileActionsOffsetX(this.mobileActionsOffsetX),
+      y: this.getMobileActionsBaseY() + this.clampMobileActionsOffsetY(this.mobileActionsOffsetY)
+    })
+    .zIndex(50)
+    .gesture(
+      PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
+        .onActionStart(() => {
+          this.beginMobileActionsDrag();
+        })
+        .onActionUpdate((event: GestureEvent) => {
+          this.updateMobileActionsDrag(event.offsetX, event.offsetY);
+        })
+    )
     .onHover((isHovering: boolean) => {
       this.handleNonRemoteHover(isHovering);
     })

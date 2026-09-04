@@ -24,6 +24,8 @@ export default class EntryAbility extends UIAbility {
     }
     PersistentStorage.persistProp('isDarkModeManual', false);
     PersistentStorage.persistProp('isDarkMode', this.isDarkColorMode(this.context.config.colorMode));
+    PersistentStorage.persistProp('mobileActionsOffsetX', 0);
+    PersistentStorage.persistProp('mobileActionsOffsetY', 0);
     this.updateColorMode(this.context.config.colorMode);
     AppStorage.setOrCreate('currentTabIndex', 0);
     AppStorage.setOrCreate('connectionStatus', 0);
