@@ -292,6 +292,8 @@ void VP9Decoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffe
         return;
     }
     OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
+    VideoRender::instance().markDecodedFrame(2, decoder->width_, decoder->height_,
+        static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
     if (ret != AV_ERR_OK) {
         OH_LOG_WARN(LOG_APP, "Render VP9 output failed index=%{public}u ret=%{public}d", index, ret);
         DiagnosticLog::instance().append("E", "vp9",
@@ -301,7 +303,5 @@ void VP9Decoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffe
         if (decoder->outputFrames_ == 1) {
             DiagnosticLog::instance().append("I", "vp9", "first_output_rendered");
         }
-        VideoRender::instance().markDecodedFrame(2, decoder->width_, decoder->height_,
-            static_cast<int>(decoder->decodeMode_));
     }
 }

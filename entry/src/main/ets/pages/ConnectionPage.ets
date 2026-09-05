@@ -83,6 +83,7 @@ export struct ConnectionPage {
   @State peerOnlineStatesVersion: number = 0
   @State connectionGroups: SavedConnectionGroup[] = []
   @State savedConnectionsExpanded: boolean = true
+  @State savedConnectionSort: string = 'id'
   @State connectionFormExpanded: boolean = true
   @State ungroupedExpanded: boolean = true
   @State showGroupNameDialog: boolean = false
@@ -108,7 +109,7 @@ export struct ConnectionPage {
   private pendingEncryptedBackup: string = ''
   private pendingImportPayload: ConnectionBackupPayload | undefined = undefined
   private statusTimer: number = -1
-  private peerOnlineStates: Record<string, number> = {}
+  @State peerOnlineStates: Record<string, number> = {}
   private peerOnlineQueryInFlight: boolean = false
   private peerOnlineQueryStartedAt: number = 0
   private nextPeerOnlineRefreshAt: number = 0
@@ -117,6 +118,7 @@ export struct ConnectionPage {
     this.checkServerConfig()
     this.loadConnectionFormState()
     this.loadConnectionGroups()
+    this.loadSavedConnectionSort()
     this.loadSavedConnections()
     this.syncConnectionState()
     this.startStatusPolling()
@@ -606,10 +608,35 @@ export struct ConnectionPage {
           .fontSize(18)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
+          .layoutWeight(1)
+          .maxLines(1)
+          .minFontSize(14)
+          .maxFontSize(18)
+          .margin({ left: 6, right: 6 })
+        Button(`排序：${this.savedConnectionSort === 'name' ? '名称' :
+          this.savedConnectionSort === 'online' ? '在线优先' : 'ID'}`)
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding({ left: 10, right: 10 })
+          .bindMenu([
+            { value: `${this.savedConnectionSort === 'id' ? '✓ ' : ''}远端 ID`,
+              action: () => { this.setSavedConnectionSort('id') } },
+            { value: `${this.savedConnectionSort === 'name' ? '✓ ' : ''}设备名称`,
+              action: () => { this.setSavedConnectionSort('name') } },
+            { value: `${this.savedConnectionSort === 'online' ? '✓ ' : ''}在线优先`,
+              action: () => { this.setSavedConnectionSort('online') } }
+          ], { placement: Placement.BottomRight, enableArrow: true })
+      }
+      .width('100%')
+
+      Row() {
         Text(`${this.savedConnections.length} 个设备`)
           .fontSize(12)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        Blank()
         Button('备份')
           .height(30)
           .fontSize(12)
@@ -779,6 +806,11 @@ export struct ConnectionPage {
                 .fontSize(12)
                 .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
                 .width('100%')
+              Text(this.peerOnlineStateHint(item.remoteId))
+                .fontSize(10)
+                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+                .width('100%')
+                .maxLines(2)
             }
             .layoutWeight(1)
 
@@ -1332,6 +1364,47 @@ export struct ConnectionPage {
     return cloned
   }
 
+  loadSavedConnectionSort(): void {
+    try {
+      const mode: string = RustDeskNapi.getOption('saved-connections-sort')
+      this.savedConnectionSort = mode === 'name' || mode === 'online' ? mode : 'id'
+    } catch (_error) {
+      this.savedConnectionSort = 'id'
+    }
+  }
+
+  setSavedConnectionSort(mode: string): void {
+    this.savedConnectionSort = mode === 'name' || mode === 'online' ? mode : 'id'
+    RustDeskNapi.setOption('saved-connections-sort', this.savedConnectionSort)
+    this.savedConnectionsVersion++
+  }
+
+  compareSavedConnectionIds(left: string, right: string): number {
+    // Match RustDesk's ID string ordering, including IDs of different lengths.
+    return left < right ? -1 : left > right ? 1 : 0
+  }
+
+  savedConnectionOnlineRank(remoteId: string): number {
+    const state: number = this.peerOnlineStates[remoteId] ?? PEER_STATE_CHECKING
+    return state === PEER_STATE_ONLINE ? 0 : state === PEER_STATE_OFFLINE ? 1 : 2
+  }
+
+  compareSavedConnections(left: SavedConnectionInfo, right: SavedConnectionInfo): number {
+    if (this.savedConnectionSort === 'online') {
+      const rank: number = this.savedConnectionOnlineRank(left.remoteId) -
+        this.savedConnectionOnlineRank(right.remoteId)
+      if (rank !== 0) return rank
+    }
+    if (this.savedConnectionSort === 'name' || this.savedConnectionSort === 'online') {
+      const leftName: string = (left.name.trim() || left.remoteId).toLowerCase()
+      const rightName: string = (right.name.trim() || right.remoteId).toLowerCase()
+      const nameOrder: number = leftName.localeCompare(rightName, 'zh-CN')
+      if (nameOrder !== 0) return nameOrder
+    }
+    const idOrder: number = this.compareSavedConnectionIds(left.remoteId, right.remoteId)
+    return idOrder !== 0 ? idOrder : this.compareSavedConnectionIds(left.id, right.id)
+  }
+
   connectionsForGroup(groupId: string): SavedConnectionInfo[] {
     let result: SavedConnectionInfo[] = []
     this.savedConnections.forEach((item: SavedConnectionInfo) => {
@@ -1339,7 +1412,9 @@ export struct ConnectionPage {
         result.push(item)
       }
     })
-    return result
+    // Sort only a display copy; keep groups, credentials and backup order intact.
+    return result.sort((left: SavedConnectionInfo, right: SavedConnectionInfo) =>
+      this.compareSavedConnections(left, right))
   }
 
   validGroupId(groupId: string): string {
@@ -1906,17 +1981,20 @@ export struct ConnectionPage {
     }
     let peerIds: string[] = []
     this.savedConnections.forEach((item: SavedConnectionInfo) => {
-      if (!peerIds.includes(item.remoteId)) {
+      if (!this.isDirectPeerEndpoint(item.remoteId) && !peerIds.includes(item.remoteId)) {
         peerIds.push(item.remoteId)
       }
     })
     if (peerIds.length <= 0) {
+      this.markAllPeerStatesUnknown()
+      this.nextPeerOnlineRefreshAt = Date.now() + PEER_STATE_REFRESH_MS
       return
     }
-    if (force) {
+    if (force || this.savedConnections.some((item: SavedConnectionInfo) => this.isDirectPeerEndpoint(item.remoteId))) {
       let checkingStates: Record<string, number> = {}
-      peerIds.forEach((peerId: string) => {
-        checkingStates[peerId] = this.peerOnlineStates[peerId] ?? PEER_STATE_CHECKING
+      this.savedConnections.forEach((item: SavedConnectionInfo) => {
+        checkingStates[item.remoteId] = this.isDirectPeerEndpoint(item.remoteId) ? PEER_STATE_UNKNOWN :
+          (this.peerOnlineStates[item.remoteId] ?? PEER_STATE_CHECKING)
       })
       this.peerOnlineStates = checkingStates
       this.peerOnlineStatesVersion++
@@ -1933,14 +2011,15 @@ export struct ConnectionPage {
   }
 
   pollPeerOnlineStates(): void {
-    if (!this.peerOnlineQueryInFlight) {
-      return
-    }
+    // A timed-out UI request can still complete in the native worker.
+    // Always drain its result before starting another query.
     let raw: string = RustDeskNapi.takePeerOnlineStates()
     if (raw.length <= 0) {
-      if (Date.now() - this.peerOnlineQueryStartedAt >= PEER_STATE_QUERY_TIMEOUT_MS) {
+      if (this.peerOnlineQueryInFlight &&
+        Date.now() - this.peerOnlineQueryStartedAt >= PEER_STATE_QUERY_TIMEOUT_MS) {
         this.peerOnlineQueryInFlight = false
         this.markAllPeerStatesUnknown()
+        RustDeskNapi.appendDiagnosticLog('online-state', 'query_ui_timeout awaiting_late_result')
         this.nextPeerOnlineRefreshAt = Date.now() + 10000
       }
       return
@@ -1948,6 +2027,10 @@ export struct ConnectionPage {
     this.peerOnlineQueryInFlight = false
     try {
       let result: PeerOnlineResult = JSON.parse(raw) as PeerOnlineResult
+      if (result.server !== this.customServerHint.trim()) {
+        this.nextPeerOnlineRefreshAt = 0
+        return
+      }
       if (result.error.length > 0) {
         this.markAllPeerStatesUnknown()
         this.nextPeerOnlineRefreshAt = Date.now() + 10000
@@ -1958,10 +2041,17 @@ export struct ConnectionPage {
         states[item.remoteId] = PEER_STATE_UNKNOWN
       })
       result.peers.forEach((peer: PeerOnlineState) => {
-        states[peer.id] = peer.online ? PEER_STATE_ONLINE : PEER_STATE_OFFLINE
+        if (typeof peer.id === 'string' && !this.isDirectPeerEndpoint(peer.id) &&
+          this.savedConnections.some((item: SavedConnectionInfo) => item.remoteId === peer.id) &&
+          typeof peer.online === 'boolean') {
+          states[peer.id] = peer.online ? PEER_STATE_ONLINE : PEER_STATE_OFFLINE
+        }
       })
       this.peerOnlineStates = states
       this.peerOnlineStatesVersion++
+      RustDeskNapi.appendDiagnosticLog('online-state',
+        `query_applied count=${Object.keys(states).length} ` +
+        `online=${Object.keys(states).filter((id: string) => states[id] === PEER_STATE_ONLINE).length}`)
       this.nextPeerOnlineRefreshAt = Date.now() + PEER_STATE_REFRESH_MS
     } catch (_error) {
       this.markAllPeerStatesUnknown()
@@ -1978,8 +2068,18 @@ export struct ConnectionPage {
     this.peerOnlineStatesVersion++
   }
 
+  isDirectPeerEndpoint(remoteId: string): boolean {
+    const endpoint: string = remoteId.trim()
+    // A query exclusion classifier, not an address validator or reachability
+    // check. Native connection parsing validates ports and IPs. Keep malformed
+    // endpoint-like inputs out of hbbs too; bare numeric RustDesk IDs stay IDs.
+    return endpoint.includes(':') || endpoint.includes('[') || endpoint.includes(']') ||
+      (endpoint.includes('.') && /^[\d.]+$/.test(endpoint))
+  }
+
   peerOnlineStateColor(remoteId: string): ResourceColor {
-    let state: number = this.peerOnlineStates[remoteId] ?? PEER_STATE_CHECKING
+    let state: number = this.isDirectPeerEndpoint(remoteId) ? PEER_STATE_UNKNOWN :
+      (this.peerOnlineStates[remoteId] ?? PEER_STATE_CHECKING)
     if (state === PEER_STATE_ONLINE) {
       return RustDeskTheme.SUCCESS
     }
@@ -1987,6 +2087,15 @@ export struct ConnectionPage {
       return this.isDarkMode ? '#697386' : '#A5ADBA'
     }
     return RustDeskTheme.WARNING
+  }
+
+  peerOnlineStateHint(remoteId: string): string {
+    if (this.isDirectPeerEndpoint(remoteId)) return '直连地址 · 状态未知，请尝试连接'
+    const state: number = this.peerOnlineStates[remoteId] ?? PEER_STATE_CHECKING
+    if (state === PEER_STATE_ONLINE) return '在线'
+    if (state === PEER_STATE_OFFLINE) return '离线'
+    if (state === PEER_STATE_CHECKING) return '正在查询在线状态…'
+    return '状态未知 · 查询未确认，仍可尝试连接'
   }
 
   applySavedConnection(item: SavedConnectionInfo): void {

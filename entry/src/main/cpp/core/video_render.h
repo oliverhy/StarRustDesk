@@ -26,9 +26,13 @@ public:
 
     bool getLatestFrame(uint8_t*& data, int& length, int& width, int& height);
     uint64_t decodedFrameCount() const;
+    uint64_t receivedFrameCount() const { return receivedFrameCount_.load(); }
+    uint64_t receivedByteCount() const { return receivedByteCount_.load(); }
+    uint64_t renderedFrameCount() const { return renderedFrameCount_.load(); }
+    void restartDecoder();
     int activeCodec() const;
     int activeDecodeMode() const;
-    void markDecodedFrame(int codec, int width = 0, int height = 0, int decodeMode = 0);
+    void markDecodedFrame(int codec, int width = 0, int height = 0, int decodeMode = 0, bool presented = true);
 
     void setSurfaceId(const std::string& surfaceId);
     void prepareSurfaceRebind();
@@ -61,6 +65,9 @@ private:
     int frameLength_{0};
     bool hasFrame_{false};
     std::atomic<uint64_t> decodedFrameCount_{0};
+    std::atomic<uint64_t> receivedFrameCount_{0};
+    std::atomic<uint64_t> receivedByteCount_{0};
+    std::atomic<uint64_t> renderedFrameCount_{0};
     std::atomic<int> activeCodec_{0};
     std::atomic<int> activeDecodeMode_{0};
     std::mutex surfaceMutex_;

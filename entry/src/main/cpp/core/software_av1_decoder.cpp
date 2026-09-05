@@ -77,7 +77,7 @@ void SoftwareAV1Decoder::release() {
     generation_ += 1;
     frames_.clear();
     resetRequested_ = true;
-    waitingForKeyframe_ = false;
+    waitingForKeyframe_ = true;
     queuedFrames_ = 0;
     decodedFrames_ = 0;
     decodeErrors_ = 0;
@@ -207,18 +207,18 @@ void SoftwareAV1Decoder::workerLoop() {
             if (!convertFrame(image, bgra)) {
                 continue;
             }
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (frame.generation != generation_ || resetRequested_) {
-                    break;
-                }
-                decodedFrames_.fetch_add(1);
+            // Keep generation validation, presentation and global counters
+            // atomic with respect to release/reset of this decoder.
+            std::lock_guard<std::mutex> outputLock(mutex_);
+            if (frame.generation != generation_ || resetRequested_) {
+                break;
             }
-            XComponentRender::instance().renderBGRAFrame(bgra.data(), static_cast<int>(bgra.size()),
+            decodedFrames_.fetch_add(1);
+            const bool presented = XComponentRender::instance().renderBGRAFrame(bgra.data(), static_cast<int>(bgra.size()),
                 static_cast<int>(image->d_w), static_cast<int>(image->d_h));
             VideoRender::instance().markDecodedFrame(5,
-                static_cast<int>(image->d_w), static_cast<int>(image->d_h), 2);
-            if (decodedFrames_.load() == 1) {
+                static_cast<int>(image->d_w), static_cast<int>(image->d_h), 2, presented);
+            if (decodedFrames_.load() == 1 && presented) {
                 DiagnosticLog::instance().append("I", "av1_software",
                     "first_output_rendered resolution=" + std::to_string(image->d_w) + "x" +
                     std::to_string(image->d_h));

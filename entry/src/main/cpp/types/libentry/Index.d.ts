@@ -13,6 +13,9 @@ export interface VideoFrameInfo {
   totalFrames?: number;
   totalBytes?: number;
   decodedFrames?: number;
+  renderedFrames?: number;
+  generation?: number;
+  security?: number;
   codec?: number;
   decoderMode?: number;
 }
@@ -57,6 +60,16 @@ export interface NativeKeyInputEvent {
   capsLockValid: boolean;
 }
 
+// Exactly one of mouse, key, or reset=true is present. Consume in array order.
+// Sequence is process-wide and increasing; coalesced moves can leave gaps.
+export interface NativeInputEvent {
+  sequence: number;
+  mouse?: NativeMouseInputEvent;
+  key?: NativeKeyInputEvent;
+  // Release all tracked remote keys/buttons and clear local input state first.
+  reset?: boolean;
+}
+
 export interface HardwareKeyState {
   valid: boolean;
   modifierMask: number;
@@ -69,7 +82,7 @@ export const setDiagnosticLogEnabled: (enabled: boolean) => number;
 export const appendDiagnosticLog: (component: string, message: string) => number;
 export const getDiagnosticLog: () => string;
 export const clearDiagnosticLog: () => number;
-export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string) => number;
+export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string, forceRelay?: boolean) => number;
 export const disconnect: () => number;
 export const sendKeyEvent: (keyCode: number, action: number, modifierMask?: number) => number;
 export const sendPhysicalKeyEvent: (scanCode: number, action: number, modifierMask?: number) => number;
@@ -116,6 +129,11 @@ export const getVideoFrame: () => VideoFrameInfo;
 export const setSurfaceId: (surfaceId: string) => number;
 export const prepareSurfaceRebind: () => number;
 export const rebindSurface: (surfaceId: string) => number;
+// Atomically drains both input kinds. Overflow clears the backlog and returns
+// a reset marker before the triggering event. Do not mix with legacy drains.
+export const takeNativeInputEvents: () => NativeInputEvent[];
+/** @deprecated No cross-device ordering; throws ERR_NATIVE_INPUT_RESET on overflow. */
 export const takeNativeMouseEvents: () => NativeMouseInputEvent[];
+/** @deprecated No cross-device ordering; throws ERR_NATIVE_INPUT_RESET on overflow. */
 export const takeNativeKeyEvents: () => NativeKeyInputEvent[];
 export const getHardwareKeyState: () => HardwareKeyState;

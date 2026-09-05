@@ -42,13 +42,15 @@
 // ===== Connection Management =====
 
 static std::atomic<int> g_connectionStatus{0};
+static std::atomic<int> g_peerSecurityState{0}; // pending, encrypted, unsigned, rejected
+static std::atomic<int64_t> g_attemptStartedAtMs{0};
+static std::atomic<int64_t> g_stageStartedAtMs{0};
 static std::atomic<int> g_lastConnectionResult{0};
 static std::atomic<uint64_t> g_connectionGeneration{0};
 static std::atomic<int64_t> g_connectionStartedAtMs{0};
 static std::atomic<bool> g_disconnectInProgress{false};
 static std::atomic<bool> g_enableTrustedDevices{false};
-static std::atomic<uint64_t> g_videoFrameCount{0};
-static std::atomic<uint64_t> g_videoByteCount{0};
+static std::atomic<uint64_t> g_videoReadyGeneration{0};
 static std::atomic<uint64_t> g_frameCallbackEnteredGeneration{0};
 static std::atomic<uint64_t> g_frameCallbackCompletedGeneration{0};
 static std::atomic<int64_t> g_lastVideoHealthLogMs{0};
@@ -82,11 +84,21 @@ struct NativeKeyInputEvent {
     bool capsLockValid{false};
 };
 
-static std::mutex g_nativeMouseInputMutex;
-static std::deque<NativeMouseInputEvent> g_nativeMouseInputEvents;
+enum class NativeInputKind { Mouse, Key, Reset };
+
+struct NativeInputEvent {
+    uint64_t sequence{0};
+    NativeInputKind kind{NativeInputKind::Reset};
+    NativeMouseInputEvent mouse;
+    NativeKeyInputEvent key;
+};
+
+// Sequence assignment, coalescing and draining share this single lock.
+static std::mutex g_nativeInputMutex;
+static std::deque<NativeInputEvent> g_nativeInputEvents;
+static uint64_t g_nativeInputSequence{0};
+static constexpr size_t NATIVE_INPUT_QUEUE_LIMIT = 256;
 static OH_NativeXComponent* g_registeredMouseXComponent = nullptr;
-static std::mutex g_nativeKeyInputMutex;
-static std::deque<NativeKeyInputEvent> g_nativeKeyInputEvents;
 static OH_NativeXComponent* g_registeredKeyXComponent = nullptr;
 
 using GetExtraMouseEventInfoFn = int32_t (*)(
@@ -238,20 +250,50 @@ static bool TryGetNativeCapsLockState(OH_NativeXComponent_KeyEvent* event, bool&
     return getCapsLockState != nullptr && getCapsLockState(event, &capsLockOn) == 0;
 }
 
-static void QueueNativeMouseInput(const NativeMouseInputEvent& input) {
-    std::lock_guard<std::mutex> lock(g_nativeMouseInputMutex);
-    if (input.hover < 0 && input.action == OH_NATIVEXCOMPONENT_MOUSE_MOVE &&
-        !g_nativeMouseInputEvents.empty()) {
-        NativeMouseInputEvent& last = g_nativeMouseInputEvents.back();
-        if (last.hover < 0 && last.action == OH_NATIVEXCOMPONENT_MOUSE_MOVE) {
+static bool IsNativeMouseMove(const NativeInputEvent& input) {
+    return input.kind == NativeInputKind::Mouse && input.mouse.hover < 0 &&
+        input.mouse.action == OH_NATIVEXCOMPONENT_MOUSE_MOVE;
+}
+
+static uint64_t QueueNativeInput(NativeInputEvent input) {
+    std::lock_guard<std::mutex> lock(g_nativeInputMutex);
+    if (IsNativeMouseMove(input) && !g_nativeInputEvents.empty()) {
+        NativeInputEvent& last = g_nativeInputEvents.back();
+        // Only consecutive enqueues may merge, even if a legacy drain has
+        // removed an intervening key. Preserve button/modifier transitions.
+        if (IsNativeMouseMove(last) && last.sequence == g_nativeInputSequence &&
+            last.mouse.button == input.mouse.button &&
+            last.mouse.modifierMask == input.mouse.modifierMask &&
+            last.mouse.modifierValid == input.mouse.modifierValid) {
+            input.sequence = ++g_nativeInputSequence;
             last = input;
-            return;
+            return input.sequence;
         }
     }
-    if (g_nativeMouseInputEvents.size() >= 256) {
-        g_nativeMouseInputEvents.pop_front();
+    if (g_nativeInputEvents.size() >= NATIVE_INPUT_QUEUE_LIMIT) {
+        const size_t discarded = g_nativeInputEvents.size();
+        g_nativeInputEvents.clear();
+        NativeInputEvent reset;
+        reset.sequence = ++g_nativeInputSequence;
+        reset.kind = NativeInputKind::Reset;
+        g_nativeInputEvents.push_back(reset);
+        const int64_t timestamp = input.kind == NativeInputKind::Mouse ?
+            input.mouse.timestamp : input.key.timestamp;
+        DiagnosticLog::instance().append("W", "input-native",
+            "queue_overflow reset=1 seq=" + std::to_string(reset.sequence) +
+            " timestamp=" + std::to_string(timestamp) +
+            " discarded=" + std::to_string(discarded));
     }
-    g_nativeMouseInputEvents.push_back(input);
+    input.sequence = ++g_nativeInputSequence;
+    g_nativeInputEvents.push_back(input);
+    return input.sequence;
+}
+
+static uint64_t QueueNativeMouseInput(const NativeMouseInputEvent& mouse) {
+    NativeInputEvent input;
+    input.kind = NativeInputKind::Mouse;
+    input.mouse = mouse;
+    return QueueNativeInput(input);
 }
 
 static void DispatchNativeMouseEvent(OH_NativeXComponent* component, void* window) {
@@ -270,11 +312,13 @@ static void DispatchNativeMouseEvent(OH_NativeXComponent* component, void* windo
         // modifier snapshot captured by ArkUI.
         modifierValid = hardwareState.valid && hardwareState.modifierMask != 0;
     }
-    QueueNativeMouseInput({event.x, event.y, static_cast<int32_t>(event.action),
+    const uint64_t sequence = QueueNativeMouseInput({event.x, event.y, static_cast<int32_t>(event.action),
         static_cast<int32_t>(event.button), -1, event.timestamp, modifierMask, modifierValid});
     if (event.action != OH_NATIVEXCOMPONENT_MOUSE_MOVE) {
         DiagnosticLog::instance().append("I", "input-native",
-            "mouse action=" + std::to_string(static_cast<int32_t>(event.action)) +
+            "mouse seq=" + std::to_string(sequence) +
+            " timestamp=" + std::to_string(event.timestamp) +
+            " action=" + std::to_string(static_cast<int32_t>(event.action)) +
             " button=" + std::to_string(static_cast<int32_t>(event.button)) +
             " x=" + std::to_string(event.x) + " y=" + std::to_string(event.y) +
             " modifiers=" + std::to_string(modifierMask) +
@@ -291,12 +335,11 @@ static OH_NativeXComponent_MouseEvent_Callback g_nativeMouseCallbacks = {
     .DispatchHoverEvent = DispatchNativeHoverEvent,
 };
 
-static void QueueNativeKeyInput(const NativeKeyInputEvent& input) {
-    std::lock_guard<std::mutex> lock(g_nativeKeyInputMutex);
-    if (g_nativeKeyInputEvents.size() >= 256) {
-        g_nativeKeyInputEvents.pop_front();
-    }
-    g_nativeKeyInputEvents.push_back(input);
+static uint64_t QueueNativeKeyInput(const NativeKeyInputEvent& key) {
+    NativeInputEvent input;
+    input.kind = NativeInputKind::Key;
+    input.key = key;
+    return QueueNativeInput(input);
 }
 
 static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
@@ -330,17 +373,20 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
         modifierMask |= hardwareState.modifierMask;
     }
     const bool capsLockValid = TryGetNativeCapsLockState(event, capsLockOn);
-    QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
+    const uint64_t sequence = QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
         modifierMask, modifierValid, capsLockOn, capsLockValid});
     if (code == KEY_CTRL_LEFT || code == KEY_CTRL_RIGHT || code == KEY_SHIFT_LEFT ||
         code == KEY_SHIFT_RIGHT || code == KEY_CAPS_LOCK) {
         OH_LOG_INFO(LOG_APP,
-            "NativeKey code=%{public}d action=%{public}d modifiers=%{public}d valid=%{public}d caps=%{public}d",
-            static_cast<int32_t>(code), static_cast<int32_t>(action), modifierMask,
+            "NativeKey seq=%{public}llu timestamp=%{public}lld action=%{public}d modifiers=%{public}d valid=%{public}d caps=%{public}d",
+            static_cast<unsigned long long>(sequence), static_cast<long long>(timestamp),
+            static_cast<int32_t>(action), modifierMask,
             modifierValid ? 1 : 0, capsLockOn ? 1 : 0);
     }
     DiagnosticLog::instance().append("I", "input-native",
-        "key code=" + std::to_string(static_cast<int32_t>(code)) +
+        // Do not log key codes: printable codes can reconstruct typed text.
+        "key seq=" + std::to_string(sequence) +
+        " timestamp=" + std::to_string(timestamp) +
         " action=" + std::to_string(static_cast<int32_t>(action)) +
         " modifiers=" + std::to_string(modifierMask) +
         " modifier_valid=" + std::to_string(modifierValid ? 1 : 0) +
@@ -448,9 +494,8 @@ static void OnRustVideoFrame(const unsigned char* data, int length, int width, i
     if (g_backgroundVideoMode.load()) {
         return;
     }
-    g_videoFrameCount.fetch_add(1);
-    g_videoByteCount.fetch_add(static_cast<uint64_t>(length));
     uint64_t generation = g_connectionGeneration.load();
+    if (g_videoReadyGeneration.load() != generation) return;
     if (g_frameCallbackEnteredGeneration.exchange(generation) != generation) {
         OH_LOG_INFO(LOG_APP, "First video frame entered generation=%{public}llu size=%{public}d",
                     static_cast<unsigned long long>(generation), length);
@@ -476,6 +521,10 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
     const char* prefixes[] = {
         "file-session:",
         "rust_connect entered",
+        "connect cancelled session=",
+        "connect deadline exceeded session=",
+        "relay address-family fallback started",
+        "direct peer address-family fallback connected",
         "previous connection cleared",
         "rendezvous tcp connected",
         "rendezvous tcp failed:",
@@ -484,6 +533,8 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "rendezvous response received",
         "rendezvous response timeout",
         "direct peer connected",
+        "IP direct ",
+        "invalid direct IP ",
         "direct peer failed:",
         "relay connected",
         "relay failed:",
@@ -493,6 +544,8 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "secure fallback failed",
         "secure fallback completed",
         "secure peer: encrypted stream enabled",
+        "secure peer: rejected",
+        "secure peer: signature_unavailable",
         "secure peer: unavailable; use non-secure connection",
         "secure peer: wait signed id timeout",
         "secure peer: first peer msg not SignedId; use non-secure connection",
@@ -541,6 +594,32 @@ static void OnRustEvent(const char* message) {
         return;
     }
     const std::string text(message);
+    if (text == "previous connection cleared") {
+        g_videoReadyGeneration.store(g_connectionGeneration.load());
+    }
+    // File-transfer sessions use the same verifier; do not let their result
+    // replace the already established remote-control security indicator.
+    if (g_connectionStatus.load() == 1) {
+        if (text == "secure peer: encrypted stream enabled") g_peerSecurityState.store(1);
+        if (text.rfind("secure peer: signature_unavailable", 0) == 0) g_peerSecurityState.store(2);
+        if (text.rfind("IP direct connected;", 0) == 0) g_peerSecurityState.store(2);
+        if (text.rfind("secure peer: rejected", 0) == 0) {
+            g_peerSecurityState.store(3);
+            g_lastConnectionResult.store(-16);
+            g_connectionStatus.store(3);
+        }
+    }
+    if (text == "rendezvous tcp connected" || text == "punch request sent" ||
+        text == "rendezvous response received" || text == "direct peer connected" ||
+        text.rfind("relay connected", 0) == 0 || text.rfind("IP direct connected;", 0) == 0 || text == "receive loop spawned" ||
+        text == "login request sent" || text.rfind("login response: ok/", 0) == 0) {
+        const int64_t now = NowMs();
+        const int64_t previous = g_stageStartedAtMs.exchange(now);
+        DiagnosticLog::instance().append("I", "connection-stage",
+            "generation=" + std::to_string(g_connectionGeneration.load()) +
+            " stage=" + text + " stage_ms=" + std::to_string(previous > 0 ? now - previous : 0) +
+            " attempt_ms=" + std::to_string(now - g_attemptStartedAtMs.load()));
+    }
     if (IsSafeRustLifecycleEvent(text) || text.rfind("input-trace:", 0) == 0) {
         OH_LOG_INFO(LOG_APP, "rust_event: %{public}s", message);
         if (text != "peer message: CursorData" && text != "peer message: CursorId" &&
@@ -636,14 +715,17 @@ static std::string ConnectionResultToMessage(int result) {
         case -20: return "Connection timed out";
         case -21: return "Previous connection is still closing";
         case -22: return "Connection state is busy";
+        case -23: return "Invalid direct IP address or port";
         default: return "Connection failed (" + std::to_string(result) + ")";
     }
 }
 
 static napi_value Connect(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value args[4] = {nullptr};
+    size_t argc = 5;
+    napi_value args[5] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool forceRelay = false;
+    if (argc >= 5) napi_get_value_bool(env, args[4], &forceRelay);
 
     char peerId[128] = {0}, password[512] = {0};
     char rendezvousServer[256] = {0}, relayServer[256] = {0};
@@ -671,13 +753,17 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         return ret;
     }
     uint64_t generation = g_connectionGeneration.fetch_add(1) + 1;
+    g_videoReadyGeneration.store(0);
     g_connectionStatus.store(1);
+    g_peerSecurityState.store(0);
+    g_attemptStartedAtMs.store(NowMs());
+    g_stageStartedAtMs.store(NowMs());
     g_lastConnectionResult.store(0);
     g_connectionStartedAtMs.store(NowMs());
     g_enableTrustedDevices.store(false);
     SetLastConnectionMessage("");
     g_lastVideoHealthLogMs.store(0);
-    g_lastVideoHealthFrameCount.store(g_videoFrameCount.load());
+    g_lastVideoHealthFrameCount.store(0);
     g_lastVideoHealthDecodedCount.store(0);
     DiagnosticLog::instance().append("I", "connection",
         "connect_requested generation=" + std::to_string(generation) +
@@ -686,7 +772,7 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         " rendezvous=" + std::string(rendezvous.empty() ? "default" : "custom") +
         " relay=" + std::string(relay.empty() ? "default" : "custom") +
         " key=" + std::string(serverKey.empty() ? "empty" : "set"));
-    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId, generation]() {
+    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId, generation, forceRelay]() {
         {
             std::unique_lock<std::mutex> lock(g_connectionLifecycleMutex);
             g_disconnectFinished.wait(lock, []() { return !g_disconnectInProgress.load(); });
@@ -699,13 +785,14 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
             return;
         }
         VideoRender::instance().resetSession();
+        if (g_connectionGeneration.load() != generation) return;
         OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
                     peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
         OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
         DiagnosticLog::instance().append("I", "connection",
             "rust_connect_started generation=" + std::to_string(generation));
         int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
-                                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str());
+                                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0);
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
         DiagnosticLog::instance().append(result == 0 ? "I" : "E", "connection",
             "rust_connect_finished generation=" + std::to_string(generation) +
@@ -744,15 +831,18 @@ static napi_value SetPerformancePreset(napi_env env, napi_callback_info info) {
 }
 
 static napi_value Disconnect(napi_env env, napi_callback_info info) {
+    // A second Cancel must invalidate a queued retry even while the first
+    // disconnect is still draining its sockets.
+    uint64_t disconnectGeneration = g_connectionGeneration.fetch_add(1) + 1;
+    g_videoReadyGeneration.store(0);
+    g_connectionStatus.store(0);
+    g_connectionStartedAtMs.store(0);
     bool expected = false;
     if (!g_disconnectInProgress.compare_exchange_strong(expected, true)) {
         napi_value ret;
         napi_create_int32(env, 0, &ret);
         return ret;
     }
-    uint64_t disconnectGeneration = g_connectionGeneration.fetch_add(1) + 1;
-    g_connectionStatus.store(0);
-    g_connectionStartedAtMs.store(0);
     DiagnosticLog::instance().append("I", "connection",
         "disconnect_requested generation=" + std::to_string(disconnectGeneration));
     std::thread([disconnectGeneration]() {
@@ -963,6 +1053,22 @@ static napi_value SwitchDisplay(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value RestartVideoDecoder(napi_env env, napi_callback_info info) {
+    const uint64_t generation = g_connectionGeneration.load();
+    std::thread([generation]() {
+        std::lock_guard<std::mutex> lock(g_connectionLifecycleMutex);
+        if (g_connectionGeneration.load() != generation || g_connectionStatus.load() != 2) return;
+        VideoRender::instance().restartDecoder();
+        if (g_connectionGeneration.load() == generation && g_connectionStatus.load() == 2) {
+            const int result = rust_refresh_video();
+            DiagnosticLog::instance().append("I", "video-recovery", "decoder_restart_complete refresh=" + std::to_string(result));
+        }
+    }).detach();
+    napi_value ret;
+    napi_create_int32(env, 0, &ret);
+    return ret;
+}
+
 static napi_value RefreshVideo(napi_env env, napi_callback_info info) {
     int result = rust_refresh_video();
     OH_LOG_INFO(LOG_APP, "RefreshVideo result=%{public}d", result);
@@ -990,15 +1096,23 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
     if (status == 1) {
         int64_t startedAt = g_connectionStartedAtMs.load();
         if (startedAt > 0 && NowMs() - startedAt > 30000) {
-            g_connectionGeneration.fetch_add(1);
+            const uint64_t timeoutGeneration = g_connectionGeneration.fetch_add(1) + 1;
+            g_videoReadyGeneration.store(0);
             g_connectionStartedAtMs.store(0);
             g_lastConnectionResult.store(-20);
             SetLastConnectionMessage("Connection timed out");
             g_connectionStatus.store(3);
-            std::thread([]() {
-                rust_disconnect();
-                VideoRender::instance().resetSession();
-            }).detach();
+            bool expected = false;
+            if (g_disconnectInProgress.compare_exchange_strong(expected, true)) {
+                std::thread([timeoutGeneration]() {
+                    rust_disconnect();
+                    if (g_connectionGeneration.load() == timeoutGeneration) {
+                        VideoRender::instance().resetSession();
+                    }
+                    g_disconnectInProgress.store(false);
+                    g_disconnectFinished.notify_all();
+                }).detach();
+            }
             status = 3;
         }
     }
@@ -1253,7 +1367,8 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 }
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
-    std::string content = DiagnosticLog::instance().exportText();
+    std::string content = std::string("native_build=recovery-20260905-r3 cpp=") + __DATE__ + " " + __TIME__ +
+        " rust=" + rust_get_build_id() + "\n" + DiagnosticLog::instance().exportText();
     napi_value ret;
     napi_create_string_utf8(env, content.c_str(), content.size(), &ret);
     return ret;
@@ -1621,9 +1736,15 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     uint8_t* data = nullptr;
     int length = 0, width = 0, height = 0;
     bool hasFrame = VideoRender::instance().getLatestFrame(data, length, width, height);
-    uint64_t totalFrames = g_videoFrameCount.load();
-    uint64_t totalBytes = g_videoByteCount.load();
+    uint64_t totalFrames = VideoRender::instance().receivedFrameCount();
+    uint64_t totalBytes = VideoRender::instance().receivedByteCount();
     uint64_t decodedFrames = VideoRender::instance().decodedFrameCount();
+    uint64_t renderedFrames = VideoRender::instance().renderedFrameCount();
+    if (g_videoReadyGeneration.load() != g_connectionGeneration.load()) {
+        hasFrame = false;
+        totalFrames = totalBytes = decodedFrames = renderedFrames = 0;
+        width = height = length = 0;
+    }
     int codec = VideoRender::instance().activeCodec();
     int decoderMode = VideoRender::instance().activeDecodeMode();
     int64_t now = NowMs();
@@ -1641,9 +1762,10 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
             " codec=" + std::to_string(codec) +
             " decoder_mode=" + std::to_string(decoderMode) +
             " input_total=" + std::to_string(totalFrames) +
-            " input_delta=" + std::to_string(totalFrames - previousFrames) +
+            " input_delta=" + std::to_string(totalFrames - std::min(totalFrames, previousFrames)) +
             " bytes_total=" + std::to_string(totalBytes) +
             " decoded_total=" + std::to_string(decodedFrames) +
+            " presented_total=" + std::to_string(renderedFrames) +
             " decoded_delta=" + std::to_string(decodedFrames - std::min(decodedFrames, previousDecoded)) +
             " frame=" + std::to_string(width) + "x" + std::to_string(height) +
             " latest_size=" + std::to_string(length) +
@@ -1652,6 +1774,9 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     napi_value obj;
     napi_create_object(env, &obj);
     napi_value hasFrameVal; napi_get_boolean(env, hasFrame, &hasFrameVal); napi_set_named_property(env, obj, "hasFrame", hasFrameVal);
+    napi_value presentedVal; napi_create_int64(env, renderedFrames, &presentedVal); napi_set_named_property(env, obj, "renderedFrames", presentedVal);
+    napi_value generationVal; napi_create_int64(env, g_connectionGeneration.load(), &generationVal); napi_set_named_property(env, obj, "generation", generationVal);
+    napi_value securityVal; napi_create_int32(env, g_peerSecurityState.load(), &securityVal); napi_set_named_property(env, obj, "security", securityVal);
     napi_value widthVal; napi_create_int32(env, width, &widthVal); napi_set_named_property(env, obj, "width", widthVal);
     napi_value heightVal; napi_create_int32(env, height, &heightVal); napi_set_named_property(env, obj, "height", heightVal);
     napi_value lengthVal; napi_create_int32(env, length, &lengthVal); napi_set_named_property(env, obj, "length", lengthVal);
@@ -1709,87 +1834,147 @@ static napi_value RebindSurface(napi_env env, napi_callback_info info) {
     return ret;
 }
 
-static napi_value TakeNativeMouseEvents(napi_env env, napi_callback_info info) {
-    (void)info;
-    std::deque<NativeMouseInputEvent> pending;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeMouseInputMutex);
-        pending.swap(g_nativeMouseInputEvents);
-    }
+static napi_value NativeMouseInputToJs(napi_env env, const NativeMouseInputEvent& input) {
+    napi_value object;
+    napi_create_object(env, &object);
+    napi_value x;
+    napi_create_double(env, input.x, &x);
+    napi_set_named_property(env, object, "x", x);
+    napi_value y;
+    napi_create_double(env, input.y, &y);
+    napi_set_named_property(env, object, "y", y);
+    napi_value action;
+    napi_create_int32(env, input.action, &action);
+    napi_set_named_property(env, object, "action", action);
+    napi_value button;
+    napi_create_int32(env, input.button, &button);
+    napi_set_named_property(env, object, "button", button);
+    napi_value hover;
+    napi_create_int32(env, input.hover, &hover);
+    napi_set_named_property(env, object, "hover", hover);
+    napi_value timestamp;
+    napi_create_int64(env, input.timestamp, &timestamp);
+    napi_set_named_property(env, object, "timestamp", timestamp);
+    napi_value modifierMask;
+    napi_create_int32(env, input.modifierMask, &modifierMask);
+    napi_set_named_property(env, object, "modifierMask", modifierMask);
+    napi_value modifierValid;
+    napi_get_boolean(env, input.modifierValid, &modifierValid);
+    napi_set_named_property(env, object, "modifierValid", modifierValid);
+    return object;
+}
 
+static napi_value NativeKeyInputToJs(napi_env env, const NativeKeyInputEvent& input) {
+    napi_value object;
+    napi_create_object(env, &object);
+    napi_value keyCode;
+    napi_create_int32(env, input.keyCode, &keyCode);
+    napi_set_named_property(env, object, "keyCode", keyCode);
+    napi_value action;
+    napi_create_int32(env, input.action, &action);
+    napi_set_named_property(env, object, "action", action);
+    napi_value timestamp;
+    napi_create_int64(env, input.timestamp, &timestamp);
+    napi_set_named_property(env, object, "timestamp", timestamp);
+    napi_value modifierMask;
+    napi_create_int32(env, input.modifierMask, &modifierMask);
+    napi_set_named_property(env, object, "modifierMask", modifierMask);
+    napi_value modifierValid;
+    napi_get_boolean(env, input.modifierValid, &modifierValid);
+    napi_set_named_property(env, object, "modifierValid", modifierValid);
+    napi_value capsLockOn;
+    napi_get_boolean(env, input.capsLockOn, &capsLockOn);
+    napi_set_named_property(env, object, "capsLockOn", capsLockOn);
+    napi_value capsLockValid;
+    napi_get_boolean(env, input.capsLockValid, &capsLockValid);
+    napi_set_named_property(env, object, "capsLockValid", capsLockValid);
+    return object;
+}
+
+static napi_value TakeNativeInputEvents(napi_env env, napi_callback_info info) {
+    (void)info;
+    std::deque<NativeInputEvent> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeInputMutex);
+        pending.swap(g_nativeInputEvents);
+    }
     napi_value array;
     napi_create_array_with_length(env, pending.size(), &array);
     uint32_t index = 0;
-    for (const NativeMouseInputEvent& input : pending) {
+    for (const NativeInputEvent& input : pending) {
         napi_value object;
         napi_create_object(env, &object);
-        napi_value x;
-        napi_create_double(env, input.x, &x);
-        napi_set_named_property(env, object, "x", x);
-        napi_value y;
-        napi_create_double(env, input.y, &y);
-        napi_set_named_property(env, object, "y", y);
-        napi_value action;
-        napi_create_int32(env, input.action, &action);
-        napi_set_named_property(env, object, "action", action);
-        napi_value button;
-        napi_create_int32(env, input.button, &button);
-        napi_set_named_property(env, object, "button", button);
-        napi_value hover;
-        napi_create_int32(env, input.hover, &hover);
-        napi_set_named_property(env, object, "hover", hover);
-        napi_value timestamp;
-        napi_create_int64(env, input.timestamp, &timestamp);
-        napi_set_named_property(env, object, "timestamp", timestamp);
-        napi_value modifierMask;
-        napi_create_int32(env, input.modifierMask, &modifierMask);
-        napi_set_named_property(env, object, "modifierMask", modifierMask);
-        napi_value modifierValid;
-        napi_get_boolean(env, input.modifierValid, &modifierValid);
-        napi_set_named_property(env, object, "modifierValid", modifierValid);
+        napi_value sequence;
+        napi_create_double(env, static_cast<double>(input.sequence), &sequence);
+        napi_set_named_property(env, object, "sequence", sequence);
+        if (input.kind == NativeInputKind::Mouse) {
+            napi_set_named_property(env, object, "mouse", NativeMouseInputToJs(env, input.mouse));
+        } else if (input.kind == NativeInputKind::Key) {
+            napi_set_named_property(env, object, "key", NativeKeyInputToJs(env, input.key));
+        } else {
+            napi_value reset;
+            napi_get_boolean(env, true, &reset);
+            napi_set_named_property(env, object, "reset", reset);
+        }
+        napi_set_element(env, array, index++, object);
+    }
+    if (!pending.empty()) {
+        const auto timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        DiagnosticLog::instance().append("I", "input-native",
+            "drain first_seq=" + std::to_string(pending.front().sequence) +
+            " last_seq=" + std::to_string(pending.back().sequence) +
+            " timestamp_ms=" + std::to_string(timestampMs) +
+            " count=" + std::to_string(pending.size()));
+    }
+    return array;
+}
+
+// Compatibility consumers remove only their kind from the same bounded queue.
+// They cannot represent reset markers or cross-device order. Never mix these
+// APIs with the unified drain, and never silently consume a pending reset.
+static napi_value TakeLegacyNativeEvents(napi_env env, NativeInputKind kind) {
+    std::deque<NativeInputEvent> pending;
+    bool needsReset = false;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeInputMutex);
+        needsReset = std::any_of(g_nativeInputEvents.begin(), g_nativeInputEvents.end(),
+            [](const NativeInputEvent& input) { return input.kind == NativeInputKind::Reset; });
+        if (!needsReset) {
+            for (auto it = g_nativeInputEvents.begin(); it != g_nativeInputEvents.end();) {
+                if (it->kind == kind) {
+                    pending.push_back(*it);
+                    it = g_nativeInputEvents.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    if (needsReset) {
+        napi_throw_error(env, "ERR_NATIVE_INPUT_RESET",
+            "Native input overflow: use takeNativeInputEvents and handle reset before dispatch");
+        return nullptr;
+    }
+    napi_value array;
+    napi_create_array_with_length(env, pending.size(), &array);
+    uint32_t index = 0;
+    for (const NativeInputEvent& input : pending) {
+        napi_value object = kind == NativeInputKind::Mouse ?
+            NativeMouseInputToJs(env, input.mouse) : NativeKeyInputToJs(env, input.key);
         napi_set_element(env, array, index++, object);
     }
     return array;
 }
 
+static napi_value TakeNativeMouseEvents(napi_env env, napi_callback_info info) {
+    (void)info;
+    return TakeLegacyNativeEvents(env, NativeInputKind::Mouse);
+}
+
 static napi_value TakeNativeKeyEvents(napi_env env, napi_callback_info info) {
     (void)info;
-    std::deque<NativeKeyInputEvent> pending;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeKeyInputMutex);
-        pending.swap(g_nativeKeyInputEvents);
-    }
-
-    napi_value array;
-    napi_create_array_with_length(env, pending.size(), &array);
-    uint32_t index = 0;
-    for (const NativeKeyInputEvent& input : pending) {
-        napi_value object;
-        napi_create_object(env, &object);
-        napi_value keyCode;
-        napi_create_int32(env, input.keyCode, &keyCode);
-        napi_set_named_property(env, object, "keyCode", keyCode);
-        napi_value action;
-        napi_create_int32(env, input.action, &action);
-        napi_set_named_property(env, object, "action", action);
-        napi_value timestamp;
-        napi_create_int64(env, input.timestamp, &timestamp);
-        napi_set_named_property(env, object, "timestamp", timestamp);
-        napi_value modifierMask;
-        napi_create_int32(env, input.modifierMask, &modifierMask);
-        napi_set_named_property(env, object, "modifierMask", modifierMask);
-        napi_value modifierValid;
-        napi_get_boolean(env, input.modifierValid, &modifierValid);
-        napi_set_named_property(env, object, "modifierValid", modifierValid);
-        napi_value capsLockOn;
-        napi_get_boolean(env, input.capsLockOn, &capsLockOn);
-        napi_set_named_property(env, object, "capsLockOn", capsLockOn);
-        napi_value capsLockValid;
-        napi_get_boolean(env, input.capsLockValid, &capsLockValid);
-        napi_set_named_property(env, object, "capsLockValid", capsLockValid);
-        napi_set_element(env, array, index++, object);
-    }
-    return array;
+    return TakeLegacyNativeEvents(env, NativeInputKind::Key);
 }
 
 static napi_value GetHardwareKeyStateForJs(napi_env env, napi_callback_info info) {
@@ -1856,6 +2041,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getRemoteCursorData", nullptr, GetRemoteCursorData, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"switchDisplay", nullptr, SwitchDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"refreshVideo", nullptr, RefreshVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"restartVideoDecoder", nullptr, RestartVideoDecoder, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setRemoteAudioEnabled", nullptr, SetRemoteAudioEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isRemoteAudioActive", nullptr, IsRemoteAudioActive, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setBackgroundVideoMode", nullptr, SetBackgroundVideoMode, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1886,6 +2072,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setSurfaceId", nullptr, SetSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"prepareSurfaceRebind", nullptr, PrepareSurfaceRebind, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rebindSurface", nullptr, RebindSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeNativeInputEvents", nullptr, TakeNativeInputEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeNativeMouseEvents", nullptr, TakeNativeMouseEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeNativeKeyEvents", nullptr, TakeNativeKeyEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getHardwareKeyState", nullptr, GetHardwareKeyStateForJs, nullptr, nullptr, nullptr, napi_default, nullptr},

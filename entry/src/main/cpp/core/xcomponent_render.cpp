@@ -66,7 +66,7 @@ bool XComponentRender::createWindowLocked() {
     if (nativeWindow_) {
         bufferWidth_ = 0;
         bufferHeight_ = 0;
-        consecutiveNoBuffer_ = 0;
+    consecutiveNoBuffer_ = 0;
         OH_LOG_INFO(LOG_APP, "Native window created for surface %{public}s ret=%{public}d", surfaceId_.c_str(), ret);
         configureWindowLocked(640, 360);
         return true;
@@ -88,25 +88,25 @@ void XComponentRender::configureWindowLocked(int width, int height) {
     bufferHeight_ = height;
 }
 
-void XComponentRender::renderFrame(const uint8_t* data, int length, int width, int height) {
-    renderPackedFrame(data, length, width, height, true);
+bool XComponentRender::renderFrame(const uint8_t* data, int length, int width, int height) {
+    return renderPackedFrame(data, length, width, height, true);
 }
 
-void XComponentRender::renderBGRAFrame(const uint8_t* data, int length, int width, int height) {
-    renderPackedFrame(data, length, width, height, false);
+bool XComponentRender::renderBGRAFrame(const uint8_t* data, int length, int width, int height) {
+    return renderPackedFrame(data, length, width, height, false);
 }
 
-void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput) {
+bool XComponentRender::renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput) {
     if (renderingPaused_.load()) {
-        return;
+        return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     if (renderingPaused_.load()) {
-        return;
+        return false;
     }
     if (!nativeWindow_ || !data || length <= 0) {
         OH_LOG_WARN(LOG_APP, "Skip render nativeWindow=%{public}d data=%{public}d length=%{public}d", nativeWindow_ ? 1 : 0, data ? 1 : 0, length);
-        return;
+        return false;
     }
 
     if (bufferWidth_ != (uint32_t)width || bufferHeight_ != (uint32_t)height) {
@@ -125,16 +125,16 @@ void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
             destroyWindowLocked();
             createWindowLocked();
         }
-        return;
+        return false;
     }
-    consecutiveNoBuffer_ = 0;
+        consecutiveNoBuffer_ = 0;
 
     OH_NativeBuffer* nativeBuffer = nullptr;
     ret = OH_NativeBuffer_FromNativeWindowBuffer(buffer, &nativeBuffer);
     if (ret != 0 || !nativeBuffer) {
         OH_LOG_ERROR(LOG_APP, "FromNativeWindowBuffer failed ret=%{public}d", ret);
         OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
-        return;
+        return false;
     }
 
     OH_NativeBuffer_Config config;
@@ -152,7 +152,7 @@ void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
             close(fenceFd);
         }
         OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
-        return;
+        return false;
     }
 
     if (length >= width * height * 4) {
@@ -178,7 +178,7 @@ void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
             close(fenceFd);
         }
         OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
-        return;
+        return false;
     }
 
     OH_NativeBuffer_Unmap(nativeBuffer);
@@ -192,6 +192,7 @@ void XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
         OH_LOG_INFO(LOG_APP, "Flush mapped frame count=%{public}llu size=%{public}dx%{public}d stride=%{public}d ret=%{public}d",
             static_cast<unsigned long long>(renderedFrames), width, height, strideBytes, ret);
     }
+    return ret == 0;
 }
 
 OHNativeWindow* XComponentRender::window() {

@@ -1,5 +1,6 @@
 import rustdeskNapi from 'libentry.so'
-import { pasteboard } from '@kit.BasicServicesKit';
+import { pasteboard, deviceInfo } from '@kit.BasicServicesKit';
+import { RELEASE_NOTES_VERSION, RELEASE_NOTES_BUILD } from '../widget/ReleaseNotesDialog'
 
 const systemPasteboard: pasteboard.SystemPasteboard = pasteboard.getSystemPasteboard()
 
@@ -18,6 +19,9 @@ export interface VideoFrameInfo {
   totalFrames?: number
   totalBytes?: number
   decodedFrames?: number
+  renderedFrames?: number
+  generation?: number
+  security?: number
   codec?: number
   decoderMode?: number
 }
@@ -60,6 +64,16 @@ export interface NativeKeyInputEvent {
   modifierValid: boolean
   capsLockOn: boolean
   capsLockValid: boolean
+}
+
+// Exactly one of mouse, key, or reset=true is present. Consume in array order.
+// Sequence is process-wide and increasing; coalesced moves can leave gaps.
+export interface NativeInputEvent {
+  sequence: number
+  mouse?: NativeMouseInputEvent
+  key?: NativeKeyInputEvent
+  // Release all tracked remote keys/buttons and clear local input state first.
+  reset?: boolean
 }
 
 export interface HardwareKeyState {
@@ -107,6 +121,7 @@ export interface PeerOnlineState {
 export interface PeerOnlineResult {
   peers: PeerOnlineState[]
   error: string
+  server: string
 }
 
 export class RustDeskNapi {
@@ -123,7 +138,9 @@ export class RustDeskNapi {
   }
 
   static getDiagnosticLog(): string {
-    return (rustdeskNapi as ESObject).getDiagnosticLog()
+    return `app_version=${RELEASE_NOTES_VERSION} version_code=${RELEASE_NOTES_BUILD} ` +
+      `sdk=${deviceInfo.sdkApiVersion} device_type=${deviceInfo.deviceType}\n` +
+      (rustdeskNapi as ESObject).getDiagnosticLog()
   }
 
   static clearDiagnosticLog(): number {
@@ -134,8 +151,13 @@ export class RustDeskNapi {
     return rustdeskNapi.connect(peerId, password)
   }
 
-  static connectWithServer(peerId: string, password: string, rendezvousServer: string, relayServer: string): number {
-    return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer)
+  static connectWithServer(peerId: string, password: string, rendezvousServer: string, relayServer: string,
+    forceRelay: boolean = false): number {
+    return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer, forceRelay)
+  }
+
+  static restartVideoDecoder(): number {
+    return (rustdeskNapi as ESObject).restartVideoDecoder()
   }
 
   static setPerformancePreset(preset: string): number {
@@ -182,10 +204,18 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).isPeerAndroid()
   }
 
+  // Atomic ordered drain. Overflow returns reset before the triggering event.
+  // Use exclusively: legacy drains consume from the same queue.
+  static takeNativeInputEvents(): NativeInputEvent[] {
+    return (rustdeskNapi as ESObject).takeNativeInputEvents() as NativeInputEvent[]
+  }
+
+  // Deprecated: unordered across devices; throws ERR_NATIVE_INPUT_RESET on overflow.
   static takeNativeMouseEvents(): NativeMouseInputEvent[] {
     return (rustdeskNapi as ESObject).takeNativeMouseEvents() as NativeMouseInputEvent[]
   }
 
+  // Deprecated: unordered across devices; throws ERR_NATIVE_INPUT_RESET on overflow.
   static takeNativeKeyEvents(): NativeKeyInputEvent[] {
     return (rustdeskNapi as ESObject).takeNativeKeyEvents() as NativeKeyInputEvent[]
   }

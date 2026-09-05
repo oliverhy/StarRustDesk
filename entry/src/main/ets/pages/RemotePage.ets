@@ -6,7 +6,7 @@ import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
-import { FileDownloadRequest, FileTransferStatus, HardwareKeyState, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { FileDownloadRequest, FileTransferStatus, HardwareKeyState, NativeInputEvent, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo } from '@kit.CoreFileKit';
@@ -114,6 +114,10 @@ struct RemotePage {
   @State speedText: string = '0 KB/s';
   @State codecText: string = '等待视频';
   @State routeText: string = '未知';
+  @State peerSecurityState: number = 0;
+  private videoSessionGeneration: number = -1;
+  private directLoginStartedAt: number = 0;
+  private videoDecoderRestartRequested: boolean = false;
   @State pageWidth: number = 0;
   @State pageHeight: number = 0;
   @State clipboardSyncEnabled: boolean = true;
@@ -181,6 +185,9 @@ struct RemotePage {
   private decoderStallStartedAt: number = 0;
   private videoRecoveryRefreshRequested: boolean = false;
   private videoFallbackRequested: boolean = false;
+  private firstVideoWaitStartedAt: number = 0;
+  private firstVideoRecoveryStage: number = 0;
+  @State videoWaitingHint: string = '等待远端视频画面';
   private lastLoggedConnectionStatus: number = -1;
   private smoothFps: number = 0;
   private smoothKbps: number = 0;
@@ -216,6 +223,8 @@ struct RemotePage {
   private leftButtonHeld: boolean = false;
   private rightButtonHeld: boolean = false;
   private multiTouchActive: boolean = false;
+  private touchSequenceDraining: boolean = false;
+  private touchSequenceMaxFingers: number = 0;
   private multiTouchGesture: number = 0;
   private multiTouchStartedAt: number = 0;
   private multiTouchStartCenterX: number = 0;
@@ -375,6 +384,15 @@ struct RemotePage {
     let poll = () => {
       let status: number = RustDeskNapi.getConnectionStatus();
       let now: number = Date.now();
+      if (status === ConnectionStatus.CONNECTING && RustDeskNapi.getConnectionRoute() === 1 &&
+        !RemoteSessionBackgroundTask.isAppBackground()) {
+        if (this.directLoginStartedAt === 0) this.directLoginStartedAt = now;
+        if (now - this.directLoginStartedAt >= 10000 && this.retryStalledDirectConnection('login_timeout')) {
+          status = ConnectionStatus.CONNECTING;
+        }
+      } else {
+        this.directLoginStartedAt = 0;
+      }
       if (status === ConnectionStatus.CONNECTING) {
         if (this.connectingStartedAt === 0) {
           this.connectingStartedAt = now;
@@ -474,13 +492,32 @@ struct RemotePage {
         return;
       }
       let frame: VideoFrameInfo = RustDeskNapi.getVideoFrame();
+      if (frame.generation !== undefined && frame.generation !== this.videoSessionGeneration) {
+        this.videoSessionGeneration = frame.generation;
+        this.resetRemoteViewportForSession();
+        this.lastStatsTime = 0;
+        this.lastStatsFrames = 0;
+        this.lastStatsBytes = 0;
+        this.smoothFps = 0;
+        this.smoothKbps = 0;
+      }
+      const security: number = frame.security ?? 0;
+      if (security === 2 && this.peerSecurityState !== 2) {
+        try {
+          this.getUIContext().getPromptAction().showToast({
+            message: '此连接未启用端到端加密，请仅在可信网络使用', duration: 3000
+          });
+        } catch (_error) {}
+      }
+      this.peerSecurityState = security;
+      this.checkFirstVideoHealth(frame);
+      this.checkDecoderHealth(frame);
       if (frame.hasFrame) {
         let firstVideoFrame: boolean = !this.hasVideo;
         if (firstVideoFrame) {
           this.hasVideo = true;
         }
         this.updateStats(frame);
-        this.checkDecoderHealth(frame);
         if (frame.width > 0 && frame.height > 0 && (frame.width !== this.remoteWidth || frame.height !== this.remoteHeight)) {
           let previousWidth: number = this.remoteWidth;
           let previousHeight: number = this.remoteHeight;
@@ -504,6 +541,7 @@ struct RemotePage {
   }
 
   onAppForegroundEpochChanged(): void {
+    ConnectionService.recordNetworkSnapshot();
     const status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus;
     this.connectionStatus = status;
     RemoteSessionBackgroundTask.syncForConnectionStatus(status);
@@ -573,17 +611,79 @@ struct RemotePage {
     this.decoderStallStartedAt = 0;
     this.videoRecoveryRefreshRequested = false;
     this.videoFallbackRequested = false;
+    this.videoDecoderRestartRequested = false;
+    this.firstVideoWaitStartedAt = 0;
+    this.firstVideoRecoveryStage = 0;
+    this.videoWaitingHint = '等待远端视频画面';
     this.codecText = '等待视频';
   }
 
+  checkFirstVideoHealth(frame: VideoFrameInfo): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || frame.hasFrame || this.hasVideo ||
+      RemoteSessionBackgroundTask.isAppBackground()) {
+      this.firstVideoWaitStartedAt = 0;
+      return;
+    }
+    if (this.firstVideoWaitStartedAt === 0) {
+      this.firstVideoWaitStartedAt = Date.now();
+    }
+    const elapsed: number = Date.now() - this.firstVideoWaitStartedAt;
+    if (elapsed >= 4000 && this.firstVideoRecoveryStage === 0) {
+      this.firstVideoRecoveryStage = 1;
+      const result: number = RustDeskNapi.refreshVideo();
+      RustDeskNapi.appendDiagnosticLog('video-recovery',
+        `first_frame_missing action=refresh result=${result} input=${frame.totalFrames ?? 0}`);
+    }
+    if (elapsed >= 10000 && this.firstVideoRecoveryStage === 1) {
+      this.firstVideoRecoveryStage = 2;
+      if ((frame.totalFrames ?? 0) === 0 && this.retryStalledDirectConnection('first_frame_timeout')) {
+        return;
+      }
+      // Renegotiate only when no encoded frames arrive. Decoder stalls have
+      // their own recovery path below, to avoid repeatedly changing codecs.
+      if ((frame.totalFrames ?? 0) === 0 && !this.videoFallbackRequested) {
+        const result: number = RustDeskNapi.fallbackVideoToVp9();
+        this.videoFallbackRequested = result === 0 || result === -3;
+        RustDeskNapi.appendDiagnosticLog('video-recovery',
+          `first_frame_missing action=negotiate_vp9 result=${result}`);
+      }
+    }
+    if (elapsed >= 20000 && this.firstVideoRecoveryStage === 2) {
+      this.firstVideoRecoveryStage = 3;
+      this.videoWaitingHint = (frame.totalFrames ?? 0) === 0 ?
+        '已连接，但远端未发送画面。请检查远端屏幕录制权限或重连，并导出诊断日志。' :
+        '已收到视频，但暂未显示画面。请重连并导出诊断日志。';
+      RustDeskNapi.appendDiagnosticLog('video-recovery',
+        `first_frame_missing recovery_exhausted input=${frame.totalFrames ?? 0} decoded=${frame.decodedFrames ?? 0}`);
+    }
+  }
+
+  retryStalledDirectConnection(reason: string): boolean {
+    if (!ConnectionService.retryDirectViaRelay(reason)) return false;
+    this.resetRemoteViewportForSession();
+    this.displayStateInitialized = false;
+    this.directLoginStartedAt = 0;
+    this.connectingStartedAt = 0;
+    this.connectionStatus = ConnectionStatus.CONNECTING;
+    this.videoWaitingHint = '直连未收到响应，正在通过中继重试';
+    return true;
+  }
+
   checkDecoderHealth(frame: VideoFrameInfo): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || RemoteSessionBackgroundTask.isAppBackground()) {
+      this.decoderStallStartedAt = 0;
+      return;
+    }
     const totalFrames: number = frame.totalFrames ?? 0;
-    const decodedFrames: number = frame.decodedFrames ?? 0;
+    const decodedFrames: number = frame.renderedFrames ?? frame.decodedFrames ?? 0;
     const codec: number = frame.codec ?? 0;
     if (!this.decoderHealthInitialized) {
       this.decoderHealthInitialized = true;
       this.lastDecoderInputFrames = totalFrames;
       this.lastDecodedFrames = decodedFrames;
+      if (totalFrames > 0 && decodedFrames === 0 && codec > 0) {
+        this.decoderStallStartedAt = Date.now();
+      }
       return;
     }
 
@@ -606,7 +706,13 @@ struct RemotePage {
           `codec=${codecName} stalled action=request_keyframe stalled_ms=${stalledFor} input=${totalFrames} decoded=${decodedFrames}`)
         hilog.warn(LOG_DOMAIN, 'StarRustDesk', `${codecName} has input but no decoded output; requested key frame`);
       }
-      if (codec !== 2 && stalledFor >= 3500) {
+      if (stalledFor >= 3500 && !this.videoDecoderRestartRequested) {
+        this.videoDecoderRestartRequested = true;
+        const result: number = RustDeskNapi.restartVideoDecoder();
+        RustDeskNapi.appendDiagnosticLog('video-recovery',
+          `codec=${codecName} stalled action=restart_decoder result=${result}`);
+      }
+      if (codec !== 2 && stalledFor >= 7000) {
         const result: number = RustDeskNapi.fallbackVideoToVp9();
         if (result === 0) {
           this.videoFallbackRequested = true;
@@ -698,24 +804,31 @@ struct RemotePage {
         return;
       }
       try {
+        this.drainNativeInputEvents();
         const now: number = Date.now();
         if (now - this.lastHardwareKeySyncAt >= 500) {
           this.lastHardwareKeySyncAt = now;
           this.syncHardwareKeyState();
-        }
-        let events: NativeMouseInputEvent[] = RustDeskNapi.takeNativeMouseEvents();
-        for (let event of events) {
-          this.handleNativeMouseInput(event);
-        }
-        let keyEvents: NativeKeyInputEvent[] = RustDeskNapi.takeNativeKeyEvents();
-        for (let event of keyEvents) {
-          this.handleNativeKeyInput(event);
         }
       } catch (_e) {
       }
       this.nativeMouseTimer = setTimeout(poll, 16);
     };
     this.nativeMouseTimer = setTimeout(poll, 16);
+  }
+
+  drainNativeInputEvents(): void {
+    const events: NativeInputEvent[] = RustDeskNapi.takeNativeInputEvents();
+    for (const event of events) {
+      if (event.reset) {
+        this.releaseHeldMouseButtons('input_queue_reset');
+        ConnectionService.releaseModifiers();
+      } else if (event.key !== undefined) {
+        this.handleNativeKeyInput(event.key);
+      } else if (event.mouse !== undefined) {
+        this.handleNativeMouseInput(event.mouse);
+      }
+    }
   }
 
   syncHardwareKeyState(): void {
@@ -770,11 +883,7 @@ struct RemotePage {
     }
     this.lastNativeMouseEventAt = Date.now();
     if (event.modifierValid) {
-      ConnectionService.syncHeldModifierState(
-        (event.modifierMask & 1) !== 0,
-        (event.modifierMask & 2) !== 0,
-        (event.modifierMask & 4) !== 0
-      );
+      ConnectionService.syncNativeModifierState(event.modifierMask);
     }
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel ||
       this.remoteWidth <= 0 || this.remoteHeight <= 0) {
@@ -831,6 +940,9 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
       return;
     }
+    if (event.action !== 0 && event.action !== 1) {
+      return;
+    }
     if (event.capsLockValid) {
       ConnectionService.syncCapsLockState(event.capsLockOn);
     }
@@ -841,15 +953,11 @@ struct RemotePage {
       return;
     }
     if (controlCode > 0) {
-      ConnectionService.sendKeyEvent(controlCode, action);
+      ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
       return;
     }
     if (event.modifierValid) {
-      ConnectionService.syncHeldModifierState(
-        (event.modifierMask & 1) !== 0,
-        (event.modifierMask & 2) !== 0,
-        (event.modifierMask & 4) !== 0
-      );
+      ConnectionService.syncNativeModifierState(event.modifierMask);
     }
     const scanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
     if (scanCode > 0) {
@@ -1564,9 +1672,11 @@ struct RemotePage {
           Text(translate('Remote Desktop'))
             .fontSize(RustDeskTheme.FONT_SIZE_BODY)
             .fontColor(Color.Gray)
-          Text(translate('Waiting for video stream...'))
+          Text(this.videoWaitingHint)
             .fontSize(12)
-            .fontColor(Color.Gray)
+            .fontColor('#C3CBD5')
+            .textAlign(TextAlign.Center)
+            .padding({ left: 24, right: 24 })
         }
         .width('100%').height('100%')
         .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
@@ -2192,6 +2302,11 @@ struct RemotePage {
         Text(this.routeText)
           .fontSize(11)
           .fontColor(this.secondaryTextColor())
+        if (this.peerSecurityState === 2) {
+          Text('未启用端到端加密')
+            .fontSize(11)
+            .fontColor(this.isDarkMode ? '#FFCC80' : '#8A4B00')
+        }
         Text(this.codecText)
           .fontSize(11)
           .fontColor(this.secondaryTextColor())
@@ -2496,6 +2611,29 @@ struct RemotePage {
       this.handlePointerCompatibilityTouch(event);
       return;
     }
+
+    // An Up may still contain the released finger. Never start another gesture
+    // from the remaining fingers of a completed scroll/pinch/three-finger swipe.
+    if (event.type === TouchType.Cancel) {
+      RustDeskNapi.appendDiagnosticLog('gesture', 'cancel suppress_click=true');
+      this.cancelActiveTouchGesture();
+      this.touchSequenceDraining = true;
+      return;
+    }
+    if (event.type === TouchType.Down && event.touches.length === 1) {
+      this.touchSequenceDraining = false;
+      this.touchSequenceMaxFingers = 0;
+    }
+    if (this.touchSequenceDraining) {
+      const remaining: number = event.type === TouchType.Up ? event.touches.filter((point: TouchObject) =>
+        !event.changedTouches.some((changed: TouchObject) => changed.id === point.id)).length : event.touches.length;
+      if (remaining === 0) {
+        this.touchSequenceDraining = false;
+        this.touchSequenceMaxFingers = 0;
+      }
+      return;
+    }
+    this.touchSequenceMaxFingers = Math.max(this.touchSequenceMaxFingers, event.touches.length);
 
     if (this.threeFingerGestureActive) {
       this.stopEdgeAutoPan();
@@ -3173,6 +3311,7 @@ struct RemotePage {
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
+    this.drainNativeInputEvents();
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return false;
     }
@@ -3191,13 +3330,13 @@ struct RemotePage {
     }
     if (this.showKeyboardPanel) {
       if (this.isModifierControlCode(controlCode)) {
-        ConnectionService.sendKeyEvent(controlCode, action);
+        ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
         return true;
       }
       return false;
     }
     if (controlCode > 0) {
-      ConnectionService.sendKeyEvent(controlCode, action);
+      ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
       return true;
     }
 
@@ -3240,6 +3379,7 @@ struct RemotePage {
   }
 
   syncModifiersFromPointerEvent(event: BaseEvent): void {
+    this.drainNativeInputEvents();
     if (event.getModifierKeyState === undefined) {
       return;
     }
@@ -3404,6 +3544,11 @@ struct RemotePage {
     let centerX: number = (first.x + second.x) / 2;
     let centerY: number = (first.y + second.y) / 2;
     if (!this.multiTouchActive) {
+      // A release cannot be the beginning of a new two-finger tap.
+      if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+        this.touchSequenceDraining = true;
+        return;
+      }
       this.endLocalPointerGesture();
       this.multiTouchActive = true;
       this.multiTouchGesture = 0;
@@ -3413,6 +3558,7 @@ struct RemotePage {
       this.multiTouchLastCenterX = centerX;
       this.multiTouchLastCenterY = centerY;
       this.multiTouchMoved = false;
+      RustDeskNapi.appendDiagnosticLog('gesture', `multi_begin fingers=${this.touchSequenceMaxFingers}`);
       this.clearLongPressTimer();
       this.flushPendingTap();
       this.sendLeftUp(this.lastAbsX, this.lastAbsY);
@@ -3482,8 +3628,13 @@ struct RemotePage {
     if (!this.multiTouchActive) {
       return;
     }
-    let isTwoFingerTap: boolean = this.multiTouchGesture === 0 && !this.multiTouchMoved &&
+    let isTwoFingerTap: boolean = this.touchSequenceMaxFingers === 2 &&
+      this.multiTouchGesture === 0 && !this.multiTouchMoved &&
       Date.now() - this.multiTouchStartedAt <= 500;
+    RustDeskNapi.appendDiagnosticLog('gesture',
+      `multi_end kind=${this.multiTouchGesture} max_fingers=${this.touchSequenceMaxFingers} ` +
+      `moved=${this.multiTouchMoved} right_click=${isTwoFingerTap}`);
+    this.touchSequenceDraining = true;
     if (isTwoFingerTap) {
       ConnectionService.sendMouseEvent(this.multiTouchRemoteX, this.multiTouchRemoteY, 3);
       ConnectionService.sendMouseEvent(this.multiTouchRemoteX, this.multiTouchRemoteY, 4);
@@ -3912,6 +4063,7 @@ struct RemotePage {
   handleThreeFingerGesture(event: TouchEvent): void {
     if (!this.threeFingerGestureActive) {
       this.threeFingerGestureActive = true;
+      RustDeskNapi.appendDiagnosticLog('gesture', 'three_begin');
       this.threeFingerStartedAt = Date.now();
       this.multiTouchActive = false;
       this.multiTouchGesture = 0;
@@ -3953,8 +4105,10 @@ struct RemotePage {
     let duration: number = Date.now() - this.threeFingerStartedAt;
     let shouldOpenKeyboard: boolean = moveY <= -THREE_FINGER_SWIPE_THRESHOLD &&
       Math.abs(moveX) <= THREE_FINGER_HORIZONTAL_LIMIT && duration <= THREE_FINGER_MAX_DURATION;
+    RustDeskNapi.appendDiagnosticLog('gesture', `three_end duration_ms=${duration} keyboard=${shouldOpenKeyboard}`);
 
     this.threeFingerGestureActive = false;
+    this.touchSequenceDraining = true;
     this.threeFingerStartedAt = 0;
     this.threeFingerStartCenterX = 0;
     this.threeFingerStartCenterY = 0;
@@ -4985,7 +5139,7 @@ struct RemotePage {
   updateStats(frame: VideoFrameInfo): void {
     this.codecText = this.videoCodecStatus(frame.codec ?? 0, frame.decoderMode ?? 0);
     let now: number = Date.now();
-    let totalFrames: number = frame.totalFrames ?? this.lastStatsFrames;
+    let totalFrames: number = frame.renderedFrames ?? frame.totalFrames ?? this.lastStatsFrames;
     let totalBytes: number = frame.totalBytes ?? this.lastStatsBytes;
     if (this.lastStatsTime === 0) {
       this.lastStatsTime = now;

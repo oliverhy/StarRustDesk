@@ -13,6 +13,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <chrono>
 #include <utility>
 
 #undef LOG_DOMAIN
@@ -194,7 +195,8 @@ void VideoRender::onFrameReceived(const uint8_t* data, int length, int width, in
         frameWidth_ = width;
         frameHeight_ = height;
         frameLength_ = length;
-        hasFrame_ = true;
+        receivedFrameCount_.fetch_add(1);
+        receivedByteCount_.fetch_add(length > 0 ? length : 0);
     }
 
     if (XComponentRender::instance().window() != nullptr) {
@@ -221,7 +223,7 @@ int VideoRender::activeDecodeMode() const {
     return activeDecodeMode_.load();
 }
 
-void VideoRender::markDecodedFrame(int codec, int width, int height, int decodeMode) {
+void VideoRender::markDecodedFrame(int codec, int width, int height, int decodeMode, bool presented) {
     activeCodec_.store(codec);
     if (decodeMode > 0) {
         activeDecodeMode_.store(decodeMode);
@@ -238,6 +240,11 @@ void VideoRender::markDecodedFrame(int codec, int width, int height, int decodeM
         }
     }
     uint64_t previous = decodedFrameCount_.fetch_add(1);
+    if (presented) {
+        renderedFrameCount_.fetch_add(1);
+        std::lock_guard<std::mutex> lock(mutex_);
+        hasFrame_ = true;
+    }
     if (previous == 0) {
         OH_LOG_INFO(LOG_APP, "First decoded video output codec=%{public}d", codec);
         DiagnosticLog::instance().append("I", "video",
@@ -284,14 +291,20 @@ void VideoRender::setSurfaceId(const std::string& surfaceId) {
 void VideoRender::prepareSurfaceRebind() {
     DiagnosticLog::instance().append("I", "surface", "layout_rebind_prepare");
     XComponentRender::instance().prepareSurfaceRebind();
-    SoftwareVP9Decoder::instance().release();
-    SoftwareVP8Decoder::instance().release();
-    SoftwareAV1Decoder::instance().release();
 }
 
 void VideoRender::rebindSurface(const std::string& surfaceId) {
     DiagnosticLog::instance().append("I", "surface", "layout_rebind_start");
-    releaseActiveDecoder();
+    {
+        std::lock_guard<std::mutex> lock(g_decoderMutex);
+        // CPU decoders own no native window; retain their reference frames.
+        if (g_activeDecoder != ActiveDecoder::SoftwareVP9 &&
+            g_activeDecoder != ActiveDecoder::SoftwareVP8 &&
+            g_activeDecoder != ActiveDecoder::SoftwareAV1) {
+            releaseEveryDecoder();
+            g_activeDecoder = ActiveDecoder::None;
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(surfaceMutex_);
         surfaceId_ = surfaceId;
@@ -309,7 +322,12 @@ std::string VideoRender::getSurfaceId() {
 
 void VideoRender::resetSession() {
     DiagnosticLog::instance().append("I", "video", "session_reset");
-    releaseActiveDecoderAsync();
+    // Called on the connection lifecycle worker. Drain old decoder callbacks
+    // before clearing session counters, including an already queued release.
+    while (g_releaseInProgress.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    releaseActiveDecoder();
     std::lock_guard<std::mutex> lock(mutex_);
     pendingFrames_.clear();
     frameWidth_ = 0;
@@ -319,8 +337,16 @@ void VideoRender::resetSession() {
     frameLength_ = 0;
     hasFrame_ = false;
     decodedFrameCount_.store(0);
+    receivedFrameCount_.store(0);
+    receivedByteCount_.store(0);
+    renderedFrameCount_.store(0);
     activeCodec_.store(0);
     activeDecodeMode_.store(0);
+}
+
+void VideoRender::restartDecoder() {
+    DiagnosticLog::instance().append("I", "video-recovery", "decoder_restart_requested");
+    releaseActiveDecoder();
 }
 
 void VideoRender::renderFrameNow(const uint8_t* data, int length, int width, int height, bool key, int64_t pts) {
@@ -380,7 +406,8 @@ void VideoRender::renderFrameNow(const uint8_t* data, int length, int width, int
         }
     } else if (length >= width * height * 4) {
         releaseActiveDecoder();
-        XComponentRender::instance().renderFrame(data, length, width, height);
+        const bool presented = XComponentRender::instance().renderFrame(data, length, width, height);
+        markDecodedFrame(3, width, height, 2, presented);
     } else if (isAnnexB(data, length)) {
         activeCodec_.store(1);
         ensureH264Decoder(window, width, height);

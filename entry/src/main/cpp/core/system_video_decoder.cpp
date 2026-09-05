@@ -367,6 +367,8 @@ void SystemVideoDecoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH
         return;
     }
     OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
+    VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
+        static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
     if (ret != AV_ERR_OK) {
         DiagnosticLog::instance().append("E", decoder->component_,
             "render_output_failed result=" + std::to_string(ret));
@@ -376,6 +378,4 @@ void SystemVideoDecoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH
     if (decoder->outputFrames_ == 1) {
         DiagnosticLog::instance().append("I", decoder->component_, "first_output_rendered");
     }
-    VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
-        static_cast<int>(decoder->decodeMode_));
 }

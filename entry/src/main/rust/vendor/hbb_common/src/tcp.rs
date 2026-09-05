@@ -86,16 +86,29 @@ impl FramedStream {
         local_addr: Option<SocketAddr>,
         ms_timeout: u64,
     ) -> ResultType<Self> {
-        for remote_addr in lookup_host(&remote_addr).await? {
-            let local = if let Some(addr) = local_addr {
-                addr
-            } else {
-                crate::config::Config::get_any_listen_addr(remote_addr.is_ipv4())
-            };
-            if let Ok(socket) = new_socket(local, true) {
-                if let Ok(Ok(stream)) =
-                    super::timeout(ms_timeout, socket.connect(remote_addr)).await
-                {
+        // One deadline covers DNS and all candidates. A broken first IPv6
+        // route must not prevent a working IPv4 address from being attempted.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms_timeout);
+        let mut addresses: Vec<_> = tokio::time::timeout_at(deadline, lookup_host(&remote_addr))
+            .await??.take(16).collect();
+        if let Some(first) = addresses.first() {
+            if let Some(other) = addresses.iter().position(|addr| addr.is_ipv4() != first.is_ipv4()) {
+                addresses.swap(1, other);
+            }
+        }
+        let mut attempts = futures::stream::FuturesUnordered::new();
+        for (index, address) in addresses.into_iter().enumerate() {
+            attempts.push(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(index as u64 * 250)).await;
+                let local = local_addr.unwrap_or_else(||
+                    crate::config::Config::get_any_listen_addr(address.is_ipv4()));
+                let socket = new_socket(local, true)?;
+                let stream = socket.connect(address).await?;
+                Ok::<_, anyhow::Error>(stream)
+            });
+        }
+        while let Ok(Some(result)) = tokio::time::timeout_at(deadline, attempts.next()).await {
+                if let Ok(stream) = result {
                     stream.set_nodelay(true).ok();
                     let addr = stream.local_addr()?;
                     return Ok(Self(
@@ -105,7 +118,6 @@ impl FramedStream {
                         0,
                     ));
                 }
-            }
         }
         bail!(format!("Failed to connect to {remote_addr}"));
     }

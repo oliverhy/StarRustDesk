@@ -1,4 +1,8 @@
 use std::collections::BTreeMap;
+#[cfg(test)]
+mod security_tests;
+#[cfg(test)]
+mod network_tests;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
@@ -9,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hbb_common::config::{CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT, RS_PUB_KEY};
+use hbb_common::config::{READ_TIMEOUT, RELAY_PORT, RENDEZVOUS_PORT, RENDEZVOUS_SERVERS, RS_PUB_KEY};
 use hbb_common::fs::{self, DataSource, JobType, TransferJob};
 use hbb_common::message_proto::{
     file_action, file_response, file_transfer_send_confirm_request, key_event, login_response,
@@ -101,8 +105,12 @@ static H265_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
 // otherwise the delayed video cursor and local cursor are both visible.
 static SHOW_REMOTE_CURSOR: AtomicBool = AtomicBool::new(true);
 
-const DIRECT_CONNECT_TIMEOUT: u64 = 6_000;
+const DIRECT_CONNECT_TIMEOUT: u64 = 3_000;
 const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 1_000;
+const SERVER_CONNECT_TIMEOUT: u64 = 8_000;
+const RENDEZVOUS_REPLY_TIMEOUT: u64 = 6_000;
+const CONNECTION_DEADLINE: Duration = Duration::from_secs(28);
+const ONLINE_QUERY_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy)]
 struct PerformanceConfig {
@@ -216,6 +224,7 @@ struct PeerOnlineState {
 struct PeerOnlineResult {
     peers: Vec<PeerOnlineState>,
     error: String,
+    server: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -361,6 +370,11 @@ pub extern "C" fn rust_set_video_codec_support(
 }
 
 #[no_mangle]
+pub extern "C" fn rust_get_build_id() -> *const c_char {
+    b"recovery-20260905-r3\0".as_ptr() as *const c_char
+}
+
+#[no_mangle]
 pub extern "C" fn rust_connect(
     peer_id: *const c_char,
     password: *const c_char,
@@ -369,6 +383,7 @@ pub extern "C" fn rust_connect(
     server_key: *const c_char,
     client_hwid: *const c_char,
     client_id: *const c_char,
+    force_relay: i32,
 ) -> i32 {
     if peer_id.is_null() {
         return -1;
@@ -377,6 +392,15 @@ pub extern "C" fn rust_connect(
     let peer = match cstr_to_string(peer_id) {
         Some(s) if !s.is_empty() => s,
         _ => return -1,
+    };
+    // Classify before contacting rendezvous. Malformed literals must not leak
+    // to a public server as IDs.
+    let direct_addr = match direct_peer_addr(&peer) {
+        Ok(address) => address,
+        Err(error) => {
+            emit_event(error);
+            return -23;
+        }
     };
     emit_event("rust_connect entered");
     let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
@@ -390,6 +414,7 @@ pub extern "C" fn rust_connect(
     let rv = cstr_to_string(rendezvous_server).unwrap_or_default();
     let relay_override = cstr_to_string(relay_server).unwrap_or_default();
     let key = cstr_to_string(server_key).unwrap_or_default();
+    let key = default_server_key(&rv, &key);
     let client_hwid = cstr_to_string(client_hwid).unwrap_or_default().into_bytes();
     let client_id = cstr_to_string(client_id).unwrap_or_else(|| "harmony-client".to_string());
 
@@ -416,7 +441,11 @@ pub extern "C" fn rust_connect(
 
     clear_clipboard_state();
 
-    let rendezvous_addr = with_port(if rv.is_empty() { "rustdesk.com" } else { &rv }, 21116);
+    let rendezvous_addr = if direct_addr.is_some() {
+        String::new()
+    } else {
+        default_rendezvous_addr(&rv)
+    };
     if let Ok(mut config) = CURRENT_CONNECTION_CONFIG.lock() {
         *config = Some(ConnectionConfig {
             peer: peer.clone(),
@@ -432,7 +461,27 @@ pub extern "C" fn rust_connect(
     let rt = runtime();
 
     rt.block_on(async {
-        let mut rv_conn = match connect_tcp(rendezvous_addr.clone(), CONNECT_TIMEOUT).await {
+      match await_connection_attempt(session_id, &SESSION_ID, CONNECTION_DEADLINE, async {
+        if let Some(address) = direct_addr {
+            // Upstream Client::_start selects the direct listener for literals,
+            // even with force_relay. No rendezvous identity exists on this route.
+            // This is never a fallback after an ID/signature validation failure.
+            let mut stream = match connect_ip_literal(address).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    emit_event(&format!("IP direct connection failed: {error}"));
+                    return -14;
+                }
+            };
+            if SESSION_ID.load(Ordering::SeqCst) != session_id { return -19; }
+            stream.set_send_timeout(5000);
+            CONNECTION_ROUTE.store(1, Ordering::SeqCst);
+            CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+            spawn_receive_loop(session_id, stream);
+            emit_event("IP direct connected; rendezvous bypassed; awaiting peer login challenge");
+            return 0;
+        }
+        let mut rv_conn = match connect_tcp(rendezvous_addr.clone(), SERVER_CONNECT_TIMEOUT).await {
             Ok(s) => {
                 emit_event("rendezvous tcp connected");
                 s
@@ -443,19 +492,7 @@ pub extern "C" fn rust_connect(
             }
         };
 
-        let mut req = RendezvousMessage::new();
-        req.set_punch_hole_request(PunchHoleRequest {
-            id: peer.clone(),
-            // RustDesk's rendezvous token is the signed-in account/server
-            // access token, not the remote-control password. This client does
-            // not currently expose account login, so keep it empty.
-            token: String::new(),
-            nat_type: NatType::UNKNOWN_NAT.into(),
-            licence_key: key.clone(),
-            conn_type: ConnType::DEFAULT_CONN.into(),
-            version: "1.2.0".to_string(),
-            ..Default::default()
-        });
+        let req = punch_hole_request(&peer, &key, ConnType::DEFAULT_CONN, force_relay != 0);
 
         if rv_conn.send(&req).await.is_err() {
             emit_event("punch request send failed");
@@ -464,7 +501,7 @@ pub extern "C" fn rust_connect(
         emit_event("punch request sent");
 
         let local_addr = rv_conn.local_addr();
-        let response = match next_rendezvous(&mut rv_conn, READ_TIMEOUT).await {
+        let response = match next_rendezvous(&mut rv_conn, RENDEZVOUS_REPLY_TIMEOUT).await {
             Some(msg) => {
                 emit_event("rendezvous response received");
                 msg
@@ -599,6 +636,7 @@ pub extern "C" fn rust_connect(
         // same-intranet path where the peer address is a LAN endpoint.
         drop(rv_conn);
 
+        let peer_addr = if force_relay != 0 { None } else { peer_addr };
         let mut stream = if let Some(addr) = peer_addr {
             let direct_timeout = if is_local {
                 LOCAL_DIRECT_CONNECT_TIMEOUT
@@ -608,7 +646,7 @@ pub extern "C" fn rust_connect(
             emit_event(&format!(
                 "try direct peer addr={addr} local={local_addr} is_local={is_local} timeout={direct_timeout}"
             ));
-            match connect_tcp_local(addr, Some(local_addr), direct_timeout).await {
+            match connect_direct_peer(addr, local_addr, direct_timeout).await {
                 Ok(s) => {
                     emit_event("direct peer connected");
                     CONNECTION_ROUTE.store(1, Ordering::SeqCst);
@@ -688,6 +726,17 @@ pub extern "C" fn rust_connect(
         spawn_receive_loop(session_id, stream);
         emit_event("receive loop spawned");
         0
+        }).await {
+            Ok(result) => result,
+            Err(ConnectionAttemptError::Cancelled) => {
+                emit_event(&format!("connect cancelled session={session_id}"));
+                -19
+            }
+            Err(ConnectionAttemptError::Deadline) => {
+                emit_event(&format!("connect deadline exceeded session={session_id}"));
+                -20
+            }
+      }
     })
 }
 
@@ -1379,7 +1428,15 @@ async fn run_file_session(
     receiver: mpsc::Receiver<QueuedPeerCommand>,
 ) {
     emit_event("file-session:connecting");
-    let mut stream = match connect_file_stream(&config).await {
+    let connection = await_connection_attempt(session_id, &SESSION_ID, CONNECTION_DEADLINE,
+        connect_file_stream(&config)).await;
+    let result = match connection {
+        Err(ConnectionAttemptError::Cancelled) => return,
+        Err(ConnectionAttemptError::Deadline) => Err("file connection deadline exceeded".to_string()),
+        Ok(result) => result,
+    };
+    if SESSION_ID.load(Ordering::SeqCst) != session_id { return; }
+    let mut stream = match result {
         Ok(stream) => stream,
         Err(error) => {
             set_remote_directory_result(RemoteDirectoryResult {
@@ -1831,26 +1888,36 @@ pub extern "C" fn rust_query_peer_online_states(
         return 1;
     }
 
-    let server = cstr_to_string(rendezvous_server).unwrap_or_default();
+    let server = cstr_to_string(rendezvous_server).unwrap_or_default().trim().to_string();
     // OnlineRequest is handled by hbbs on the auxiliary NAT-test port, which
     // is one lower than the normal rendezvous port (21115 for the default
     // 21116 service). Sending it to the main port makes hbbs close the stream
     // without an OnlineResponse.
     let rendezvous_addr = online_query_addr(&server);
     let requester_id = cstr_to_string(requester_id).unwrap_or_else(|| "harmony-client".to_string());
-    if let Ok(mut guard) = PEER_ONLINE_RESULT.lock() {
-        guard.clear();
+    if let Ok(guard) = PEER_ONLINE_RESULT.lock() {
+        if !guard.is_empty() {
+            PEER_ONLINE_QUERY_ACTIVE.store(false, Ordering::SeqCst);
+            return 1;
+        }
     }
     emit_event(&format!("online state query started count={}", peers.len()));
 
     runtime().spawn(async move {
-        let result = query_peer_online_states(peers, rendezvous_addr, requester_id).await;
+        let started = Instant::now();
+        let result = match tokio::time::timeout(ONLINE_QUERY_DEADLINE,
+            query_peer_online_states(peers, rendezvous_addr, requester_id)).await {
+            Ok(result) => result,
+            Err(_) => Err("online query deadline exceeded (including DNS)".to_string()),
+        };
         let payload = match result {
             Ok(states) => {
-                emit_event(&format!("online state query completed count={}", states.len()));
+                emit_event(&format!("online state query completed count={} online={} elapsed_ms={}",
+                    states.len(), states.iter().filter(|peer| peer.online).count(), started.elapsed().as_millis()));
                 PeerOnlineResult {
                     peers: states,
                     error: String::new(),
+                    server: server.clone(),
                 }
             }
             Err(error) => {
@@ -1858,6 +1925,7 @@ pub extern "C" fn rust_query_peer_online_states(
                 PeerOnlineResult {
                     peers: Vec::new(),
                     error,
+                    server,
                 }
             }
         };
@@ -1876,7 +1944,13 @@ async fn query_peer_online_states(
     rendezvous_addr: String,
     requester_id: String,
 ) -> Result<Vec<PeerOnlineState>, String> {
-    let mut connection = connect_tcp(rendezvous_addr, CONNECT_TIMEOUT)
+    // hbbs knows IDs, not IP listeners. Omit literals so callers retain an
+    // unknown status instead of leaking local addresses or inventing offline.
+    let peers: Vec<_> = peers.into_iter()
+        .filter(|peer| matches!(direct_peer_addr(peer), Ok(None)))
+        .collect();
+    if peers.is_empty() { return Ok(Vec::new()); }
+    let mut connection = connect_tcp(rendezvous_addr, SERVER_CONNECT_TIMEOUT)
         .await
         .map_err(|error| format!("connect failed: {error}"))?;
     let mut request = RendezvousMessage::new();
@@ -1889,7 +1963,7 @@ async fn query_peer_online_states(
         .send(&request)
         .await
         .map_err(|error| format!("send failed: {error}"))?;
-    let response = next_rendezvous(&mut connection, READ_TIMEOUT)
+    let response = next_rendezvous(&mut connection, RENDEZVOUS_REPLY_TIMEOUT)
         .await
         .ok_or_else(|| "response timeout".to_string())?;
     let online = match response.union {
@@ -1897,6 +1971,9 @@ async fn query_peer_online_states(
         _ => return Err("unexpected response".to_string()),
     };
     let states = online.states.as_ref();
+    if states.len() < (peers.len() + 7) / 8 {
+        return Err("truncated online response".to_string());
+    }
     Ok(peers
         .into_iter()
         .enumerate()
@@ -1954,6 +2031,86 @@ fn emit_event(message: &str) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectionAttemptError { Cancelled, Deadline }
+
+async fn await_connection_attempt<T>(
+    session_id: u64,
+    current_session: &AtomicU64,
+    deadline: Duration,
+    attempt: impl std::future::Future<Output = T>,
+) -> Result<T, ConnectionAttemptError> {
+    tokio::select! {
+        biased;
+        _ = async {
+            while current_session.load(Ordering::SeqCst) == session_id {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => Err(ConnectionAttemptError::Cancelled),
+        _ = tokio::time::sleep(deadline) => Err(ConnectionAttemptError::Deadline),
+        result = attempt => Ok(result),
+    }
+}
+
+fn direct_peer_addr(peer: &str) -> Result<Option<SocketAddr>, &'static str> {
+    let peer = peer.trim();
+    let address = peer.parse::<SocketAddr>().ok().or_else(|| {
+        // Parse bare IPv6 as a whole: a trailing numeric component is not a
+        // port. IPv6 with a port must use [address]:port.
+        let ip = peer.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(peer);
+        ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, (RELAY_PORT + 1) as u16))
+    });
+    if let Some(address) = address {
+        if address.port() == 0 { return Err("invalid direct IP port"); }
+        return Ok(Some(address));
+    }
+    if peer.is_empty() || peer.contains([':', '[', ']'])
+        || (peer.contains('.') && peer.chars().all(|c| c.is_ascii_digit() || c == '.')) {
+        return Err("invalid direct IP address or port");
+    }
+    Ok(None)
+}
+
+async fn connect_ip_literal(address: SocketAddr) -> hbb_common::ResultType<Stream> {
+    // Match upstream's IP-listener protocol: no PunchHoleRequest, no empty
+    // compatibility handshake, no signed-ID exchange. The receive loop handles
+    // the listener's Hash/password challenge normally.
+    tokio::time::timeout(Duration::from_millis(SERVER_CONNECT_TIMEOUT),
+        connect_tcp_local(address, None, SERVER_CONNECT_TIMEOUT)).await?
+}
+
+fn default_server_key(server: &str, key: &str) -> String {
+    // Upstream common::get_key supplies RS_PUB_KEY for public service access.
+    // Never replace an explicit key (even invalid: validation must fail closed)
+    // or inject a public key into a custom self-hosted configuration.
+    if server.trim().is_empty() && key.is_empty() { RS_PUB_KEY.to_string() } else { key.to_string() }
+}
+
+fn punch_hole_request(peer: &str, key: &str, conn_type: ConnType, force_relay: bool) -> RendezvousMessage {
+    // Deliberately no password parameter. The remote password belongs only to
+    // peer login; token is an account access token, not a password or server key.
+    let mut request = RendezvousMessage::new();
+    request.set_punch_hole_request(PunchHoleRequest {
+        id: peer.to_string(),
+        token: String::new(),
+        nat_type: NatType::UNKNOWN_NAT.into(),
+        licence_key: key.to_string(),
+        conn_type: conn_type.into(),
+        force_relay,
+        version: "1.2.0".to_string(),
+        ..Default::default()
+    });
+    request
+}
+
+fn default_rendezvous_addr(server: &str) -> String {
+    // Public bootstrap shipped by upstream hbb_common (config.rs). Its full
+    // desktop client can also use configured/latency-selected servers; this
+    // standalone core has no discovery mediator and uses the shipped bootstrap.
+    // Never redirect an explicitly configured self-hosted server to public.
+    with_port(if server.trim().is_empty() { RENDEZVOUS_SERVERS[0] } else { server }, RENDEZVOUS_PORT)
+}
+
 fn with_port(host: &str, port: i32) -> String {
     let host = host.trim();
     if host.is_empty() {
@@ -1982,14 +2139,7 @@ fn with_port(host: &str, port: i32) -> String {
 }
 
 fn online_query_addr(server: &str) -> String {
-    let rendezvous_addr = with_port(
-        if server.trim().is_empty() {
-            "rustdesk.com"
-        } else {
-            server
-        },
-        21116,
-    );
+    let rendezvous_addr = default_rendezvous_addr(server);
     if let Ok(mut addr) = rendezvous_addr.parse::<SocketAddr>() {
         if addr.port() > 1 {
             addr.set_port(addr.port() - 1);
@@ -2047,6 +2197,8 @@ fn should_skip_rendezvous_message(union: &Option<rendezvous_message::Union>) -> 
 }
 
 async fn next_rendezvous(conn: &mut Stream, timeout: u64) -> Option<RendezvousMessage> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
+    tokio::time::timeout_at(deadline, async {
     while let Some(Ok(bytes)) = conn.next_timeout(timeout).await {
         match RendezvousMessage::parse_from_bytes(&bytes) {
             Ok(msg) => {
@@ -2067,25 +2219,40 @@ async fn next_rendezvous(conn: &mut Stream, timeout: u64) -> Option<RendezvousMe
         }
     }
     None
+    }).await.ok().flatten()
+}
+
+async fn connect_direct_peer(addr: SocketAddr, local: SocketAddr, timeout: u64)
+    -> hbb_common::ResultType<Stream> {
+    // Reuse the punch-hole port, but don't force IPv4 peers through an
+    // unrelated IPv6 socket and external nip.io DNS on dual-stack Wi-Fi.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
+    let attempt = async {
+        if addr.is_ipv4() != local.is_ipv4() {
+            let mut matching = hbb_common::config::Config::get_any_listen_addr(addr.is_ipv4());
+            matching.set_port(local.port());
+            if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_millis(timeout / 2),
+                connect_tcp_local(addr, Some(matching), timeout / 2)).await {
+                emit_event("direct peer address-family fallback connected");
+                return Ok(stream);
+            }
+        }
+        connect_tcp_local(addr, Some(local), timeout).await
+    };
+    tokio::time::timeout_at(deadline, attempt).await?
 }
 
 async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String> {
-    let mut rendezvous = connect_tcp(config.rendezvous_addr.clone(), CONNECT_TIMEOUT)
+    if let Some(address) = direct_peer_addr(&config.peer).map_err(str::to_string)? {
+        return connect_ip_literal(address).await.map_err(|error| error.to_string());
+    }
+    let mut rendezvous = connect_tcp(config.rendezvous_addr.clone(), SERVER_CONNECT_TIMEOUT)
         .await
         .map_err(|error| error.to_string())?;
-    let mut request = RendezvousMessage::new();
-    request.set_punch_hole_request(PunchHoleRequest {
-        id: config.peer.clone(),
-        token: String::new(),
-        nat_type: NatType::UNKNOWN_NAT.into(),
-        licence_key: config.key.clone(),
-        conn_type: ConnType::FILE_TRANSFER.into(),
-        version: "1.2.0".to_string(),
-        ..Default::default()
-    });
+    let request = punch_hole_request(&config.peer, &config.key, ConnType::FILE_TRANSFER, false);
     rendezvous.send(&request).await.map_err(|error| error.to_string())?;
     let local_addr = rendezvous.local_addr();
-    let response = next_rendezvous(&mut rendezvous, READ_TIMEOUT)
+    let response = next_rendezvous(&mut rendezvous, RENDEZVOUS_REPLY_TIMEOUT)
         .await
         .ok_or_else(|| "文件传输连接超时".to_string())?;
     let mut peer_addr = None;
@@ -2152,7 +2319,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         } else {
             DIRECT_CONNECT_TIMEOUT
         };
-        match connect_tcp_local(address, Some(local_addr), direct_timeout).await {
+        match connect_direct_peer(address, local_addr, direct_timeout).await {
             Ok(stream) => stream,
             Err(_) if !relay.is_empty() => request_relay_with_type(
                 &config.peer,
@@ -2223,7 +2390,14 @@ async fn request_relay_with_type(
         // hbbs pairs every retry by a fresh source socket and UUID. Reusing the
         // first rendezvous socket can leave a valid peer waiting on another
         // relay slot, which is why the official clients reconnect per attempt.
-        let mut rv_conn = connect_tcp(rendezvous_server.to_string(), CONNECT_TIMEOUT).await?;
+        let mut rv_conn = match connect_tcp(rendezvous_server.to_string(), SERVER_CONNECT_TIMEOUT).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                last_error = error.to_string();
+                emit_event(&format!("relay request attempt={attempt}/3 tcp_failed"));
+                continue;
+            }
+        };
         if !key.is_empty() && !token.is_empty() {
             secure_rendezvous_connection(&mut rv_conn, key).await?;
         }
@@ -2247,7 +2421,7 @@ async fn request_relay_with_type(
         });
         rv_conn.send(&req).await?;
 
-        match next_rendezvous(&mut rv_conn, CONNECT_TIMEOUT).await {
+        match next_rendezvous(&mut rv_conn, RENDEZVOUS_REPLY_TIMEOUT).await {
             Some(msg) => match msg.union {
                 Some(rendezvous_message::Union::RelayResponse(resp))
                     if resp.refuse_reason.is_empty() =>
@@ -2345,11 +2519,17 @@ async fn create_relay_with_type(
     ipv4: bool,
     conn_type: ConnType,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
-    let mut relay_conn = connect_tcp(
-        ipv4_to_ipv6(check_port(relay_server.to_string(), RELAY_PORT), ipv4),
-        CONNECT_TIMEOUT,
-    )
-    .await?;
+    let relay_addr = check_port(relay_server.to_string(), RELAY_PORT);
+    let mut relay_conn = match connect_tcp(relay_addr.clone(), SERVER_CONNECT_TIMEOUT).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            let fallback = ipv4_to_ipv6(relay_addr.clone(), ipv4);
+            if fallback == relay_addr { return Err(error); }
+            emit_event("relay address-family fallback started");
+            connect_tcp(fallback, SERVER_CONNECT_TIMEOUT).await?
+        }
+    };
+    relay_conn.set_send_timeout(5000);
 
     let mut create = RendezvousMessage::new();
     create.set_request_relay(RequestRelay {
@@ -2370,6 +2550,10 @@ async fn secure_peer_connection(
     conn: &mut Stream,
 ) -> Result<(), hbb_common::anyhow::Error> {
     let rs_pk = get_rs_pk(if key.is_empty() { RS_PUB_KEY } else { key });
+    if rs_pk.is_none() {
+        emit_event("secure peer: rejected reason=invalid_server_key");
+        hbb_common::bail!("invalid server key");
+    }
     let mut sign_pk = None;
 
     if let (Some(rs_pk), false) = (rs_pk, signed_id_pk.is_empty()) {
@@ -2377,17 +2561,19 @@ async fn secure_peer_connection(
             Ok((id, pk)) if id == peer_id => {
                 sign_pk = Some(sign::PublicKey(pk));
             }
-            Ok((id, _)) => {
-                emit_event(&format!("secure peer: rendezvous signed id mismatch id={id}"));
+            Ok((_, _)) => {
+                emit_event("secure peer: rejected reason=rendezvous_id_mismatch");
+                hbb_common::bail!("rendezvous signed id mismatch");
             }
-            Err(e) => {
-                emit_event(&format!("secure peer: invalid rendezvous signed id: {e}"));
+            Err(_) => {
+                emit_event("secure peer: rejected reason=invalid_rendezvous_signature");
+                hbb_common::bail!("invalid rendezvous signature");
             }
         }
     }
 
     let Some(sign_pk) = sign_pk else {
-        emit_event("secure peer: unavailable; use non-secure connection");
+        emit_event("secure peer: signature_unavailable; use non-secure connection");
         // Keep compatibility with peers that are waiting for the client's
         // first handshake message before continuing without encryption.
         conn.send(&PeerMessage::new()).await?;
@@ -2401,18 +2587,14 @@ async fn secure_peer_connection(
 
     let msg = match PeerMessage::parse_from_bytes(&bytes) {
         Ok(msg) => msg,
-        Err(e) => {
-            emit_event(&format!(
-                "secure peer: invalid handshake message: {e}; use non-secure connection"
-            ));
-            conn.send(&PeerMessage::new()).await?;
-            return Ok(());
+        Err(_) => {
+            emit_event("secure peer: rejected reason=invalid_handshake_message");
+            hbb_common::bail!("invalid handshake message");
         }
     };
     let Some(message::Union::SignedId(signed_id)) = msg.union else {
-        emit_event("secure peer: first peer msg not SignedId; use non-secure connection");
-        conn.send(&PeerMessage::new()).await?;
-        return Ok(());
+        emit_event("secure peer: rejected reason=expected_signed_id");
+        hbb_common::bail!("expected signed id");
     };
 
     match decode_id_pk(&signed_id.id, &sign_pk) {
@@ -2428,19 +2610,13 @@ async fn secure_peer_connection(
             conn.set_key(key);
             emit_event("secure peer: encrypted stream enabled");
         }
-        Ok((id, _)) => {
-            emit_event(&format!(
-                "secure peer: peer signed id mismatch id={id}; use non-secure connection"
-            ));
-            conn.send(&PeerMessage::new()).await?;
+        Ok((_, _)) => {
+            emit_event("secure peer: rejected reason=peer_id_mismatch");
+            hbb_common::bail!("peer signed id mismatch");
         }
-        Err(e) => {
-            emit_event(&format!(
-                "secure peer: invalid peer signed id: {e}; use non-secure connection"
-            ));
-            let mut msg_out = PeerMessage::new();
-            msg_out.set_public_key(PublicKey::new());
-            conn.send(&msg_out).await?;
+        Err(_) => {
+            emit_event("secure peer: rejected reason=invalid_peer_signature");
+            hbb_common::bail!("invalid peer signature");
         }
     }
     Ok(())

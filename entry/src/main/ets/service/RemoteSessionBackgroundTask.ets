@@ -5,6 +5,15 @@ import { ConnectionStatus } from '../model/ConnectionModel'
 import { RemoteAudioSession } from './RemoteAudioSession'
 import { RustDeskNapi } from './RustDeskNapi'
 
+class RemoteTaskRequestError extends Error {
+  code: number
+
+  constructor(error: BusinessError) {
+    super(error.message)
+    this.code = error.code
+  }
+}
+
 enum RemoteTaskState {
   STOPPED = 'stopped',
   STARTING = 'starting',
@@ -26,36 +35,47 @@ export class RemoteSessionBackgroundTask {
   private static backgroundVideoApplied: boolean = false
   private static taskId: number = -1
   private static currentSignature: string = ''
+  private static selectedModeDescription: string = ''
+  private static videoBroadcastRejected: boolean = false
   private static operationInFlight: boolean = false
   private static reconcilePending: boolean = false
   private static listenersRegistered: boolean = false
   private static userSuppressed: boolean = false
   private static retryAfter: number = 0
+  private static retryTimer: number = -1
+  private static cancellationVersion: number = 0
+  private static taskSuspended: boolean = false
 
   private static cancelCallback = (info: backgroundTaskManager.ContinuousTaskCancelInfo): void => {
     RemoteSessionBackgroundTask.handleCancel(info)
   }
 
   private static suspendCallback = (info: backgroundTaskManager.ContinuousTaskSuspendInfo): void => {
-    if (RemoteSessionBackgroundTask.taskId >= 0 &&
-      info.continuousTaskId !== RemoteSessionBackgroundTask.taskId) {
+    if (!RemoteSessionBackgroundTask.acceptsCallback(info.continuousTaskId)) {
       return
     }
-    RemoteSessionBackgroundTask.state = info.suspendState ?
-      RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+    RemoteSessionBackgroundTask.taskId = info.continuousTaskId
+    RemoteSessionBackgroundTask.taskSuspended = info.suspendState
+    if (RemoteSessionBackgroundTask.state !== RemoteTaskState.STOPPING) {
+      RemoteSessionBackgroundTask.state = info.suspendState ?
+        RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+    }
     RustDeskNapi.appendDiagnosticLog('background-task',
       `remote_session_keep_alive_suspend id=${info.continuousTaskId} ` +
-      `suspended=${info.suspendState} reason=${info.suspendReason}`)
+      `suspended=${info.suspendState} reason=${info.suspendReason} state=${RemoteSessionBackgroundTask.state}`)
   }
 
   private static activeCallback = (info: backgroundTaskManager.ContinuousTaskActiveInfo): void => {
-    if (RemoteSessionBackgroundTask.taskId >= 0 && info.id !== RemoteSessionBackgroundTask.taskId) {
+    if (!RemoteSessionBackgroundTask.acceptsCallback(info.id)) {
       return
     }
-    RemoteSessionBackgroundTask.state = RemoteTaskState.ACTIVE
+    RemoteSessionBackgroundTask.taskSuspended = false
+    if (RemoteSessionBackgroundTask.state !== RemoteTaskState.STOPPING) {
+      RemoteSessionBackgroundTask.state = RemoteTaskState.ACTIVE
+    }
     RemoteSessionBackgroundTask.taskId = info.id
     RustDeskNapi.appendDiagnosticLog('background-task',
-      `remote_session_keep_alive_active id=${info.id}`)
+      `remote_session_keep_alive_active id=${info.id} state=${RemoteSessionBackgroundTask.state}`)
   }
 
   static initialize(context: common.UIAbilityContext): void {
@@ -69,7 +89,10 @@ export class RemoteSessionBackgroundTask {
       status === ConnectionStatus.CONNECTED || status === ConnectionStatus.WAITING_2FA
     if (desired && !RemoteSessionBackgroundTask.sessionDesired) {
       RemoteSessionBackgroundTask.userSuppressed = false
-      RemoteSessionBackgroundTask.retryAfter = 0
+      RemoteSessionBackgroundTask.clearRetry()
+    }
+    if (!desired && RemoteSessionBackgroundTask.sessionDesired) {
+      RemoteSessionBackgroundTask.clearRetry()
     }
     RemoteSessionBackgroundTask.sessionDesired = desired
     if (!desired) {
@@ -92,6 +115,10 @@ export class RemoteSessionBackgroundTask {
       `app_background=${background} reduce_video=${reduceVideo}`)
   }
 
+  static isAppBackground(): boolean {
+    return RemoteSessionBackgroundTask.appBackground
+  }
+
   static setDataTransferActive(active: boolean): void {
     if (RemoteSessionBackgroundTask.dataTransferActive === active) {
       return
@@ -112,6 +139,7 @@ export class RemoteSessionBackgroundTask {
   }
 
   static stop(): void {
+    RemoteSessionBackgroundTask.clearRetry()
     RemoteSessionBackgroundTask.sessionDesired = false
     RemoteSessionBackgroundTask.dataTransferActive = false
     RemoteSessionBackgroundTask.audioPlaybackActive = false
@@ -174,11 +202,19 @@ export class RemoteSessionBackgroundTask {
     RemoteSessionBackgroundTask.listenersRegistered = false
   }
 
+  private static acceptsCallback(id: number): boolean {
+    return id >= 0 && (RemoteSessionBackgroundTask.taskId >= 0 ?
+      id === RemoteSessionBackgroundTask.taskId : RemoteSessionBackgroundTask.state === RemoteTaskState.STARTING)
+  }
+
   private static handleCancel(info: backgroundTaskManager.ContinuousTaskCancelInfo): void {
-    if (RemoteSessionBackgroundTask.taskId >= 0 && info.id !== RemoteSessionBackgroundTask.taskId) {
+    if (!RemoteSessionBackgroundTask.acceptsCallback(info.id)) {
       return
     }
+    RemoteSessionBackgroundTask.cancellationVersion++
+    RemoteSessionBackgroundTask.clearRetry()
     RemoteSessionBackgroundTask.state = RemoteTaskState.CANCELLED
+    RemoteSessionBackgroundTask.taskSuspended = false
     RemoteSessionBackgroundTask.taskId = -1
     RemoteSessionBackgroundTask.currentSignature = ''
     RustDeskNapi.appendDiagnosticLog('background-task',
@@ -197,8 +233,27 @@ export class RemoteSessionBackgroundTask {
       RemoteSessionBackgroundTask.audioPlaybackActive = false
       RemoteAudioSession.setActive(false)
     }
-    RemoteSessionBackgroundTask.retryAfter = Date.now() + 30000
+    if (RemoteSessionBackgroundTask.sessionDesired) RemoteSessionBackgroundTask.setRetry()
     RemoteSessionBackgroundTask.scheduleReconcile()
+  }
+
+  private static clearRetry(): void {
+    if (RemoteSessionBackgroundTask.retryTimer !== -1) {
+      clearTimeout(RemoteSessionBackgroundTask.retryTimer)
+      RemoteSessionBackgroundTask.retryTimer = -1
+    }
+    RemoteSessionBackgroundTask.retryAfter = 0
+  }
+
+  private static setRetry(): void {
+    RemoteSessionBackgroundTask.clearRetry()
+    RemoteSessionBackgroundTask.retryAfter = Date.now() + 30000
+    RustDeskNapi.appendDiagnosticLog('background-task',
+      `continuous_task_backoff state=${RemoteSessionBackgroundTask.state} retry_after=${RemoteSessionBackgroundTask.retryAfter}`)
+    RemoteSessionBackgroundTask.retryTimer = setTimeout(() => {
+      RemoteSessionBackgroundTask.retryTimer = -1
+      RemoteSessionBackgroundTask.scheduleReconcile()
+    }, 30000)
   }
 
   private static desiredSignature(): string {
@@ -215,29 +270,32 @@ export class RemoteSessionBackgroundTask {
     if (RemoteSessionBackgroundTask.dataTransferActive) {
       modes.push('dataTransfer')
     }
+    RemoteSessionBackgroundTask.selectedModeDescription = `legacy:${modes.join(',')}`
     return modes
   }
 
-  private static createRequest(notificationAgent: WantAgent, update: boolean):
+  private static createRequest(notificationAgent: WantAgent, update: boolean, videoBroadcast: boolean = false):
     backgroundTaskManager.ContinuousTaskRequest {
     let request = new backgroundTaskManager.ContinuousTaskRequest()
     let modes: backgroundTaskManager.BackgroundTaskMode[] = [
       backgroundTaskManager.BackgroundTaskMode.MODE_MULTI_DEVICE_CONNECTION,
     ]
-    let submodes: backgroundTaskManager.BackgroundTaskSubmode[] = []
-    if (deviceInfo.sdkApiVersion >= 22) {
-      submodes.push(backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_VIDEO_BROADCAST_NORMAL_NOTIFICATION)
-    }
+    let submodes: backgroundTaskManager.BackgroundTaskSubmode[] = [
+      videoBroadcast ? backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_VIDEO_BROADCAST_NORMAL_NOTIFICATION :
+        backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_NORMAL_NOTIFICATION,
+    ]
     if (RemoteSessionBackgroundTask.audioPlaybackActive) {
       if (deviceInfo.sdkApiVersion >= 22) {
         modes.push(backgroundTaskManager.BackgroundTaskMode.MODE_AV_PLAYBACK_AND_RECORD)
         submodes.push(backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_AVSESSION_AUDIO_PLAYBACK)
       } else {
         modes.push(backgroundTaskManager.BackgroundTaskMode.MODE_AUDIO_PLAYBACK)
+        submodes.push(backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_NORMAL_NOTIFICATION)
       }
     }
     if (RemoteSessionBackgroundTask.dataTransferActive) {
       modes.push(backgroundTaskManager.BackgroundTaskMode.MODE_DATA_TRANSFER)
+      submodes.push(backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_LIVE_VIEW_NOTIFICATION)
     }
     request.backgroundTaskModes = modes
     request.backgroundTaskSubmodes = submodes
@@ -247,6 +305,79 @@ export class RemoteSessionBackgroundTask {
       request.continuousTaskId = RemoteSessionBackgroundTask.taskId
     }
     return request
+  }
+
+  private static supportedRequest(notificationAgent: WantAgent, update: boolean):
+    backgroundTaskManager.ContinuousTaskRequest | undefined {
+    // Some OS versions map video-broadcast to a different parent mode than the
+    // SDK declaration. Probe safely; never request privileged special modes.
+    const variants: boolean[] = deviceInfo.sdkApiVersion >= 22 &&
+      !RemoteSessionBackgroundTask.videoBroadcastRejected ? [true, false] : [false]
+    for (const videoBroadcast of variants) {
+      try {
+        const request: backgroundTaskManager.ContinuousTaskRequest =
+          RemoteSessionBackgroundTask.createRequest(notificationAgent, update, videoBroadcast)
+        if (request.isModeSupported()) {
+          RemoteSessionBackgroundTask.selectedModeDescription =
+            `modes=${request.backgroundTaskModes.join(',')};submodes=${request.backgroundTaskSubmodes.join(',')}`
+          RustDeskNapi.appendDiagnosticLog('background-task',
+            `continuous_task_request_selected video_broadcast=${videoBroadcast} ` +
+            `modes=${request.backgroundTaskModes.join(',')} submodes=${request.backgroundTaskSubmodes.join(',')}`)
+          return request
+        }
+        RustDeskNapi.appendDiagnosticLog('background-task',
+          `continuous_task_mode_unsupported video_broadcast=${videoBroadcast}`)
+        if (videoBroadcast) RemoteSessionBackgroundTask.videoBroadcastRejected = true
+      } catch (error) {
+        const businessError: BusinessError = error as BusinessError
+        if (businessError.code !== 9800005) {
+          throw new RemoteTaskRequestError(businessError)
+        }
+        if (videoBroadcast) RemoteSessionBackgroundTask.videoBroadcastRejected = true
+        RustDeskNapi.appendDiagnosticLog('background-task',
+          `continuous_task_mode_rejected video_broadcast=${videoBroadcast} code=${businessError.code}`)
+      }
+    }
+    return undefined
+  }
+
+  private static async runCompatibleRequest(context: common.UIAbilityContext, notificationAgent: WantAgent,
+    update: boolean): Promise<backgroundTaskManager.ContinuousTaskNotification> {
+    const cancellationVersion: number = RemoteSessionBackgroundTask.cancellationVersion
+    const operation: string = update ? 'update' : 'start'
+    if (deviceInfo.sdkApiVersion >= 21) {
+      let request: backgroundTaskManager.ContinuousTaskRequest | undefined =
+        RemoteSessionBackgroundTask.supportedRequest(notificationAgent, update)
+      while (request !== undefined) {
+        try {
+          return update ? await backgroundTaskManager.updateBackgroundRunning(context, request) :
+            await backgroundTaskManager.startBackgroundRunning(context, request)
+        } catch (error) {
+          const businessError: BusinessError = error as BusinessError
+          RustDeskNapi.appendDiagnosticLog('background-task',
+            `continuous_task_${operation}_rejected code=${businessError.code} ` +
+            `actual=${RemoteSessionBackgroundTask.selectedModeDescription}`)
+          if (businessError.code !== 9800005 ||
+            cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion ||
+            !RemoteSessionBackgroundTask.sessionDesired || RemoteSessionBackgroundTask.userSuppressed) {
+            throw new RemoteTaskRequestError(businessError)
+          }
+          if (!request.backgroundTaskSubmodes.includes(
+            backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_VIDEO_BROADCAST_NORMAL_NOTIFICATION)) {
+            break
+          }
+          // A successful capability probe does not guarantee runtime acceptance.
+          // Retry the normal multi-device request before considering the legacy API.
+          RemoteSessionBackgroundTask.videoBroadcastRejected = true
+          RustDeskNapi.appendDiagnosticLog('background-task', `continuous_task_${operation}_fallback=normal`)
+          request = RemoteSessionBackgroundTask.supportedRequest(notificationAgent, update)
+        }
+      }
+    }
+    RustDeskNapi.appendDiagnosticLog('background-task', `continuous_task_${operation}_fallback=legacy`)
+    return update ? await backgroundTaskManager.updateBackgroundRunning(
+      context, RemoteSessionBackgroundTask.legacyModes()) : await backgroundTaskManager.startBackgroundRunning(
+      context, RemoteSessionBackgroundTask.legacyModes(), notificationAgent)
   }
 
   private static scheduleReconcile(): void {
@@ -275,6 +406,9 @@ export class RemoteSessionBackgroundTask {
   private static async reconcileOnce(): Promise<void> {
     const context: common.UIAbilityContext | undefined = RemoteSessionBackgroundTask.context
     if (context === undefined) {
+      return
+    }
+    if (Date.now() < RemoteSessionBackgroundTask.retryAfter) {
       return
     }
     if (!RemoteSessionBackgroundTask.sessionDesired) {
@@ -313,87 +447,99 @@ export class RemoteSessionBackgroundTask {
   }
 
   private static async startInternal(context: common.UIAbilityContext, signature: string): Promise<void> {
+    const cancellationVersion: number = RemoteSessionBackgroundTask.cancellationVersion
     RemoteSessionBackgroundTask.state = RemoteTaskState.STARTING
+    RemoteSessionBackgroundTask.taskSuspended = false
     try {
       const notificationAgent: WantAgent = await RemoteSessionBackgroundTask.createWantAgent(context)
-      let notification: backgroundTaskManager.ContinuousTaskNotification
-      if (deviceInfo.sdkApiVersion >= 21) {
-        const request: backgroundTaskManager.ContinuousTaskRequest =
-          RemoteSessionBackgroundTask.createRequest(notificationAgent, false)
-        if (request.isModeSupported()) {
-          notification = await backgroundTaskManager.startBackgroundRunning(context, request)
-        } else {
-          RustDeskNapi.appendDiagnosticLog('background-task',
-            'continuous_task_request_unsupported_fallback=legacy')
-          notification = await backgroundTaskManager.startBackgroundRunning(
-            context, RemoteSessionBackgroundTask.legacyModes(), notificationAgent)
+      if (!RemoteSessionBackgroundTask.sessionDesired ||
+        cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) {
+        if (RemoteSessionBackgroundTask.state === RemoteTaskState.STARTING) {
+          RemoteSessionBackgroundTask.state = RemoteTaskState.STOPPED
         }
-      } else {
-        notification = await backgroundTaskManager.startBackgroundRunning(
-          context, RemoteSessionBackgroundTask.legacyModes(), notificationAgent)
+        return
       }
-      RemoteSessionBackgroundTask.taskId = notification.continuousTaskId ?? -1
+      const notification: backgroundTaskManager.ContinuousTaskNotification =
+        await RemoteSessionBackgroundTask.runCompatibleRequest(context, notificationAgent, false)
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
+      RemoteSessionBackgroundTask.taskId = notification.continuousTaskId ?? RemoteSessionBackgroundTask.taskId
       RemoteSessionBackgroundTask.currentSignature = signature
-      RemoteSessionBackgroundTask.state = RemoteTaskState.ACTIVE
-      RemoteSessionBackgroundTask.retryAfter = 0
+      RemoteSessionBackgroundTask.state = RemoteSessionBackgroundTask.taskSuspended ?
+        RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+      RemoteSessionBackgroundTask.clearRetry()
       RustDeskNapi.appendDiagnosticLog('background-task',
-        `remote_session_keep_alive_started id=${RemoteSessionBackgroundTask.taskId} modes=${signature}`)
+        `remote_session_keep_alive_started id=${RemoteSessionBackgroundTask.taskId} ` +
+        `state=${RemoteSessionBackgroundTask.state} requested=${signature} ` +
+        `actual=${RemoteSessionBackgroundTask.selectedModeDescription}`)
     } catch (error) {
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
       const businessError: BusinessError = error as BusinessError
       RemoteSessionBackgroundTask.state = RemoteTaskState.FAILED
-      RemoteSessionBackgroundTask.retryAfter = Date.now() + 30000
+      RemoteSessionBackgroundTask.taskId = -1
+      RemoteSessionBackgroundTask.currentSignature = ''
+      if (RemoteSessionBackgroundTask.sessionDesired) RemoteSessionBackgroundTask.setRetry()
       RustDeskNapi.appendDiagnosticLog('background-task',
         `remote_session_keep_alive_start_failed code=${businessError.code} message=${businessError.message}`)
     }
   }
 
   private static async updateInternal(context: common.UIAbilityContext, signature: string): Promise<void> {
+    const cancellationVersion: number = RemoteSessionBackgroundTask.cancellationVersion
     RemoteSessionBackgroundTask.state = RemoteTaskState.UPDATING
     try {
-      let notification: backgroundTaskManager.ContinuousTaskNotification
-      if (deviceInfo.sdkApiVersion >= 21) {
-        const notificationAgent: WantAgent = await RemoteSessionBackgroundTask.createWantAgent(context)
-        const request: backgroundTaskManager.ContinuousTaskRequest =
-          RemoteSessionBackgroundTask.createRequest(notificationAgent, true)
-        if (request.isModeSupported()) {
-          notification = await backgroundTaskManager.updateBackgroundRunning(context, request)
-        } else {
-          notification = await backgroundTaskManager.updateBackgroundRunning(
-            context, RemoteSessionBackgroundTask.legacyModes())
-        }
-      } else {
-        notification = await backgroundTaskManager.updateBackgroundRunning(
-          context, RemoteSessionBackgroundTask.legacyModes())
+      const notificationAgent: WantAgent = await RemoteSessionBackgroundTask.createWantAgent(context)
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
+      if (!RemoteSessionBackgroundTask.sessionDesired) {
+        RemoteSessionBackgroundTask.state = RemoteSessionBackgroundTask.taskSuspended ?
+          RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+        return
       }
+      const notification: backgroundTaskManager.ContinuousTaskNotification =
+        await RemoteSessionBackgroundTask.runCompatibleRequest(context, notificationAgent, true)
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
       RemoteSessionBackgroundTask.taskId = notification.continuousTaskId ??
         RemoteSessionBackgroundTask.taskId
       RemoteSessionBackgroundTask.currentSignature = signature
-      RemoteSessionBackgroundTask.state = RemoteTaskState.ACTIVE
-      RemoteSessionBackgroundTask.retryAfter = 0
+      RemoteSessionBackgroundTask.state = RemoteSessionBackgroundTask.taskSuspended ?
+        RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+      RemoteSessionBackgroundTask.clearRetry()
       RustDeskNapi.appendDiagnosticLog('background-task',
-        `remote_session_keep_alive_updated id=${RemoteSessionBackgroundTask.taskId} modes=${signature}`)
+        `remote_session_keep_alive_updated id=${RemoteSessionBackgroundTask.taskId} ` +
+        `state=${RemoteSessionBackgroundTask.state} requested=${signature} ` +
+        `actual=${RemoteSessionBackgroundTask.selectedModeDescription}`)
     } catch (error) {
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
       const businessError: BusinessError = error as BusinessError
-      RemoteSessionBackgroundTask.state = RemoteTaskState.ACTIVE
-      RemoteSessionBackgroundTask.retryAfter = Date.now() + 30000
+      RemoteSessionBackgroundTask.state = RemoteSessionBackgroundTask.taskSuspended ?
+        RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+      if (RemoteSessionBackgroundTask.sessionDesired) RemoteSessionBackgroundTask.setRetry()
       RustDeskNapi.appendDiagnosticLog('background-task',
-        `remote_session_keep_alive_update_failed code=${businessError.code} message=${businessError.message}`)
+        `remote_session_keep_alive_update_failed code=${businessError.code} message=${businessError.message} ` +
+        `retained_state=${RemoteSessionBackgroundTask.state} applied=${RemoteSessionBackgroundTask.currentSignature}`)
     }
   }
 
   private static async stopInternal(context: common.UIAbilityContext): Promise<void> {
+    const cancellationVersion: number = RemoteSessionBackgroundTask.cancellationVersion
     RemoteSessionBackgroundTask.state = RemoteTaskState.STOPPING
     try {
       await backgroundTaskManager.stopBackgroundRunning(context)
-      RustDeskNapi.appendDiagnosticLog('background-task', 'remote_session_keep_alive_stopped')
-    } catch (error) {
-      const businessError: BusinessError = error as BusinessError
-      RustDeskNapi.appendDiagnosticLog('background-task',
-        `remote_session_keep_alive_stop_failed code=${businessError.code} message=${businessError.message}`)
-    } finally {
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
+      RemoteSessionBackgroundTask.clearRetry()
       RemoteSessionBackgroundTask.state = RemoteTaskState.STOPPED
       RemoteSessionBackgroundTask.taskId = -1
       RemoteSessionBackgroundTask.currentSignature = ''
+      RemoteSessionBackgroundTask.taskSuspended = false
+      RustDeskNapi.appendDiagnosticLog('background-task', 'remote_session_keep_alive_stopped')
+    } catch (error) {
+      if (cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion) return
+      const businessError: BusinessError = error as BusinessError
+      RemoteSessionBackgroundTask.state = RemoteSessionBackgroundTask.taskSuspended ?
+        RemoteTaskState.SUSPENDED : RemoteTaskState.ACTIVE
+      RemoteSessionBackgroundTask.setRetry()
+      RustDeskNapi.appendDiagnosticLog('background-task',
+        `remote_session_keep_alive_stop_failed code=${businessError.code} message=${businessError.message} ` +
+        `retained_state=${RemoteSessionBackgroundTask.state}`)
     }
   }
 }

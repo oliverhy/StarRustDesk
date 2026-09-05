@@ -15,8 +15,8 @@ public:
     void setSurface(const std::string& surfaceId);
     void prepareSurfaceRebind();
     void rebindSurface(const std::string& surfaceId);
-    void renderFrame(const uint8_t* data, int length, int width, int height);
-    void renderBGRAFrame(const uint8_t* data, int length, int width, int height);
+    bool renderFrame(const uint8_t* data, int length, int width, int height);
+    bool renderBGRAFrame(const uint8_t* data, int length, int width, int height);
     OHNativeWindow* window();
     void release();
 
@@ -26,7 +26,7 @@ private:
 
     bool createWindowLocked();
     void configureWindowLocked(int width, int height);
-    void renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput);
+    bool renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput);
     void destroyWindowLocked();
 
     OHNativeWindow* nativeWindow_;
