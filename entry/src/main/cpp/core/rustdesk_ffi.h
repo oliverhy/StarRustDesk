@@ -10,7 +10,8 @@ extern "C" {
 int rust_connect(const char* peer_id, const char* password,
                  const char* rendezvous_server, const char* relay_server,
                  const char* server_key, const char* client_hwid,
-                 const char* client_id, int force_relay);
+                 const char* client_id, int force_relay,
+                 int allow_insecure_fallback);
 const char* rust_get_build_id(void);
 void rust_set_video_codec_support(int h264_supported, int vp9_supported,
                                   int vp8_supported, int av1_supported, int h265_supported);

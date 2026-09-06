@@ -716,16 +716,19 @@ static std::string ConnectionResultToMessage(int result) {
         case -21: return "Previous connection is still closing";
         case -22: return "Connection state is busy";
         case -23: return "Invalid direct IP address or port";
+        case -24: return "Server key is invalid";
         default: return "Connection failed (" + std::to_string(result) + ")";
     }
 }
 
 static napi_value Connect(napi_env env, napi_callback_info info) {
-    size_t argc = 5;
-    napi_value args[5] = {nullptr};
+    size_t argc = 6;
+    napi_value args[6] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     bool forceRelay = false;
+    bool allowInsecureFallback = false;
     if (argc >= 5) napi_get_value_bool(env, args[4], &forceRelay);
+    if (argc >= 6) napi_get_value_bool(env, args[5], &allowInsecureFallback);
 
     char peerId[128] = {0}, password[512] = {0};
     char rendezvousServer[256] = {0}, relayServer[256] = {0};
@@ -771,8 +774,10 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         " password_configured=" + std::string(pass.empty() ? "no" : "yes") +
         " rendezvous=" + std::string(rendezvous.empty() ? "default" : "custom") +
         " relay=" + std::string(relay.empty() ? "default" : "custom") +
-        " key=" + std::string(serverKey.empty() ? "empty" : "set"));
-    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId, generation, forceRelay]() {
+        " key=" + std::string(serverKey.empty() ? "empty" : "set") +
+        " insecure_fallback=" + std::string(allowInsecureFallback ? "approved_once" : "denied"));
+    std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId, generation,
+                 forceRelay, allowInsecureFallback]() {
         {
             std::unique_lock<std::mutex> lock(g_connectionLifecycleMutex);
             g_disconnectFinished.wait(lock, []() { return !g_disconnectInProgress.load(); });
@@ -792,7 +797,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         DiagnosticLog::instance().append("I", "connection",
             "rust_connect_started generation=" + std::to_string(generation));
         int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
-                                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0);
+                                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0,
+                                  allowInsecureFallback ? 1 : 0);
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
         DiagnosticLog::instance().append(result == 0 ? "I" : "E", "connection",
             "rust_connect_finished generation=" + std::to_string(generation) +

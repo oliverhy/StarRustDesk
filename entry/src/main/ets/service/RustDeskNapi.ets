@@ -147,13 +147,13 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).clearDiagnosticLog()
   }
 
-  static connect(peerId: string, password: string): number {
-    return rustdeskNapi.connect(peerId, password)
+  static connect(peerId: string, password: string, allowInsecureFallback: boolean = false): number {
+    return rustdeskNapi.connect(peerId, password, '', '', false, allowInsecureFallback)
   }
 
   static connectWithServer(peerId: string, password: string, rendezvousServer: string, relayServer: string,
-    forceRelay: boolean = false): number {
-    return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer, forceRelay)
+    forceRelay: boolean = false, allowInsecureFallback: boolean = false): number {
+    return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer, forceRelay, allowInsecureFallback)
   }
 
   static restartVideoDecoder(): number {

@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.1.0'
-export const RELEASE_NOTES_BUILD: string = '1001002'
+export const RELEASE_NOTES_BUILD: string = '1001003'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.1.0（1001003）· 服务器密钥异常提示', [
+            '自建服务器密钥无效、格式错误或与服务器身份不匹配时，不再只显示笼统的安全握手失败。',
+            '新增明确的风险提示，可取消连接，或由用户主动选择“仅本次继续”并临时使用未加密连接。',
+            '降级授权只对当前一次连接有效，不写入设置；断开连接或重新发起普通连接后自动恢复安全校验。',
+            '文件传输会话只在当前远控会话已获用户授权时沿用临时降级状态，避免重复失败或永久降低安全性。',
+            '补充服务器密钥异常、用户选择及临时降级流程的诊断记录和自动回归检查。',
+          ])
           this.buildSection('1.1.0（1001002）· 手势、PC组合键与网络连接修复', [
             '修复双指、三指滚动后因手指分批抬起误触右键的问题，保留双指轻点右键，取消手势不再触发点击。',
             '键盘和鼠标采用统一事件队列，修复 Ctrl/Shift 配合鼠标多选的事件顺序问题，分别跟踪左右修饰键。',

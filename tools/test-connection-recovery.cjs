@@ -93,10 +93,17 @@ test('decoded but unpresented frames also trigger decoder recovery', () => {
   now=24000; video.checkDecoderHealth(stalled); assert.equal(restart,2);
   now=30000; video.checkDecoderHealth(stalled); assert.equal(restart,2); assert.equal(fallback,2);
 });
-let route=1, status=2, connections=0, disconnects=0;
+let route=1, status=2, connections=0, insecureConnections=0, disconnects=0;
+let lastConnectionError='';
 const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,
+  getLastConnectionError:()=>lastConnectionError,
   disconnect:()=>{disconnects++;}, appendDiagnosticLog:()=>{},
-  connectWithServer:(id,pw,rv,relay,forced)=>{assert.equal(forced,true);connections++;return 0;}};
+  connectWithServer:(id,pw,rv,relay,forced,insecure=false)=>{
+    if(insecure){assert.equal(forced,false);insecureConnections++;}
+    else{assert.equal(forced,true);connections++;}
+    return 0;
+  },
+  connect:(id,pw,insecure=false)=>{assert.equal(insecure,true);insecureConnections++;return 0;}};
 const Service = subject(slice('entry/src/main/ets/service/ConnectionService.ets',
   '  static disconnect():', '  static sendKeyEvent(').replaceAll('ConnectionService','Subject'), {
   RustDeskNapi:serviceNapi,ConnectionStatus:{CONNECTING:1,CONNECTED:2,FAILED:3},
@@ -129,6 +136,21 @@ for (const endpoint of ['192.168.2.123', '192.168.2.123:21118', '[2001:db8::1]:2
     assert.equal(Service.retryDirectViaRelay('test'),false);
   });
 }
+test('invalid server key downgrade requires explicit one-time retry',()=>{
+  status=3; route=2; lastConnectionError='Server key is invalid';
+  Object.assign(Service,{retryPeer:'test-peer',retryPassword:'test-only',retryRendezvous:'server',
+    retryRelay:'relay',insecureRetryUsed:false});
+  assert.equal(Service.canRetryWithoutEncryption(),true);
+  assert.equal(Service.retryWithoutEncryption(),true);
+  assert.equal(Service.canRetryWithoutEncryption(),false);
+  assert.equal(Service.retryWithoutEncryption(),false);
+  assert.equal(insecureConnections,1);
+  assert.equal(Service.retryPassword,'test-only');
+});
+test('other handshake errors never offer insecure downgrade',()=>{
+  status=3; lastConnectionError='Peer secure handshake failed'; Service.insecureRetryUsed=false;
+  assert.equal(Service.canRetryWithoutEncryption(),false);
+});
 let polledFrame={generation:1,security:0,hasFrame:true,width:1280,height:720}, scheduled;
 const Poller = subject(slice('entry/src/main/ets/pages/RemotePage.ets',
   '  startFramePolling():', '  onAppForegroundEpochChanged():') +

@@ -82,7 +82,8 @@ export const setDiagnosticLogEnabled: (enabled: boolean) => number;
 export const appendDiagnosticLog: (component: string, message: string) => number;
 export const getDiagnosticLog: () => string;
 export const clearDiagnosticLog: () => number;
-export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string, forceRelay?: boolean) => number;
+export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string,
+  forceRelay?: boolean, allowInsecureFallback?: boolean) => number;
 export const disconnect: () => number;
 export const sendKeyEvent: (keyCode: number, action: number, modifierMask?: number) => number;
 export const sendPhysicalKeyEvent: (scanCode: number, action: number, modifierMask?: number) => number;

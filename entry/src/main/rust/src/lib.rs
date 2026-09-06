@@ -93,6 +93,7 @@ static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static REMOTE_AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 static BACKGROUND_VIDEO_MODE: AtomicBool = AtomicBool::new(false);
+static ALLOW_INSECURE_SESSION: AtomicBool = AtomicBool::new(false);
 // Conservative defaults keep older native shells safe until they report the
 // decoders that can actually be created on the current device.
 static H264_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(true);
@@ -371,7 +372,7 @@ pub extern "C" fn rust_set_video_codec_support(
 
 #[no_mangle]
 pub extern "C" fn rust_get_build_id() -> *const c_char {
-    b"recovery-20260905-r3\0".as_ptr() as *const c_char
+    b"recovery-20260906-r4\0".as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -384,6 +385,7 @@ pub extern "C" fn rust_connect(
     client_hwid: *const c_char,
     client_id: *const c_char,
     force_relay: i32,
+    allow_insecure_fallback: i32,
 ) -> i32 {
     if peer_id.is_null() {
         return -1;
@@ -407,6 +409,7 @@ pub extern "C" fn rust_connect(
     PROTOCOL_SESSION_ID.store(new_protocol_session_id(), Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    ALLOW_INSECURE_SESSION.store(allow_insecure_fallback != 0, Ordering::SeqCst);
     reset_display_state();
     let _ = clear_connection_for_session(session_id);
     emit_event("previous connection cleared");
@@ -601,12 +604,19 @@ pub extern "C" fn rust_connect(
                         return -15;
                     }
                 };
-                if secure_peer_connection(&peer, &signed_id_pk, &key, &mut stream)
-                    .await
-                    .is_err()
-                {
+                if let Err(error) = secure_peer_connection(
+                    &peer,
+                    &signed_id_pk,
+                    &key,
+                    &mut stream,
+                    allow_insecure_fallback != 0,
+                ).await {
                     emit_event("secure fallback failed");
-                    return -16;
+                    return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
+                        -24
+                    } else {
+                        -16
+                    };
                 }
                 emit_event("secure fallback completed");
 
@@ -707,12 +717,19 @@ pub extern "C" fn rust_connect(
             return -4;
         };
 
-        if secure_peer_connection(&peer, &signed_id_pk, &key, &mut stream)
-            .await
-            .is_err()
-        {
+        if let Err(error) = secure_peer_connection(
+            &peer,
+            &signed_id_pk,
+            &key,
+            &mut stream,
+            allow_insecure_fallback != 0,
+        ).await {
             emit_event("secure fallback failed");
-            return -16;
+            return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
+                -24
+            } else {
+                -16
+            };
         }
         emit_event("secure fallback completed");
 
@@ -889,6 +906,7 @@ pub extern "C" fn rust_disconnect() -> i32 {
     }
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    ALLOW_INSECURE_SESSION.store(false, Ordering::SeqCst);
     reset_audio_async();
     reset_display_state();
     let _ = clear_connection_for_session(session_id);
@@ -2280,7 +2298,8 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         )
         .await
         .map_err(|error| error.to_string())?;
-        secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream)
+        secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream,
+            ALLOW_INSECURE_SESSION.load(Ordering::SeqCst))
             .await
             .map_err(|error| error.to_string())?;
         return Ok(stream);
@@ -2349,7 +2368,8 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     } else {
         return Err("远端没有可用的文件传输路径".to_string());
     };
-    secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream)
+    secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream,
+        ALLOW_INSECURE_SESSION.load(Ordering::SeqCst))
         .await
         .map_err(|error| error.to_string())?;
     Ok(stream)
@@ -2548,9 +2568,15 @@ async fn secure_peer_connection(
     signed_id_pk: &[u8],
     key: &str,
     conn: &mut Stream,
+    allow_insecure_fallback: bool,
 ) -> Result<(), hbb_common::anyhow::Error> {
     let rs_pk = get_rs_pk(if key.is_empty() { RS_PUB_KEY } else { key });
     if rs_pk.is_none() {
+        if allow_insecure_fallback {
+            emit_event("secure peer: invalid_server_key user_approved_insecure_once");
+            conn.send(&PeerMessage::new()).await?;
+            return Ok(());
+        }
         emit_event("secure peer: rejected reason=invalid_server_key");
         hbb_common::bail!("invalid server key");
     }
@@ -2562,12 +2588,22 @@ async fn secure_peer_connection(
                 sign_pk = Some(sign::PublicKey(pk));
             }
             Ok((_, _)) => {
+                if allow_insecure_fallback {
+                    emit_event("secure peer: rendezvous_id_mismatch user_approved_insecure_once");
+                    conn.send(&PeerMessage::new()).await?;
+                    return Ok(());
+                }
                 emit_event("secure peer: rejected reason=rendezvous_id_mismatch");
-                hbb_common::bail!("rendezvous signed id mismatch");
+                hbb_common::bail!("server key mismatch");
             }
             Err(_) => {
+                if allow_insecure_fallback {
+                    emit_event("secure peer: invalid_rendezvous_signature user_approved_insecure_once");
+                    conn.send(&PeerMessage::new()).await?;
+                    return Ok(());
+                }
                 emit_event("secure peer: rejected reason=invalid_rendezvous_signature");
-                hbb_common::bail!("invalid rendezvous signature");
+                hbb_common::bail!("server key mismatch");
             }
         }
     }

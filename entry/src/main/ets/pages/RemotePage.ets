@@ -142,6 +142,7 @@ struct RemotePage {
   @State trustThisDevice: boolean = false;
   @State enableTrustedDevices: boolean = false;
   @State connectionError: string = '';
+  private insecureFallbackPromptShown: boolean = false;
   @State isFullScreen: boolean = false;
   @State isPanMode: boolean = false;
   @State edgeAutoPanEnabled: boolean = false;
@@ -301,6 +302,7 @@ struct RemotePage {
     this.resetRemoteViewportForSession();
     this.showRemoteSurface = true;
     this.connectedPeerId = AppStorage.get<string>('connectedPeerId') ?? '';
+    this.insecureFallbackPromptShown = false;
     this.loadInputMode();
     this.loadLocalCursorPreference();
     this.loadEdgeAutoPanPreference();
@@ -423,6 +425,10 @@ struct RemotePage {
         this.connectionError = '';
       } else if (status === ConnectionStatus.FAILED) {
         this.connectionError = ConnectionService.getLastConnectionError();
+        if (!this.insecureFallbackPromptShown && ConnectionService.canRetryWithoutEncryption()) {
+          this.insecureFallbackPromptShown = true;
+          this.showInsecureFallbackPrompt();
+        }
       }
       if (status === ConnectionStatus.CONNECTED && now - this.lastDisplayPollAt > 2000) {
         this.lastDisplayPollAt = now;
@@ -4866,6 +4872,34 @@ struct RemotePage {
 
   sendControlKey(code: number): void {
     ConnectionService.sendKeyEvent(code, 2);
+  }
+
+  showInsecureFallbackPrompt(): void {
+    AlertDialog.show({
+      title: '服务器密钥不正确',
+      message: '无法验证自建服务器密钥。降级后，本次连接将不再验证远端身份，可能存在被冒充或窃听的风险。是否仅对本次连接使用未加密模式？',
+      autoCancel: false,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消连接',
+        action: () => {
+          RustDeskNapi.appendDiagnosticLog('connection-security', 'user_rejected_insecure_fallback');
+        },
+      },
+      secondaryButton: {
+        value: '仅本次继续',
+        fontColor: RustDeskTheme.ERROR,
+        action: () => {
+          this.connectionError = '';
+          this.connectionStatus = ConnectionStatus.CONNECTING;
+          this.connectingStartedAt = Date.now();
+          if (!ConnectionService.retryWithoutEncryption()) {
+            this.connectionStatus = ConnectionStatus.FAILED;
+            this.connectionError = ConnectionService.getLastConnectionError();
+          }
+        },
+      },
+    });
   }
 
   disconnectSession(): void {

@@ -42,7 +42,7 @@ fn retry_guard_endpoint_forms_never_select_id_rendezvous() {
     }
     let invalid = CString::new("192.0.2.8:0").unwrap();
     let null = std::ptr::null();
-    assert_eq!(rust_connect(invalid.as_ptr(), null, null, null, null, null, null, 0), -23);
+    assert_eq!(rust_connect(invalid.as_ptr(), null, null, null, null, null, null, 0, 0), -23);
 }
 
 #[test]
