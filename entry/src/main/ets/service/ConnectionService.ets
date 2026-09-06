@@ -23,6 +23,7 @@ export class ConnectionService {
   private static capsLockKeyHeld: boolean = false
   private static legacyShiftLetterScanCodes: number[] = []
   private static legacyShiftLetterCodes: number[] = []
+  private static legacyShiftSymbolScanCodes: number[] = []
   private static heldScanCodes: number[] = []
   private static heldLegacyKeys: number[] = []
   // Retry context lives only in memory and is cleared by an explicit disconnect.
@@ -179,6 +180,29 @@ export class ConnectionService {
 
   static sendPhysicalKeyEvent(scanCode: number, action: number, eventModifierMask?: number): void {
     let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
+    const trackedSymbolIndex: number = ConnectionService.legacyShiftSymbolScanCodes.indexOf(scanCode)
+    const shiftedSymbol: string = ConnectionService.getShiftedNumberSymbol(scanCode)
+    const hasShift: boolean = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
+    const hasHotkeyModifier: boolean = (modifierMask &
+      (ConnectionService.MODIFIER_CONTROL | ConnectionService.MODIFIER_ALT | ConnectionService.MODIFIER_META)) !== 0
+    if (action === 0 && shiftedSymbol.length > 0 && hasShift && !hasHotkeyModifier) {
+      if (trackedSymbolIndex < 0) {
+        ConnectionService.legacyShiftSymbolScanCodes.push(scanCode)
+      }
+      // Map mode expects modifiers as raw scan codes. HarmonyOS currently sends
+      // Shift through the compatible control-key path, so a shifted number can
+      // be dropped by Windows peers. Send the already-resolved printable symbol
+      // as text, then restore the held Shift state for following input.
+      RustDeskNapi.sendText(shiftedSymbol)
+      ConnectionService.sendRawModifierEvent(16, 0, 'shift-symbol-restore')
+      RustDeskNapi.appendDiagnosticLog('input',
+        `shifted_number_forwarded scan=${scanCode} repeat=${trackedSymbolIndex >= 0 ? 1 : 0}`)
+      return
+    }
+    if (action === 1 && trackedSymbolIndex >= 0) {
+      ConnectionService.legacyShiftSymbolScanCodes.splice(trackedSymbolIndex, 1)
+      return
+    }
     ConnectionService.trackHeldKey(ConnectionService.heldScanCodes, scanCode, action)
     RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, modifierMask)
   }
@@ -308,6 +332,7 @@ export class ConnectionService {
     ConnectionService.heldLegacyKeys = []
     ConnectionService.legacyShiftLetterScanCodes = []
     ConnectionService.legacyShiftLetterCodes = []
+    ConnectionService.legacyShiftSymbolScanCodes = []
     let previousMask: number = ConnectionService.heldModifierMask
     ConnectionService.directModifierMask = 0
     ConnectionService.pointerModifierMask = 0
@@ -384,6 +409,7 @@ export class ConnectionService {
     ConnectionService.capsLockKeyHeld = false
     ConnectionService.legacyShiftLetterScanCodes = []
     ConnectionService.legacyShiftLetterCodes = []
+    ConnectionService.legacyShiftSymbolScanCodes = []
     ConnectionService.heldScanCodes = []
     ConnectionService.heldLegacyKeys = []
   }
@@ -392,6 +418,22 @@ export class ConnectionService {
     const index: number = keys.indexOf(code)
     if (action === 0 && index < 0) keys.push(code)
     if (action === 1 && index >= 0) keys.splice(index, 1)
+  }
+
+  private static getShiftedNumberSymbol(scanCode: number): string {
+    switch (scanCode) {
+      case 0x02: return '!'
+      case 0x03: return '@'
+      case 0x04: return '#'
+      case 0x05: return '$'
+      case 0x06: return '%'
+      case 0x07: return '^'
+      case 0x08: return '&'
+      case 0x09: return '*'
+      case 0x0A: return '('
+      case 0x0B: return ')'
+      default: return ''
+    }
   }
 
   private static applyModifierSnapshot(snapshot: number, pointerSource: boolean, source: string): void {

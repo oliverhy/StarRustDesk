@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.1.0'
-export const RELEASE_NOTES_BUILD: string = '1001003'
+export const RELEASE_NOTES_BUILD: string = '1001004'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.1.0（1001004）· 键盘特殊符号输入修复', [
+            '修复 HarmonyOS PC 使用物理键盘时，Shift 配合数字行无法输入 ! @ # $ % ^ & * ( ) 的问题。',
+            '普通数字、Shift 大小写及中文输入保持原有行为，不受本次修复影响。',
+            'Ctrl、Alt 或 Win 配合 Shift 与数字键的快捷键继续按物理按键传递，避免破坏远端快捷操作。',
+            '完善数字行长按重复、按键释放和会话重置处理，降低 Shift 或数字键状态残留的风险。',
+          ])
           this.buildSection('1.1.0（1001003）· 服务器密钥异常提示', [
             '自建服务器密钥无效、格式错误或与服务器身份不匹配时，不再只显示笼统的安全握手失败。',
             '新增明确的风险提示，可取消连接，或由用户主动选择“仅本次继续”并临时使用未加密连接。',
