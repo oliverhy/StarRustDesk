@@ -14,18 +14,18 @@ assert(start >= 0 && end > start, 'Production shifted-number helper not found');
 
 const method = source.slice(start, end)
   .replace('private static ', 'static ')
-  .replace(/scanCode: number/g, 'scanCode')
+  .replace(/hidCode: number/g, 'hidCode')
   .replace(/\): string/g, ')');
 const KeyboardMapping = Function(`return class KeyboardMapping {\n${method}\n}`)();
 
 const expected = new Map([
-  [0x02, '!'], [0x03, '@'], [0x04, '#'], [0x05, '$'], [0x06, '%'],
-  [0x07, '^'], [0x08, '&'], [0x09, '*'], [0x0A, '('], [0x0B, ')'],
+  [0x1E, '!'], [0x1F, '@'], [0x20, '#'], [0x21, '$'], [0x22, '%'],
+  [0x23, '^'], [0x24, '&'], [0x25, '*'], [0x26, '('], [0x27, ')'],
 ]);
-for (const [scanCode, symbol] of expected) {
-  assert.equal(KeyboardMapping.getShiftedNumberSymbol(scanCode), symbol);
+for (const [hidCode, symbol] of expected) {
+  assert.equal(KeyboardMapping.getShiftedNumberSymbol(hidCode), symbol);
 }
-assert.equal(KeyboardMapping.getShiftedNumberSymbol(0x1E), '');
+assert.equal(KeyboardMapping.getShiftedNumberSymbol(0x04), '');
 
 assert.match(source, /shiftedSymbol\.length > 0 && hasShift && !hasHotkeyModifier/,
   'Shifted-number fallback must not replace Ctrl\/Alt\/Meta shortcuts');
@@ -34,4 +34,4 @@ assert.match(source, /RustDeskNapi\.sendText\(shiftedSymbol\)/,
 assert.match(source, /action === 1 && trackedSymbolIndex >= 0/,
   'Key-up must follow the same fallback path as key-down');
 
-console.log('PASS Shift+1..0 map to !@#$%^&*() without intercepting hotkeys');
+console.log('PASS USB HID Shift+1..0 map to !@#$%^&*() without intercepting hotkeys');

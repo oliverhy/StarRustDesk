@@ -178,6 +178,20 @@ static HardwareKeyState GetHardwareKeyState() {
     anyValid = anyValid || pressed != KEY_DEFAULT;
     pressed = KEY_DEFAULT;
     keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_META_LEFT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 8;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
+    if (QueryHardwareKeyState(KEYCODE_META_RIGHT, pressed, keySwitch) && pressed == KEY_PRESSED) {
+        state.modifierMask |= 8;
+    }
+    state.querySuccessCount += pressed != KEY_DEFAULT ? 1 : 0;
+    anyValid = anyValid || pressed != KEY_DEFAULT;
+    pressed = KEY_DEFAULT;
+    keySwitch = KEY_DEFAULT;
     if (QueryHardwareKeyState(KEYCODE_CAPS_LOCK, pressed, keySwitch)) {
         state.capsLockValid = keySwitch == KEY_SWITCH_ON || keySwitch == KEY_SWITCH_OFF;
         state.capsLockOn = keySwitch == KEY_SWITCH_ON;
@@ -376,7 +390,8 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
     const uint64_t sequence = QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
         modifierMask, modifierValid, capsLockOn, capsLockValid});
     if (code == KEY_CTRL_LEFT || code == KEY_CTRL_RIGHT || code == KEY_SHIFT_LEFT ||
-        code == KEY_SHIFT_RIGHT || code == KEY_CAPS_LOCK) {
+        code == KEY_SHIFT_RIGHT || code == KEY_ALT_LEFT || code == KEY_ALT_RIGHT ||
+        code == KEY_META_LEFT || code == KEY_META_RIGHT || code == KEY_CAPS_LOCK) {
         OH_LOG_INFO(LOG_APP,
             "NativeKey seq=%{public}llu timestamp=%{public}lld action=%{public}d modifiers=%{public}d valid=%{public}d caps=%{public}d",
             static_cast<unsigned long long>(sequence), static_cast<long long>(timestamp),
@@ -904,22 +919,37 @@ static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value SendCtrlAltDel(napi_env env, napi_callback_info info) {
+    int result = rust_send_ctrl_alt_del();
+    DiagnosticLog::instance().append(result == 0 ? "I" : "E", "input-shortcut",
+        "ctrl_alt_del result=" + std::to_string(result));
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static napi_value CanSendCtrlAltDel(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_get_boolean(env, rust_can_send_ctrl_alt_del() != 0, &ret);
+    return ret;
+}
+
 static napi_value SendPhysicalKeyEvent(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value args[3] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    int32_t scanCode = 0, action = 0, modifierMask = 0;
-    napi_get_value_int32(env, args[0], &scanCode);
+    int32_t hidCode = 0, action = 0, modifierMask = 0;
+    napi_get_value_int32(env, args[0], &hidCode);
     napi_get_value_int32(env, args[1], &action);
     if (argc >= 3) {
         napi_get_value_int32(env, args[2], &modifierMask);
     }
-    int result = rust_send_physical_key_event(scanCode, action, modifierMask);
+    int result = rust_send_physical_key_event(hidCode, action, modifierMask);
     OH_LOG_INFO(LOG_APP,
-        "InputTrace napi_physical scan=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
-        scanCode, action, modifierMask, result);
+        "InputTrace napi_physical hid=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
+        hidCode, action, modifierMask, result);
     if (result != 0) {
-        OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent scan=%{public}d action=%{public}d result=%{public}d", scanCode, action, result);
+        OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent hid=%{public}d action=%{public}d result=%{public}d", hidCode, action, result);
     }
     napi_value ret;
     napi_create_int32(env, result, &ret);
@@ -1373,7 +1403,7 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 }
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
-    std::string content = std::string("native_build=recovery-20260905-r3 cpp=") + __DATE__ + " " + __TIME__ +
+    std::string content = std::string("native_build=connection-recovery-20260908-r4 cpp=") + __DATE__ + " " + __TIME__ +
         " rust=" + rust_get_build_id() + "\n" + DiagnosticLog::instance().exportText();
     napi_value ret;
     napi_create_string_utf8(env, content.c_str(), content.size(), &ret);
@@ -2033,6 +2063,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setPerformancePreset", nullptr, SetPerformancePreset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"disconnect", nullptr, Disconnect, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent", nullptr, SendKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendCtrlAltDel", nullptr, SendCtrlAltDel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"canSendCtrlAltDel", nullptr, CanSendCtrlAltDel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendPhysicalKeyEvent", nullptr, SendPhysicalKeyEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"send2FA", nullptr, Send2FA, nullptr, nullptr, nullptr, napi_default, nullptr},

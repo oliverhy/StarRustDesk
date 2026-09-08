@@ -172,8 +172,16 @@ export class RustDeskNapi {
     return rustdeskNapi.sendKeyEvent(keyCode, action, modifierMask)
   }
 
-  static sendPhysicalKeyEvent(scanCode: number, action: number, modifierMask: number = 0): number {
-    return (rustdeskNapi as ESObject).sendPhysicalKeyEvent(scanCode, action, modifierMask)
+  static sendCtrlAltDel(): number {
+    return (rustdeskNapi as ESObject).sendCtrlAltDel()
+  }
+
+  static canSendCtrlAltDel(): boolean {
+    return (rustdeskNapi as ESObject).canSendCtrlAltDel()
+  }
+
+  static sendPhysicalKeyEvent(hidCode: number, action: number, modifierMask: number = 0): number {
+    return (rustdeskNapi as ESObject).sendPhysicalKeyEvent(hidCode, action, modifierMask)
   }
 
   static sendText(text: string): number {

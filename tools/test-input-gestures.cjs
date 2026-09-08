@@ -24,9 +24,10 @@ test('native empty snapshot cannot erase ArkUI Ctrl',()=>{
   S.sendMouseEvent(10,10,1);assert.equal(calls.at(-1)[4],1);
 });
 test('left and right Shift release independently',()=>{
-  S.releaseModifiers();S.sendKeyEvent(16,0,2047);S.sendKeyEvent(16,0,2048);
+  S.releaseModifiers();calls.length=0;S.sendKeyEvent(16,0,2047);S.sendKeyEvent(161,0,2048);
+  assert.deepEqual(calls.filter(c=>c[0]==='key').map(c=>c[1]),[16,161]);
   S.sendKeyEvent(16,1,2047);S.sendMouseEvent(0,0,1);assert.equal(calls.at(-1)[4],2);
-  S.sendKeyEvent(16,1,2048);S.sendMouseEvent(0,0,1);assert.equal(calls.at(-1)[4],0);
+  S.sendKeyEvent(161,1,2048);S.sendMouseEvent(0,0,1);assert.equal(calls.at(-1)[4],0);
 });
 test('duplicate modifier callbacks are idempotent',()=>{
   S.releaseModifiers();calls.length=0;S.sendKeyEvent(17,0,2072);S.sendKeyEvent(17,0,2072);
@@ -38,16 +39,25 @@ test('authoritative key-up clears stale snapshots',()=>{
   S.sendMouseEvent(0,0,1);assert.equal(calls.at(-1)[4],0);
 });
 test('plain letters retain physical scan path for remote IME',()=>{
-  S.releaseModifiers();S.sendLetterKeyEvent('a',30,0);assert.equal(calls.at(-1)[0],'scan');
+  S.releaseModifiers();S.sendLetterKeyEvent('a',4,0);assert.equal(calls.at(-1)[0],'scan');
 });
 test('Shift letter uses uppercase and matching release path',()=>{
-  S.sendKeyEvent(16,0,2047);S.sendLetterKeyEvent('a',30,0);assert.equal(calls.at(-1)[1],65);
-  S.sendKeyEvent(16,1,2047);S.sendLetterKeyEvent('a',30,1);assert.equal(calls.at(-1)[0],'key');
+  S.sendKeyEvent(16,0,2047);S.sendLetterKeyEvent('a',4,0);assert.equal(calls.at(-1)[1],65);
+  S.sendKeyEvent(16,1,2047);S.sendLetterKeyEvent('a',4,1);assert.equal(calls.at(-1)[0],'key');
   assert.equal(calls.at(-1)[1],65);
 });
+test('Ctrl+Shift letter stays on physical path for remote shortcuts',()=>{
+  S.releaseModifiers();calls.length=0;S.sendKeyEvent(17,0,2072);S.sendKeyEvent(16,0,2047);
+  S.sendLetterKeyEvent('c',6,0);assert.equal(calls.at(-1)[0],'scan');
+});
+test('right Alt is preserved for Linux AltGr and macOS Option',()=>{
+  S.releaseModifiers();calls.length=0;S.sendKeyEvent(165,0,2046);S.sendPhysicalKeyEvent(20,0);
+  assert(calls.some(c=>c[0]==='key'&&c[1]===165&&c[2]===0));
+  assert.equal(calls.at(-1)[3]&4,4);
+});
 test('queue reset balances held printable keys as well as modifiers',()=>{
-  S.releaseModifiers();S.sendPhysicalKeyEvent(30,0);S.sendKeyEvent(13,0);calls.length=0;
-  S.releaseModifiers();assert(calls.some(c=>c[0]==='scan'&&c[1]===30&&c[2]===1));
+  S.releaseModifiers();S.sendPhysicalKeyEvent(4,0);S.sendKeyEvent(13,0);calls.length=0;
+  S.releaseModifiers();assert(calls.some(c=>c[0]==='scan'&&c[1]===4&&c[2]===1));
   assert(calls.some(c=>c[0]==='key'&&c[1]===13&&c[2]===1));
 });
 let now=1000, output=[];

@@ -17,14 +17,15 @@ export class ConnectionService {
   private static nativeModifierMask: number = 0
   private static physicalModifierKeys: number[] = []
   private static physicalModifierBits: number[] = []
+  private static physicalModifierControlCodes: number[] = []
   private static hardwareModifierMask: number = 0
   private static heldModifierMask: number = 0
   private static capsLockEnabled: boolean = false
   private static capsLockKeyHeld: boolean = false
-  private static legacyShiftLetterScanCodes: number[] = []
+  private static legacyShiftLetterHidCodes: number[] = []
   private static legacyShiftLetterCodes: number[] = []
-  private static legacyShiftSymbolScanCodes: number[] = []
-  private static heldScanCodes: number[] = []
+  private static legacyShiftSymbolHidCodes: number[] = []
+  private static heldHidCodes: number[] = []
   private static heldLegacyKeys: number[] = []
   // Retry context lives only in memory and is cleared by an explicit disconnect.
   private static retryPeer: string = ''
@@ -32,6 +33,8 @@ export class ConnectionService {
   private static retryRendezvous: string = ''
   private static retryRelay: string = ''
   private static relayRetryUsed: boolean = false
+  private static rendezvousRetryCount: number = 0
+  private static relayFailureRetryCount: number = 0
   private static insecureRetryUsed: boolean = false
 
   static connect(remoteId: string, password: string, performancePreset: string = 'smooth'): ConnectionStatus {
@@ -45,6 +48,8 @@ export class ConnectionService {
     ConnectionService.retryRendezvous = rendezvousServer
     ConnectionService.retryRelay = relayServer
     ConnectionService.relayRetryUsed = false
+    ConnectionService.rendezvousRetryCount = 0
+    ConnectionService.relayFailureRetryCount = 0
     ConnectionService.insecureRetryUsed = false
     RustDeskNapi.setPerformancePreset(performancePreset)
     let result: number
@@ -78,6 +83,8 @@ export class ConnectionService {
     ConnectionService.retryPeer = ''
     ConnectionService.retryPassword = ''
     ConnectionService.relayRetryUsed = true
+    ConnectionService.rendezvousRetryCount = 2
+    ConnectionService.relayFailureRetryCount = 1
     ConnectionService.insecureRetryUsed = true
     ConnectionService.releaseModifiers()
     RemoteSessionBackgroundTask.stop()
@@ -105,6 +112,66 @@ export class ConnectionService {
     RemoteSessionBackgroundTask.syncForConnectionStatus(
       result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED)
     return result === 0
+  }
+
+  static retryRecoverableConnectionFailure(message: string): string {
+    if (ConnectionService.retryPeer.length === 0 ||
+      ConnectionService.isDirectAddress(ConnectionService.retryPeer) ||
+      RustDeskNapi.getConnectionStatus() !== ConnectionStatus.FAILED) {
+      return ''
+    }
+
+    const route: number = RustDeskNapi.getConnectionRoute()
+    if (message === 'Peer secure handshake failed' && route === 1 && !ConnectionService.relayRetryUsed) {
+      ConnectionService.relayRetryUsed = true
+      if (ConnectionService.restartConnection(true, 'direct_secure_handshake_failed', 1, 1)) {
+        return '直连安全握手失败，正在通过加密中继重试'
+      }
+      return ''
+    }
+
+    if (message === 'Rendezvous server did not respond' && ConnectionService.rendezvousRetryCount < 2) {
+      ConnectionService.rendezvousRetryCount++
+      const attempt: number = ConnectionService.rendezvousRetryCount
+      // Preserve a forced-relay recovery selected after a direct secure
+      // handshake failure. A transient hbbs timeout must not send the next
+      // attempt back to the direct route that already failed authentication.
+      if (ConnectionService.restartConnection(ConnectionService.relayRetryUsed,
+        'rendezvous_timeout', attempt, 2)) {
+        return `注册服务器未响应，正在重新连接（${attempt}/2）`
+      }
+      return ''
+    }
+
+    if (message === 'Relay connection failed' && ConnectionService.relayFailureRetryCount < 1) {
+      ConnectionService.relayFailureRetryCount++
+      ConnectionService.relayRetryUsed = true
+      if (ConnectionService.restartConnection(true, 'relay_connection_failed', 1, 1)) {
+        return '中继连接失败，正在重新申请中继线路'
+      }
+    }
+    return ''
+  }
+
+  private static restartConnection(forceRelay: boolean, reason: string, attempt: number, maximum: number): boolean {
+    ConnectionService.releaseModifiers()
+    RustDeskNapi.appendDiagnosticLog('connection-recovery',
+      `automatic_retry reason=${reason} attempt=${attempt}/${maximum} ` +
+      `previous_route=${RustDeskNapi.getConnectionRoute()} force_relay=${forceRelay ? 1 : 0}`)
+    RustDeskNapi.disconnect()
+    ConnectionService.recordNetworkSnapshot()
+    const result: number = RustDeskNapi.connectWithServer(ConnectionService.retryPeer,
+      ConnectionService.retryPassword, ConnectionService.retryRendezvous, ConnectionService.retryRelay, forceRelay)
+    ConnectionService.resetTransientInputState()
+    const status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
+    RemoteSessionBackgroundTask.syncForConnectionStatus(status)
+    RustDeskNapi.appendDiagnosticLog(result === 0 ? 'connection-recovery' : 'connection',
+      `automatic_retry_started reason=${reason} result=${result}`)
+    return result === 0
+  }
+
+  private static isDirectAddress(peer: string): boolean {
+    return /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(peer) || peer.includes(':')
   }
 
   static canRetryWithoutEncryption(): boolean {
@@ -143,34 +210,37 @@ export class ConnectionService {
     }
     let modifierBit: number = ConnectionService.getModifierBit(keyCode)
     if (modifierBit !== 0) {
-      let previousMask: number = ConnectionService.heldModifierMask
       const identity: number = physicalKeyCode ?? keyCode
       const index: number = ConnectionService.physicalModifierKeys.indexOf(identity)
       if (action === 0) {
-        if (index < 0) {
-          ConnectionService.physicalModifierKeys.push(identity)
-          ConnectionService.physicalModifierBits.push(modifierBit)
-        }
-        ConnectionService.directModifierMask |= modifierBit
-      } else if (action === 1) {
         if (index >= 0) {
-          ConnectionService.physicalModifierKeys.splice(index, 1)
-          ConnectionService.physicalModifierBits.splice(index, 1)
-        }
-        if (ConnectionService.physicalModifierBits.includes(modifierBit)) {
           return
         }
-        // A real key-up is authoritative. Clear stale snapshots from pointer
-        // and polling sources as well so a modifier cannot remain stuck.
-        ConnectionService.directModifierMask &= ~modifierBit
-        ConnectionService.pointerModifierMask &= ~modifierBit
-        ConnectionService.nativeModifierMask &= ~modifierBit
-        ConnectionService.hardwareModifierMask &= ~modifierBit
-      }
-      ConnectionService.recomputeHeldModifierMask()
-      if (previousMask === ConnectionService.heldModifierMask) {
+        ConnectionService.physicalModifierKeys.push(identity)
+        ConnectionService.physicalModifierBits.push(modifierBit)
+        ConnectionService.physicalModifierControlCodes.push(keyCode)
+        ConnectionService.directModifierMask |= modifierBit
+      } else if (action === 1) {
+        if (index < 0) {
+          return
+        }
+        ConnectionService.physicalModifierKeys.splice(index, 1)
+        ConnectionService.physicalModifierBits.splice(index, 1)
+        ConnectionService.physicalModifierControlCodes.splice(index, 1)
+        if (!ConnectionService.physicalModifierBits.includes(modifierBit)) {
+          // A real key-up is authoritative. Clear stale snapshots from pointer
+          // and polling sources as well so a modifier cannot remain stuck.
+          ConnectionService.directModifierMask &= ~modifierBit
+          ConnectionService.pointerModifierMask &= ~modifierBit
+          ConnectionService.nativeModifierMask &= ~modifierBit
+          ConnectionService.hardwareModifierMask &= ~modifierBit
+        }
+      } else {
         return
       }
+      ConnectionService.recomputeHeldModifierMask()
+      // Keep left/right modifiers as separate protocol events. The aggregate
+      // mask remains available for printable keys and mouse packets.
       ConnectionService.sendRawModifierEvent(keyCode, action, 'key')
       return
     }
@@ -178,16 +248,16 @@ export class ConnectionService {
     RustDeskNapi.sendKeyEvent(keyCode, action, ConnectionService.getKeyModifierMask())
   }
 
-  static sendPhysicalKeyEvent(scanCode: number, action: number, eventModifierMask?: number): void {
+  static sendPhysicalKeyEvent(hidCode: number, action: number, eventModifierMask?: number): void {
     let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
-    const trackedSymbolIndex: number = ConnectionService.legacyShiftSymbolScanCodes.indexOf(scanCode)
-    const shiftedSymbol: string = ConnectionService.getShiftedNumberSymbol(scanCode)
+    const trackedSymbolIndex: number = ConnectionService.legacyShiftSymbolHidCodes.indexOf(hidCode)
+    const shiftedSymbol: string = ConnectionService.getShiftedNumberSymbol(hidCode)
     const hasShift: boolean = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
     const hasHotkeyModifier: boolean = (modifierMask &
       (ConnectionService.MODIFIER_CONTROL | ConnectionService.MODIFIER_ALT | ConnectionService.MODIFIER_META)) !== 0
     if (action === 0 && shiftedSymbol.length > 0 && hasShift && !hasHotkeyModifier) {
       if (trackedSymbolIndex < 0) {
-        ConnectionService.legacyShiftSymbolScanCodes.push(scanCode)
+        ConnectionService.legacyShiftSymbolHidCodes.push(hidCode)
       }
       // Map mode expects modifiers as raw scan codes. HarmonyOS currently sends
       // Shift through the compatible control-key path, so a shifted number can
@@ -196,42 +266,45 @@ export class ConnectionService {
       RustDeskNapi.sendText(shiftedSymbol)
       ConnectionService.sendRawModifierEvent(16, 0, 'shift-symbol-restore')
       RustDeskNapi.appendDiagnosticLog('input',
-        `shifted_number_forwarded scan=${scanCode} repeat=${trackedSymbolIndex >= 0 ? 1 : 0}`)
+        `shifted_number_forwarded hid=${hidCode} repeat=${trackedSymbolIndex >= 0 ? 1 : 0}`)
       return
     }
     if (action === 1 && trackedSymbolIndex >= 0) {
-      ConnectionService.legacyShiftSymbolScanCodes.splice(trackedSymbolIndex, 1)
+      ConnectionService.legacyShiftSymbolHidCodes.splice(trackedSymbolIndex, 1)
       return
     }
-    ConnectionService.trackHeldKey(ConnectionService.heldScanCodes, scanCode, action)
-    RustDeskNapi.sendPhysicalKeyEvent(scanCode, action, modifierMask)
+    ConnectionService.trackHeldKey(ConnectionService.heldHidCodes, hidCode, action)
+    RustDeskNapi.sendPhysicalKeyEvent(hidCode, action, modifierMask)
   }
 
-  static sendLetterKeyEvent(letter: string, scanCode: number, action: number,
+  static sendLetterKeyEvent(letter: string, hidCode: number, action: number,
     eventModifierMask?: number): void {
     if (letter.length !== 1) {
       return
     }
     let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
-    let trackedIndex: number = ConnectionService.legacyShiftLetterScanCodes.indexOf(scanCode)
+    let trackedIndex: number = ConnectionService.legacyShiftLetterHidCodes.indexOf(hidCode)
     const releasedCharacter: number = trackedIndex >= 0 ? ConnectionService.legacyShiftLetterCodes[trackedIndex] : 0
     let useLegacyCharacter: boolean
     if (action === 0) {
-      useLegacyCharacter = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
+      const hasShift: boolean = (modifierMask & ConnectionService.MODIFIER_SHIFT) !== 0
+      const hasHotkeyModifier: boolean = (modifierMask &
+        (ConnectionService.MODIFIER_CONTROL | ConnectionService.MODIFIER_ALT | ConnectionService.MODIFIER_META)) !== 0
+      useLegacyCharacter = hasShift && !hasHotkeyModifier
       if (useLegacyCharacter && trackedIndex < 0) {
-        ConnectionService.legacyShiftLetterScanCodes.push(scanCode)
+        ConnectionService.legacyShiftLetterHidCodes.push(hidCode)
       }
     } else {
       // The key-up must use the same protocol path as its key-down even when
       // Shift was released first.
       useLegacyCharacter = trackedIndex >= 0
       if (trackedIndex >= 0) {
-        ConnectionService.legacyShiftLetterScanCodes.splice(trackedIndex, 1)
+        ConnectionService.legacyShiftLetterHidCodes.splice(trackedIndex, 1)
         ConnectionService.legacyShiftLetterCodes.splice(trackedIndex, 1)
       }
     }
     if (!useLegacyCharacter) {
-      ConnectionService.sendPhysicalKeyEvent(scanCode, action, modifierMask)
+      ConnectionService.sendPhysicalKeyEvent(hidCode, action, modifierMask)
       return
     }
     let lower: string = letter.toLowerCase()
@@ -247,19 +320,21 @@ export class ConnectionService {
       character, action, modifierMask, result)
   }
 
-  static syncHeldModifierState(control: boolean, shift: boolean, alt: boolean): void {
+  static syncHeldModifierState(control: boolean, shift: boolean, alt: boolean, meta: boolean = false): void {
     let snapshot: number =
       (control ? ConnectionService.MODIFIER_CONTROL : 0) |
       (shift ? ConnectionService.MODIFIER_SHIFT : 0) |
-      (alt ? ConnectionService.MODIFIER_ALT : 0)
+      (alt ? ConnectionService.MODIFIER_ALT : 0) |
+      (meta ? ConnectionService.MODIFIER_META : 0)
     ConnectionService.applyModifierSnapshot(snapshot, true, 'pointer')
   }
 
-  static syncHardwareModifierState(control: boolean, shift: boolean, alt: boolean): void {
+  static syncHardwareModifierState(control: boolean, shift: boolean, alt: boolean, meta: boolean = false): void {
     let snapshot: number =
       (control ? ConnectionService.MODIFIER_CONTROL : 0) |
       (shift ? ConnectionService.MODIFIER_SHIFT : 0) |
-      (alt ? ConnectionService.MODIFIER_ALT : 0)
+      (alt ? ConnectionService.MODIFIER_ALT : 0) |
+      (meta ? ConnectionService.MODIFIER_META : 0)
     ConnectionService.applyModifierSnapshot(snapshot, false, 'hardware')
   }
 
@@ -308,6 +383,21 @@ export class ConnectionService {
     RustDeskNapi.sendText(text)
   }
 
+  static sendCtrlAltDel(): number {
+    return RustDeskNapi.sendCtrlAltDel()
+  }
+
+  static sendShortcutKey(keyCode: number, modifierMask: number): number {
+    const result: number = RustDeskNapi.sendKeyEvent(keyCode, 2, modifierMask)
+    RustDeskNapi.appendDiagnosticLog('input-shortcut',
+      `key=${keyCode} modifiers=${modifierMask} result=${result}`)
+    return result
+  }
+
+  static canSendCtrlAltDel(): boolean {
+    return RustDeskNapi.canSendCtrlAltDel()
+  }
+
   static send2FA(code: string, trustThisDevice: boolean): number {
     return RustDeskNapi.send2FA(code, trustThisDevice)
   }
@@ -322,29 +412,38 @@ export class ConnectionService {
 
   static releaseModifiers(): void {
     // Also balance printable/control keys on focus/session loss or queue overflow.
-    for (const scan of ConnectionService.heldScanCodes) {
-      RustDeskNapi.sendPhysicalKeyEvent(scan, 1, ConnectionService.getKeyModifierMask())
+    for (const hid of ConnectionService.heldHidCodes) {
+      RustDeskNapi.sendPhysicalKeyEvent(hid, 1, ConnectionService.getKeyModifierMask())
     }
     for (const key of ConnectionService.heldLegacyKeys) {
       RustDeskNapi.sendKeyEvent(key, 1, ConnectionService.getKeyModifierMask())
     }
-    ConnectionService.heldScanCodes = []
+    ConnectionService.heldHidCodes = []
     ConnectionService.heldLegacyKeys = []
-    ConnectionService.legacyShiftLetterScanCodes = []
+    ConnectionService.legacyShiftLetterHidCodes = []
     ConnectionService.legacyShiftLetterCodes = []
-    ConnectionService.legacyShiftSymbolScanCodes = []
+    ConnectionService.legacyShiftSymbolHidCodes = []
     let previousMask: number = ConnectionService.heldModifierMask
+    let physicalModifierMask: number = 0
+    for (let index: number = 0; index < ConnectionService.physicalModifierControlCodes.length; index++) {
+      const keyCode: number = ConnectionService.physicalModifierControlCodes[index]
+      physicalModifierMask |= ConnectionService.physicalModifierBits[index]
+      RustDeskNapi.sendKeyEvent(keyCode, 1, ConnectionService.getKeyModifierMask())
+      hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
+        'InputTrace physical_modifier_release key=%{public}d previous=%{public}d', keyCode, previousMask)
+    }
     ConnectionService.directModifierMask = 0
     ConnectionService.pointerModifierMask = 0
     ConnectionService.nativeModifierMask = 0
     ConnectionService.physicalModifierKeys = []
     ConnectionService.physicalModifierBits = []
+    ConnectionService.physicalModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
     let modifiers: number[] = [17, 16, 18, 91]
     for (let keyCode of modifiers) {
       let modifierBit: number = ConnectionService.getModifierBit(keyCode)
-      if ((previousMask & modifierBit) === 0) {
+      if ((previousMask & modifierBit) === 0 || (physicalModifierMask & modifierBit) !== 0) {
         continue
       }
       RustDeskNapi.sendKeyEvent(keyCode, 1, ConnectionService.getKeyModifierMask())
@@ -374,9 +473,13 @@ export class ConnectionService {
   private static getModifierBit(keyCode: number): number {
     switch (keyCode) {
       case 17: return ConnectionService.MODIFIER_CONTROL
+      case 163: return ConnectionService.MODIFIER_CONTROL
       case 16: return ConnectionService.MODIFIER_SHIFT
+      case 161: return ConnectionService.MODIFIER_SHIFT
       case 18: return ConnectionService.MODIFIER_ALT
+      case 165: return ConnectionService.MODIFIER_ALT
       case 91: return ConnectionService.MODIFIER_META
+      case 92: return ConnectionService.MODIFIER_META
       default: return 0
     }
   }
@@ -404,13 +507,14 @@ export class ConnectionService {
     ConnectionService.nativeModifierMask = 0
     ConnectionService.physicalModifierKeys = []
     ConnectionService.physicalModifierBits = []
+    ConnectionService.physicalModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
     ConnectionService.capsLockKeyHeld = false
-    ConnectionService.legacyShiftLetterScanCodes = []
+    ConnectionService.legacyShiftLetterHidCodes = []
     ConnectionService.legacyShiftLetterCodes = []
-    ConnectionService.legacyShiftSymbolScanCodes = []
-    ConnectionService.heldScanCodes = []
+    ConnectionService.legacyShiftSymbolHidCodes = []
+    ConnectionService.heldHidCodes = []
     ConnectionService.heldLegacyKeys = []
   }
 
@@ -420,18 +524,18 @@ export class ConnectionService {
     if (action === 1 && index >= 0) keys.splice(index, 1)
   }
 
-  private static getShiftedNumberSymbol(scanCode: number): string {
-    switch (scanCode) {
-      case 0x02: return '!'
-      case 0x03: return '@'
-      case 0x04: return '#'
-      case 0x05: return '$'
-      case 0x06: return '%'
-      case 0x07: return '^'
-      case 0x08: return '&'
-      case 0x09: return '*'
-      case 0x0A: return '('
-      case 0x0B: return ')'
+  private static getShiftedNumberSymbol(hidCode: number): string {
+    switch (hidCode) {
+      case 0x1E: return '!'
+      case 0x1F: return '@'
+      case 0x20: return '#'
+      case 0x21: return '$'
+      case 0x22: return '%'
+      case 0x23: return '^'
+      case 0x24: return '&'
+      case 0x25: return '*'
+      case 0x26: return '('
+      case 0x27: return ')'
       default: return ''
     }
   }

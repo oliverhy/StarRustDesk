@@ -84,6 +84,8 @@ export struct ConnectionPage {
   @State connectionGroups: SavedConnectionGroup[] = []
   @State savedConnectionsExpanded: boolean = true
   @State savedConnectionSort: string = 'id'
+  @State savedConnectionSearch: string = ''
+  @State savedConnectionSearchExpanded: boolean = false
   @State connectionFormExpanded: boolean = true
   @State ungroupedExpanded: boolean = true
   @State showGroupNameDialog: boolean = false
@@ -633,11 +635,44 @@ export struct ConnectionPage {
       .width('100%')
 
       Row() {
-        Text(`${this.savedConnections.length} 个设备`)
+        if (this.savedConnectionSearchExpanded) {
+          Search({ value: this.savedConnectionSearch, placeholder: '搜索名称或远端 ID' })
+            .layoutWeight(1)
+            .height(30)
+            .textFont({ size: 12 })
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+            .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
+            .borderRadius(6)
+            .margin({ right: 8 })
+            .onChange((value: string) => {
+              this.savedConnectionSearch = value
+            })
+        } else {
+          Text(`${this.savedConnections.length} 个设备`)
+            .fontSize(12)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          Blank()
+        }
+        Button(this.savedConnectionSearchExpanded ? '收起' : '搜索')
+          .width(48)
+          .height(30)
           .fontSize(12)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        Blank()
+          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(6)
+          .padding(0)
+          .enabled(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded)
+          .opacity(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded ? 1 : 0.45)
+          .onClick(() => {
+            if (this.savedConnectionSearchExpanded) {
+              this.savedConnectionSearch = ''
+            }
+            this.savedConnectionSearchExpanded = !this.savedConnectionSearchExpanded
+          })
         Button('备份')
+          .width(48)
           .height(30)
           .fontSize(12)
           .fontColor(RustDeskTheme.ACCENT)
@@ -669,6 +704,7 @@ export struct ConnectionPage {
             enableArrow: true
           })
         Button('+ 分组')
+          .width(56)
           .height(30)
           .fontSize(12)
           .fontColor(RustDeskTheme.ACCENT)
@@ -699,14 +735,32 @@ export struct ConnectionPage {
           .alignItems(HorizontalAlign.Center)
           .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
           .borderRadius(6)
+        } else if (this.filteredSavedConnectionCount() === 0) {
+          Column({ space: 6 }) {
+            Text('未找到匹配的设备')
+              .fontSize(15)
+              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+            Text('可按设备名称或远端 ID 搜索')
+              .fontSize(12)
+              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          }
+          .width('100%')
+          .height(88)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
+          .borderRadius(6)
         } else {
           if (this.connectionsForGroup('').length > 0) {
             this.buildSavedConnectionGroup('', '未分组', this.ungroupedExpanded, false)
           }
 
           ForEach(this.connectionGroups, (group: SavedConnectionGroup) => {
-            this.buildSavedConnectionGroup(group.id, group.name, group.expanded, true)
-          }, (group: SavedConnectionGroup) => `${group.id}-${this.savedConnectionsVersion}`)
+            if (this.shouldShowSavedConnectionGroup(group.id)) {
+              this.buildSavedConnectionGroup(group.id, group.name, group.expanded, true)
+            }
+          }, (group: SavedConnectionGroup) =>
+            `${group.id}-${this.savedConnectionsVersion}-${this.savedConnectionSearch}`)
         }
       }
     }
@@ -1408,13 +1462,37 @@ export struct ConnectionPage {
   connectionsForGroup(groupId: string): SavedConnectionInfo[] {
     let result: SavedConnectionInfo[] = []
     this.savedConnections.forEach((item: SavedConnectionInfo) => {
-      if (this.validGroupId(item.groupId) === groupId) {
+      if (this.validGroupId(item.groupId) === groupId && this.matchesSavedConnectionSearch(item)) {
         result.push(item)
       }
     })
     // Sort only a display copy; keep groups, credentials and backup order intact.
     return result.sort((left: SavedConnectionInfo, right: SavedConnectionInfo) =>
       this.compareSavedConnections(left, right))
+  }
+
+  matchesSavedConnectionSearch(item: SavedConnectionInfo): boolean {
+    const query: string = (this.savedConnectionSearch ?? '').trim().toLowerCase()
+    if (query.length === 0) {
+      return true
+    }
+    const compactQuery: string = query.replace(/\s+/g, '')
+    const compactRemoteId: string = item.remoteId.toLowerCase().replace(/\s+/g, '')
+    return item.name.toLowerCase().includes(query) || compactRemoteId.includes(compactQuery)
+  }
+
+  filteredSavedConnectionCount(): number {
+    let count: number = 0
+    this.savedConnections.forEach((item: SavedConnectionInfo) => {
+      if (this.matchesSavedConnectionSearch(item)) {
+        count++
+      }
+    })
+    return count
+  }
+
+  shouldShowSavedConnectionGroup(groupId: string): boolean {
+    return (this.savedConnectionSearch ?? '').trim().length === 0 || this.connectionsForGroup(groupId).length > 0
   }
 
   validGroupId(groupId: string): string {

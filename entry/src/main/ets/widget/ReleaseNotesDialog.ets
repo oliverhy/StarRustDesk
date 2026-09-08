@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.1.0'
-export const RELEASE_NOTES_BUILD: string = '1001004'
+export const RELEASE_NOTES_BUILD: string = '1001006'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,22 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.1.0（1001006）· 键盘、快捷栏与连接界面优化', [
+            '远控键盘快捷栏支持拖动，可收起为半透明小按钮，点击小按钮即可重新展开。',
+            '优化已保存连接的搜索布局，搜索框从按钮左侧展开，搜索、备份和分组按钮不再位移。',
+            '快捷栏发送 Ctrl+Shift+Esc、Ctrl+Shift+Del、Alt+F4 或 Ctrl+Alt+Del 后不再自动弹出本地软键盘。',
+            '补齐 F1–F12 物理功能键传递，修复控制 macOS 时 F3 无法送达远端的问题。',
+            '左右 Ctrl、Shift、Alt/Option 与 Meta/Command 按键分别按 RustDesk 官方协议传递，改善 Ctrl+↑ 等多键组合。',
+            '组合键不再把当前修饰键重复附加到自身事件，降低 macOS、Linux 被控端忽略快捷键或产生按键残留的风险。',
+            '断开连接、切换页面或失去输入焦点时释放已按下的修饰键，避免下一次输入受到旧按键状态影响。',
+            '直连安全握手失败时自动保持加密并改走中继；注册服务器无响应和中继超时会进行有限次数的全新连接重试。',
+          ])
+          this.buildSection('1.1.0（1001005）· Linux 外接键盘映射修复', [
+            '修复 HarmonyOS 6 平板使用蓝牙或 USB 外接键盘控制 Ubuntu/KDE 时，Q、W 等按键错误变成数字键的问题。',
+            '物理键盘改用通用 USB HID 位置码传递，再根据被控端系统转换为 Windows、Linux、macOS 或 Android 对应键码。',
+            'Linux 被控端使用正确的 Xorg/XKB 键码，Windows 原有扫描码行为保持不变。',
+            '同步覆盖数字、标点、Shift 大小写、按键释放和会话重置，降低跨平台键位偏移与按键残留风险。',
+          ])
           this.buildSection('1.1.0（1001004）· 键盘特殊符号输入修复', [
             '修复 HarmonyOS PC 使用物理键盘时，Shift 配合数字行无法输入 ! @ # $ % ^ & * ( ) 的问题。',
             '普通数字、Shift 大小写及中文输入保持原有行为，不受本次修复影响。',

@@ -86,7 +86,9 @@ export const connect: (peerId: string, password: string, rendezvousServer?: stri
   forceRelay?: boolean, allowInsecureFallback?: boolean) => number;
 export const disconnect: () => number;
 export const sendKeyEvent: (keyCode: number, action: number, modifierMask?: number) => number;
-export const sendPhysicalKeyEvent: (scanCode: number, action: number, modifierMask?: number) => number;
+export const sendCtrlAltDel: () => number;
+export const canSendCtrlAltDel: () => boolean;
+export const sendPhysicalKeyEvent: (hidCode: number, action: number, modifierMask?: number) => number;
 export const sendText: (text: string) => number;
 export const send2FA: (code: string, trustThisDevice: boolean) => number;
 export const getEnableTrustedDevices: () => boolean;

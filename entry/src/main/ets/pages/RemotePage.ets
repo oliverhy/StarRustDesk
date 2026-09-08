@@ -1,6 +1,6 @@
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
-import { window } from '@kit.ArkUI';
+import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { BusinessError, zlib } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
@@ -67,6 +67,16 @@ const MOBILE_ACTION_RECENTS: number = 2;
 const MOBILE_ACTION_VOLUME_UP: number = 3;
 const MOBILE_ACTION_VOLUME_DOWN: number = 4;
 const MOBILE_ACTION_POWER: number = 5;
+const VIRTUAL_MODIFIER_CTRL: number = 17;
+const VIRTUAL_MODIFIER_SHIFT: number = 16;
+const VIRTUAL_MODIFIER_ALT: number = 18;
+const VIRTUAL_MODIFIER_META: number = 91;
+const MODIFIER_MASK_CTRL: number = 1;
+const MODIFIER_MASK_SHIFT: number = 2;
+const MODIFIER_MASK_ALT: number = 4;
+const MODIFIER_MASK_META: number = 8;
+const KEYBOARD_CAPTURE_SENTINEL: string =
+  '1111111111111111111111111111111111111111111111111111111111111111';
 const LOG_DOMAIN: number = 0x0000;
 
 @Entry
@@ -90,13 +100,23 @@ struct RemotePage {
   @State lastAbsX: number = 0;
   @State lastAbsY: number = 0;
   @State showKeyboardPanel: boolean = false;
+  @State keyboardToolsCollapsed: boolean = false;
+  @State keyboardToolsOffsetX: number = 0;
+  @State keyboardToolsOffsetY: number = 0;
+  @State showKeyboardFunctionKeys: boolean = false;
+  @State showKeyboardMoreKeys: boolean = false;
+  @State virtualCtrlSelected: boolean = false;
+  @State virtualShiftSelected: boolean = false;
+  @State virtualAltSelected: boolean = false;
+  @State virtualMetaSelected: boolean = false;
+  @State canSendCtrlAltDel: boolean = false;
   @State inputMode: string = INPUT_MODE_MOUSE;
   @State showGestureHelp: boolean = false;
   @State showMobileActions: boolean = false;
   @State isPeerAndroid: boolean = false;
   @State showLocalCursor: boolean = true;
   @State showLeftButtonHoldIndicator: boolean = false;
-  @State keyboardInput: string = '';
+  @State keyboardInput: string = KEYBOARD_CAPTURE_SENTINEL;
   @State showCursor: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
   @State embeddedCursorOverlayFallback: boolean = false;
@@ -213,6 +233,8 @@ struct RemotePage {
   private connectingStartedAt: number = 0;
   private mobileActionsDragStartX: number = 0;
   private mobileActionsDragStartY: number = 0;
+  private keyboardToolsDragStartX: number = 0;
+  private keyboardToolsDragStartY: number = 0;
   private lastSurfaceWidth: number = 0;
   private lastSurfaceHeight: number = 0;
   private touchStartX: number = 0;
@@ -244,7 +266,7 @@ struct RemotePage {
   private viewportPanActive: boolean = false;
   private viewportPanLastX: number = 0;
   private viewportPanLastY: number = 0;
-  private directKeyboardCommittedText: string = '';
+  private directKeyboardCommittedText: string = KEYBOARD_CAPTURE_SENTINEL;
   private clipboardPolling: boolean = false;
   private lastLocalClipboardText: string = '';
   private lastRemoteClipboardText: string = '';
@@ -296,6 +318,8 @@ struct RemotePage {
   private edgePanTouchActive: boolean = false;
   private edgePanFromTouch: boolean = false;
   private edgePanMoving: boolean = false;
+  private keyboardAvoidModeBeforePanel: KeyboardAvoidMode = KeyboardAvoidMode.OFFSET;
+  private keyboardAvoidModeChanged: boolean = false;
 
   aboutToAppear(): void {
     RustDeskNapi.appendDiagnosticLog('remote-page', 'about_to_appear')
@@ -344,6 +368,7 @@ struct RemotePage {
     this.cleanupPendingUploadFile();
     this.cleanupPendingDownloadFiles();
     this.releaseRemoteCursorImages();
+    this.restoreKeyboardAvoidMode();
     this.pointerOverRemoteViewport = false;
     this.setSystemPointerHidden(false);
     if (this.isFullScreen) {
@@ -353,6 +378,10 @@ struct RemotePage {
   }
 
   onBackPress(): boolean {
+    if (this.showKeyboardPanel) {
+      this.closeRemoteKeyboard();
+      return true;
+    }
     if (this.showRemoteFileBrowser) {
       this.closeRemoteFileBrowser(true);
       return true;
@@ -405,6 +434,19 @@ struct RemotePage {
       } else {
         this.connectingStartedAt = 0;
       }
+      if (status === ConnectionStatus.FAILED) {
+        const failedMessage: string = ConnectionService.getLastConnectionError();
+        const recoveryHint: string = ConnectionService.retryRecoverableConnectionFailure(failedMessage);
+        if (recoveryHint.length > 0) {
+          this.resetRemoteViewportForSession();
+          this.displayStateInitialized = false;
+          this.directLoginStartedAt = 0;
+          this.connectingStartedAt = now;
+          this.connectionError = '';
+          this.videoWaitingHint = recoveryHint;
+          status = ConnectionStatus.CONNECTING;
+        }
+      }
       this.connectionStatus = status as ConnectionStatus;
       RemoteSessionBackgroundTask.syncForConnectionStatus(this.connectionStatus);
       RemoteSessionBackgroundTask.setAudioPlaybackActive(
@@ -447,6 +489,7 @@ struct RemotePage {
         }
         this.updateConnectionRoute();
         this.isPeerAndroid = RustDeskNapi.isPeerAndroid();
+        this.canSendCtrlAltDel = ConnectionService.canSendCtrlAltDel();
       }
       if (status === ConnectionStatus.CONNECTED) {
         this.ensureClipboardSyncRunning();
@@ -455,6 +498,7 @@ struct RemotePage {
       if (status !== ConnectionStatus.CONNECTED) {
         this.displayStateInitialized = false;
         this.isPeerAndroid = false;
+        this.canSendCtrlAltDel = false;
         this.showMobileActions = false;
         this.hasVideo = false;
         this.routeText = '未连接';
@@ -852,7 +896,8 @@ struct RemotePage {
       ConnectionService.syncHardwareModifierState(
         (state.modifierMask & 1) !== 0,
         (state.modifierMask & 2) !== 0,
-        (state.modifierMask & 4) !== 0
+        (state.modifierMask & 4) !== 0,
+        (state.modifierMask & 8) !== 0
       );
       this.hardwareModifierTrackingActive = state.modifierMask !== 0;
     }
@@ -965,18 +1010,18 @@ struct RemotePage {
     if (event.modifierValid) {
       ConnectionService.syncNativeModifierState(event.modifierMask);
     }
-    const scanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
-    if (scanCode > 0) {
+    const hidCode: number = this.mapHarmonyKeyCodeToUsbHidCode(event.keyCode);
+    if (hidCode > 0) {
       const eventModifierMask: number | undefined = event.modifierValid ? event.modifierMask : undefined;
       const letter: string = this.mapHarmonyKeyCodeToLetter(event.keyCode);
       if (letter.length > 0) {
-        ConnectionService.sendLetterKeyEvent(letter, scanCode, action, eventModifierMask);
+        ConnectionService.sendLetterKeyEvent(letter, hidCode, action, eventModifierMask);
       } else {
-        ConnectionService.sendPhysicalKeyEvent(scanCode, action, eventModifierMask);
+        ConnectionService.sendPhysicalKeyEvent(hidCode, action, eventModifierMask);
       }
       if (action === 0) {
         RustDeskNapi.appendDiagnosticLog('input',
-          `native_key_forwarded code=${event.keyCode} scan=${scanCode} modifiers=${event.modifierMask} ` +
+          `native_key_forwarded code=${event.keyCode} hid=${hidCode} modifiers=${event.modifierMask} ` +
           `modifier_valid=${event.modifierValid ? 1 : 0}`);
       }
     }
@@ -1070,6 +1115,7 @@ struct RemotePage {
         this.buildTransferProgress();
       }
       if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        this.buildKeyboardShortcutOverlay();
         this.buildKeyboardCapture();
       }
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
@@ -1091,6 +1137,8 @@ struct RemotePage {
       this.pageHeight = newValue.height as number;
       this.mobileActionsOffsetX = this.clampMobileActionsOffsetX(this.mobileActionsOffsetX);
       this.mobileActionsOffsetY = this.clampMobileActionsOffsetY(this.mobileActionsOffsetY);
+      this.keyboardToolsOffsetX = this.clampKeyboardToolsOffsetX(this.keyboardToolsOffsetX);
+      this.keyboardToolsOffsetY = this.clampKeyboardToolsOffsetY(this.keyboardToolsOffsetY);
       this.scheduleSurfaceRebindIfSizeChanged();
     });
   }
@@ -2265,6 +2313,216 @@ struct RemotePage {
   }
 
   @Builder
+  buildKeyboardToolButton(label: string, buttonWidth: number, selected: boolean,
+    danger: boolean, enabled: boolean, onClick: () => void, refocusAfterClick: boolean = true) {
+    Button(label)
+      .width(buttonWidth)
+      .height(38)
+      .padding({ left: 3, right: 3 })
+      .fontSize(label.length > 10 ? 10 : 12)
+      .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+      .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : this.primaryTextColor()))
+      .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FFF1F2') :
+        (selected ? RustDeskTheme.ACCENT : this.mutedSurfaceColor()))
+      .border({ width: 1, color: selected ? RustDeskTheme.ACCENT : this.themeBorderColor() })
+      .borderRadius(8)
+      .enabled(enabled)
+      .opacity(enabled ? 1 : 0.5)
+      .focusable(false)
+      .onClick(() => {
+        onClick();
+        if (refocusAfterClick) {
+          this.refocusRemoteKeyboard();
+        }
+      })
+  }
+
+  @Builder
+  buildKeyboardShortcutOverlay() {
+    if (this.keyboardToolsCollapsed) {
+      Button() {
+        Text('键')
+          .fontSize(16)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? '#DCE9FF' : RustDeskTheme.ACCENT)
+      }
+      .width(this.getKeyboardToolsCollapsedSize())
+      .height(this.getKeyboardToolsCollapsedSize())
+      .padding(0)
+      .backgroundColor(this.isDarkMode ? '#991B2638' : '#B3FFFFFF')
+      .border({ width: 1, color: this.isDarkMode ? '#995C93E6' : '#99518BDD' })
+      .borderRadius(this.getKeyboardToolsCollapsedSize() / 2)
+      .opacity(0.72)
+      .shadow({ radius: 10, color: '#33000000', offsetX: 0, offsetY: 4 })
+      .position({ x: this.getKeyboardToolsX(), y: this.getKeyboardToolsY() })
+      .zIndex(65)
+      .focusable(false)
+      .gesture(
+        PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
+          .onActionStart(() => {
+            this.beginKeyboardToolsDrag();
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.updateKeyboardToolsDrag(event.offsetX, event.offsetY);
+          })
+      )
+      .onClick(() => {
+        this.keyboardToolsCollapsed = false;
+        this.refocusRemoteKeyboard();
+      })
+      .onHover((isHovering: boolean) => {
+        this.handleNonRemoteHover(isHovering);
+      })
+    } else {
+      Column({ space: 6 }) {
+        Row({ space: 4 }) {
+          Button('⋮')
+            .width(24)
+            .height(38)
+            .padding(0)
+            .fontSize(18)
+            .fontColor(this.secondaryTextColor())
+            .backgroundColor(Color.Transparent)
+            .focusable(false)
+            .gesture(
+              PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
+                .onActionStart(() => {
+                  this.beginKeyboardToolsDrag();
+                })
+                .onActionUpdate((event: GestureEvent) => {
+                  this.updateKeyboardToolsDrag(event.offsetX, event.offsetY);
+                })
+            )
+          Scroll() {
+            Row({ space: 6 }) {
+          this.buildKeyboardToolButton('Ctrl', this.keyboardMainButtonWidth(58, 46),
+            this.virtualCtrlSelected, false, true, () => {
+            this.toggleVirtualModifier(VIRTUAL_MODIFIER_CTRL);
+          })
+          this.buildKeyboardToolButton('Alt', this.keyboardMainButtonWidth(54, 44),
+            this.virtualAltSelected, false, true, () => {
+            this.toggleVirtualModifier(VIRTUAL_MODIFIER_ALT);
+          })
+          this.buildKeyboardToolButton('Shift', this.keyboardMainButtonWidth(62, 52),
+            this.virtualShiftSelected, false, true, () => {
+            this.toggleVirtualModifier(VIRTUAL_MODIFIER_SHIFT);
+          })
+          this.buildKeyboardToolButton('Win/Cmd', this.keyboardMainButtonWidth(76, 68),
+            this.virtualMetaSelected, false, true, () => {
+            this.toggleVirtualModifier(VIRTUAL_MODIFIER_META);
+          })
+          this.buildKeyboardToolButton('Fn', this.keyboardMainButtonWidth(48, 42),
+            this.showKeyboardFunctionKeys, false, true, () => {
+            this.showKeyboardFunctionKeys = !this.showKeyboardFunctionKeys;
+            if (this.showKeyboardFunctionKeys) this.showKeyboardMoreKeys = false;
+          })
+          this.buildKeyboardToolButton('更多', this.keyboardMainButtonWidth(54, 46),
+            this.showKeyboardMoreKeys, false, true, () => {
+            this.showKeyboardMoreKeys = !this.showKeyboardMoreKeys;
+            if (this.showKeyboardMoreKeys) this.showKeyboardFunctionKeys = false;
+          })
+            }
+            .height(38)
+            .alignItems(VerticalAlign.Center)
+          }
+          .layoutWeight(1)
+          .height(38)
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          this.buildKeyboardToolButton('收', 38, false, false, true, () => {
+            this.keyboardToolsCollapsed = true;
+          })
+          this.buildKeyboardToolButton('×', 38, false, false, true, () => {
+            this.closeRemoteKeyboard();
+          })
+        }
+        .width('100%')
+        .height(38)
+        .alignItems(VerticalAlign.Center)
+
+      if (this.showKeyboardFunctionKeys) {
+        Scroll() {
+          Row({ space: 6 }) {
+            ForEach(this.makeFunctionKeyCodes(), (code: number) => {
+              this.buildKeyboardToolButton(`F${code - 111}`, 48, false, false, true, () => {
+                this.sendVirtualControlKey(code, `F${code - 111}`);
+              })
+            }, (code: number) => `function-${code}`)
+          }
+          .height(38)
+        }
+        .width('100%')
+        .height(38)
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+      }
+
+      if (this.showKeyboardMoreKeys) {
+        Scroll() {
+          Row({ space: 6 }) {
+            this.buildKeyboardToolButton('Esc', 50, false, false, true, () => {
+              this.sendVirtualControlKey(27, 'Esc');
+            })
+            this.buildKeyboardToolButton('Tab', 50, false, false, true, () => {
+              this.sendVirtualControlKey(9, 'Tab');
+            })
+            this.buildKeyboardToolButton('Home', 58, false, false, true, () => {
+              this.sendVirtualControlKey(36, 'Home');
+            })
+            this.buildKeyboardToolButton('End', 50, false, false, true, () => {
+              this.sendVirtualControlKey(35, 'End');
+            })
+            this.buildKeyboardToolButton('Ins', 48, false, false, true, () => {
+              this.sendVirtualControlKey(45, 'Insert');
+            })
+            this.buildKeyboardToolButton('Del', 48, false, false, true, () => {
+              this.sendVirtualControlKey(46, 'Delete');
+            })
+            this.buildKeyboardToolButton('PgUp', 58, false, false, true, () => {
+              this.sendVirtualControlKey(33, 'PageUp');
+            })
+            this.buildKeyboardToolButton('PgDn', 58, false, false, true, () => {
+              this.sendVirtualControlKey(34, 'PageDown');
+            })
+            this.buildKeyboardToolButton('Ctrl+Shift+Esc', 112, false, false, true, () => {
+              this.sendPresetShortcut(27, MODIFIER_MASK_CTRL | MODIFIER_MASK_SHIFT, 'Ctrl+Shift+Esc');
+            }, false)
+            this.buildKeyboardToolButton('Ctrl+Shift+Del', 112, false, false, true, () => {
+              this.sendPresetShortcut(46, MODIFIER_MASK_CTRL | MODIFIER_MASK_SHIFT, 'Ctrl+Shift+Del');
+            }, false)
+            this.buildKeyboardToolButton('Alt+F4', 72, false, false, true, () => {
+              this.sendPresetShortcut(115, MODIFIER_MASK_ALT, 'Alt+F4');
+            }, false)
+            if (this.canSendCtrlAltDel) {
+              this.buildKeyboardToolButton('Ctrl+Alt+Del', 104, false, true, true, () => {
+                this.sendCtrlAltDel();
+              }, false)
+            }
+          }
+          .height(38)
+        }
+        .width('100%')
+        .height(38)
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+      }
+    }
+      .width(this.getKeyboardToolsWidth())
+      .height(this.getKeyboardToolsHeight())
+      .padding(8)
+      .backgroundColor(this.isDarkMode ? '#F21B2638' : '#FAFFFFFF')
+      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
+      .borderRadius(14)
+      .shadow({ radius: 18, color: '#44000000', offsetX: 0, offsetY: 6 })
+      .position({ x: this.getKeyboardToolsX(), y: this.getKeyboardToolsY() })
+      .zIndex(65)
+      .onHover((isHovering: boolean) => {
+        this.handleNonRemoteHover(isHovering);
+      })
+    }
+  }
+
+  @Builder
   buildKeyboardCapture() {
     TextInput({ text: this.keyboardInput })
       .id('remoteKeyboardCapture')
@@ -2285,8 +2543,7 @@ struct RemotePage {
       })
       .onSubmit(() => {
         this.sendControlKey(13);
-        this.keyboardInput = '';
-        this.directKeyboardCommittedText = '';
+        this.resetKeyboardCaptureBuffer();
       })
       .position({ x: 0, y: 0 })
   }
@@ -2366,6 +2623,7 @@ struct RemotePage {
       return;
     }
     this.showKeyboardPanel = false;
+    this.restoreKeyboardAvoidMode();
     this.showGestureHelp = false;
     this.isFullScreen = true;
     this.applyFullscreenWindow(true);
@@ -3347,21 +3605,21 @@ struct RemotePage {
     }
 
     let text: string = this.getKeyEventText(event);
-    let physicalScanCode: number = this.mapHarmonyKeyCodeToWindowsScanCode(event.keyCode);
-    if (physicalScanCode > 0) {
+    let physicalHidCode: number = this.mapHarmonyKeyCodeToUsbHidCode(event.keyCode);
+    if (physicalHidCode > 0) {
       let letter: string = this.mapHarmonyKeyCodeToLetter(event.keyCode);
       if (letter.length > 0) {
-        ConnectionService.sendLetterKeyEvent(letter, physicalScanCode, action);
+        ConnectionService.sendLetterKeyEvent(letter, physicalHidCode, action);
       } else {
-        ConnectionService.sendPhysicalKeyEvent(physicalScanCode, action);
+        ConnectionService.sendPhysicalKeyEvent(physicalHidCode, action);
       }
       return true;
     }
 
     if (text.length > 0) {
-      let scanCode: number = this.mapAsciiToWindowsScanCode(text);
-      if (scanCode > 0) {
-        ConnectionService.sendPhysicalKeyEvent(scanCode, action);
+      let hidCode: number = this.mapAsciiToUsbHidCode(text);
+      if (hidCode > 0) {
+        ConnectionService.sendPhysicalKeyEvent(hidCode, action);
       } else if (event.type === KeyType.Down) {
         ConnectionService.sendText(text);
       }
@@ -3374,11 +3632,17 @@ struct RemotePage {
     if (event.getModifierKeyState === undefined) {
       return;
     }
+    let meta: boolean = false;
+    try {
+      meta = event.getModifierKeyState(['Meta']);
+    } catch (_ignored) {
+    }
     try {
       ConnectionService.syncHeldModifierState(
         event.getModifierKeyState(['Ctrl']),
         event.getModifierKeyState(['Shift']),
-        event.getModifierKeyState(['Alt'])
+        event.getModifierKeyState(['Alt']),
+        meta
       );
     } catch (_e) {
     }
@@ -3389,11 +3653,17 @@ struct RemotePage {
     if (event.getModifierKeyState === undefined) {
       return;
     }
+    let meta: boolean = false;
+    try {
+      meta = event.getModifierKeyState(['Meta']);
+    } catch (_ignored) {
+    }
     try {
       ConnectionService.syncHeldModifierState(
         event.getModifierKeyState(['Ctrl']),
         event.getModifierKeyState(['Shift']),
-        event.getModifierKeyState(['Alt'])
+        event.getModifierKeyState(['Alt']),
+        meta
       );
     } catch (_e) {
     }
@@ -3421,70 +3691,44 @@ struct RemotePage {
     return '';
   }
 
-  mapAsciiToWindowsScanCode(text: string): number {
+  mapAsciiToUsbHidCode(text: string): number {
     if (text.length !== 1) {
       return 0;
     }
-    switch (text.toLowerCase()) {
-      case 'a': return 0x1E;
-      case 'b': return 0x30;
-      case 'c': return 0x2E;
-      case 'd': return 0x20;
-      case 'e': return 0x12;
-      case 'f': return 0x21;
-      case 'g': return 0x22;
-      case 'h': return 0x23;
-      case 'i': return 0x17;
-      case 'j': return 0x24;
-      case 'k': return 0x25;
-      case 'l': return 0x26;
-      case 'm': return 0x32;
-      case 'n': return 0x31;
-      case 'o': return 0x18;
-      case 'p': return 0x19;
-      case 'q': return 0x10;
-      case 'r': return 0x13;
-      case 's': return 0x1F;
-      case 't': return 0x14;
-      case 'u': return 0x16;
-      case 'v': return 0x2F;
-      case 'w': return 0x11;
-      case 'x': return 0x2D;
-      case 'y': return 0x15;
-      case 'z': return 0x2C;
-      case '1': return 0x02;
-      case '2': return 0x03;
-      case '3': return 0x04;
-      case '4': return 0x05;
-      case '5': return 0x06;
-      case '6': return 0x07;
-      case '7': return 0x08;
-      case '8': return 0x09;
-      case '9': return 0x0A;
-      case '0': return 0x0B;
-      default: return 0;
+    const normalized: string = text.toLowerCase();
+    const codePoint: number = normalized.charCodeAt(0);
+    if (codePoint >= 97 && codePoint <= 122) {
+      return 0x04 + codePoint - 97;
     }
+    if (codePoint >= 49 && codePoint <= 57) {
+      return 0x1E + codePoint - 49;
+    }
+    if (codePoint === 48) {
+      return 0x27;
+    }
+    return 0;
   }
 
-  mapHarmonyKeyCodeToWindowsScanCode(keyCode: number): number {
+  mapHarmonyKeyCodeToUsbHidCode(keyCode: number): number {
     if (keyCode >= 2017 && keyCode <= 2042) {
-      return this.mapAsciiToWindowsScanCode('abcdefghijklmnopqrstuvwxyz'.charAt(keyCode - 2017));
+      return 0x04 + keyCode - 2017;
     }
     if (keyCode >= 2000 && keyCode <= 2009) {
-      return this.mapAsciiToWindowsScanCode((keyCode - 2000).toString());
+      const digit: number = keyCode - 2000;
+      return digit === 0 ? 0x27 : 0x1D + digit;
     }
     switch (keyCode) {
-      case 2043: return 0x33;
-      case 2044: return 0x34;
-      case 2056: return 0x29;
-      case 2057: return 0x0C;
-      case 2058: return 0x0D;
-      case 2059: return 0x1A;
-      case 2060: return 0x1B;
-      case 2061: return 0x2B;
-      case 2062: return 0x27;
-      case 2063: return 0x28;
-      case 2064: return 0x35;
+      case 2043: return 0x36;
+      case 2044: return 0x37;
+      case 2056: return 0x35;
+      case 2057: return 0x2D;
+      case 2058: return 0x2E;
+      case 2059: return 0x2F;
+      case 2060: return 0x30;
+      case 2061: return 0x31;
+      case 2062: return 0x33;
+      case 2063: return 0x34;
+      case 2064: return 0x38;
       default: return 0;
     }
   }
@@ -3497,13 +3741,20 @@ struct RemotePage {
   }
 
   mapControlKeyCode(keyCode: number): number {
+    if (keyCode >= 2090 && keyCode <= 2101) {
+      // HarmonyOS KEYCODE_F1..KEYCODE_F12 -> the stable virtual-key range
+      // consumed by the native RustDesk protocol mapping.
+      return 112 + keyCode - 2090;
+    }
     switch (keyCode) {
       case 2045:
-      case 2046:
         return 18;
+      case 2046:
+        return 165;
       case 2047:
-      case 2048:
         return 16;
+      case 2048:
+        return 161;
       case 2012:
         return 38;
       case 2013:
@@ -3525,20 +3776,23 @@ struct RemotePage {
       case 2071:
         return 46;
       case 2072:
-      case 2073:
         return 17;
+      case 2073:
+        return 163;
       case 2074:
         return 20;
       case 2076:
-      case 2077:
         return 91;
+      case 2077:
+        return 92;
       default:
         return 0;
     }
   }
 
   isModifierControlCode(controlCode: number): boolean {
-    return controlCode === 16 || controlCode === 17 || controlCode === 18 || controlCode === 91;
+    return controlCode === 16 || controlCode === 161 || controlCode === 17 || controlCode === 163 ||
+      controlCode === 18 || controlCode === 165 || controlCode === 91 || controlCode === 92;
   }
 
   handleMultiTouch(event: TouchEvent): void {
@@ -4002,6 +4256,37 @@ struct RemotePage {
     if (text.length <= 0) {
       return;
     }
+    let segmentStart: number = 0;
+    for (let index: number = 0; index < text.length; index++) {
+      let character: string = text.charAt(index);
+      if (character !== '\n' && character !== '\r') {
+        continue;
+      }
+      if (index > segmentStart) {
+        this.sendKeyboardTextSegment(text.substring(segmentStart, index));
+      }
+      if (character === '\r' && index + 1 < text.length && text.charAt(index + 1) === '\n') {
+        index++;
+      }
+      this.sendControlKey(13);
+      segmentStart = index + 1;
+    }
+    if (segmentStart < text.length) {
+      this.sendKeyboardTextSegment(text.substring(segmentStart));
+    }
+  }
+
+  sendKeyboardTextSegment(text: string): void {
+    if (text.length === 1) {
+      const modifierMask: number = this.getVirtualModifierMask();
+      const keyCode: number = this.getPrintableShortcutKeyCode(text);
+      if (modifierMask !== 0 && keyCode > 0) {
+        ConnectionService.sendShortcutKey(keyCode, modifierMask);
+        RustDeskNapi.appendDiagnosticLog('input-shortcut',
+          `soft_key key=${keyCode} modifiers=${modifierMask}`);
+        return;
+      }
+    }
     ConnectionService.sendText(text);
   }
 
@@ -4017,8 +4302,8 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
-    this.keyboardInput = '';
-    this.directKeyboardCommittedText = '';
+    this.resetKeyboardCaptureBuffer();
+    this.applyKeyboardResizeMode();
     this.showKeyboardPanel = true;
     setTimeout(() => {
       try {
@@ -4029,12 +4314,232 @@ struct RemotePage {
   }
 
   closeRemoteKeyboard(): void {
+    this.releaseVirtualModifiers();
     this.showKeyboardPanel = false;
-    this.keyboardInput = '';
-    this.directKeyboardCommittedText = '';
+    this.keyboardToolsCollapsed = false;
+    this.showKeyboardFunctionKeys = false;
+    this.showKeyboardMoreKeys = false;
+    this.resetKeyboardCaptureBuffer();
+    this.restoreKeyboardAvoidMode();
     setTimeout(() => {
       this.requestRemoteInputFocus();
     }, 60);
+  }
+
+  applyKeyboardResizeMode(): void {
+    if (this.keyboardAvoidModeChanged) {
+      return;
+    }
+    try {
+      const uiContext = this.getUIContext();
+      this.keyboardAvoidModeBeforePanel = uiContext.getKeyboardAvoidMode();
+      uiContext.setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+      this.keyboardAvoidModeChanged = true;
+      RustDeskNapi.appendDiagnosticLog('input-shortcut', 'keyboard_avoid_mode=resize');
+    } catch (_e) {
+      RustDeskNapi.appendDiagnosticLog('input-shortcut', 'keyboard_avoid_mode=resize_failed');
+    }
+  }
+
+  restoreKeyboardAvoidMode(): void {
+    if (!this.keyboardAvoidModeChanged) {
+      return;
+    }
+    try {
+      this.getUIContext().setKeyboardAvoidMode(this.keyboardAvoidModeBeforePanel);
+    } catch (_e) {
+    }
+    this.keyboardAvoidModeChanged = false;
+  }
+
+  getKeyboardToolsWidth(): number {
+    const available: number = Math.max(272, (this.pageWidth > 0 ? this.pageWidth : 360) - 12);
+    return Math.min(this.isLargeLayout() ? 720 : 520, available);
+  }
+
+  keyboardMainButtonWidth(largeWidth: number, compactWidth: number): number {
+    return this.isLargeLayout() ? largeWidth : compactWidth;
+  }
+
+  getKeyboardToolsHeight(): number {
+    return this.showKeyboardFunctionKeys || this.showKeyboardMoreKeys ? 98 : 54;
+  }
+
+  getKeyboardToolsCollapsedSize(): number {
+    return 44;
+  }
+
+  getKeyboardToolsCurrentWidth(): number {
+    return this.keyboardToolsCollapsed ? this.getKeyboardToolsCollapsedSize() : this.getKeyboardToolsWidth();
+  }
+
+  getKeyboardToolsCurrentHeight(): number {
+    return this.keyboardToolsCollapsed ? this.getKeyboardToolsCollapsedSize() : this.getKeyboardToolsHeight();
+  }
+
+  getKeyboardToolsBaseX(): number {
+    return Math.max(8, ((this.pageWidth > 0 ? this.pageWidth : 360) - this.getKeyboardToolsWidth()) / 2);
+  }
+
+  getKeyboardToolsBaseY(): number {
+    return 8;
+  }
+
+  clampKeyboardToolsOffsetX(offset: number): number {
+    const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
+    const baseX: number = this.getKeyboardToolsBaseX();
+    const minOffset: number = 8 - baseX;
+    const maxOffset: number = width - this.getKeyboardToolsCurrentWidth() - 8 - baseX;
+    return Math.max(minOffset, Math.min(maxOffset, offset));
+  }
+
+  clampKeyboardToolsOffsetY(offset: number): number {
+    const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
+    const baseY: number = this.getKeyboardToolsBaseY();
+    const minOffset: number = 8 - baseY;
+    const maxOffset: number = height - this.getKeyboardToolsCurrentHeight() - 8 - baseY;
+    return Math.max(minOffset, Math.min(maxOffset, offset));
+  }
+
+  beginKeyboardToolsDrag(): void {
+    this.keyboardToolsDragStartX = this.clampKeyboardToolsOffsetX(this.keyboardToolsOffsetX);
+    this.keyboardToolsDragStartY = this.clampKeyboardToolsOffsetY(this.keyboardToolsOffsetY);
+  }
+
+  updateKeyboardToolsDrag(offsetX: number, offsetY: number): void {
+    this.keyboardToolsOffsetX = this.clampKeyboardToolsOffsetX(this.keyboardToolsDragStartX + offsetX);
+    this.keyboardToolsOffsetY = this.clampKeyboardToolsOffsetY(this.keyboardToolsDragStartY + offsetY);
+  }
+
+  getKeyboardToolsX(): number {
+    return this.getKeyboardToolsBaseX() + this.clampKeyboardToolsOffsetX(this.keyboardToolsOffsetX);
+  }
+
+  getKeyboardToolsY(): number {
+    return this.getKeyboardToolsBaseY() + this.clampKeyboardToolsOffsetY(this.keyboardToolsOffsetY);
+  }
+
+  makeFunctionKeyCodes(): number[] {
+    return [112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123];
+  }
+
+  refocusRemoteKeyboard(): void {
+    setTimeout(() => {
+      if (!this.showKeyboardPanel) return;
+      try {
+        this.getUIContext()?.getFocusController().requestFocus('remoteKeyboardCapture');
+      } catch (_e) {
+      }
+    }, 30);
+  }
+
+  toggleVirtualModifier(keyCode: number): void {
+    let selected: boolean = !this.isVirtualModifierSelected(keyCode);
+    this.setVirtualModifierSelected(keyCode, selected);
+    ConnectionService.sendKeyEvent(keyCode, selected ? 0 : 1, 10000 + keyCode);
+    RustDeskNapi.appendDiagnosticLog('input-shortcut',
+      `modifier_toggle key=${keyCode} selected=${selected ? 1 : 0}`);
+  }
+
+  isVirtualModifierSelected(keyCode: number): boolean {
+    switch (keyCode) {
+      case VIRTUAL_MODIFIER_CTRL: return this.virtualCtrlSelected;
+      case VIRTUAL_MODIFIER_SHIFT: return this.virtualShiftSelected;
+      case VIRTUAL_MODIFIER_ALT: return this.virtualAltSelected;
+      case VIRTUAL_MODIFIER_META: return this.virtualMetaSelected;
+      default: return false;
+    }
+  }
+
+  setVirtualModifierSelected(keyCode: number, selected: boolean): void {
+    switch (keyCode) {
+      case VIRTUAL_MODIFIER_CTRL: this.virtualCtrlSelected = selected; break;
+      case VIRTUAL_MODIFIER_SHIFT: this.virtualShiftSelected = selected; break;
+      case VIRTUAL_MODIFIER_ALT: this.virtualAltSelected = selected; break;
+      case VIRTUAL_MODIFIER_META: this.virtualMetaSelected = selected; break;
+    }
+  }
+
+  releaseVirtualModifiers(): void {
+    const modifiers: number[] = [VIRTUAL_MODIFIER_META, VIRTUAL_MODIFIER_ALT,
+      VIRTUAL_MODIFIER_SHIFT, VIRTUAL_MODIFIER_CTRL];
+    for (const keyCode of modifiers) {
+      if (!this.isVirtualModifierSelected(keyCode)) continue;
+      this.setVirtualModifierSelected(keyCode, false);
+      ConnectionService.sendKeyEvent(keyCode, 1, 10000 + keyCode);
+    }
+  }
+
+  getVirtualModifierMask(): number {
+    return (this.virtualCtrlSelected ? MODIFIER_MASK_CTRL : 0) |
+      (this.virtualShiftSelected ? MODIFIER_MASK_SHIFT : 0) |
+      (this.virtualAltSelected ? MODIFIER_MASK_ALT : 0) |
+      (this.virtualMetaSelected ? MODIFIER_MASK_META : 0);
+  }
+
+  getPrintableShortcutKeyCode(character: string): number {
+    if (character.length !== 1) return 0;
+    const code: number = character.charCodeAt(0);
+    if (code >= 65 && code <= 90) return code;
+    if (code >= 97 && code <= 122) return code - 32;
+    if (code >= 48 && code <= 57) return code;
+    switch (character) {
+      case '!': return 49;
+      case '@': return 50;
+      case '#': return 51;
+      case '$': return 52;
+      case '%': return 53;
+      case '^': return 54;
+      case '&': return 55;
+      case '*': return 56;
+      case '(': return 57;
+      case ')': return 48;
+      case ';':
+      case ':': return 186;
+      case '=':
+      case '+': return 187;
+      case ',':
+      case '<': return 188;
+      case '-':
+      case '_': return 189;
+      case '.':
+      case '>': return 190;
+      case '/':
+      case '?': return 191;
+      case '`':
+      case '~': return 192;
+      case '[':
+      case '{': return 219;
+      case '\\':
+      case '|': return 220;
+      case ']':
+      case '}': return 221;
+      case "'":
+      case '"': return 222;
+      default: return 0;
+    }
+  }
+
+  resetKeyboardCaptureBuffer(): void {
+    this.keyboardInput = KEYBOARD_CAPTURE_SENTINEL;
+    this.directKeyboardCommittedText = KEYBOARD_CAPTURE_SENTINEL;
+  }
+
+  sendVirtualControlKey(keyCode: number, label: string): void {
+    ConnectionService.sendKeyEvent(keyCode, 2);
+    RustDeskNapi.appendDiagnosticLog('input-shortcut', `virtual_key=${label} code=${keyCode}`);
+  }
+
+  sendPresetShortcut(keyCode: number, modifierMask: number, label: string): void {
+    const result: number = ConnectionService.sendShortcutKey(keyCode,
+      modifierMask | this.getVirtualModifierMask());
+    this.showFileToast(result === 0 ? `已发送 ${label}` : `${label} 发送失败`);
+  }
+
+  sendCtrlAltDel(): void {
+    this.releaseVirtualModifiers();
+    const result: number = ConnectionService.sendCtrlAltDel();
+    this.showFileToast(result === 0 ? '已发送 Ctrl+Alt+Del' : 'Ctrl+Alt+Del 发送失败');
   }
 
   handleDirectKeyboardChange(value: string, previewText?: PreviewText): void {
@@ -4044,6 +4549,11 @@ struct RemotePage {
     }
 
     let previous: string = this.directKeyboardCommittedText;
+    if (previous.startsWith(KEYBOARD_CAPTURE_SENTINEL) && value.length > 0 && value.charAt(0) !== '1') {
+      // Some IMEs replace the whole hidden field when pasting. In that case the
+      // missing sentinel is not a request to erase the remote document.
+      previous = '';
+    }
     let commonLength: number = 0;
     let maxCommonLength: number = Math.min(previous.length, value.length);
     while (commonLength < maxCommonLength && previous.charAt(commonLength) === value.charAt(commonLength)) {
@@ -4060,9 +4570,8 @@ struct RemotePage {
     }
     this.directKeyboardCommittedText = value;
 
-    if (value.length >= 80) {
-      this.keyboardInput = '';
-      this.directKeyboardCommittedText = '';
+    if (value.length < 16 || value.length >= 160) {
+      this.resetKeyboardCaptureBuffer();
     }
   }
 
@@ -4931,6 +5440,7 @@ struct RemotePage {
     this.surfaceEpoch += 1;
     this.connectionStatus = ConnectionStatus.DISCONNECTED;
     this.showKeyboardPanel = false;
+    this.restoreKeyboardAvoidMode();
     this.showMobileActions = false;
     this.isPeerAndroid = false;
     this.showCursor = false;

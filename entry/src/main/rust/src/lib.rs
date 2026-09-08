@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 mod security_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod keyboard_tests;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
@@ -62,6 +64,8 @@ static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
 static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32, bool)>> = Mutex::new(Vec::new());
 static PEER_IS_ANDROID: AtomicBool = AtomicBool::new(false);
+static PEER_SAS_ENABLED: AtomicBool = AtomicBool::new(false);
+static CURRENT_PEER_PLATFORM: Mutex<String> = Mutex::new(String::new());
 static CURRENT_PEER_VERSION: Mutex<String> = Mutex::new(String::new());
 static REMOTE_CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
@@ -272,6 +276,10 @@ fn reset_display_state() {
         guard.clear();
     }
     PEER_IS_ANDROID.store(false, Ordering::SeqCst);
+    PEER_SAS_ENABLED.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = CURRENT_PEER_PLATFORM.try_lock() {
+        guard.clear();
+    }
     if let Ok(mut guard) = CURRENT_PEER_VERSION.try_lock() {
         guard.clear();
     }
@@ -372,7 +380,7 @@ pub extern "C" fn rust_set_video_codec_support(
 
 #[no_mangle]
 pub extern "C" fn rust_get_build_id() -> *const c_char {
-    b"recovery-20260906-r4\0".as_ptr() as *const c_char
+    b"keyboard-macos-20260907-r3\0".as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -982,7 +990,9 @@ pub extern "C" fn rust_send_key_event(key_code: i32, action: i32, modifier_mask:
         down: action == 0,
         press: action == 2,
         mode: KeyboardMode::Legacy.into(),
-        modifiers: modifier_mask_to_controls(modifier_mask),
+        // RustDesk's sender does not repeat the modifier represented by the
+        // current key event inside the modifier list.
+        modifiers: modifier_mask_to_controls(modifier_mask & !modifier_bit_for_key_code(key_code)),
         ..Default::default()
     };
     match key_code_to_control(key_code) {
@@ -996,10 +1006,22 @@ pub extern "C" fn rust_send_key_event(key_code: i32, action: i32, modifier_mask:
 
 #[no_mangle]
 pub extern "C" fn rust_send_physical_key_event(
-    scan_code: i32,
+    usb_hid_code: i32,
     action: i32,
     modifier_mask: i32,
 ) -> i32 {
+    let peer_platform = CURRENT_PEER_PLATFORM
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let Some(peer_code) = map_usb_hid_to_peer_code(usb_hid_code.max(0) as u32, &peer_platform) else {
+        emit_event(&format!(
+            "keyboard map unsupported hid={} peer_platform={}",
+            usb_hid_code,
+            if peer_platform.is_empty() { "unknown" } else { peer_platform.as_str() }
+        ));
+        return -3;
+    };
     let mut event = KeyEvent {
         down: action == 0,
         press: action == 2,
@@ -1007,10 +1029,141 @@ pub extern "C" fn rust_send_physical_key_event(
         modifiers: modifier_mask_to_controls(modifier_mask),
         ..Default::default()
     };
-    event.union = Some(key_event::Union::Chr(scan_code.max(0) as u32));
+    event.union = Some(key_event::Union::Chr(peer_code));
     let mut msg = PeerMessage::new();
     msg.set_key_event(event);
     queue_peer_message(msg)
+}
+
+fn ctrl_alt_del_event(peer_platform: &str) -> KeyEvent {
+    let mut event = KeyEvent {
+        mode: KeyboardMode::Legacy.into(),
+        ..Default::default()
+    };
+    if peer_platform.eq_ignore_ascii_case("windows") {
+        // Windows secure attention sequence. This must be handled by the
+        // installed RustDesk service and cannot be synthesized as three normal
+        // key presses from a mobile client.
+        event.set_control_key(ControlKey::CtrlAltDel);
+        event.down = true;
+    } else {
+        // RustDesk's official client uses a normal Ctrl+Alt+Delete press for
+        // supported non-Windows peers such as Linux.
+        event.set_control_key(ControlKey::Delete);
+        event.modifiers = modifier_mask_to_controls(1 | 4);
+        event.press = true;
+    }
+    event
+}
+
+#[no_mangle]
+pub extern "C" fn rust_send_ctrl_alt_del() -> i32 {
+    let peer_platform = CURRENT_PEER_PLATFORM
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let mut msg = PeerMessage::new();
+    msg.set_key_event(ctrl_alt_del_event(&peer_platform));
+    queue_peer_message(msg)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_can_send_ctrl_alt_del() -> i32 {
+    let peer_platform = CURRENT_PEER_PLATFORM
+        .lock()
+        .map(|guard| guard.to_ascii_lowercase())
+        .unwrap_or_default();
+    if peer_platform.contains("linux") ||
+        (peer_platform.contains("windows") && PEER_SAS_ENABLED.load(Ordering::SeqCst)) {
+        1
+    } else {
+        0
+    }
+}
+
+fn lookup_usb_hid_code(hid: u32, letters: &[u32; 26], digits: &[u32; 10],
+    printable: &[u32; 17]) -> Option<u32> {
+    let code = match hid {
+        0x04..=0x1D => letters[(hid - 0x04) as usize],
+        0x1E..=0x27 => digits[(hid - 0x1E) as usize],
+        0x28..=0x38 => printable[(hid - 0x28) as usize],
+        _ => 0,
+    };
+    (code != 0).then_some(code)
+}
+
+fn usb_hid_to_windows_scan_code(hid: u32) -> Option<u32> {
+    const LETTERS: [u32; 26] = [
+        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+        0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+    ];
+    const DIGITS: [u32; 10] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B];
+    const PRINTABLE: [u32; 17] = [
+        0x1C, 0x01, 0x0E, 0x0F, 0x39, 0x0C, 0x0D, 0x1A, 0x1B, 0x2B, 0, 0x27, 0x28,
+        0x29, 0x33, 0x34, 0x35,
+    ];
+    lookup_usb_hid_code(hid, &LETTERS, &DIGITS, &PRINTABLE)
+}
+
+fn usb_hid_to_linux_xorg_code(hid: u32) -> Option<u32> {
+    // RustDesk's Linux Map receiver expects Xorg/XKB keycodes, which are
+    // Linux evdev codes plus the X11 offset of eight.
+    const LETTERS: [u32; 26] = [
+        38, 56, 54, 40, 26, 41, 42, 43, 31, 44, 45, 46, 58, 57, 32, 33, 24, 27, 39,
+        28, 30, 55, 25, 53, 29, 52,
+    ];
+    const DIGITS: [u32; 10] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    const PRINTABLE: [u32; 17] = [
+        36, 9, 22, 23, 65, 20, 21, 34, 35, 51, 0, 47, 48, 49, 59, 60, 61,
+    ];
+    lookup_usb_hid_code(hid, &LETTERS, &DIGITS, &PRINTABLE)
+}
+
+fn usb_hid_to_macos_code(hid: u32) -> Option<u32> {
+    const LETTERS: [u32; 26] = [
+        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17,
+        32, 9, 13, 7, 16, 6,
+    ];
+    const DIGITS: [u32; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
+    const PRINTABLE: [u32; 17] = [
+        36, 53, 51, 48, 49, 27, 24, 33, 30, 42, u32::MAX, 41, 39, 50, 43, 47, 44,
+    ];
+    // macOS virtual keycode 0 is a valid A key, so use a sentinel for the
+    // unsupported HID 0x32 slot instead of treating zero as missing.
+    let code = match hid {
+        0x04..=0x1D => LETTERS[(hid - 0x04) as usize],
+        0x1E..=0x27 => DIGITS[(hid - 0x1E) as usize],
+        0x28..=0x38 => PRINTABLE[(hid - 0x28) as usize],
+        _ => u32::MAX,
+    };
+    (code != u32::MAX).then_some(code)
+}
+
+fn usb_hid_to_android_code(hid: u32) -> Option<u32> {
+    const LETTERS: [u32; 26] = [
+        29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54,
+    ];
+    const DIGITS: [u32; 10] = [8, 9, 10, 11, 12, 13, 14, 15, 16, 7];
+    const PRINTABLE: [u32; 17] = [
+        66, 111, 67, 61, 62, 69, 70, 71, 72, 73, 0, 74, 75, 68, 55, 56, 76,
+    ];
+    lookup_usb_hid_code(hid, &LETTERS, &DIGITS, &PRINTABLE)
+}
+
+fn map_usb_hid_to_peer_code(hid: u32, peer_platform: &str) -> Option<u32> {
+    let platform = peer_platform.trim().to_ascii_lowercase();
+    if platform.contains("linux") {
+        usb_hid_to_linux_xorg_code(hid)
+    } else if platform.contains("android") {
+        usb_hid_to_android_code(hid)
+    } else if platform.contains("mac") || platform.contains("darwin") || platform.contains("osx") {
+        usb_hid_to_macos_code(hid)
+    } else {
+        // Preserve the previous Windows behavior for Windows and for old peers
+        // that do not report a platform string.
+        usb_hid_to_windows_scan_code(hid)
+    }
 }
 
 #[no_mangle]
@@ -2944,6 +3097,10 @@ async fn handle_peer_bytes(
                 Some(login_response::Union::PeerInfo(info)) => {
                     let is_android = info.platform.eq_ignore_ascii_case("android");
                     PEER_IS_ANDROID.store(is_android, Ordering::SeqCst);
+                    PEER_SAS_ENABLED.store(info.sas_enabled, Ordering::SeqCst);
+                    if let Ok(mut guard) = CURRENT_PEER_PLATFORM.try_lock() {
+                        *guard = info.platform.clone();
+                    }
                     if let Ok(mut guard) = CURRENT_PEER_VERSION.try_lock() {
                         *guard = info.version.clone();
                     }
@@ -3932,8 +4089,11 @@ fn enqueue_peer_message(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Erro
 fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
     match key_code {
         16 => Some(ControlKey::Shift),
+        161 => Some(ControlKey::RShift),
         17 => Some(ControlKey::Control),
+        163 => Some(ControlKey::RControl),
         18 => Some(ControlKey::Alt),
+        165 => Some(ControlKey::RAlt),
         20 => Some(ControlKey::CapsLock),
         13 => Some(ControlKey::Return),
         27 => Some(ControlKey::Escape),
@@ -3944,9 +4104,42 @@ fn key_code_to_control(key_code: i32) -> Option<ControlKey> {
         38 => Some(ControlKey::UpArrow),
         39 => Some(ControlKey::RightArrow),
         40 => Some(ControlKey::DownArrow),
+        33 => Some(ControlKey::PageUp),
+        34 => Some(ControlKey::PageDown),
+        35 => Some(ControlKey::End),
+        36 => Some(ControlKey::Home),
+        45 => Some(ControlKey::Insert),
         46 => Some(ControlKey::Delete),
+        19 => Some(ControlKey::Pause),
+        44 => Some(ControlKey::Snapshot),
+        93 => Some(ControlKey::Apps),
+        145 => Some(ControlKey::Scroll),
         91 => Some(ControlKey::Meta),
+        92 => Some(ControlKey::RWin),
+        112 => Some(ControlKey::F1),
+        113 => Some(ControlKey::F2),
+        114 => Some(ControlKey::F3),
+        115 => Some(ControlKey::F4),
+        116 => Some(ControlKey::F5),
+        117 => Some(ControlKey::F6),
+        118 => Some(ControlKey::F7),
+        119 => Some(ControlKey::F8),
+        120 => Some(ControlKey::F9),
+        121 => Some(ControlKey::F10),
+        122 => Some(ControlKey::F11),
+        123 => Some(ControlKey::F12),
         _ => None,
+    }
+}
+
+fn modifier_bit_for_key_code(key_code: i32) -> i32 {
+    match key_code {
+        17 | 163 => 1,
+        16 | 161 => 2,
+        18 | 165 => 4,
+        91 | 92 => 8,
+        20 => 16,
+        _ => 0,
     }
 }
 

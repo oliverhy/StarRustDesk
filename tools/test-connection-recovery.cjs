@@ -93,14 +93,15 @@ test('decoded but unpresented frames also trigger decoder recovery', () => {
   now=24000; video.checkDecoderHealth(stalled); assert.equal(restart,2);
   now=30000; video.checkDecoderHealth(stalled); assert.equal(restart,2); assert.equal(fallback,2);
 });
-let route=1, status=2, connections=0, insecureConnections=0, disconnects=0;
+let route=1, status=2, forcedConnections=0, normalConnections=0, insecureConnections=0, disconnects=0;
 let lastConnectionError='';
 const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,
   getLastConnectionError:()=>lastConnectionError,
   disconnect:()=>{disconnects++;}, appendDiagnosticLog:()=>{},
   connectWithServer:(id,pw,rv,relay,forced,insecure=false)=>{
     if(insecure){assert.equal(forced,false);insecureConnections++;}
-    else{assert.equal(forced,true);connections++;}
+    else if(forced){forcedConnections++;}
+    else{normalConnections++;}
     return 0;
   },
   connect:(id,pw,insecure=false)=>{assert.equal(insecure,true);insecureConnections++;return 0;}};
@@ -114,12 +115,12 @@ Object.assign(Service,{retryPeer:'test',retryPassword:'test-only',relayRetryUsed
 test('direct retry forces relay exactly once',()=>{
   assert.equal(Service.retryDirectViaRelay('test'),true);
   assert.equal(Service.retryDirectViaRelay('test'),false);
-  assert.equal(connections,1); assert.equal(disconnects,1);
+  assert.equal(forcedConnections,1); assert.equal(disconnects,1);
 });
 test('2FA and login failure never automatically retry',()=>{
   Service.relayRetryUsed=false;
   for(status of [3,4]) assert.equal(Service.retryDirectViaRelay('test'),false);
-  assert.equal(connections,1);
+  assert.equal(forcedConnections,1);
 });
 test('explicit cancellation clears credentials and prevents delayed retry',()=>{
   status=2; Service.disconnect();
@@ -128,6 +129,48 @@ test('explicit cancellation clears credentials and prevents delayed retry',()=>{
 test('relay route never retries relay again',()=>{
   route=2; Service.retryPeer='test'; Service.relayRetryUsed=false;
   assert.equal(Service.retryDirectViaRelay('test'),false);
+});
+
+test('fast direct secure failure immediately retries over encrypted relay',()=>{
+  status=3; route=1; lastConnectionError='Peer secure handshake failed';
+  Object.assign(Service,{retryPeer:'test',retryPassword:'test-only',retryRendezvous:'server',retryRelay:'relay',
+    relayRetryUsed:false,rendezvousRetryCount:0,relayFailureRetryCount:0});
+  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/加密中继/);
+  assert.equal(Service.relayRetryUsed,true);
+  assert.equal(forcedConnections,2);
+  assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
+});
+test('rendezvous retry preserves forced relay after direct secure failure',()=>{
+  status=3; route=0; lastConnectionError='Rendezvous server did not respond';
+  Object.assign(Service,{retryPeer:'test',relayRetryUsed:true,rendezvousRetryCount:0});
+  const before=forcedConnections;
+  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/1\/2/);
+  assert.equal(forcedConnections,before+1);
+});
+test('rendezvous timeout retries twice with fresh normal connections',()=>{
+  status=3; route=0; lastConnectionError='Rendezvous server did not respond';
+  Object.assign(Service,{retryPeer:'test',rendezvousRetryCount:0,relayFailureRetryCount:0,relayRetryUsed:false});
+  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/1\/2/);
+  status=3;
+  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/2\/2/);
+  status=3;
+  assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
+  assert.equal(normalConnections,2);
+});
+test('relay failure requests one fresh forced-relay route',()=>{
+  status=3; route=0; lastConnectionError='Relay connection failed';
+  Object.assign(Service,{retryPeer:'test',relayFailureRetryCount:0,relayRetryUsed:false});
+  const before=forcedConnections;
+  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/重新申请中继/);
+  status=3;
+  assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
+  assert.equal(forcedConnections,before+1);
+});
+test('security failure on a relay route does not loop or downgrade',()=>{
+  status=3; route=2; lastConnectionError='Peer secure handshake failed';
+  Object.assign(Service,{retryPeer:'test',relayRetryUsed:false});
+  assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
+  assert.equal(insecureConnections,0);
 });
 
 for (const endpoint of ['192.168.2.123', '192.168.2.123:21118', '[2001:db8::1]:21118', '::1']) {
