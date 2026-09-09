@@ -10,7 +10,7 @@ class RemoteTaskRequestError extends Error {
 
   constructor(error: BusinessError) {
     super(error.message)
-    this.code = error.code
+    this.code = Number(error.code)
   }
 }
 
@@ -330,7 +330,7 @@ export class RemoteSessionBackgroundTask {
         if (videoBroadcast) RemoteSessionBackgroundTask.videoBroadcastRejected = true
       } catch (error) {
         const businessError: BusinessError = error as BusinessError
-        if (businessError.code !== 9800005) {
+        if (Number(businessError.code) !== 9800005) {
           throw new RemoteTaskRequestError(businessError)
         }
         if (videoBroadcast) RemoteSessionBackgroundTask.videoBroadcastRejected = true
@@ -356,8 +356,10 @@ export class RemoteSessionBackgroundTask {
           const businessError: BusinessError = error as BusinessError
           RustDeskNapi.appendDiagnosticLog('background-task',
             `continuous_task_${operation}_rejected code=${businessError.code} ` +
-            `actual=${RemoteSessionBackgroundTask.selectedModeDescription}`)
-          if (businessError.code !== 9800005 ||
+            `actual=${RemoteSessionBackgroundTask.selectedModeDescription} code_type=${typeof businessError.code} ` +
+            `cancelled=${cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion} ` +
+            `desired=${RemoteSessionBackgroundTask.sessionDesired} suppressed=${RemoteSessionBackgroundTask.userSuppressed}`)
+          if (Number(businessError.code) !== 9800005 ||
             cancellationVersion !== RemoteSessionBackgroundTask.cancellationVersion ||
             !RemoteSessionBackgroundTask.sessionDesired || RemoteSessionBackgroundTask.userSuppressed) {
             throw new RemoteTaskRequestError(businessError)

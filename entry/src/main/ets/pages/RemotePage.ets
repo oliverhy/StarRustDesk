@@ -15,6 +15,7 @@ import { image } from '@kit.ImageKit';
 import pointer from '@ohos.multimodalInput.pointer';
 import { FileTransferHistoryRecord, FileTransferHistoryService } from '../service/FileTransferHistoryService';
 import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog';
+import { sortRemoteFiles } from '../utils/RemoteFileSort';
 
 interface RemotePoint {
   x: number;
@@ -99,7 +100,7 @@ struct RemotePage {
   @State lastAbsX: number = 0;
   @State lastAbsY: number = 0;
   @State showKeyboardPanel: boolean = false;
-  @State keyboardToolsCollapsed: boolean = false;
+  @State keyboardToolsCollapsed: boolean = true;
   @State keyboardToolsOffsetX: number = 0;
   @State keyboardToolsOffsetY: number = 0;
   @State remoteToolbarCollapsed: boolean = false;
@@ -147,6 +148,8 @@ struct RemotePage {
   @State remoteDirectoryPath: string = '';
   @State remoteDirectoryEntries: RemoteDirectoryEntry[] = [];
   @State remoteDirectoryLoading: boolean = false;
+  @State remoteFileSortField: string = 'name';
+  @State remoteFileSortDescending: boolean = false;
   @State remoteFileBrowserMode: string = 'upload';
   @State selectedRemoteDownloads: RemoteDownloadSelection[] = [];
   @State transferProgress: number = 0;
@@ -1143,8 +1146,10 @@ struct RemotePage {
       if (this.transferActive && !this.showRemoteFileBrowser) {
         this.buildTransferProgress();
       }
-      if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
+      if (this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildKeyboardShortcutOverlay();
+      }
+      if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildKeyboardCapture();
       }
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
@@ -1465,6 +1470,39 @@ struct RemotePage {
         }
         .width('100%')
 
+        Row({ space: 6 }) {
+          Text(this.remoteDirectoryLoading ? '读取中…' : `${this.getVisibleRemoteEntries().length} 项 · 文件夹优先`)
+            .layoutWeight(1)
+            .fontSize(12)
+            .fontColor(this.secondaryTextColor())
+          Button(`排序：${this.remoteFileSortLabel()}`)
+            .height(32)
+            .padding({ left: 10, right: 10 })
+            .fontSize(12)
+            .fontColor(this.controlSelectedTextColor())
+            .backgroundColor(this.controlSelectedBackgroundColor())
+            .borderRadius(8)
+            .bindMenu([
+              { value: `${this.remoteFileSortField === 'name' ? '✓ ' : ''}名称`,
+                action: () => { this.remoteFileSortField = 'name'; } },
+              { value: `${this.remoteFileSortField === 'type' ? '✓ ' : ''}类型（扩展名）`,
+                action: () => { this.remoteFileSortField = 'type'; } },
+              { value: `${this.remoteFileSortField === 'size' ? '✓ ' : ''}大小`,
+                action: () => { this.remoteFileSortField = 'size'; } },
+              { value: `${this.remoteFileSortField === 'modified' ? '✓ ' : ''}修改时间`,
+                action: () => { this.remoteFileSortField = 'modified'; } }
+            ], { placement: Placement.BottomRight, enableArrow: true })
+          Button(this.remoteFileSortDescending ? '降序 ↓' : '升序 ↑')
+            .height(32)
+            .padding({ left: 8, right: 8 })
+            .fontSize(12)
+            .fontColor(this.primaryTextColor())
+            .backgroundColor(this.mutedSurfaceColor())
+            .borderRadius(8)
+            .onClick(() => { this.remoteFileSortDescending = !this.remoteFileSortDescending; })
+        }
+        .width('100%')
+
         if (this.remoteFileBrowserMode === 'download' && !this.remoteDirectoryLoading) {
           Row({ space: 8 }) {
             Button(this.areAllRemoteEntriesSelected() ? '取消全选' : '全选')
@@ -1498,6 +1536,15 @@ struct RemotePage {
         if (this.remoteDirectoryLoading) {
           Column() {
             LoadingProgress().width(40).height(40).color(RustDeskTheme.ACCENT)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else if (this.getVisibleRemoteEntries().length === 0) {
+          Column({ space: 8 }) {
+            Text(this.remoteFileBrowserMode === 'download' ? '此文件夹为空' : '没有子文件夹')
+              .fontSize(15)
+              .fontColor(this.secondaryTextColor())
           }
           .layoutWeight(1)
           .width('100%')
@@ -1537,13 +1584,13 @@ struct RemotePage {
                       .fontSize(15)
                       .fontWeight(500)
                       .fontColor(this.primaryTextColor())
-                      .maxLines(2)
+                      .maxLines(3)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                     Text(this.remoteEntryMetadata(entry))
                       .width('100%')
                       .fontSize(12)
                       .fontColor(this.secondaryTextColor())
-                      .maxLines(1)
+                      .maxLines(2)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                   }
                     .layoutWeight(1)
@@ -1836,8 +1883,43 @@ struct RemotePage {
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
 
+  floatingPanelTransition(): TransitionEffect {
+    return TransitionEffect.OPACITY.combine(
+      TransitionEffect.scale({ x: 0.94, y: 0.94, centerX: 0, centerY: 0 }));
+  }
+
+  setFloatingPanelCollapsed(keyboard: boolean, collapsed: boolean): void {
+    // Keep the same top-left anchor and never refocus the IME or release modifiers.
+    this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseOut }, () => {
+      if (keyboard) {
+        this.keyboardToolsCollapsed = collapsed;
+      } else {
+        this.remoteToolbarCollapsed = collapsed;
+      }
+    });
+  }
+
+  @Builder
+  buildFloatingCollapseButton(keyboard: boolean) {
+    Button('‹')
+      .width(34)
+      .height(38)
+      .padding(0)
+      .fontSize(24)
+      .fontColor(this.primaryTextColor())
+      .backgroundColor(this.isDarkMode ? '#991C222D' : '#99F7F9FD')
+      .border({ width: 1, color: this.themeBorderColor() })
+      .borderRadius(8)
+      .focusable(false)
+      .accessibilityText('收起')
+      .onClick(() => {
+        this.setFloatingPanelCollapsed(keyboard, true);
+      })
+  }
+
   @Builder
   buildFloatingToolbar() {
+    Stack({ alignContent: Alignment.TopStart }) {
     if (this.remoteToolbarCollapsed) {
       Button() {
         Text('控')
@@ -1845,16 +1927,12 @@ struct RemotePage {
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.controlSelectedTextColor())
       }
-      .width(this.getRemoteToolbarCollapsedSize())
+      .width(56)
       .height(this.getRemoteToolbarCollapsedSize())
       .padding(0)
-      .backgroundColor(this.isDarkMode ? '#991B2638' : '#B3FFFFFF')
-      .border({ width: 1, color: this.controlSelectedBorderColor() })
-      .borderRadius(this.getRemoteToolbarCollapsedSize() / 2)
-      .opacity(0.76)
-      .shadow({ radius: 10, color: '#33000000', offsetX: 0, offsetY: 4 })
-      .position({ x: this.getRemoteToolbarX(), y: this.getRemoteToolbarY() })
-      .zIndex(60)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(16)
+      .transition(this.floatingPanelTransition())
       .focusable(false)
       .gesture(
         PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
@@ -1866,8 +1944,7 @@ struct RemotePage {
           })
       )
       .onClick(() => {
-        this.remoteToolbarCollapsed = false;
-        this.requestRemoteInputFocus();
+        this.setFloatingPanelCollapsed(false, false);
       })
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
@@ -1974,23 +2051,26 @@ struct RemotePage {
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
 
-        this.buildToolbarButton('收', 34, false, false, true, () => {
-          this.remoteToolbarCollapsed = true;
-        })
+        this.buildFloatingCollapseButton(false)
       }
       .width(this.getRemoteToolbarWidth())
       .height(this.getRemoteToolbarHeight())
-      .padding({ left: 7, right: 7, top: 8, bottom: 8 })
-      .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F7FFFFFF')
-      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
-      .borderRadius(15)
-      .shadow({ radius: 20, color: '#55000000', offsetX: 0, offsetY: 7 })
-      .position({ x: this.getRemoteToolbarX(), y: this.getRemoteToolbarY() })
-      .zIndex(60)
+      .padding(7)
+      .transition(this.floatingPanelTransition())
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
       })
     }
+    }
+    .width(this.getRemoteToolbarCurrentWidth())
+    .height(this.getRemoteToolbarCurrentHeight())
+    .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
+    .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
+    .borderRadius(16)
+    .clip(true)
+    .shadow({ radius: 12, color: '#26000000', offsetX: 0, offsetY: 4 })
+    .position({ x: this.getRemoteToolbarX(), y: this.getRemoteToolbarY() })
+    .zIndex(60)
   }
 
   @Builder
@@ -2135,7 +2215,7 @@ struct RemotePage {
 
   @Builder
   buildInputModeIcon(mode: string, size: number, selected: boolean) {
-    Stack() {
+    Shape() {
       if (mode === INPUT_MODE_MOUSE) {
         Path()
           .commands('M 2 1 L 2 18 L 6.5 13.5 L 10 21 L 13 19.5 L 9.5 12.5 L 16 12.5 Z')
@@ -2150,6 +2230,7 @@ struct RemotePage {
           .strokeWidth(1.1)
       }
     }
+    .viewPort({ x: 0, y: 0, width: 22, height: 22 })
     .width(size)
     .height(size)
   }
@@ -2167,14 +2248,13 @@ struct RemotePage {
         }
         .justifyContent(FlexAlign.Center)
       } else {
-        Row({ space: 4 }) {
-          this.buildInputModeIcon(this.inputMode, 19, true)
-          Text(this.inputMode === INPUT_MODE_MOUSE ? '鼠标' : '触摸')
-            .fontSize(12)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.controlSelectedTextColor())
-        }
-        .justifyContent(FlexAlign.Center)
+        Text(this.inputMode === INPUT_MODE_MOUSE ? '鼠标' : '触摸')
+          .width('100%')
+          .fontSize(12)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.controlSelectedTextColor())
+          .maxLines(1)
+          .textAlign(TextAlign.Center)
       }
     }
     .width(buttonWidth)
@@ -2198,6 +2278,8 @@ struct RemotePage {
           .fontColor(this.primaryTextColor())
           .width('100%')
 
+        Scroll() {
+          Column({ space: 14 }) {
         Row({ space: 10 }) {
           this.buildInputModeChoice(INPUT_MODE_MOUSE, '鼠标模式')
           this.buildInputModeChoice(INPUT_MODE_TOUCH, '触摸模式')
@@ -2252,7 +2334,7 @@ struct RemotePage {
         .padding({ left: 2, right: 2, top: 2, bottom: 2 })
 
         if (this.inputMode === INPUT_MODE_MOUSE) {
-          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 双击后按住移动：拖拽\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 边缘跟随开启后：画面超出可视区域时，鼠标靠近边缘会自动平移，越靠边越快\n• 放大后点“移动画面”：按钮变为淡蓝色，单指平移视野且远端鼠标保持显示\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端')
+          Text('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 轻点一次，第二次按住并移动：拖拽，松手结束\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 边缘跟随开启后：画面超出可视区域时，鼠标靠近边缘会自动平移，越靠边越快\n• 放大后点“移动画面”：按钮变为淡蓝色，单指平移视野且远端鼠标保持显示\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端')
             .fontSize(14)
             .lineHeight(24)
             .fontColor(this.secondaryTextColor())
@@ -2265,6 +2347,21 @@ struct RemotePage {
             .width('100%')
         }
 
+        this.buildGestureHelpSection('拖拽与框选',
+          '鼠标模式：先将远端指针移到起点，轻点一次，第二次按住并拖动，松手结束。框选文件时请从文件列表或桌面的空白处开始；从文件上开始通常是拖动文件。\n触摸模式：在目标位置按住并移动，松手结束。')
+        this.buildGestureHelpSection('组合键与本地键盘',
+          '连接后，上方默认显示折叠的“键”按钮，点击展开，拖动按钮或展开栏左侧的“⋮”可移动位置。\nCtrl、Alt、Shift、Win/Cmd：点一下选中，相当于按住；再点一下释放，不需要手指一直按着。可以同时选中多个。\n例如 Ctrl+C：点亮 Ctrl，再输入 C，最后再次点击 Ctrl 取消选中。Mac 常用 Cmd+C。Ctrl/Shift 也可配合鼠标多选文件，用完记得释放。\nCtrl+Shift+Esc 等完整组合键按钮：点一次发送整组按键，不会自动弹出本地键盘。\n“Fn”和“更多”展开附加按键；“收”只折叠，不释放已选中的修饰键。“释放”一次取消所有已选中的 Ctrl、Alt、Shift、Win/Cmd，不收起快捷栏，也不打开或关闭本地键盘。\n底部“键盘”按钮用于打开或关闭本地输入法，与上方组合键栏独立。')
+        this.buildGestureHelpSection('悬浮功能栏与移动画面',
+          '手机窄屏布局的底部悬浮功能栏可拖动左侧“⋮”调整位置，点击“收”折叠为“控”按钮，点击“控”重新展开。\n画面放大后，点击“移动画面”进入平移模式；点击“结束移动”恢复正常鼠标或触摸操作。平移只移动视野，不点击远端。\n全屏三指上滑用于打开本地键盘，不是滚动手势；滚动请使用双指平行滑动。')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .scrollBar(BarState.Auto)
+        .edgeEffect(EdgeEffect.Spring)
+
         Button('知道了')
           .width('100%')
           .height(42)
@@ -2276,6 +2373,7 @@ struct RemotePage {
           })
       }
       .width(this.isLargeLayout() ? 420 : '88%')
+      .height(Math.min(760, Math.max(180, (this.pageHeight > 0 ? this.pageHeight : 640) - 24)))
       .padding(20)
       .backgroundColor(this.panelColor())
       .border({ width: 1, color: this.themeBorderColor() })
@@ -2288,6 +2386,23 @@ struct RemotePage {
     .onHover((isHovering: boolean) => {
       this.handleNonRemoteHover(isHovering);
     })
+  }
+
+  @Builder
+  buildGestureHelpSection(title: string, details: string) {
+    Column({ space: 6 }) {
+      Text(title)
+        .fontSize(15)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.primaryTextColor())
+        .width('100%')
+      Text(details)
+        .fontSize(13)
+        .lineHeight(22)
+        .fontColor(this.secondaryTextColor())
+        .width('100%')
+    }
+    .width('100%')
   }
 
   sendMobileAction(action: number, label: string): void {
@@ -2448,12 +2563,15 @@ struct RemotePage {
       .width(buttonWidth)
       .height(38)
       .padding({ left: 3, right: 3 })
-      .fontSize(label.length > 10 ? 10 : 12)
-      .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-      .fontColor(danger ? RustDeskTheme.ERROR : (selected ? Color.White : this.primaryTextColor()))
+      .fontSize(label === '释放' ? 11 : (label.length > 10 ? 10 : 12))
+      .fontWeight(this.keyboardToolSelected(label, selected) ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
+      .fontColor(danger ? RustDeskTheme.ERROR : (this.keyboardToolSelected(label, selected) ?
+        this.controlSelectedTextColor() : this.primaryTextColor()))
       .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FFF1F2') :
-        (selected ? RustDeskTheme.ACCENT : this.mutedSurfaceColor()))
-      .border({ width: 1, color: selected ? RustDeskTheme.ACCENT : this.themeBorderColor() })
+        (this.keyboardToolSelected(label, selected) ? this.controlSelectedBackgroundColor() :
+          (this.isDarkMode ? '#991C222D' : '#99F7F9FD')))
+      .border({ width: 1, color: this.keyboardToolSelected(label, selected) ?
+        this.controlSelectedBorderColor() : this.themeBorderColor() })
       .borderRadius(8)
       .enabled(enabled)
       .opacity(enabled ? 1 : 0.5)
@@ -2468,23 +2586,26 @@ struct RemotePage {
 
   @Builder
   buildKeyboardShortcutOverlay() {
+    Stack({ alignContent: Alignment.TopStart }) {
     if (this.keyboardToolsCollapsed) {
       Button() {
-        Text('键')
+        Row({ space: 3 }) {
+          Text('键')
           .fontSize(16)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? '#DCE9FF' : RustDeskTheme.ACCENT)
+          .fontColor(this.controlSelectedTextColor())
+          if (this.virtualCtrlSelected || this.virtualAltSelected ||
+            this.virtualShiftSelected || this.virtualMetaSelected) {
+            Circle().width(5).height(5).fill(this.controlSelectedTextColor())
+          }
+        }
       }
-      .width(this.getKeyboardToolsCollapsedSize())
+      .width(56)
       .height(this.getKeyboardToolsCollapsedSize())
       .padding(0)
-      .backgroundColor(this.isDarkMode ? '#991B2638' : '#B3FFFFFF')
-      .border({ width: 1, color: this.isDarkMode ? '#995C93E6' : '#99518BDD' })
-      .borderRadius(this.getKeyboardToolsCollapsedSize() / 2)
-      .opacity(0.72)
-      .shadow({ radius: 10, color: '#33000000', offsetX: 0, offsetY: 4 })
-      .position({ x: this.getKeyboardToolsX(), y: this.getKeyboardToolsY() })
-      .zIndex(65)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(16)
+      .transition(this.floatingPanelTransition())
       .focusable(false)
       .gesture(
         PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
@@ -2496,8 +2617,7 @@ struct RemotePage {
           })
       )
       .onClick(() => {
-        this.keyboardToolsCollapsed = false;
-        this.refocusRemoteKeyboard();
+        this.setFloatingPanelCollapsed(true, false);
       })
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
@@ -2558,12 +2678,10 @@ struct RemotePage {
           .height(38)
           .scrollable(ScrollDirection.Horizontal)
           .scrollBar(BarState.Off)
-          this.buildKeyboardToolButton('收', 38, false, false, true, () => {
-            this.keyboardToolsCollapsed = true;
-          })
-          this.buildKeyboardToolButton('×', 38, false, false, true, () => {
-            this.closeRemoteKeyboard();
-          })
+          this.buildFloatingCollapseButton(true)
+          this.buildKeyboardToolButton('释放', 48, false, false, true, () => {
+            this.releaseVirtualModifiers();
+          }, false)
         }
         .width('100%')
         .height(38)
@@ -2639,16 +2757,21 @@ struct RemotePage {
       .width(this.getKeyboardToolsWidth())
       .height(this.getKeyboardToolsHeight())
       .padding(8)
-      .backgroundColor(this.isDarkMode ? '#F21B2638' : '#FAFFFFFF')
-      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
-      .borderRadius(14)
-      .shadow({ radius: 18, color: '#44000000', offsetX: 0, offsetY: 6 })
-      .position({ x: this.getKeyboardToolsX(), y: this.getKeyboardToolsY() })
-      .zIndex(65)
+      .transition(this.floatingPanelTransition())
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
       })
     }
+    }
+    .width(this.getKeyboardToolsCurrentWidth())
+    .height(this.getKeyboardToolsCurrentHeight())
+    .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
+    .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
+    .borderRadius(16)
+    .clip(true)
+    .shadow({ radius: 12, color: '#26000000', offsetX: 0, offsetY: 4 })
+    .position({ x: this.getKeyboardToolsX(), y: this.getKeyboardToolsY() })
+    .zIndex(65)
   }
 
   @Builder
@@ -4450,7 +4573,7 @@ struct RemotePage {
   closeRemoteKeyboard(): void {
     this.releaseVirtualModifiers();
     this.showKeyboardPanel = false;
-    this.keyboardToolsCollapsed = false;
+    this.keyboardToolsCollapsed = true;
     this.showKeyboardFunctionKeys = false;
     this.showKeyboardMoreKeys = false;
     this.resetKeyboardCaptureBuffer();
@@ -4492,15 +4615,15 @@ struct RemotePage {
   }
 
   getRemoteToolbarHeight(): number {
-    return 58;
+    return 54;
   }
 
   getRemoteToolbarCollapsedSize(): number {
-    return 44;
+    return 54;
   }
 
   getRemoteToolbarCurrentWidth(): number {
-    return this.remoteToolbarCollapsed ? this.getRemoteToolbarCollapsedSize() : this.getRemoteToolbarWidth();
+    return this.remoteToolbarCollapsed ? 56 : this.getRemoteToolbarWidth();
   }
 
   getRemoteToolbarCurrentHeight(): number {
@@ -4520,7 +4643,7 @@ struct RemotePage {
     const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
     const baseX: number = this.getRemoteToolbarBaseX();
     const minOffset: number = 8 - baseX;
-    const maxOffset: number = width - this.getRemoteToolbarCurrentWidth() - 8 - baseX;
+    const maxOffset: number = width - this.getRemoteToolbarWidth() - 8 - baseX;
     return Math.max(minOffset, Math.min(maxOffset, offset));
   }
 
@@ -4528,7 +4651,7 @@ struct RemotePage {
     const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
     const baseY: number = this.getRemoteToolbarBaseY();
     const minOffset: number = 8 - baseY;
-    const maxOffset: number = height - this.getRemoteToolbarCurrentHeight() - 8 - baseY;
+    const maxOffset: number = height - this.getRemoteToolbarHeight() - 8 - baseY;
     return Math.max(minOffset, Math.min(maxOffset, offset));
   }
 
@@ -4564,11 +4687,11 @@ struct RemotePage {
   }
 
   getKeyboardToolsCollapsedSize(): number {
-    return 44;
+    return 54;
   }
 
   getKeyboardToolsCurrentWidth(): number {
-    return this.keyboardToolsCollapsed ? this.getKeyboardToolsCollapsedSize() : this.getKeyboardToolsWidth();
+    return this.keyboardToolsCollapsed ? 56 : this.getKeyboardToolsWidth();
   }
 
   getKeyboardToolsCurrentHeight(): number {
@@ -4587,7 +4710,7 @@ struct RemotePage {
     const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
     const baseX: number = this.getKeyboardToolsBaseX();
     const minOffset: number = 8 - baseX;
-    const maxOffset: number = width - this.getKeyboardToolsCurrentWidth() - 8 - baseX;
+    const maxOffset: number = width - this.getKeyboardToolsWidth() - 8 - baseX;
     return Math.max(minOffset, Math.min(maxOffset, offset));
   }
 
@@ -4595,7 +4718,7 @@ struct RemotePage {
     const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
     const baseY: number = this.getKeyboardToolsBaseY();
     const minOffset: number = 8 - baseY;
-    const maxOffset: number = height - this.getKeyboardToolsCurrentHeight() - 8 - baseY;
+    const maxOffset: number = height - this.getKeyboardToolsHeight() - 8 - baseY;
     return Math.max(minOffset, Math.min(maxOffset, offset));
   }
 
@@ -4629,6 +4752,20 @@ struct RemotePage {
       } catch (_e) {
       }
     }, 30);
+  }
+
+  keyboardToolSelected(label: string, fallback: boolean): boolean {
+    // Read reactive state inside the button's style expressions, not only the
+    // primitive value captured by the outer @Builder call.
+    switch (label) {
+      case 'Ctrl': return this.virtualCtrlSelected;
+      case 'Shift': return this.virtualShiftSelected;
+      case 'Alt': return this.virtualAltSelected;
+      case 'Win/Cmd': return this.virtualMetaSelected;
+      case 'Fn': return this.showKeyboardFunctionKeys;
+      case '更多': return this.showKeyboardMoreKeys;
+      default: return fallback;
+    }
   }
 
   toggleVirtualModifier(keyCode: number): void {
@@ -4931,11 +5068,18 @@ struct RemotePage {
 
   getVisibleRemoteEntries(): RemoteDirectoryEntry[] {
     if (this.remoteFileBrowserMode === 'download') {
-      return this.remoteDirectoryEntries;
+      return sortRemoteFiles(this.remoteDirectoryEntries, this.remoteFileSortField, this.remoteFileSortDescending);
     }
-    return this.remoteDirectoryEntries.filter((entry: RemoteDirectoryEntry) => {
+    return sortRemoteFiles(this.remoteDirectoryEntries.filter((entry: RemoteDirectoryEntry) => {
       return this.isRemoteDirectory(entry);
-    });
+    }), this.remoteFileSortField, this.remoteFileSortDescending);
+  }
+
+  remoteFileSortLabel(): string {
+    if (this.remoteFileSortField === 'type') return '类型';
+    if (this.remoteFileSortField === 'size') return '大小';
+    if (this.remoteFileSortField === 'modified') return '修改时间';
+    return '名称';
   }
 
   getSelectableRemoteEntries(): RemoteDirectoryEntry[] {

@@ -663,7 +663,21 @@ static void OnRustEvent(const char* message) {
         g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(2);
     } else if (text.rfind(loginErrorPrefix, 0) == 0) {
-        SetLastConnectionMessage(text.substr(loginErrorPrefix.length()));
+        const std::string error = text.substr(loginErrorPrefix.length());
+        // Peer errors are untrusted text: log only fixed known reasons, never
+        // raw error messages that could contain passwords or other user data.
+        const char* reason = "other_peer_login_error";
+        const char* knownErrors[] = {"Wrong Password", "No Password Access", "Connection not allowed",
+            "Connection is not allowed", "Too many wrong password attempts", "Permission denied",
+            "Remote desktop is offline", "Connection closed manually by the peer"};
+        for (const char* known : knownErrors) {
+            if (error == known) { reason = known; break; }
+        }
+        DiagnosticLog::instance().append("E", "connection-login",
+            "login_failed generation=" + std::to_string(g_connectionGeneration.load()) +
+            " reason=" + reason + " message_length=" + std::to_string(error.size()) +
+            " route=" + std::to_string(rust_get_connection_route()));
+        SetLastConnectionMessage(error);
         g_lastConnectionResult.store(-17);
         g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(3);
@@ -817,7 +831,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
         DiagnosticLog::instance().append(result == 0 ? "I" : "E", "connection",
             "rust_connect_finished generation=" + std::to_string(generation) +
-            " result=" + std::to_string(result) + " message=" + ConnectionResultToMessage(result));
+            " result=" + std::to_string(result) + " message=" + ConnectionResultToMessage(result) +
+            " attempt_route=" + std::to_string(rust_get_connection_route()));
         if (g_connectionGeneration.load() != generation) {
             OH_LOG_INFO(LOG_APP, "Ignore stale rust_connect result generation=%{public}llu", static_cast<unsigned long long>(generation));
             return;
@@ -1403,7 +1418,7 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 }
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
-    std::string content = std::string("native_build=connection-recovery-20260908-r4 cpp=") + __DATE__ + " " + __TIME__ +
+    std::string content = std::string("native_build=connection-recovery-20260909-r5 cpp=") + __DATE__ + " " + __TIME__ +
         " rust=" + rust_get_build_id() + "\n" + DiagnosticLog::instance().exportText();
     napi_value ret;
     napi_create_string_utf8(env, content.c_str(), content.size(), &ret);

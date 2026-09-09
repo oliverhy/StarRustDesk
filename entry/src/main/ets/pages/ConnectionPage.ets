@@ -63,6 +63,7 @@ const PEER_STATE_QUERY_TIMEOUT_MS: number = 12000
 export struct ConnectionPage {
   @State connectionName: string = ''
   @State remoteId: string = ''
+  @State focusedConnectionField: string = ''
   @State password: string = ''
   @State isIdEmpty: boolean = true
   @State isConnecting: boolean = false
@@ -313,7 +314,7 @@ export struct ConnectionPage {
       .padding({ left: 12, right: 12 })
       .backgroundColor(this.isDarkMode ? '#263142' : '#F7FAFF')
       .border({ width: 1, color: this.isDarkMode ? '#364256' : '#DFE7F2' })
-      .borderRadius(7)
+      .borderRadius(12)
     }
     .width('100%')
     .height(this.pageWidth >= 820 ? 116 : 104)
@@ -334,8 +335,8 @@ export struct ConnectionPage {
         }
           .width(44)
           .height(34)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding(0)
           .onClick(() => {
             this.setConnectionFormExpanded(!this.connectionFormExpanded)
@@ -347,7 +348,7 @@ export struct ConnectionPage {
         Blank()
         Text(this.performancePreset === 'stable' ? '稳定优先' : this.performancePreset === 'high_fps' ? '帧率优先' : this.performancePreset === 'silky' ? '丝滑优先' : '流畅优先')
           .fontSize(12)
-          .fontColor(RustDeskTheme.ACCENT)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
       }
       .width('100%')
       .margin({ bottom: 2 })
@@ -369,10 +370,10 @@ export struct ConnectionPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .margin({ bottom: 18 })
   }
 
@@ -410,7 +411,7 @@ export struct ConnectionPage {
       if (this.connectionStatusValue === ConnectionStatus.FAILED) {
         Button(translate('Retry'))
           .fontSize(12)
-          .fontColor(RustDeskTheme.ACCENT)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
           .backgroundColor(Color.Transparent)
           .margin({ left: 12 })
           .onClick(() => {
@@ -432,8 +433,8 @@ export struct ConnectionPage {
     .width('100%')
     .height(38)
     .padding({ left: 12, right: 8 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-    .borderRadius(6)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+    .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
   }
 
   @Builder
@@ -450,6 +451,9 @@ export struct ConnectionPage {
             .width('100%')
             .height(52)
             .padding({ left: 12, right: 44 })
+            .backgroundColor(Color.Transparent)
+            .onFocus(() => { this.focusedConnectionField = 'id' })
+            .onBlur(() => { this.focusedConnectionField = '' })
             .onChange((value: string) => {
               let normalized: string = this.normalizeRemoteId(value)
               this.remoteId = normalized
@@ -490,9 +494,9 @@ export struct ConnectionPage {
       }
       .padding({ left: 16, right: 8 })
       .height(68)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
-      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+      .border({ width: 1, color: this.connectionInputBorder('id') })
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
       .alignItems(VerticalAlign.Center)
       .shadow({
         radius: 8,
@@ -514,9 +518,11 @@ export struct ConnectionPage {
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
-      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+      .border({ width: 1, color: this.connectionInputBorder('name') })
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+      .onFocus(() => { this.focusedConnectionField = 'name' })
+      .onBlur(() => { this.focusedConnectionField = '' })
       .onChange((value: string) => {
         this.connectionName = value
       })
@@ -542,9 +548,9 @@ export struct ConnectionPage {
       Button('选择')
         .height(32)
         .fontSize(12)
-        .fontColor(RustDeskTheme.ACCENT)
-        .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-        .borderRadius(6)
+        .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         .onClick(() => {
           this.openGroupPickerForForm()
         })
@@ -554,7 +560,7 @@ export struct ConnectionPage {
         .fontSize(12)
         .fontColor(Color.White)
         .backgroundColor(RustDeskTheme.ACCENT)
-        .borderRadius(6)
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         .onClick(() => {
           this.openNewGroupDialog(true)
         })
@@ -562,9 +568,9 @@ export struct ConnectionPage {
     .width('100%')
     .height(52)
     .padding({ left: 14, right: 8 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
-    .borderRadius(RustDeskTheme.CONTROL_RADIUS)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
     .alignItems(VerticalAlign.Center)
   }
 
@@ -578,9 +584,11 @@ export struct ConnectionPage {
       .width('100%')
       .height(48)
       .padding({ left: 16, right: 16 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-      .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
-      .borderRadius(RustDeskTheme.CONTROL_RADIUS)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+      .border({ width: 1, color: this.connectionInputBorder('password') })
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+      .onFocus(() => { this.focusedConnectionField = 'password' })
+      .onBlur(() => { this.focusedConnectionField = '' })
       .onChange((value: string) => {
         this.password = value
       })
@@ -599,8 +607,8 @@ export struct ConnectionPage {
         }
           .width(44)
           .height(34)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding(0)
           .onClick(() => {
             this.savedConnectionsExpanded = !this.savedConnectionsExpanded
@@ -620,8 +628,8 @@ export struct ConnectionPage {
           .height(30)
           .fontSize(12)
           .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding({ left: 10, right: 10 })
           .bindMenu([
             { value: `${this.savedConnectionSort === 'id' ? '✓ ' : ''}远端 ID`,
@@ -642,9 +650,9 @@ export struct ConnectionPage {
             .textFont({ size: 12 })
             .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
             .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-            .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#DEE6F1' })
-            .borderRadius(6)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+            .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+            .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
             .margin({ right: 8 })
             .onChange((value: string) => {
               this.savedConnectionSearch = value
@@ -660,8 +668,8 @@ export struct ConnectionPage {
           .height(30)
           .fontSize(12)
           .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding(0)
           .enabled(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded)
           .opacity(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded ? 1 : 0.45)
@@ -675,9 +683,9 @@ export struct ConnectionPage {
           .width(48)
           .height(30)
           .fontSize(12)
-          .fontColor(RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding(0)
           .margin({ left: 8 })
           .bindMenu([
@@ -707,9 +715,9 @@ export struct ConnectionPage {
           .width(56)
           .height(30)
           .fontSize(12)
-          .fontColor(RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .padding(0)
           .margin({ left: 8 })
           .onClick(() => {
@@ -733,8 +741,8 @@ export struct ConnectionPage {
           .height(112)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         } else if (this.filteredSavedConnectionCount() === 0) {
           Column({ space: 6 }) {
             Text('未找到匹配的设备')
@@ -748,8 +756,8 @@ export struct ConnectionPage {
           .height(88)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         } else {
           if (this.connectionsForGroup('').length > 0) {
             this.buildSavedConnectionGroup('', '未分组', this.ungroupedExpanded, false)
@@ -766,10 +774,10 @@ export struct ConnectionPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 16, color: this.isDarkMode ? '#44000000' : '#15345A84', offsetX: 0, offsetY: 6 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .margin({ bottom: 18 })
   }
 
@@ -786,8 +794,8 @@ export struct ConnectionPage {
         }
           .width(44)
           .height(34)
-          .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.toggleConnectionGroup(groupId)
           })
@@ -808,7 +816,7 @@ export struct ConnectionPage {
           Button('重命名')
             .height(28)
             .fontSize(11)
-            .fontColor(RustDeskTheme.ACCENT)
+            .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
             .backgroundColor(Color.Transparent)
             .onClick(() => {
               this.openRenameGroupDialog(groupId)
@@ -828,20 +836,20 @@ export struct ConnectionPage {
                 Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
                   .fontSize(15)
                   .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-                  .fontColor(RustDeskTheme.ACCENT)
+                  .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
               }
               .width(36)
               .height(36)
               .justifyContent(FlexAlign.Center)
               .alignItems(HorizontalAlign.Center)
               .backgroundColor(this.isDarkMode ? '#26364E' : RustDeskTheme.ACCENT_SOFT)
-              .borderRadius(6)
+              .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
 
               Row()
                 .width(10)
                 .height(10)
                 .backgroundColor(this.peerOnlineStateColor(item.remoteId))
-                .border({ width: 2, color: this.isDarkMode ? '#1E2938' : '#F7F9FD' })
+                .border({ width: 2, color: this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE })
                 .borderRadius(5)
                 .position({ x: 27, y: 27 })
             }
@@ -873,7 +881,7 @@ export struct ConnectionPage {
               .fontSize(12)
               .fontColor(Color.White)
               .backgroundColor(RustDeskTheme.ACCENT)
-              .borderRadius(6)
+              .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
               .onClick(() => {
                 this.connectSavedConnection(item)
               })
@@ -882,8 +890,8 @@ export struct ConnectionPage {
               .height(32)
               .fontSize(12)
               .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-              .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.SURFACE_MUTED)
-              .borderRadius(6)
+              .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+              .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
               .bindMenu([
                 {
                   value: '移动到分组',
@@ -918,9 +926,9 @@ export struct ConnectionPage {
     }
     .width('100%')
     .margin({ top: 4 })
-    .backgroundColor(this.isDarkMode ? '#1E2938' : '#F7F9FD')
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(7)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(12)
   }
 
   @Builder
@@ -938,9 +946,9 @@ export struct ConnectionPage {
         .fontSize(15)
         .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-        .border({ width: 1, color: this.groupNameError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
-        .borderRadius(7)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.groupNameError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER) })
+        .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .onChange((value: string) => {
           this.groupNameDraft = value
@@ -959,8 +967,8 @@ export struct ConnectionPage {
           .layoutWeight(1)
           .height(40)
           .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.closeGroupDialogs()
           })
@@ -969,7 +977,7 @@ export struct ConnectionPage {
           .height(40)
           .fontColor(Color.White)
           .backgroundColor(RustDeskTheme.ACCENT)
-          .borderRadius(6)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.saveGroupName()
           })
@@ -978,8 +986,8 @@ export struct ConnectionPage {
     }
     .width(this.pageWidth >= 820 ? 420 : '88%')
     .padding(20)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(10)
     .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
     .zIndex(11)
@@ -1020,17 +1028,17 @@ export struct ConnectionPage {
       Button('+ 新建分组')
         .width('100%')
         .height(40)
-        .fontColor(RustDeskTheme.ACCENT)
-        .backgroundColor(this.isDarkMode ? '#29364A' : RustDeskTheme.ACCENT_SOFT)
-        .borderRadius(6)
+        .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         .onClick(() => {
           this.openNewGroupDialog(this.groupPickerForForm, this.groupPickerForForm ? '' : this.groupPickerConnectionId)
         })
     }
     .width(this.pageWidth >= 820 ? 420 : '88%')
     .padding(20)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(10)
     .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
     .zIndex(11)
@@ -1059,9 +1067,9 @@ export struct ConnectionPage {
         .fontSize(15)
         .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-        .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
-        .borderRadius(7)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER) })
+        .borderRadius(12)
         .padding({ left: 12, right: 12 })
         .onChange((value: string) => {
           this.backupPasswordDraft = value
@@ -1076,9 +1084,9 @@ export struct ConnectionPage {
           .fontSize(15)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
           .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? '#303B4D' : '#DEE6F1') })
-          .borderRadius(7)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .border({ width: 1, color: this.backupPasswordError.length > 0 ? RustDeskTheme.ERROR : (this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER) })
+          .borderRadius(12)
           .padding({ left: 12, right: 12 })
           .onChange((value: string) => {
             this.backupPasswordConfirm = value
@@ -1098,8 +1106,8 @@ export struct ConnectionPage {
           .layoutWeight(1)
           .height(40)
           .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.closeBackupDialogs()
           })
@@ -1108,7 +1116,7 @@ export struct ConnectionPage {
           .height(40)
           .fontColor(Color.White)
           .backgroundColor(this.backupBusy ? RustDeskTheme.DARK_GRAY : RustDeskTheme.ACCENT)
-          .borderRadius(6)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.confirmBackupPassword()
           })
@@ -1117,8 +1125,8 @@ export struct ConnectionPage {
     }
     .width(this.pageWidth >= 820 ? 440 : '88%')
     .padding(20)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(10)
     .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
     .zIndex(11)
@@ -1150,9 +1158,9 @@ export struct ConnectionPage {
           .layoutWeight(1)
           .height(38)
           .fontSize(13)
-          .fontColor(!this.importReplaceExisting ? Color.White :
+          .fontColor(!this.importReplaceExisting ? this.selectedControlText() :
             (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
-          .backgroundColor(!this.importReplaceExisting ? RustDeskTheme.ACCENT : Color.Transparent)
+          .backgroundColor(!this.importReplaceExisting ? this.selectedControlBackground() : Color.Transparent)
           .borderRadius(5)
           .onClick(() => {
             this.importReplaceExisting = false
@@ -1161,9 +1169,9 @@ export struct ConnectionPage {
           .layoutWeight(1)
           .height(38)
           .fontSize(13)
-          .fontColor(this.importReplaceExisting ? Color.White :
+          .fontColor(this.importReplaceExisting ? this.selectedControlText() :
             (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
-          .backgroundColor(this.importReplaceExisting ? RustDeskTheme.ACCENT : Color.Transparent)
+          .backgroundColor(this.importReplaceExisting ? this.selectedControlBackground() : Color.Transparent)
           .borderRadius(5)
           .onClick(() => {
             this.importReplaceExisting = true
@@ -1171,8 +1179,8 @@ export struct ConnectionPage {
       }
       .width('100%')
       .padding(3)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-      .borderRadius(7)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+      .borderRadius(12)
 
       if (this.importReplaceExisting) {
         Text('覆盖后，当前已保存的连接、分组和连接密码将被替换。')
@@ -1191,8 +1199,8 @@ export struct ConnectionPage {
           .layoutWeight(1)
           .height(40)
           .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.closeBackupDialogs()
           })
@@ -1201,7 +1209,7 @@ export struct ConnectionPage {
           .height(40)
           .fontColor(Color.White)
           .backgroundColor(this.backupBusy ? RustDeskTheme.DARK_GRAY : RustDeskTheme.ACCENT)
-          .borderRadius(6)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
           .onClick(() => {
             this.importPreparedBackup()
           })
@@ -1210,8 +1218,8 @@ export struct ConnectionPage {
     }
     .width(this.pageWidth >= 820 ? 440 : '88%')
     .padding(20)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#3A465A' : '#DDE5F0' })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(10)
     .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
     .zIndex(11)
@@ -1223,21 +1231,21 @@ export struct ConnectionPage {
       Row() {
         Text(groupName)
           .fontSize(14)
-          .fontColor(this.groupPickerCurrentGroupId() === groupId ? Color.White : (this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY))
+          .fontColor(this.groupPickerCurrentGroupId() === groupId ? this.selectedControlText() : (this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Blank()
         Text(this.groupPickerCurrentGroupId() === groupId ? '✓' : '')
           .fontSize(16)
-          .fontColor(Color.White)
+          .fontColor(this.selectedControlText())
       }
       .width('100%')
       .padding({ left: 12, right: 12 })
     }
     .width('100%')
     .height(42)
-    .backgroundColor(this.groupPickerCurrentGroupId() === groupId ? RustDeskTheme.ACCENT : (this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED))
-    .borderRadius(6)
+    .backgroundColor(this.groupPickerCurrentGroupId() === groupId ? this.selectedControlBackground() : (this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE))
+    .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
     .onClick(() => {
       this.selectGroupFromPicker(groupId)
     })
@@ -1252,7 +1260,7 @@ export struct ConnectionPage {
         .fontSize(14)
         .fontColor(Color.White)
         .backgroundColor(this.remoteId.trim().length > 0 ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
-        .borderRadius(6)
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         .onClick(() => {
           this.saveCurrentConnection()
         })
@@ -1261,8 +1269,8 @@ export struct ConnectionPage {
         .height(40)
         .fontSize(14)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-        .borderRadius(6)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
         .onClick(() => {
           this.clearConnectionForm()
         })
@@ -1302,8 +1310,8 @@ export struct ConnectionPage {
       }
       .width('100%')
       .padding(3)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-      .borderRadius(7)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+      .borderRadius(12)
     }
     .width('100%')
   }
@@ -1314,13 +1322,30 @@ export struct ConnectionPage {
       .height(36)
       .layoutWeight(1)
       .fontSize(12)
-      .fontColor(this.performancePreset === preset ? Color.White :
+      .fontColor(this.performancePreset === preset ? this.selectedControlText() :
         (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
-      .backgroundColor(this.performancePreset === preset ? RustDeskTheme.ACCENT : Color.Transparent)
-      .borderRadius(5)
+      .backgroundColor(this.performancePreset === preset ? this.selectedControlBackground() : Color.Transparent)
+      .border({ width: 1, color: this.performancePreset === preset ?
+        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
       .onClick(() => {
         this.performancePreset = preset
       })
+  }
+
+  private selectedControlText(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT
+  }
+
+  private connectionInputBorder(field: string): ResourceColor {
+    if (this.focusedConnectionField === field) {
+      return this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER
+    }
+    return this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER
+  }
+
+  private selectedControlBackground(): ResourceColor {
+    return this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG
   }
 
   onConnect(): void {

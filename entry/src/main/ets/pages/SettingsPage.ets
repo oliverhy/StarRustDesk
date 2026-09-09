@@ -198,10 +198,10 @@ export struct SettingsPage {
       }
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -221,11 +221,15 @@ export struct SettingsPage {
   buildOptionItem(label: string, onClick: () => void) {
     Text(label)
       .fontSize(14)
-      .fontColor(RustDeskTheme.ACCENT)
+      .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
       .padding({ top: 6, bottom: 6, left: 8 })
       .width('100%')
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.ACCENT_SOFT)
-      .borderRadius(6)
+      .backgroundColor(label === this.resolution || label === this.frameRate.toString() ?
+        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) :
+        (this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE))
+      .border({ width: 1, color: label === this.resolution || label === this.frameRate.toString() ?
+        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
       .onClick(() => { onClick() })
   }
 
@@ -256,10 +260,10 @@ export struct SettingsPage {
       }, (item: SettingItem) => item.label)
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -281,6 +285,10 @@ export struct SettingsPage {
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
         Toggle({ type: ToggleType.Switch, isOn: this.showLocalCursor })
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.showLocalCursor ?
+            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
           .onChange((isOn: boolean) => {
             this.showLocalCursor = isOn
             RustDeskNapi.setOption('show-local-cursor', isOn ? '1' : '0')
@@ -289,10 +297,10 @@ export struct SettingsPage {
       .width('100%')
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -314,6 +322,10 @@ export struct SettingsPage {
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
         Toggle({ type: ToggleType.Switch, isOn: this.remoteAudioEnabled })
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.remoteAudioEnabled ?
+            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
           .onChange((isOn: boolean) => {
             this.remoteAudioEnabled = isOn
             RustDeskNapi.setOption('remote-audio-enabled', isOn ? '1' : '0')
@@ -326,10 +338,10 @@ export struct SettingsPage {
       .width('100%')
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -369,6 +381,10 @@ export struct SettingsPage {
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
         Toggle({ type: ToggleType.Switch, isOn: this.diagnosticLogEnabled })
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.diagnosticLogEnabled ?
+            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
           .onChange((isOn: boolean) => {
             this.setDiagnosticLogEnabled(isOn)
           })
@@ -400,7 +416,7 @@ export struct SettingsPage {
           .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
           .padding({ left: 12, right: 12, top: 7, bottom: 7 })
           .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(6)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
       }
       .width('100%')
       .padding({ top: 10, bottom: 10 })
@@ -430,10 +446,10 @@ export struct SettingsPage {
       })
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -640,10 +656,10 @@ export struct SettingsPage {
       })
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -703,10 +719,10 @@ export struct SettingsPage {
       })
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 
@@ -720,6 +736,8 @@ export struct SettingsPage {
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
         Toggle({ type: ToggleType.Switch, isOn: this.isDarkMode })
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : Color.White)
           .onChange((isOn: boolean) => {
             this.isDarkModeManual = true
             this.isDarkMode = isOn
@@ -728,10 +746,10 @@ export struct SettingsPage {
       .width('100%')
     }
     .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : RustDeskTheme.CARD_LIGHT)
-    .border({ width: 1, color: this.isDarkMode ? '#303B4D' : '#E4EAF3' })
-    .borderRadius(RustDeskTheme.CARD_RADIUS)
-    .shadow({ radius: 12, color: this.isDarkMode ? '#33000000' : '#12345A84', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
   }
 

@@ -933,11 +933,9 @@ pub extern "C" fn rust_get_connection_status() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_get_connection_route() -> i32 {
-    if CONNECTION_ACTIVE.load(Ordering::SeqCst) {
-        CONNECTION_ROUTE.load(Ordering::SeqCst)
-    } else {
-        0
-    }
+    // Keep the attempted route visible through a failed secure handshake.
+    // Connect/disconnect already reset it; ACTIVE is set only after verification.
+    CONNECTION_ROUTE.load(Ordering::SeqCst)
 }
 
 #[no_mangle]

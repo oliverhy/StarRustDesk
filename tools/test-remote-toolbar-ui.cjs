@@ -23,7 +23,7 @@ expect(theme, /CONTROL_SELECTED_TEXT:\s*ResourceColor\s*=\s*'#246BCE'/,
   'light toolbar selection text must remain readable blue')
 expect(remotePage, /@State remoteToolbarCollapsed:\s*boolean\s*=\s*false/,
   'remote toolbar must support a collapsed state')
-expect(remotePage, /buildFloatingToolbar\(\)[\s\S]*Text\('控'\)[\s\S]*remoteToolbarCollapsed\s*=\s*false/,
+expect(remotePage, /buildFloatingToolbar\(\)[\s\S]*Text\('控'\)[\s\S]*setFloatingPanelCollapsed\(false, false\)/,
   'collapsed remote toolbar must expose a compact restore button')
 expect(remotePage, /beginRemoteToolbarDrag\(\)[\s\S]*updateRemoteToolbarDrag\(offsetX:\s*number,\s*offsetY:\s*number\)/,
   'remote toolbar must support bounded dragging')

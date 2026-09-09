@@ -76,7 +76,7 @@ struct HomePage {
       })
       .width('100%')
       .height('100%')
-      .padding({ bottom: 66 })
+      .padding({ bottom: 78 })
       .backgroundColor(Color.Transparent)
 
       this.buildFloatingTabBar()
@@ -95,15 +95,16 @@ struct HomePage {
       this.buildTabItem(0, translate('Connection'))
       this.buildTabItem(1, translate('Settings'))
     }
-    .height(52)
-    .padding(5)
-    .margin({ left: 24, right: 24, bottom: 9 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
+    .width(this.pageWidth >= 820 ? 440 : '92%')
+    .height(58)
+    .padding(6)
+    .margin({ bottom: 12 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_FLOATING_DARK : RustDeskTheme.HOME_FLOATING)
     .border({
       width: 1,
-      color: this.isDarkMode ? '#344052' : '#E5EAF2'
+      color: this.isDarkMode ? '#805C93E6' : '#80518BDD'
     })
-    .borderRadius(8)
+    .borderRadius(18)
     .clip(true)
     .shadow({
       radius: 18,
@@ -119,15 +120,20 @@ struct HomePage {
       Text(label)
         .fontSize(14)
         .fontWeight(index === this.currentTabIndex ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-        .fontColor(index === this.currentTabIndex ? Color.White : (this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY))
+        .fontColor(index === this.currentTabIndex ?
+          (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+          (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
         .textAlign(TextAlign.Center)
     }
     .layoutWeight(1)
-    .height(42)
+    .height(44)
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
-    .backgroundColor(index === this.currentTabIndex ? RustDeskTheme.ACCENT : Color.Transparent)
-    .borderRadius(6)
+    .backgroundColor(index === this.currentTabIndex ?
+      (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) : Color.Transparent)
+    .border({ width: 1, color: index === this.currentTabIndex ?
+      (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
+    .borderRadius(12)
     .clip(true)
     .onClick(() => {
       if (index === this.currentTabIndex) {

@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.1.0'
-export const RELEASE_NOTES_BUILD: string = '1001006'
+export const RELEASE_NOTES_BUILD: string = '1001007'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,17 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.1.0（1001007）· 界面、文件排序与连接恢复', [
+            '连接页与设置页统一柔和卡片、悬浮导航和淡蓝色选中风格，同时适配深色模式。',
+            '远控上方默认显示折叠的“键”快捷栏；上下“键 / 控”统一收放样式、尺寸与伸缩过渡，降低展开面板的遮挡。',
+            '修复 Ctrl、Alt、Shift、Win/Cmd 选中状态显示不及时；折叠后保留按键状态，并以小蓝点提示仍有修饰键选中。',
+            '快捷栏新增“释放”按钮，一次取消所有已选修饰键，不折叠面板、不打开或关闭本地键盘；补充手势和组合键说明。',
+            '底部鼠标/触摸模式按钮改为居中的纯文字，统一与相邻功能按钮的视觉风格。',
+            '远端文件浏览新增名称、类型、大小、修改时间排序及升降序切换，文件夹优先，名称支持数字自然排序，切换排序保留已选文件。',
+            '优化取回文件界面，长文件名最多显示三行，详细信息两行，增加项目数量和空目录提示。',
+            '修复直连安全握手失败后连接路线丢失，导致未触发加密中继重试的问题；不自动降级为未加密连接。',
+            '完善后台任务错误码兼容和失败回退判断，补充连接路线、登录失败原因及后台任务诊断信息。',
+          ])
           this.buildSection('1.1.0（1001006）· 键盘、快捷栏与连接界面优化', [
             '手机远控功能栏改为半透明悬浮胶囊，支持拖动、收起和展开；平板及 PC 侧栏同步优化外观。',
             '屏幕切换、鼠标模式、移动画面及边缘跟随统一使用淡蓝色选中态，并适配深色模式。',

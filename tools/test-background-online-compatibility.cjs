@@ -101,6 +101,14 @@ for (const operation of ['start', 'update']) {
     return f;
   }
   const run = f => f.task[`${operation}Internal`](f.task.context, 'new');
+  test(`${operation}: string mismatch code still falls back without retrying video`, async () => {
+    const f = prepare();
+    f.config.run = async (_, kind) => { if (kind !== 'legacy') throw error('9800005'); return { continuousTaskId: 7 }; };
+    await run(f);
+    assert.deepEqual(f.calls.map(c => c[1]), ['video', 'normal', 'legacy']);
+    assert.equal(f.task.state, 'active');
+    assert(f.logs.some(l => l.includes('code_type=string')));
+  });
   test(`${operation}: runtime video rejection retries normal before legacy and caches rejection`, async () => {
     const f = prepare();
     f.config.run = async (_, kind) => { if (kind === 'video') throw error(9800005); return { continuousTaskId: 7 }; };
@@ -127,7 +135,7 @@ for (const operation of ['start', 'update']) {
     assert.equal(f.timers.size, 1);
     assert(!f.logs.some(l => /keep_alive_(started|updated) /.test(l)));
   });
-  for (const code of [201, 401, 9800004]) test(`${operation}: error ${code} is not bypassed`, async () => {
+  for (const code of [201, 401, 9800004, '201', '401']) test(`${operation}: error ${code} is not bypassed`, async () => {
     const f = prepare(); f.config.run = async () => { throw error(code); };
     await run(f); assert.equal(f.calls.length, 1);
     assert.equal(f.timers.size, 1);
@@ -157,12 +165,12 @@ for (const operation of ['start', 'update']) {
   });
 }
 test('probe false or 9800005 tries normal; unrelated probe error stops', async () => {
-  for (const mode of ['false', 'mismatch', 'permission']) {
+  for (const mode of ['false', 'mismatch', 'string-mismatch', 'permission']) {
     const f = fixture();
     f.config.probe = kind => {
       if (kind === 'normal') return true;
       if (mode === 'false') return false;
-      throw error(mode === 'mismatch' ? 9800005 : 201);
+      throw error(mode === 'string-mismatch' ? '9800005' : mode === 'mismatch' ? 9800005 : 201);
     };
     await f.task.startInternal(f.task.context, 'new');
     assert.deepEqual(f.calls.map(c => c[1]), mode === 'permission' ? [] : ['normal']);
