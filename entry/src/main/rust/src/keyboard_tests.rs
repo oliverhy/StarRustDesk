@@ -1,4 +1,6 @@
-use super::{ctrl_alt_del_event, key_code_to_control, map_usb_hid_to_peer_code, modifier_bit_for_key_code};
+use super::{
+    ctrl_alt_del_event, key_code_to_control, map_usb_hid_to_peer_code, modifier_bit_for_key_code,
+};
 use hbb_common::message_proto::{key_event, ControlKey, KeyboardMode};
 
 #[test]
@@ -63,9 +65,18 @@ fn mobile_keyboard_helper_keys_follow_rustdesk_protocol_controls() {
 
 #[test]
 fn both_sides_share_the_same_aggregate_modifier_bit() {
-    assert_eq!(modifier_bit_for_key_code(16), modifier_bit_for_key_code(161));
-    assert_eq!(modifier_bit_for_key_code(17), modifier_bit_for_key_code(163));
-    assert_eq!(modifier_bit_for_key_code(18), modifier_bit_for_key_code(165));
+    assert_eq!(
+        modifier_bit_for_key_code(16),
+        modifier_bit_for_key_code(161)
+    );
+    assert_eq!(
+        modifier_bit_for_key_code(17),
+        modifier_bit_for_key_code(163)
+    );
+    assert_eq!(
+        modifier_bit_for_key_code(18),
+        modifier_bit_for_key_code(165)
+    );
     assert_eq!(modifier_bit_for_key_code(91), modifier_bit_for_key_code(92));
 }
 
@@ -76,7 +87,10 @@ fn windows_ctrl_alt_del_uses_secure_attention_control() {
     assert!(event.down);
     assert!(!event.press);
     assert!(event.modifiers.is_empty());
-    assert_eq!(event.union, Some(key_event::Union::ControlKey(ControlKey::CtrlAltDel.into())));
+    assert_eq!(
+        event.union,
+        Some(key_event::Union::ControlKey(ControlKey::CtrlAltDel.into()))
+    );
 }
 
 #[test]
@@ -84,7 +98,10 @@ fn linux_ctrl_alt_del_uses_delete_with_ctrl_and_alt() {
     let event = ctrl_alt_del_event("Linux");
     assert!(!event.down);
     assert!(event.press);
-    assert_eq!(event.union, Some(key_event::Union::ControlKey(ControlKey::Delete.into())));
+    assert_eq!(
+        event.union,
+        Some(key_event::Union::ControlKey(ControlKey::Delete.into()))
+    );
     assert!(event.modifiers.contains(&ControlKey::Control.into()));
     assert!(event.modifiers.contains(&ControlKey::Alt.into()));
 }

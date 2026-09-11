@@ -21,6 +21,13 @@ export interface ConnectionBackupItem {
   groupId: string
 }
 
+export interface ConnectionBackupServerConfig {
+  idServer: string
+  relayServer: string
+  apiServer: string
+  serverKey: string
+}
+
 export interface ConnectionBackupPayload {
   format: string
   schemaVersion: number
@@ -28,6 +35,7 @@ export interface ConnectionBackupPayload {
   includesPasswords: boolean
   groups: ConnectionBackupGroup[]
   connections: ConnectionBackupItem[]
+  serverConfig?: ConnectionBackupServerConfig
 }
 
 interface EncryptedConnectionBackup {
@@ -49,8 +57,8 @@ export class ConnectionBackupService {
   private static base64: util.Base64Helper = new util.Base64Helper()
 
   static createPayload(groups: ConnectionBackupGroup[], connections: ConnectionBackupItem[],
-    includesPasswords: boolean): ConnectionBackupPayload {
-    return {
+    includesPasswords: boolean, serverConfig?: ConnectionBackupServerConfig): ConnectionBackupPayload {
+    let payload: ConnectionBackupPayload = {
       format: PLAIN_BACKUP_FORMAT,
       schemaVersion: BACKUP_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
@@ -58,6 +66,10 @@ export class ConnectionBackupService {
       groups: groups,
       connections: connections
     }
+    if (serverConfig !== undefined) {
+      payload.serverConfig = serverConfig
+    }
+    return payload
   }
 
   static createPlainText(payload: ConnectionBackupPayload): string {
@@ -204,6 +216,18 @@ export class ConnectionBackupService {
         throw new Error('备份中的连接信息无效')
       }
     })
+    if (payload.serverConfig !== undefined) {
+      let config: ConnectionBackupServerConfig = payload.serverConfig
+      if (typeof config.idServer !== 'string' || typeof config.relayServer !== 'string' ||
+        typeof config.apiServer !== 'string' || typeof config.serverKey !== 'string' ||
+        config.idServer.length > 500 || config.relayServer.length > 500 ||
+        config.apiServer.length > 500 || config.serverKey.length > 4000) {
+        throw new Error('备份中的服务器配置无效')
+      }
+      if (!payload.includesPasswords && config.serverKey.length > 0) {
+        throw new Error('普通备份不得包含服务器密钥')
+      }
+    }
   }
 
   private static encode(value: string): Uint8Array {

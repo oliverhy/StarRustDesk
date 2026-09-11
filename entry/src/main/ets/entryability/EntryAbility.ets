@@ -6,6 +6,7 @@ import { RustDeskNapi } from '../service/RustDeskNapi';
 import { RELEASE_NOTES_BUILD, RELEASE_NOTES_VERSION } from '../widget/ReleaseNotesDialog';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
+import { CloudSyncService } from '../service/CloudSyncService';
 
 const DOMAIN = 0x0000;
 
@@ -34,6 +35,8 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate('deviceId', '');
     AppStorage.setOrCreate('peerList', '[]');
     AppStorage.setOrCreate('appForegroundEpoch', 0);
+    AppStorage.setOrCreate('serverConfigVersion', 0);
+    AppStorage.setOrCreate('savedConnectionsCloudRevision', 0);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 
@@ -72,6 +75,12 @@ export default class EntryAbility extends UIAbility {
     RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
     let foregroundEpoch: number = AppStorage.get<number>('appForegroundEpoch') ?? 0
     AppStorage.set<number>('appForegroundEpoch', foregroundEpoch + 1)
+    if (CloudSyncService.isEnabled()) {
+      CloudSyncService.syncNow(this.context).then(() => {
+      }).catch(() => {
+        RustDeskNapi.appendDiagnosticLog('cloud-sync', 'foreground_sync_failed')
+      })
+    }
     RustDeskNapi.appendDiagnosticLog('app', 'foreground')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
@@ -80,6 +89,12 @@ export default class EntryAbility extends UIAbility {
     RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
     RemoteSessionBackgroundTask.setAppBackground(true)
     RustDeskNapi.appendDiagnosticLog('app', 'background')
+    if (CloudSyncService.isEnabled()) {
+      CloudSyncService.upload(this.context).then(() => {
+      }).catch(() => {
+        RustDeskNapi.appendDiagnosticLog('cloud-sync', 'background_upload_failed')
+      })
+    }
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }
 

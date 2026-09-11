@@ -117,4 +117,21 @@ test('unified native drain preserves keyboard-before-click and resets overflow',
     handleNativeMouseInput:()=>ordered.push('mouse'),releaseHeldMouseButtons:()=>ordered.push('reset_mouse')});
   d.drainNativeInputEvents();assert.deepEqual(ordered,['key','mouse','reset_mouse','reset_keys']);
 });
+test('touchpad drag waits for confirmed movement before left-down',()=>{
+  assert.match(source,/const TOUCHPAD_DRAG_START_THRESHOLD: number = 18;/);
+  const handlerStart=source.indexOf('\n  handleTouchpadTouch(');
+  const handlerEnd=source.indexOf('\n  handleDirectTouch(',handlerStart);
+  const handler=source.slice(handlerStart,handlerEnd);
+  const downStart=handler.indexOf('if (secondTap)');
+  const moveStart=handler.indexOf('} else if (event.type === TouchType.Move)');
+  assert(downStart>=0&&moveStart>downStart);
+  assert.doesNotMatch(handler.slice(downStart,moveStart),/sendLeftDown/);
+  assert.match(handler.slice(moveStart),/TOUCHPAD_DRAG_START_THRESHOLD[\s\S]*sendLeftDown/);
+});
+test('second touchpad tap without movement remains a double-click',()=>{
+  const finish=method('finishTouchpadTouch');
+  const candidate=finish.indexOf('wasDragCandidate && !cancelled');
+  assert(candidate>=0);
+  assert.equal((finish.slice(candidate).match(/sendLeftClick/g)||[]).length,2);
+});
 console.log(`${passed} input/gesture regression checks passed`);

@@ -10,7 +10,11 @@ async fn stream_pair() -> (Stream, Stream) {
 }
 
 fn signed_identity(id: &str, pk: [u8; 32], signer: &sign::SecretKey) -> Vec<u8> {
-    let payload = IdPk { id: id.into(), pk: pk.to_vec().into(), ..Default::default() };
+    let payload = IdPk {
+        id: id.into(),
+        pk: pk.to_vec().into(),
+        ..Default::default()
+    };
     sign::sign(&payload.write_to_bytes().unwrap(), signer)
 }
 
@@ -29,14 +33,20 @@ fn secure_handshake_valid_and_unsigned_compatibility() {
             ..Default::default()
         });
         peer.send(&message).await.unwrap();
-        secure_peer_connection("test-peer", &signed, &key, &mut client, false).await.unwrap();
+        secure_peer_connection("test-peer", &signed, &key, &mut client, false)
+            .await
+            .unwrap();
         assert!(client.is_secured());
         let response = peer.next_timeout(1000).await.unwrap().unwrap();
-        assert!(matches!(PeerMessage::parse_from_bytes(&response).unwrap().union,
-            Some(message::Union::PublicKey(_))));
+        assert!(matches!(
+            PeerMessage::parse_from_bytes(&response).unwrap().union,
+            Some(message::Union::PublicKey(_))
+        ));
 
         let (mut client, mut peer) = stream_pair().await;
-        secure_peer_connection("test-peer", &[], &key, &mut client, false).await.unwrap();
+        secure_peer_connection("test-peer", &[], &key, &mut client, false)
+            .await
+            .unwrap();
         assert!(!client.is_secured());
         assert!(peer.next_timeout(1000).await.is_some());
     });
@@ -60,20 +70,45 @@ fn invalid_identity_never_downgrades_or_sends_public_key() {
                 3 => peer.send(&PeerMessage::new()).await.unwrap(),
                 4 => peer.send_raw(vec![0xff]).await.unwrap(),
                 5 | 6 => {
-                    let mut id = signed_identity(if scenario == 5 { "wrong-peer" } else { "test-peer" },
-                        peer_pk.0, &peer_sk);
-                    if scenario == 6 { id[0] ^= 1; }
+                    let mut id = signed_identity(
+                        if scenario == 5 {
+                            "wrong-peer"
+                        } else {
+                            "test-peer"
+                        },
+                        peer_pk.0,
+                        &peer_sk,
+                    );
+                    if scenario == 6 {
+                        id[0] ^= 1;
+                    }
                     let mut message = PeerMessage::new();
-                    message.set_signed_id(SignedId { id: id.into(), ..Default::default() });
+                    message.set_signed_id(SignedId {
+                        id: id.into(),
+                        ..Default::default()
+                    });
                     peer.send(&message).await.unwrap();
                 }
                 _ => unreachable!(),
             }
-            assert!(secure_peer_connection("test-peer", &server_signed, &server_key, &mut client, false).await.is_err(),
-                "scenario {scenario}");
+            assert!(
+                secure_peer_connection(
+                    "test-peer",
+                    &server_signed,
+                    &server_key,
+                    &mut client,
+                    false
+                )
+                .await
+                .is_err(),
+                "scenario {scenario}"
+            );
             assert!(!client.is_secured());
             // A failed identity check must not emit a compatibility/downgrade message.
-            assert!(peer.next_timeout(30).await.is_none(), "scenario {scenario} sent data");
+            assert!(
+                peer.next_timeout(30).await.is_none(),
+                "scenario {scenario} sent data"
+            );
         }
     });
 }
@@ -82,7 +117,9 @@ fn invalid_identity_never_downgrades_or_sends_public_key() {
 fn invalid_server_key_downgrades_only_after_explicit_one_time_approval() {
     runtime().block_on(async {
         let (mut client, mut peer) = stream_pair().await;
-        secure_peer_connection("test-peer", &[], "invalid-key", &mut client, true).await.unwrap();
+        secure_peer_connection("test-peer", &[], "invalid-key", &mut client, true)
+            .await
+            .unwrap();
         assert!(!client.is_secured());
         let response = peer.next_timeout(1000).await.unwrap().unwrap();
         let message = PeerMessage::parse_from_bytes(&response).unwrap();

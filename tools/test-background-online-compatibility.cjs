@@ -231,7 +231,8 @@ function pageFixture(ids = ['123', '192.168.1.2']) {
   });
   vm.runInContext(pageJs, context);
   const page = Object.assign(new context.Page(), { savedConnections: ids.map(remoteId => ({ remoteId })),
-    peerOnlineStates: {}, peerOnlineStatesVersion: 0, peerOnlineQueryInFlight: false, customServerHint: 'server' });
+    peerOnlineStates: {}, peerOnlineStatesVersion: 0, peerOnlineQueryInFlight: false,
+    customServerHint: 'server', peerStateServer: 'server' });
   return { page, queries, setNow: value => { now = value; }, setRaw: value => { raw = value; },
     setQueryReturn: value => { queryReturn = value; } };
 }

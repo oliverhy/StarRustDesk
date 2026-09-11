@@ -1,4 +1,4 @@
-use crate::{bail, bytes_codec::BytesCodec, ResultType, config::Socks5Server, proxy::Proxy};
+use crate::{bail, bytes_codec::BytesCodec, config::Socks5Server, proxy::Proxy, ResultType};
 use anyhow::Context as AnyhowCtx;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
@@ -62,7 +62,10 @@ impl DerefMut for DynTcpStream {
     }
 }
 
-pub(crate) fn new_socket(addr: std::net::SocketAddr, reuse: bool) -> Result<TcpSocket, std::io::Error> {
+pub(crate) fn new_socket(
+    addr: std::net::SocketAddr,
+    reuse: bool,
+) -> Result<TcpSocket, std::io::Error> {
     let socket = match addr {
         std::net::SocketAddr::V4(..) => TcpSocket::new_v4()?,
         std::net::SocketAddr::V6(..) => TcpSocket::new_v6()?,
@@ -90,9 +93,14 @@ impl FramedStream {
         // route must not prevent a working IPv4 address from being attempted.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms_timeout);
         let mut addresses: Vec<_> = tokio::time::timeout_at(deadline, lookup_host(&remote_addr))
-            .await??.take(16).collect();
+            .await??
+            .take(16)
+            .collect();
         if let Some(first) = addresses.first() {
-            if let Some(other) = addresses.iter().position(|addr| addr.is_ipv4() != first.is_ipv4()) {
+            if let Some(other) = addresses
+                .iter()
+                .position(|addr| addr.is_ipv4() != first.is_ipv4())
+            {
                 addresses.swap(1, other);
             }
         }
@@ -100,24 +108,25 @@ impl FramedStream {
         for (index, address) in addresses.into_iter().enumerate() {
             attempts.push(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(index as u64 * 250)).await;
-                let local = local_addr.unwrap_or_else(||
-                    crate::config::Config::get_any_listen_addr(address.is_ipv4()));
+                let local = local_addr.unwrap_or_else(|| {
+                    crate::config::Config::get_any_listen_addr(address.is_ipv4())
+                });
                 let socket = new_socket(local, true)?;
                 let stream = socket.connect(address).await?;
                 Ok::<_, anyhow::Error>(stream)
             });
         }
         while let Ok(Some(result)) = tokio::time::timeout_at(deadline, attempts.next()).await {
-                if let Ok(stream) = result {
-                    stream.set_nodelay(true).ok();
-                    let addr = stream.local_addr()?;
-                    return Ok(Self(
-                        Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
-                        addr,
-                        None,
-                        0,
-                    ));
-                }
+            if let Ok(stream) = result {
+                stream.set_nodelay(true).ok();
+                let addr = stream.local_addr()?;
+                return Ok(Self(
+                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+                    addr,
+                    None,
+                    0,
+                ));
+            }
         }
         bail!(format!("Failed to connect to {remote_addr}"));
     }

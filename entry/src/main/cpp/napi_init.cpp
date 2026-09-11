@@ -543,6 +543,15 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "previous connection cleared",
         "rendezvous tcp connected",
         "rendezvous tcp failed:",
+        "rendezvous candidate attempt=",
+        "rendezvous configuration updated",
+        "rendezvous rejected",
+        "nat probe ",
+        "transport preparation ",
+        "udp mapping ",
+        "ipv6 preparation ",
+        "webrtc offer ",
+        "route history ",
         "punch request sent",
         "punch request send failed",
         "rendezvous response received",
@@ -658,6 +667,10 @@ static void OnRustEvent(const char* message) {
         g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(4);
     } else if (text.rfind("login response: ok/peer info", 0) == 0) {
+        // The accepted login belongs to the active connection. Reaffirm the
+        // video generation here so a late lifecycle/rebind race cannot leave
+        // quality polling permanently masked after the surface is live.
+        g_videoReadyGeneration.store(g_connectionGeneration.load());
         SetLastConnectionMessage("");
         g_lastConnectionResult.store(0);
         g_connectionStartedAtMs.store(0);
@@ -676,7 +689,8 @@ static void OnRustEvent(const char* message) {
         DiagnosticLog::instance().append("E", "connection-login",
             "login_failed generation=" + std::to_string(g_connectionGeneration.load()) +
             " reason=" + reason + " message_length=" + std::to_string(error.size()) +
-            " route=" + std::to_string(rust_get_connection_route()));
+            " route=" + std::to_string(rust_get_connection_route()) +
+            " transport=" + std::to_string(rust_get_connection_transport()));
         SetLastConnectionMessage(error);
         g_lastConnectionResult.store(-17);
         g_connectionStartedAtMs.store(0);
@@ -832,7 +846,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         DiagnosticLog::instance().append(result == 0 ? "I" : "E", "connection",
             "rust_connect_finished generation=" + std::to_string(generation) +
             " result=" + std::to_string(result) + " message=" + ConnectionResultToMessage(result) +
-            " attempt_route=" + std::to_string(rust_get_connection_route()));
+            " attempt_route=" + std::to_string(rust_get_connection_route()) +
+            " transport=" + std::to_string(rust_get_connection_transport()));
         if (g_connectionGeneration.load() != generation) {
             OH_LOG_INFO(LOG_APP, "Ignore stale rust_connect result generation=%{public}llu", static_cast<unsigned long long>(generation));
             return;
@@ -1186,6 +1201,12 @@ static napi_value GetConnectionRoute(napi_env env, napi_callback_info info) {
     return ret;
 }
 
+static napi_value GetConnectionTransport(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_create_int32(env, rust_get_connection_transport(), &ret);
+    return ret;
+}
+
 static napi_value GetLastConnectionError(napi_env env, napi_callback_info info) {
     std::string message = GetLastConnectionMessage();
     if (!message.empty()) {
@@ -1418,7 +1439,7 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 }
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
-    std::string content = std::string("native_build=connection-recovery-20260909-r5 cpp=") + __DATE__ + " " + __TIME__ +
+    std::string content = std::string("native_build=official-transports-20260911-r2 cpp=") + __DATE__ + " " + __TIME__ +
         " rust=" + rust_get_build_id() + "\n" + DiagnosticLog::instance().exportText();
     napi_value ret;
     napi_create_string_utf8(env, content.c_str(), content.size(), &ret);
@@ -1810,6 +1831,7 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
             "generation=" + std::to_string(g_connectionGeneration.load()) +
             " status=" + std::to_string(status) +
             " route=" + std::to_string(rust_get_connection_route()) +
+            " transport=" + std::to_string(rust_get_connection_transport()) +
             " codec=" + std::to_string(codec) +
             " decoder_mode=" + std::to_string(decoderMode) +
             " input_total=" + std::to_string(totalFrames) +
@@ -1836,6 +1858,8 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     napi_value decodedCountVal; napi_create_int64(env, static_cast<int64_t>(decodedFrames), &decodedCountVal); napi_set_named_property(env, obj, "decodedFrames", decodedCountVal);
     napi_value codecVal; napi_create_int32(env, codec, &codecVal); napi_set_named_property(env, obj, "codec", codecVal);
     napi_value decoderModeVal; napi_create_int32(env, decoderMode, &decoderModeVal); napi_set_named_property(env, obj, "decoderMode", decoderModeVal);
+    napi_value delayVal; napi_create_int32(env, rust_get_connection_delay_ms(), &delayVal); napi_set_named_property(env, obj, "delayMs", delayVal);
+    napi_value targetBitrateVal; napi_create_int32(env, rust_get_connection_target_bitrate_kb(), &targetBitrateVal); napi_set_named_property(env, obj, "targetBitrateKb", targetBitrateVal);
     return obj;
 }
 
@@ -2104,6 +2128,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"takePeerOnlineStates", nullptr, TakePeerOnlineStates, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionStatus", nullptr, GetConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getConnectionRoute", nullptr, GetConnectionRoute, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getConnectionTransport", nullptr, GetConnectionTransport, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getLastConnectionError", nullptr, GetLastConnectionError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDeviceName", nullptr, GetDeviceName, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getClipboardText", nullptr, GetClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -15,6 +15,7 @@ import {
 struct HomePage {
   @State currentTabIndex: number = 0
   @State pageWidth: number = 0
+  @State tabBarWidth: number = 0
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   private swiperController: SwiperController = new SwiperController()
   private releaseNotesScheduled: boolean = false
@@ -76,7 +77,6 @@ struct HomePage {
       })
       .width('100%')
       .height('100%')
-      .padding({ bottom: 78 })
       .backgroundColor(Color.Transparent)
 
       this.buildFloatingTabBar()
@@ -91,26 +91,61 @@ struct HomePage {
 
   @Builder
   buildFloatingTabBar() {
-    Row({ space: 6 }) {
-      this.buildTabItem(0, translate('Connection'))
-      this.buildTabItem(1, translate('Settings'))
+    Stack({ alignContent: Alignment.TopStart }) {
+      Row()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(Color.Transparent)
+        .backgroundEffect({
+          radius: 14,
+          saturation: 1.04,
+          brightness: this.isDarkMode ? 0.96 : 1.0,
+          color: this.isDarkMode ? '#0C1B2638' : '#04F4F8FF'
+        })
+
+      if (this.tabBarWidth > 18) {
+        Row()
+          .width((this.tabBarWidth - 18) / 2)
+          .height(44)
+          .backgroundColor(this.isDarkMode ? '#2823466F' : '#18DCEBFF')
+          .border({
+            width: 1,
+            color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK :
+              RustDeskTheme.CONTROL_SELECTED_BORDER
+          })
+          .borderRadius(12)
+          .translate({
+            x: 6 + this.currentTabIndex * ((this.tabBarWidth - 18) / 2 + 6),
+            y: 6
+          })
+          .animation({ duration: 280, curve: Curve.EaseInOut })
+      }
+
+      Row({ space: 6 }) {
+        this.buildTabItem(0, translate('Connection'))
+        this.buildTabItem(1, translate('Settings'))
+      }
+      .width('100%')
+      .height('100%')
+      .padding(6)
     }
     .width(this.pageWidth >= 820 ? 440 : '92%')
     .height(58)
-    .padding(6)
     .margin({ bottom: 12 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_FLOATING_DARK : RustDeskTheme.HOME_FLOATING)
     .border({
       width: 1,
-      color: this.isDarkMode ? '#805C93E6' : '#80518BDD'
+      color: this.isDarkMode ? '#505C93E6' : '#45518BDD'
     })
     .borderRadius(18)
     .clip(true)
     .shadow({
       radius: 18,
-      color: this.isDarkMode ? '#66000000' : '#1A335A8A',
+      color: this.isDarkMode ? '#3D000000' : '#0D335A8A',
       offsetX: 0,
       offsetY: 6
+    })
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      this.tabBarWidth = newValue.width as number
     })
   }
 
@@ -129,12 +164,11 @@ struct HomePage {
     .height(44)
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
-    .backgroundColor(index === this.currentTabIndex ?
-      (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) : Color.Transparent)
-    .border({ width: 1, color: index === this.currentTabIndex ?
-      (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
+    .backgroundColor(Color.Transparent)
+    .border({ width: 1, color: Color.Transparent })
     .borderRadius(12)
     .clip(true)
+    .animation({ duration: 220, curve: Curve.EaseInOut })
     .onClick(() => {
       if (index === this.currentTabIndex) {
         return

@@ -36,8 +36,9 @@ const REMOTE_WHEEL_SCALE: number = 0.08;
 const TOUCH_SCROLL_SCALE: number = 0.12;
 const TOUCHPAD_POINTER_SPEED: number = 1.25;
 const TOUCH_MOVE_THRESHOLD: number = 12;
-const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 400;
-const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 48;
+const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 340;
+const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 40;
+const TOUCHPAD_DRAG_START_THRESHOLD: number = 18;
 const MULTI_TOUCH_MOVE_THRESHOLD: number = 8;
 const PINCH_DISTANCE_THRESHOLD: number = 12;
 const THREE_FINGER_SWIPE_THRESHOLD: number = 70;
@@ -78,6 +79,31 @@ const MODIFIER_MASK_META: number = 8;
 const KEYBOARD_CAPTURE_SENTINEL: string =
   '1111111111111111111111111111111111111111111111111111111111111111';
 const LOG_DOMAIN: number = 0x0000;
+
+@Component
+struct ConnectionQualityRow {
+  @Prop label: string;
+  @Prop value: string;
+  @Prop valueColor: ResourceColor = Color.White;
+
+  build() {
+    Row() {
+      Text(this.label)
+        .width(76)
+        .fontSize(11)
+        .fontColor('#FFD2D2D2')
+        .textAlign(TextAlign.End)
+        .maxLines(1)
+      Text(this.value)
+        .width(96)
+        .fontSize(11)
+        .fontColor(this.valueColor)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .height(17)
+  }
+}
 
 @Entry
 @Component
@@ -135,9 +161,15 @@ struct RemotePage {
   @State currentDisplay: number = 0;
   @State fpsText: string = '0 fps';
   @State speedText: string = '0 KB/s';
+  @State delayText: string = '-';
+  @State delayMs: number = 0;
+  @State targetBitrateText: string = '-';
   @State codecText: string = '等待视频';
+  @State codecNameText: string = '等待视频';
+  @State decoderText: string = '-';
   @State routeText: string = '未知';
   @State peerSecurityState: number = 0;
+  @State showQualityMonitor: boolean = true;
   private videoSessionGeneration: number = -1;
   private directLoginStartedAt: number = 0;
   private videoDecoderRestartRequested: boolean = false;
@@ -567,6 +599,10 @@ struct RemotePage {
         } catch (_error) {}
       }
       this.peerSecurityState = security;
+      // Quality information is independent from the latest-frame readiness
+      // flag. Keep it updating while the native surface is already rendering,
+      // including during a short surface/generation rebind.
+      this.updateStats(frame);
       this.checkFirstVideoHealth(frame);
       this.checkDecoderHealth(frame);
       if (frame.hasFrame) {
@@ -574,7 +610,6 @@ struct RemotePage {
         if (firstVideoFrame) {
           this.hasVideo = true;
         }
-        this.updateStats(frame);
         if (frame.width > 0 && frame.height > 0 && (frame.width !== this.remoteWidth || frame.height !== this.remoteHeight)) {
           let previousWidth: number = this.remoteWidth;
           let previousHeight: number = this.remoteHeight;
@@ -672,7 +707,14 @@ struct RemotePage {
     this.firstVideoWaitStartedAt = 0;
     this.firstVideoRecoveryStage = 0;
     this.videoWaitingHint = '等待远端视频画面';
+    this.speedText = '0 KB/s';
+    this.fpsText = '0 fps';
+    this.delayMs = 0;
+    this.delayText = '-';
+    this.targetBitrateText = '-';
     this.codecText = '等待视频';
+    this.codecNameText = '等待视频';
+    this.decoderText = '-';
   }
 
   checkFirstVideoHealth(frame: VideoFrameInfo): void {
@@ -1319,7 +1361,7 @@ struct RemotePage {
     if (this.isFullScreen) {
       Stack({ alignContent: Alignment.Bottom }) {
         Column() {
-          this.buildRemoteViewport();
+          this.buildRemoteViewportWithQualityMonitor();
         }
         .width('100%')
         .height('100%')
@@ -1410,8 +1452,7 @@ struct RemotePage {
     } else if (this.isLargeLayout()) {
       Row() {
         Column() {
-          this.buildStatsPanel();
-          this.buildRemoteViewport();
+          this.buildRemoteViewportWithQualityMonitor();
         }
         .layoutWeight(1)
         .height('100%')
@@ -1422,8 +1463,7 @@ struct RemotePage {
       .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#DCE5F2');
     } else {
       Column() {
-        this.buildStatsPanel();
-        this.buildRemoteViewport();
+        this.buildRemoteViewportWithQualityMonitor();
       }
       .width('100%').height('100%')
       .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#DCE5F2');
@@ -1731,6 +1771,21 @@ struct RemotePage {
   }
 
   @Builder
+  buildRemoteViewportWithQualityMonitor() {
+    Stack({ alignContent: Alignment.TopEnd }) {
+      this.buildRemoteViewport();
+      if (this.showQualityMonitor) {
+        this.buildStatsPanel();
+      } else {
+        this.buildStatsPanelRestoreButton();
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .clip(true)
+  }
+
+  @Builder
   buildRemoteViewport() {
     Stack({ alignContent: Alignment.Center }) {
       Button('', { stateEffect: false })
@@ -1844,7 +1899,7 @@ struct RemotePage {
       }
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .clip(true)
     .backgroundColor('#090D14')
     .onAreaChange((oldValue: Area, newValue: Area) => {
@@ -2802,49 +2857,83 @@ struct RemotePage {
 
   @Builder
   buildStatsPanel() {
-    Scroll() {
-      Row({ space: 14 }) {
-        Row({ space: 7 }) {
-          Circle()
-            .width(8)
-            .height(8)
-            .fill(RustDeskTheme.SUCCESS)
-          Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : '远端设备')
-            .fontSize(13)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.primaryTextColor())
-        }
-        Text(this.routeText)
+    Column({ space: 2 }) {
+      Row() {
+        Text('连接信息')
           .fontSize(11)
-          .fontColor(this.secondaryTextColor())
-        if (this.peerSecurityState === 2) {
-          Text('未启用端到端加密')
-            .fontSize(11)
-            .fontColor(this.isDarkMode ? '#FFCC80' : '#8A4B00')
-        }
-        Text(this.codecText)
-          .fontSize(11)
-          .fontColor(this.secondaryTextColor())
-        Text(this.speedText)
-          .fontSize(11)
-          .fontColor(this.secondaryTextColor())
-        Text(this.fpsText)
-          .fontSize(11)
-          .fontColor(this.secondaryTextColor())
+          .fontWeight(600)
+          .fontColor('#FFF2F2F2')
+        Blank()
+        Text('×')
+          .width(24)
+          .height(22)
+          .fontSize(18)
+          .fontColor('#FFD2D2D2')
+          .textAlign(TextAlign.Center)
+          .borderRadius(11)
+          .onClick(() => {
+            this.showQualityMonitor = false;
+          })
       }
-      .height(44)
-      .padding({ left: 14, right: 14 })
-      .alignItems(VerticalAlign.Center)
+      .width('100%')
+      .height(22)
+
+      ConnectionQualityRow({ label: '速度', value: this.speedText })
+      ConnectionQualityRow({ label: 'FPS', value: this.fpsText })
+      ConnectionQualityRow({ label: '延迟', value: this.delayText, valueColor: this.delayTextColor() })
+      ConnectionQualityRow({ label: '连接', value: this.routeText })
+      ConnectionQualityRow({ label: '目标码率', value: this.targetBitrateText })
+      ConnectionQualityRow({ label: '编码', value: this.codecNameText })
+      ConnectionQualityRow({ label: '解码', value: this.decoderText })
+      ConnectionQualityRow({ label: '安全', value: this.securityText(), valueColor: this.securityTextColor() })
     }
-    .width('100%')
-    .height(44)
-    .backgroundColor(this.panelColor())
-    .border({ width: { bottom: 1 }, color: this.themeBorderColor() })
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
-    .onHover((isHovering: boolean) => {
-      this.handleNonRemoteHover(isHovering);
-    });
+    .width(194)
+    .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+    .margin({ top: this.isFullScreen ? 58 : 10, right: 10 })
+    .backgroundColor('#96000000')
+    .borderRadius(6)
+    .zIndex(40)
+  }
+
+  @Builder
+  buildStatsPanelRestoreButton() {
+    Row({ space: 4 }) {
+      Text('ⓘ')
+        .fontSize(13)
+        .fontColor('#FFF2F2F2')
+      Text('信息')
+        .fontSize(11)
+        .fontColor('#FFF2F2F2')
+    }
+    .height(30)
+    .padding({ left: 10, right: 10 })
+    .margin({ top: this.isFullScreen ? 58 : 10, right: 10 })
+    .backgroundColor('#80000000')
+    .borderRadius(15)
+    .zIndex(40)
+    .onClick(() => {
+      this.showQualityMonitor = true;
+    })
+  }
+
+  delayTextColor(): ResourceColor {
+    if (this.delayMs <= 0) return Color.White
+    if (this.delayMs < 80) return '#FF5DDF91'
+    if (this.delayMs <= 180) return '#FFFFC857'
+    return '#FFFF6B6B'
+  }
+
+  securityText(): string {
+    if (this.peerSecurityState === 1) return '端到端加密'
+    if (this.peerSecurityState === 2) return '未加密'
+    if (this.peerSecurityState === 3) return '验证失败'
+    return '检测中'
+  }
+
+  securityTextColor(): ResourceColor {
+    if (this.peerSecurityState === 1) return '#FF5DDF91'
+    if (this.peerSecurityState === 2 || this.peerSecurityState === 3) return '#FFFFC857'
+    return Color.White
   }
 
   @Builder
@@ -3280,7 +3369,6 @@ struct RemotePage {
         `touchpad_down second_tap=${secondTap ? 1 : 0} pending=${this.tapTimer !== -1 ? 1 : 0}`);
       if (secondTap) {
         this.clearTapTimer();
-        this.sendLeftDown(this.lastAbsX, this.lastAbsY);
       } else {
         this.flushPendingTap();
         this.startRightClickTimer(this.lastAbsX, this.lastAbsY);
@@ -3290,12 +3378,12 @@ struct RemotePage {
     } else if (event.type === TouchType.Move) {
       let movedX: number = touch.x - this.touchStartX;
       let movedY: number = touch.y - this.touchStartY;
-      if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCH_MOVE_THRESHOLD) {
+      if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCHPAD_DRAG_START_THRESHOLD) {
         this.touchMoved = true;
         this.clearLongPressTimer();
         if (this.touchpadDragCandidate && !this.leftButtonHeld) {
           this.sendLeftDown(this.lastAbsX, this.lastAbsY);
-          RustDeskNapi.appendDiagnosticLog('input', 'touchpad_drag left_down_recovered_on_move');
+          RustDeskNapi.appendDiagnosticLog('input', 'touchpad_drag confirmed left_down');
         }
       }
       let deltaX: number = touch.x - this.lastTouchX;
@@ -3371,13 +3459,12 @@ struct RemotePage {
     this.clearLongPressTimer();
     if (this.leftButtonHeld) {
       this.sendLeftUp(this.lastAbsX, this.lastAbsY);
-      if (wasDragCandidate && !cancelled && !this.touchMoved) {
-        // The first tap is intentionally held back while deciding whether this
-        // is a drag. Complete a normal double-click only when the second tap
-        // is released without movement; a drag must remain a clean
-        // left-down -> move -> left-up sequence for desktop marquee selection.
-        this.sendLeftClick(this.lastAbsX, this.lastAbsY);
-      }
+    } else if (wasDragCandidate && !cancelled && !this.longPressTriggered && !this.touchMoved) {
+      // The first tap is held back while waiting for a possible drag. A second
+      // tap released without enough movement is a normal double-click; only a
+      // confirmed move sends a left-down packet.
+      this.sendLeftClick(this.lastAbsX, this.lastAbsY);
+      this.sendLeftClick(this.lastAbsX, this.lastAbsY);
     } else if (!cancelled && !this.longPressTriggered && !this.touchMoved) {
       this.queueTouchpadTap(this.lastAbsX, this.lastAbsY, localX, localY);
     }
@@ -6028,6 +6115,13 @@ struct RemotePage {
 
   updateStats(frame: VideoFrameInfo): void {
     this.codecText = this.videoCodecStatus(frame.codec ?? 0, frame.decoderMode ?? 0);
+    this.codecNameText = this.videoCodecName(frame.codec ?? 0);
+    this.decoderText = this.videoDecoderName(frame.codec ?? 0, frame.decoderMode ?? 0);
+    const delayMs: number = frame.delayMs ?? 0;
+    const targetBitrateKb: number = frame.targetBitrateKb ?? 0;
+    this.delayMs = delayMs;
+    this.delayText = delayMs > 0 ? `${delayMs} ms` : '-';
+    this.targetBitrateText = targetBitrateKb > 0 ? `${targetBitrateKb} kb` : '-';
     let now: number = Date.now();
     let totalFrames: number = frame.renderedFrames ?? frame.totalFrames ?? this.lastStatsFrames;
     let totalBytes: number = frame.totalBytes ?? this.lastStatsBytes;
@@ -6087,14 +6181,34 @@ struct RemotePage {
     return `${codecName} · 检测中`;
   }
 
+  videoDecoderName(codec: number, decoderMode: number): string {
+    if (codec <= 0) return '-';
+    if (decoderMode === 1) return '硬解';
+    if (decoderMode === 2) return '软解';
+    return '检测中';
+  }
+
   updateConnectionRoute(): void {
     let route: number = ConnectionService.getConnectionRoute();
+    let transport: number = ConnectionService.getConnectionTransport();
+    let routeLabel: string = '未知';
+    let transportLabel: string = '';
     if (route === 1) {
-      this.routeText = '直连';
+      routeLabel = '直连';
     } else if (route === 2) {
-      this.routeText = '中继';
-    } else {
-      this.routeText = '未知';
+      routeLabel = '中继';
     }
+    if (transport === 1) {
+      transportLabel = 'TCP';
+    } else if (transport === 2) {
+      transportLabel = 'UDP/KCP';
+    } else if (transport === 3) {
+      transportLabel = 'IPv6/KCP';
+    } else if (transport === 4) {
+      transportLabel = 'WebRTC';
+    } else if (transport === 5) {
+      transportLabel = 'WebSocket';
+    }
+    this.routeText = transportLabel.length > 0 ? `${routeLabel} · ${transportLabel}` : routeLabel;
   }
 }

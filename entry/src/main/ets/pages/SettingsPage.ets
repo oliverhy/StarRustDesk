@@ -14,6 +14,7 @@ import { promptAction } from '@kit.ArkUI'
 import { fileIo, picker } from '@kit.CoreFileKit'
 import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
+import { CloudSyncResult, CloudSyncService } from '../service/CloudSyncService'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
@@ -34,6 +35,11 @@ export struct SettingsPage {
   @State remoteAudioEnabled: boolean = true
   @State diagnosticLogEnabled: boolean = false
   @State diagnosticLogBusy: boolean = false
+  @State cloudSyncEnabled: boolean = false
+  @State cloudSyncIncludesSecrets: boolean = false
+  @State cloudSyncBusy: boolean = false
+  @State cloudSyncStatus: string = '未开启'
+  private cloudPasswordAction: string = ''
   @State pageWidth: number = 0
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
@@ -57,6 +63,22 @@ export struct SettingsPage {
     customStyle: true,
     cornerRadius: 10,
   })
+  private cloudPasswordDialogController: CustomDialogController = new CustomDialogController({
+    builder: SettingsPasswordDialog({
+      title: '云备份密码',
+      description: '密码仅保存在本机安全存储中，新设备恢复时需要重新输入。',
+      onSave: (password: string) => {
+        this.saveCloudPassword(password)
+      },
+      onCancel: () => {
+        this.cloudPasswordAction = ''
+        this.cloudPasswordDialogController.close()
+      }
+    }),
+    autoCancel: false,
+    customStyle: true,
+    cornerRadius: 10,
+  })
 
   aboutToAppear(): void {
     let savedRes: string = RustDeskNapi.getOption('resolution')
@@ -72,6 +94,12 @@ export struct SettingsPage {
     RustDeskNapi.setRemoteAudioEnabled(this.remoteAudioEnabled)
     this.diagnosticLogEnabled = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
     RustDeskNapi.setDiagnosticLogEnabled(this.diagnosticLogEnabled)
+    this.cloudSyncEnabled = CloudSyncService.isEnabled()
+    this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
+    this.updateCloudSyncStatus()
+    if (this.cloudSyncEnabled) {
+      this.syncCloudNow(false, true)
+    }
   }
 
   build() {
@@ -103,12 +131,18 @@ export struct SettingsPage {
           this.buildInputCard()
           this.buildAudioCard()
           this.buildServerConfigCard()
+          this.buildCloudSyncCard()
           this.buildDiagnosticsCard()
           this.buildThemeToggle()
           this.buildAboutCard()
         }
         .width(this.pageWidth >= 820 ? 720 : '100%')
-        .padding(RustDeskTheme.PAGE_PADDING)
+        .padding({
+          left: RustDeskTheme.PAGE_PADDING,
+          right: RustDeskTheme.PAGE_PADDING,
+          top: RustDeskTheme.PAGE_PADDING,
+          bottom: 94
+        })
       }
       .width('100%')
       .layoutWeight(1)
@@ -346,6 +380,262 @@ export struct SettingsPage {
   }
 
   @Builder
+  buildCloudSyncCard() {
+    Column({ space: 4 }) {
+      Text('华为云空间')
+        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+        .margin({ bottom: 4 })
+
+      Text('在同一华为账号的设备间备份和恢复已保存连接、分组与服务器地址。')
+        .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+        .lineHeight(19)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+        .margin({ bottom: 6 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('个人云空间同步')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text(this.cloudSyncStatus)
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.cloudSyncEnabled })
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.cloudSyncEnabled ?
+            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
+          .onChange((isOn: boolean) => {
+            this.setCloudSyncEnabled(isOn)
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row() {
+        Column({ space: 3 }) {
+          Text('同步连接密码和服务器密钥')
+            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text(this.cloudSyncIncludesSecrets ? '已使用 AES-256-GCM 加密后上传' : '默认不上传敏感信息')
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.cloudSyncIncludesSecrets })
+          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
+          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+          .switchPointColor(this.cloudSyncIncludesSecrets ?
+            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
+            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
+          .onChange((isOn: boolean) => {
+            this.setCloudSecretsEnabled(isOn)
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 10 })
+      .opacity(this.cloudSyncEnabled ? 1 : 0.55)
+
+      if (this.cloudSyncEnabled && this.cloudSyncIncludesSecrets) {
+        Row() {
+          Text('备份密码仅保存在本机')
+            .fontSize(11)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          Blank()
+          Text('更换密码')
+            .fontSize(12)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+            .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+            .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+            .onClick(() => {
+              this.cloudPasswordAction = 'enable-secrets'
+              this.cloudPasswordDialogController.open()
+            })
+        }
+        .width('100%')
+        .padding({ bottom: 8 })
+      }
+
+      Divider()
+        .height(1)
+        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+
+      Row({ space: 10 }) {
+        Button(this.cloudSyncBusy ? '同步中…' : '立即同步')
+          .fontSize(14)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .layoutWeight(1)
+          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
+          .onClick(() => {
+            this.syncCloudNow(false, false)
+          })
+        Button('从云端恢复')
+          .fontSize(14)
+          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .layoutWeight(1)
+          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
+          .onClick(() => {
+            this.confirmCloudRestore()
+          })
+      }
+      .width('100%')
+      .padding({ top: 10, bottom: 6 })
+
+      Text('还需在系统“设置 > 华为账号 > 云空间”中允许 StarRustDesk 同步。')
+        .fontSize(11)
+        .lineHeight(17)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+    }
+    .padding(16)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW,
+      offsetX: 0, offsetY: 5 })
+    .width('100%')
+  }
+
+  setCloudSyncEnabled(enabled: boolean): void {
+    this.cloudSyncEnabled = enabled
+    CloudSyncService.setEnabled(enabled)
+    if (!enabled) {
+      this.cloudSyncStatus = '已关闭'
+      return
+    }
+    this.cloudSyncStatus = '等待首次同步'
+    this.syncCloudNow(false, false)
+  }
+
+  async setCloudSecretsEnabled(enabled: boolean): Promise<void> {
+    if (!enabled) {
+      this.cloudSyncIncludesSecrets = false
+      CloudSyncService.setIncludesSecrets(false)
+      await CloudSyncService.upload(getContext(this) as common.UIAbilityContext)
+      this.updateCloudSyncStatus()
+      return
+    }
+    if (await CloudSyncService.hasCloudPassword()) {
+      this.cloudSyncIncludesSecrets = true
+      CloudSyncService.setIncludesSecrets(true)
+      await this.syncCloudNow(false, false)
+      return
+    }
+    this.cloudPasswordAction = 'enable-secrets'
+    this.cloudPasswordDialogController.open()
+  }
+
+  async saveCloudPassword(password: string): Promise<void> {
+    try {
+      await CloudSyncService.saveCloudPassword(password)
+      this.cloudPasswordDialogController.close()
+      let action: string = this.cloudPasswordAction
+      this.cloudPasswordAction = ''
+      if (action === 'enable-secrets') {
+        this.cloudSyncIncludesSecrets = true
+        CloudSyncService.setIncludesSecrets(true)
+        await this.syncCloudNow(false, false)
+      } else if (action === 'restore') {
+        await this.syncCloudNow(true, false)
+      }
+    } catch (_error) {
+      promptAction.showToast({ message: '备份密码保存失败' })
+    }
+  }
+
+  async syncCloudNow(restoreOnly: boolean, quiet: boolean): Promise<void> {
+    if (this.cloudSyncBusy || !this.cloudSyncEnabled) {
+      return
+    }
+    this.cloudSyncBusy = true
+    this.cloudSyncStatus = restoreOnly ? '正在从云端恢复…' : '正在同步…'
+    let result: CloudSyncResult = restoreOnly ?
+      await CloudSyncService.restore(getContext(this) as common.UIAbilityContext) :
+      await CloudSyncService.syncNow(getContext(this) as common.UIAbilityContext)
+    this.cloudSyncBusy = false
+    if (result.needsPassword) {
+      await CloudSyncService.clearCloudPassword()
+      this.cloudPasswordAction = 'restore'
+      this.cloudPasswordDialogController.open()
+      this.cloudSyncStatus = '需要云备份密码'
+      if (!quiet) {
+        promptAction.showToast({ message: result.message })
+      }
+      return
+    }
+    this.updateCloudSyncStatus()
+    this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
+    if (!quiet || !result.success) {
+      promptAction.showToast({ message: result.message })
+    }
+  }
+
+  confirmCloudRestore(): void {
+    AlertDialog.show({
+      title: '从云端恢复',
+      message: '云端的连接、分组和服务器配置将覆盖本机对应内容。未加密备份不会覆盖本机已有密码与服务器密钥。',
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        },
+      },
+      secondaryButton: {
+        value: '恢复',
+        fontColor: RustDeskTheme.ACCENT,
+        action: () => {
+          this.syncCloudNow(true, false)
+        },
+      },
+    })
+  }
+
+  updateCloudSyncStatus(): void {
+    if (!this.cloudSyncEnabled) {
+      this.cloudSyncStatus = '未开启'
+      return
+    }
+    let lastTime: number = CloudSyncService.getLastSuccessTime()
+    if (lastTime <= 0) {
+      this.cloudSyncStatus = '已开启，尚未完成同步'
+      return
+    }
+    let date: Date = new Date(lastTime)
+    let pad: (value: number) => string = (value: number): string => value < 10 ? `0${value}` : value.toString()
+    this.cloudSyncStatus = `上次同步 ${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+      `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
+
+  @Builder
   buildDiagnosticsCard() {
     Column({ space: 4 }) {
       Text('问题诊断')
@@ -541,7 +831,7 @@ export struct SettingsPage {
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Text('1.1.0')
+        Text(RELEASE_NOTES_VERSION)
           .fontSize(RustDeskTheme.FONT_SIZE_BODY)
           .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
       }
@@ -755,25 +1045,34 @@ export struct SettingsPage {
 
 }
 
-@Component
+@CustomDialog
 struct SettingsPasswordDialog {
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State password: string = ''
   @State passwordConfirm: string = ''
-  onPasswordChange: (v: string) => void = () => {}
-  onConfirmChange: (v: string) => void = () => {}
-  onSave: () => void = () => {}
+  title: string = '密码'
+  description: string = ''
+  onSave: (password: string) => void = (_password: string) => {}
   onCancel: () => void = () => {}
+  controller?: CustomDialogController
   @State errorMsg: string = ''
 
   build() {
     Column({ space: 12 }) {
-      Text(translate('Password'))
+      Text(this.title)
         .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
         .width('100%')
         .textAlign(TextAlign.Start)
+
+      if (this.description.length > 0) {
+        Text(this.description)
+          .fontSize(12)
+          .lineHeight(18)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          .width('100%')
+      }
 
       TextInput({ placeholder: translate('Password'), text: this.password })
         .height(40)
@@ -787,7 +1086,6 @@ struct SettingsPasswordDialog {
         .width('100%')
         .onChange((v: string) => {
           this.password = v
-          this.onPasswordChange(v)
           this.errorMsg = ''
         })
 
@@ -803,7 +1101,6 @@ struct SettingsPasswordDialog {
         .width('100%')
         .onChange((v: string) => {
           this.passwordConfirm = v
-          this.onConfirmChange(v)
           this.errorMsg = ''
         })
 
@@ -820,7 +1117,12 @@ struct SettingsPasswordDialog {
           .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.BG_LIGHT)
           .borderRadius(8)
           .layoutWeight(1)
-          .onClick(() => { this.onCancel() })
+          .onClick(() => {
+            this.password = ''
+            this.passwordConfirm = ''
+            this.errorMsg = ''
+            this.onCancel()
+          })
 
         Button(translate('Save'))
           .fontColor(Color.White)
@@ -828,11 +1130,19 @@ struct SettingsPasswordDialog {
           .borderRadius(8)
           .layoutWeight(1)
           .onClick(() => {
+            if (this.password.length < 8) {
+              this.errorMsg = '备份密码至少需要 8 位'
+              return
+            }
             if (this.password !== this.passwordConfirm) {
               this.errorMsg = translate('Passwords do not match')
               return
             }
-            this.onSave()
+            let password: string = this.password
+            this.password = ''
+            this.passwordConfirm = ''
+            this.errorMsg = ''
+            this.onSave(password)
           })
       }
       .width('100%')

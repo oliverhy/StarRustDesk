@@ -1,48 +1,57 @@
 use std::collections::BTreeMap;
+mod kcp_stream;
 #[cfg(test)]
-mod security_tests;
+mod keyboard_tests;
 #[cfg(test)]
 mod network_tests;
 #[cfg(test)]
-mod keyboard_tests;
+mod security_tests;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hbb_common::config::{READ_TIMEOUT, RELAY_PORT, RENDEZVOUS_PORT, RENDEZVOUS_SERVERS, RS_PUB_KEY};
+use hbb_common::config::{
+    Config, READ_TIMEOUT, RELAY_PORT, RENDEZVOUS_PORT, RENDEZVOUS_SERVERS, RS_PUB_KEY,
+};
 use hbb_common::fs::{self, DataSource, JobType, TransferJob};
+use hbb_common::futures::future::{select_ok, BoxFuture, FutureExt};
 use hbb_common::message_proto::{
     file_action, file_response, file_transfer_send_confirm_request, key_event, login_response,
-    message, misc, supported_decoding, video_frame, AudioFormat, Clipboard, ClipboardFormat,
-    Auth2FA, CodecAbility, ControlKey, CursorData, EncodedVideoFrames, FileAction, FileTransfer,
-    FileTransferCancel, FileTransferSendConfirmRequest, Hash, ImageQuality, KeyEvent, IdPk, KeyboardMode, LoginRequest,
-    Message as PeerMessage,
-    Misc, MouseEvent, ReadDir,
-    OptionMessage, OSLogin, PublicKey, SupportedDecoding, SwitchDisplay,
-    TestDelay, VideoFrame,
+    message, misc, supported_decoding, video_frame, AudioFormat, Auth2FA, CaptureDisplays,
+    Clipboard, ClipboardFormat, CodecAbility, ControlKey, CursorData, EncodedVideoFrames,
+    FileAction, FileTransfer, FileTransferCancel, FileTransferSendConfirmRequest, Hash, IdPk,
+    ImageQuality, KeyEvent, KeyboardMode, LoginRequest, Message as PeerMessage, Misc, MouseEvent,
+    OSLogin, OptionMessage, PublicKey, ReadDir, SupportedDecoding, SwitchDisplay, TestDelay,
+    VideoFrame,
 };
+use hbb_common::protobuf::MessageField;
 use hbb_common::rendezvous_proto::{
     punch_hole_response, rendezvous_message, ConnType, KeyExchange, NatType, OnlineRequest,
-    PunchHoleRequest, RequestRelay, RendezvousMessage,
+    PunchHoleRequest, RendezvousMessage, RequestRelay, TestNatRequest,
 };
 use hbb_common::sha2::{Digest, Sha256};
+use hbb_common::socket_client::{
+    check_port, connect_tcp, connect_tcp_local, ipv4_to_ipv6, new_direct_udp_for, split_host_port,
+};
 use hbb_common::sodiumoxide::{
     base64::{self, Variant},
     crypto::{box_, secretbox, sign},
 };
-use hbb_common::protobuf::MessageField;
-use hbb_common::socket_client::{check_port, connect_tcp, connect_tcp_local, ipv4_to_ipv6};
+use hbb_common::tokio::net::UdpSocket;
 use hbb_common::uuid::Uuid;
+use hbb_common::webrtc::WebRTCStream;
 use hbb_common::{AddrMangle, Stream};
 use protobuf::{Enum, EnumOrUnknown, Message};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
+
+use crate::kcp_stream::KcpStream;
 
 type FrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32, i32, i64);
 type EventCallback = extern "C" fn(*const c_char);
@@ -63,6 +72,8 @@ static CURRENT_CLIENT_ID: Mutex<String> = Mutex::new(String::new());
 static DISPLAY_COUNT: Mutex<i32> = Mutex::new(1);
 static CURRENT_DISPLAY: Mutex<i32> = Mutex::new(0);
 static DISPLAY_INFOS: Mutex<Vec<(i32, i32, i32, i32, bool)>> = Mutex::new(Vec::new());
+static PEER_SUPPORTS_MULTI_DISPLAY_FRAMES: AtomicBool = AtomicBool::new(false);
+static LAST_DROPPED_DISPLAY_FRAME_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static PEER_IS_ANDROID: AtomicBool = AtomicBool::new(false);
 static PEER_SAS_ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PEER_PLATFORM: Mutex<String> = Mutex::new(String::new());
@@ -71,8 +82,7 @@ static REMOTE_CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 static REMOTE_CURSOR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_VALID: AtomicBool = AtomicBool::new(false);
-static REMOTE_CURSOR_IMAGES: Mutex<BTreeMap<u64, RemoteCursorImage>> =
-    Mutex::new(BTreeMap::new());
+static REMOTE_CURSOR_IMAGES: Mutex<BTreeMap<u64, RemoteCursorImage>> = Mutex::new(BTreeMap::new());
 static REMOTE_CURSOR_IMAGE_ID: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_IMAGE_VALID: AtomicBool = AtomicBool::new(false);
@@ -84,7 +94,8 @@ static PEER_ONLINE_RESULT: Mutex<String> = Mutex::new(String::new());
 static PEER_ONLINE_QUERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_FILE_JOB_ID: AtomicI32 = AtomicI32::new(10_000);
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static PEER_MESSAGE_SENDER: Mutex<Option<(u64, tokio_mpsc::UnboundedSender<QueuedPeerCommand>)>> = Mutex::new(None);
+static PEER_MESSAGE_SENDER: Mutex<Option<(u64, tokio_mpsc::UnboundedSender<QueuedPeerCommand>)>> =
+    Mutex::new(None);
 static PEER_TASK_CONTROL: Mutex<Option<PeerTaskControl>> = Mutex::new(None);
 static FILE_MESSAGE_SENDER: Mutex<Option<Sender<QueuedPeerCommand>>> = Mutex::new(None);
 static CURRENT_CONNECTION_CONFIG: Mutex<Option<ConnectionConfig>> = Mutex::new(None);
@@ -94,6 +105,9 @@ static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
+static CONNECTION_TRANSPORT: AtomicI32 = AtomicI32::new(0);
+static CONNECTION_DELAY_MS: AtomicI32 = AtomicI32::new(0);
+static CONNECTION_TARGET_BITRATE_KB: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static REMOTE_AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 static BACKGROUND_VIDEO_MODE: AtomicBool = AtomicBool::new(false);
@@ -109,13 +123,23 @@ static H265_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(false);
 // controlled peer to embed its cursor only when that local overlay is disabled,
 // otherwise the delayed video cursor and local cursor are both visible.
 static SHOW_REMOTE_CURSOR: AtomicBool = AtomicBool::new(true);
+static PEER_ROUTE_HISTORY_LOCK: Mutex<()> = Mutex::new(());
 
-const DIRECT_CONNECT_TIMEOUT: u64 = 3_000;
-const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 1_000;
+const DIRECT_CONNECT_TIMEOUT: u64 = 1_500;
+const DIRECT_ONLY_CONNECT_TIMEOUT: u64 = 5_000;
+const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 800;
 const SERVER_CONNECT_TIMEOUT: u64 = 8_000;
 const RENDEZVOUS_REPLY_TIMEOUT: u64 = 6_000;
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(28);
 const ONLINE_QUERY_DEADLINE: Duration = Duration::from_secs(10);
+// RustDesk wire-protocol compatibility version, not the HarmonyOS package version.
+const RUSTDESK_PROTOCOL_VERSION: &str = "1.5.0";
+const PUNCH_REPLY_TIMEOUTS: [u64; 3] = [1_500, 2_500, 4_000];
+const NAT_PROBE_TIMEOUT: u64 = 1_500;
+const PEER_ROUTE_HISTORY_OPTION: &str = "peer-route-history-v1";
+const PEER_ROUTE_HISTORY_TTL_MS: u64 = 30 * 60 * 1_000;
+const PEER_ROUTE_HISTORY_MAX_ENTRIES: usize = 128;
+const PEER_ROUTE_HISTORY_MAX_FAILURES: u8 = 3;
 
 #[derive(Clone, Copy)]
 struct PerformanceConfig {
@@ -185,6 +209,16 @@ struct ConnectionConfig {
     key: String,
     client_hwid: Vec<u8>,
     client_id: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+struct PeerRouteRecord {
+    route: i32,
+    transport: i32,
+    direct_failures: u8,
+    direct_failure_ms: u64,
+    updated_ms: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -262,7 +296,11 @@ fn runtime() -> &'static Runtime {
 fn new_protocol_session_id() -> u64 {
     let uuid = Uuid::new_v4().as_u128();
     let session_id = (uuid as u64) ^ ((uuid >> 64) as u64);
-    if session_id == 0 { 1 } else { session_id }
+    if session_id == 0 {
+        1
+    } else {
+        session_id
+    }
 }
 
 fn reset_display_state() {
@@ -275,6 +313,8 @@ fn reset_display_state() {
     if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
         guard.clear();
     }
+    PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(false, Ordering::SeqCst);
+    LAST_DROPPED_DISPLAY_FRAME_LOG_MS.store(0, Ordering::Relaxed);
     PEER_IS_ANDROID.store(false, Ordering::SeqCst);
     PEER_SAS_ENABLED.store(false, Ordering::SeqCst);
     if let Ok(mut guard) = CURRENT_PEER_PLATFORM.try_lock() {
@@ -313,7 +353,10 @@ fn clear_peer_message_sender() {
 
 fn clear_peer_message_sender_for_session(session_id: u64) {
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.try_lock() {
-        if guard.as_ref().is_some_and(|(stored_session_id, _)| *stored_session_id == session_id) {
+        if guard
+            .as_ref()
+            .is_some_and(|(stored_session_id, _)| *stored_session_id == session_id)
+        {
             *guard = None;
         }
     }
@@ -380,7 +423,7 @@ pub extern "C" fn rust_set_video_codec_support(
 
 #[no_mangle]
 pub extern "C" fn rust_get_build_id() -> *const c_char {
-    b"keyboard-macos-20260907-r3\0".as_ptr() as *const c_char
+    b"official-quality-monitor-20260911-r3\0".as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -417,6 +460,9 @@ pub extern "C" fn rust_connect(
     PROTOCOL_SESSION_ID.store(new_protocol_session_id(), Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
+    CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
+    CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
     ALLOW_INSECURE_SESSION.store(allow_insecure_fallback != 0, Ordering::SeqCst);
     reset_display_state();
     let _ = clear_connection_for_session(session_id);
@@ -452,11 +498,13 @@ pub extern "C" fn rust_connect(
 
     clear_clipboard_state();
 
-    let rendezvous_addr = if direct_addr.is_some() {
-        String::new()
+    let public_server = rv.trim().is_empty();
+    let rendezvous_candidates = if direct_addr.is_some() {
+        Vec::new()
     } else {
-        default_rendezvous_addr(&rv)
+        rendezvous_candidates(&rv)
     };
+    let rendezvous_addr = rendezvous_candidates.first().cloned().unwrap_or_default();
     if let Ok(mut config) = CURRENT_CONNECTION_CONFIG.lock() {
         *config = Some(ConnectionConfig {
             peer: peer.clone(),
@@ -487,69 +535,163 @@ pub extern "C" fn rust_connect(
             if SESSION_ID.load(Ordering::SeqCst) != session_id { return -19; }
             stream.set_send_timeout(5000);
             CONNECTION_ROUTE.store(1, Ordering::SeqCst);
+            CONNECTION_TRANSPORT.store(stream_transport_code(&stream), Ordering::SeqCst);
             CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
-            spawn_receive_loop(session_id, stream);
+            spawn_receive_loop(session_id, stream, None);
             emit_event("IP direct connected; rendezvous bypassed; awaiting peer login challenge");
             return 0;
         }
-        let mut rv_conn = match connect_tcp(rendezvous_addr.clone(), SERVER_CONNECT_TIMEOUT).await {
-            Ok(s) => {
-                emit_event("rendezvous tcp connected");
-                s
-            }
-            Err(e) => {
-                emit_event(&format!("rendezvous tcp failed: {e}"));
+        let (mut rv_conn, active_rendezvous_addr) = match connect_rendezvous(&rendezvous_candidates).await {
+            Ok(value) => value,
+            Err(error) => {
+                emit_event(&format!("rendezvous tcp failed: {error}"));
                 return -1;
             }
         };
-
-        let req = punch_hole_request(&peer, &key, ConnType::DEFAULT_CONN, force_relay != 0);
-
-        if rv_conn.send(&req).await.is_err() {
-            emit_event("punch request send failed");
-            return -2;
+        emit_event("rendezvous tcp connected");
+        if let Ok(mut config) = CURRENT_CONNECTION_CONFIG.lock() {
+            if let Some(config) = config.as_mut() {
+                config.rendezvous_addr = active_rendezvous_addr.clone();
+            }
         }
-        emit_event("punch request sent");
+
+        let nat_type = if force_relay != 0 {
+            NatType::SYMMETRIC
+        } else {
+            let cached = NatType::from_i32(Config::get_nat_type()).unwrap_or(NatType::UNKNOWN_NAT);
+            if cached == NatType::UNKNOWN_NAT {
+                // NAT classification improves later attempts, but it must not
+                // delay the current connection before its first punch request.
+                let probe_server = active_rendezvous_addr.clone();
+                tokio::spawn(async move {
+                    let _ = detect_nat_type(&probe_server, public_server).await;
+                });
+            }
+            cached
+        };
+        let preparation_policy = transport_preparation_policy(public_server, force_relay != 0);
+        let preparation_started = Instant::now();
+        let udp_future = async {
+            if preparation_policy.udp_kcp {
+                prepare_udp_punch_socket(&active_rendezvous_addr, public_server).await
+            } else {
+                None
+            }
+        };
+        let ipv6_future = async {
+            if preparation_policy.ipv6_kcp {
+                match tokio::time::timeout(
+                    Duration::from_millis(IPV6_PREPARATION_TIMEOUT),
+                    prepare_ipv6_punch_socket(&active_rendezvous_addr),
+                ).await {
+                    Ok(candidate) => candidate,
+                    Err(_) => {
+                        emit_event("ipv6 preparation skipped after fast budget");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        let webrtc_future = async {
+            if preparation_policy.webrtc {
+                prepare_webrtc_offerer(false).await
+            } else {
+                None
+            }
+        };
+        let (udp_candidate, ipv6_candidate, webrtc_candidate) =
+            tokio::join!(udp_future, ipv6_future, webrtc_future);
+        emit_event(&format!(
+            "transport preparation completed elapsed_ms={} udp={} ipv6={} webrtc={}",
+            preparation_started.elapsed().as_millis(),
+            udp_candidate.is_some(),
+            ipv6_candidate.is_some(),
+            webrtc_candidate.is_some(),
+        ));
+        let udp_port = udp_candidate.as_ref().map(|(_, port)| *port).unwrap_or(0);
+        let socket_addr_v6 = ipv6_candidate
+            .as_ref()
+            .map(|(_, address)| address.clone())
+            .unwrap_or_default();
+        let webrtc_sdp_offer = webrtc_candidate
+            .as_ref()
+            .map(|(_, endpoint)| endpoint.clone())
+            .unwrap_or_default();
+        let req = punch_hole_request(
+            &peer,
+            &key,
+            ConnType::DEFAULT_CONN,
+            force_relay != 0,
+            nat_type,
+            udp_port,
+            socket_addr_v6,
+            webrtc_sdp_offer,
+        );
 
         let local_addr = rv_conn.local_addr();
-        let response = match next_rendezvous(&mut rv_conn, RENDEZVOUS_REPLY_TIMEOUT).await {
-            Some(msg) => {
+        let response = match send_punch_request(&mut rv_conn, &req, public_server).await {
+            Ok(Some(msg)) => {
                 emit_event("rendezvous response received");
                 msg
             }
-            None => {
+            Ok(None) => {
                 emit_event("rendezvous response timeout");
                 return -7;
             }
+            Err(()) => return -2,
         };
 
         let mut peer_addr: Option<SocketAddr> = None;
         let mut relay_from_server = relay_override.clone();
         let mut signed_id_pk = Vec::new();
         let mut is_local = false;
+        let mut peer_nat_type = NatType::UNKNOWN_NAT;
+        let mut peer_is_udp = false;
+        let mut peer_ipv6_addr: Option<SocketAddr> = None;
+        let mut webrtc_sdp_answer = String::new();
+        let mut relay_uuid: Option<String> = None;
 
         match response.union {
             Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
                 is_local = ph.is_local();
+                peer_nat_type = ph.nat_type();
                 emit_event(&format!(
-                    "punch response socket_addr={} relay={} pk_len={} is_local={} other_failure={}",
+                    "punch response socket_addr={} relay_set={} pk_len={} is_local={} peer_nat={} udp={} refusal={}",
                     ph.socket_addr.len(),
-                    ph.relay_server,
+                    !ph.relay_server.is_empty(),
                     ph.pk.len(),
                     is_local,
-                    ph.other_failure
+                    peer_nat_type.value(),
+                    ph.is_udp,
+                    classify_rendezvous_refusal(&ph.other_failure)
                 ));
                 if !ph.other_failure.is_empty() {
+                    emit_event(&format!("rendezvous rejected source=punch category={}",
+                        classify_rendezvous_refusal(&ph.other_failure)));
                     return -13;
                 }
                 signed_id_pk = ph.pk.to_vec();
+                peer_is_udp = ph.is_udp;
                 if !ph.socket_addr.is_empty() {
                     peer_addr = Some(AddrMangle::decode(&ph.socket_addr));
                 }
+                if !ph.socket_addr_v6.is_empty() {
+                    let address = AddrMangle::decode(&ph.socket_addr_v6);
+                    if address.port() > 0 {
+                        peer_ipv6_addr = Some(address);
+                    }
+                }
+                webrtc_sdp_answer = ph.webrtc_sdp_answer;
                 if relay_from_server.is_empty() {
                     relay_from_server = ph.relay_server;
                 }
-                if peer_addr.is_none() && relay_from_server.is_empty() {
+                if peer_addr.is_none()
+                    && peer_ipv6_addr.is_none()
+                    && webrtc_sdp_answer.is_empty()
+                    && relay_from_server.is_empty()
+                {
                     match ph.failure.enum_value() {
                         Ok(punch_hole_response::Failure::ID_NOT_EXIST) => return -8,
                         Ok(punch_hole_response::Failure::OFFLINE) => return -9,
@@ -568,19 +710,27 @@ pub extern "C" fn rust_connect(
                 if !ph.socket_addr.is_empty() {
                     peer_addr = Some(AddrMangle::decode(&ph.socket_addr));
                 }
+                if !ph.socket_addr_v6.is_empty() {
+                    let address = AddrMangle::decode(&ph.socket_addr_v6);
+                    if address.port() > 0 {
+                        peer_ipv6_addr = Some(address);
+                    }
+                }
                 if relay_from_server.is_empty() {
                     relay_from_server = ph.relay_server;
                 }
             }
             Some(rendezvous_message::Union::RelayResponse(rr)) => {
                 emit_event(&format!(
-                    "relay response relay={} uuid_len={} pk_len={} refuse={}",
-                    rr.relay_server,
+                    "relay response relay_set={} uuid_len={} pk_len={} refusal={}",
+                    !rr.relay_server.is_empty(),
                     rr.uuid.len(),
                     rr.pk().len(),
-                    rr.refuse_reason
+                    classify_rendezvous_refusal(&rr.refuse_reason)
                 ));
                 if !rr.refuse_reason.is_empty() {
+                    emit_event(&format!("rendezvous rejected source=relay category={}",
+                        classify_rendezvous_refusal(&rr.refuse_reason)));
                     return -13;
                 }
                 signed_id_pk = rr.pk().to_vec();
@@ -594,51 +744,14 @@ pub extern "C" fn rust_connect(
                     return -4;
                 }
                 relay_from_server = relay;
-                let addr = if !rr.socket_addr.is_empty() {
-                    Some(AddrMangle::decode(&rr.socket_addr))
-                } else {
-                    None
-                };
-                if let Some(addr) = addr {
-                    peer_addr = Some(addr);
-                }
-                let mut stream = match create_relay(&peer, &rr.uuid, &relay_from_server, &key, local_addr.is_ipv4()).await {
-                    Ok(s) => {
-                        emit_event("relay connected from relay response");
-                        s
+                relay_uuid = Some(rr.uuid);
+                if !rr.socket_addr_v6.is_empty() {
+                    let address = AddrMangle::decode(&rr.socket_addr_v6);
+                    if address.port() > 0 {
+                        peer_ipv6_addr = Some(address);
                     }
-                    Err(e) => {
-                        emit_event(&format!("relay response connect failed: {e}"));
-                        return -15;
-                    }
-                };
-                if let Err(error) = secure_peer_connection(
-                    &peer,
-                    &signed_id_pk,
-                    &key,
-                    &mut stream,
-                    allow_insecure_fallback != 0,
-                ).await {
-                    emit_event("secure fallback failed");
-                    return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
-                        -24
-                    } else {
-                        -16
-                    };
                 }
-                emit_event("secure fallback completed");
-
-                if SESSION_ID.load(Ordering::SeqCst) != session_id {
-                    emit_event("connect session stale before store");
-                    return -19;
-                }
-                stream.set_send_timeout(5000);
-                CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
-                CONNECTION_ROUTE.store(2, Ordering::SeqCst);
-
-                spawn_receive_loop(session_id, stream);
-                emit_event("receive loop spawned");
-                return 0;
+                webrtc_sdp_answer = rr.webrtc_sdp_answer;
             }
             _ => {
                 emit_event(&format!(
@@ -649,95 +762,174 @@ pub extern "C" fn rust_connect(
             }
         }
 
-        // The direct connection must reuse the rendezvous connection's local
-        // endpoint. Release the original socket first, especially for the
-        // same-intranet path where the peer address is a LAN endpoint.
+        // The TCP punch reuses the rendezvous connection's local endpoint.
+        // The UDP/KCP sockets and WebRTC ICE sockets were prepared independently.
         drop(rv_conn);
 
-        let peer_addr = if force_relay != 0 { None } else { peer_addr };
-        let mut stream = if let Some(addr) = peer_addr {
-            let direct_timeout = if is_local {
-                LOCAL_DIRECT_CONNECT_TIMEOUT
-            } else {
-                DIRECT_CONNECT_TIMEOUT
-            };
-            emit_event(&format!(
-                "try direct peer addr={addr} local={local_addr} is_local={is_local} timeout={direct_timeout}"
-            ));
-            match connect_direct_peer(addr, local_addr, direct_timeout).await {
-                Ok(s) => {
-                    emit_event("direct peer connected");
-                    CONNECTION_ROUTE.store(1, Ordering::SeqCst);
-                    s
+        let mut udp_socket = udp_candidate.map(|(socket, _)| socket);
+        if force_relay != 0 || !peer_is_udp {
+            udp_socket = None;
+        } else if let (Some(socket), Some(address)) = (udp_socket.as_ref(), peer_addr) {
+            if let Err(error) = socket.connect(address).await {
+                emit_event(&format!("udp peer endpoint rejected: {error}"));
+                udp_socket = None;
+            }
+        } else {
+            udp_socket = None;
+        }
+
+        let mut ipv6_socket = ipv6_candidate.map(|(socket, _)| socket);
+        if force_relay != 0 {
+            ipv6_socket = None;
+        } else if let (Some(socket), Some(address)) = (ipv6_socket.as_ref(), peer_ipv6_addr) {
+            if let Err(error) = socket.connect(address).await {
+                emit_event(&format!("ipv6 peer endpoint rejected: {error}"));
+                ipv6_socket = None;
+            }
+        } else {
+            ipv6_socket = None;
+        }
+
+        let mut webrtc_stream = webrtc_candidate.map(|(stream, _)| stream);
+        if let Some(stream) = webrtc_stream.as_ref() {
+            if webrtc_sdp_answer.is_empty() {
+                stream.close().await;
+                webrtc_stream = None;
+            } else if let Err(error) = stream.set_remote_endpoint(&webrtc_sdp_answer).await {
+                emit_event(&format!("webrtc answer rejected: {error}"));
+                stream.close().await;
+                webrtc_stream = None;
+            }
+        }
+
+        let direct_failures = recent_peer_direct_failures(&peer, now_ms());
+        let direct_timeout = official_direct_timeout(
+            is_local,
+            peer_nat_type,
+            nat_type,
+            !relay_from_server.is_empty(),
+            direct_failures,
+        );
+        let tcp_peer = if force_relay == 0 && !peer_is_udp { peer_addr } else { None };
+        emit_event(&format!(
+            "transport race tcp={} udp_kcp={} ipv6_kcp={} webrtc={} timeout={direct_timeout}",
+            tcp_peer.is_some(),
+            udp_socket.is_some(),
+            ipv6_socket.is_some(),
+            webrtc_stream.is_some(),
+        ));
+        let direct_result = connect_direct_transports(
+            tcp_peer,
+            local_addr,
+            direct_timeout,
+            udp_socket,
+            ipv6_socket,
+            webrtc_stream,
+            if force_relay != 0 { 2 } else { 1 },
+        ).await;
+
+        let mut selected = match direct_result {
+            Ok(transport) => {
+                emit_event(&format!("transport connected type={}", transport.label));
+                transport
+            }
+            Err(direct_error) if !relay_from_server.is_empty() => {
+                emit_event(&format!("direct transports failed: {direct_error}; try relay"));
+                if force_relay == 0 {
+                    record_peer_direct_failure(&peer, now_ms());
                 }
-                Err(e) if !relay_from_server.is_empty() => {
-                    emit_event(&format!("direct peer failed: {e}; try relay"));
-                    match request_relay(
+                let relay_result = if let Some(uuid) = relay_uuid.as_deref() {
+                    create_relay(
+                        &peer,
+                        uuid,
+                        &relay_from_server,
+                        &key,
+                        local_addr.is_ipv4(),
+                    ).await
+                } else {
+                    request_relay(
                         &peer,
                         &relay_from_server,
-                        &rendezvous_addr,
+                        &active_rendezvous_addr,
                         !signed_id_pk.is_empty(),
                         &key,
                         "",
-                    )
-                    .await
-                    {
-                        Ok(s) => {
-                            emit_event("relay connected");
-                            CONNECTION_ROUTE.store(2, Ordering::SeqCst);
-                            s
-                        }
-                        Err(e) => {
-                            emit_event(&format!("relay failed: {e}"));
-                            return -15;
+                    ).await
+                };
+                match relay_result {
+                    Ok(stream) => {
+                        let transport = stream_transport_code(&stream);
+                        ConnectedTransport {
+                            stream,
+                            kcp: None,
+                            label: stream_transport_label(transport),
+                            route: 2,
+                            transport,
                         }
                     }
-                }
-                Err(e) => {
-                    emit_event(&format!("direct peer failed: {e}"));
-                    return -14;
-                }
-            }
-        } else if !relay_from_server.is_empty() {
-            emit_event("no direct addr, try relay");
-            match request_relay(
-                &peer,
-                &relay_from_server,
-                &rendezvous_addr,
-                !signed_id_pk.is_empty(),
-                &key,
-                "",
-            )
-            .await
-            {
-                Ok(s) => {
-                    emit_event("relay connected");
-                    CONNECTION_ROUTE.store(2, Ordering::SeqCst);
-                    s
-                }
-                Err(e) => {
-                    emit_event(&format!("relay failed: {e}"));
-                    return -15;
+                    Err(error) => {
+                        emit_event(&format!("relay failed: {error}"));
+                        return -15;
+                    }
                 }
             }
-        } else {
-            emit_event("no direct addr and no relay");
-            return -4;
+            Err(error) => {
+                emit_event(&format!("all direct transports failed: {error}"));
+                return -14;
+            }
         };
 
         if let Err(error) = secure_peer_connection(
             &peer,
             &signed_id_pk,
             &key,
-            &mut stream,
+            &mut selected.stream,
             allow_insecure_fallback != 0,
         ).await {
-            emit_event("secure fallback failed");
-            return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
-                -24
+            if selected.stream.is_webrtc() && !relay_from_server.is_empty() {
+                emit_event(&format!("webrtc secure handshake failed: {error}; try relay"));
+                record_peer_direct_failure(&peer, now_ms());
+                selected.stream.close_webrtc().await;
+                let mut relay = match request_relay(
+                    &peer,
+                    &relay_from_server,
+                    &active_rendezvous_addr,
+                    !signed_id_pk.is_empty(),
+                    &key,
+                    "",
+                ).await {
+                    Ok(stream) => stream,
+                    Err(relay_error) => {
+                        emit_event(&format!("webrtc relay fallback failed: {relay_error}"));
+                        return -15;
+                    }
+                };
+                if secure_peer_connection(
+                    &peer,
+                    &signed_id_pk,
+                    &key,
+                    &mut relay,
+                    allow_insecure_fallback != 0,
+                ).await.is_err() {
+                    emit_event("secure relay fallback failed");
+                    return -16;
+                }
+                let transport = stream_transport_code(&relay);
+                selected = ConnectedTransport {
+                    stream: relay,
+                    kcp: None,
+                    label: stream_transport_label(transport),
+                    route: 2,
+                    transport,
+                };
             } else {
-                -16
-            };
+                emit_event("secure fallback failed");
+                return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
+                    -24
+                } else {
+                    -16
+                };
+            }
         }
         emit_event("secure fallback completed");
 
@@ -745,11 +937,14 @@ pub extern "C" fn rust_connect(
             emit_event("connect session stale before store");
             return -19;
         }
-        stream.set_send_timeout(5000);
+        record_peer_route_success(&peer, selected.route, selected.transport, now_ms());
+        selected.stream.set_send_timeout(5000);
         CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+        CONNECTION_ROUTE.store(selected.route, Ordering::SeqCst);
+        CONNECTION_TRANSPORT.store(selected.transport, Ordering::SeqCst);
 
-        spawn_receive_loop(session_id, stream);
-        emit_event("receive loop spawned");
+        spawn_receive_loop(session_id, selected.stream, selected.kcp);
+        emit_event(&format!("receive loop spawned transport={}", selected.label));
         0
         }).await {
             Ok(result) => result,
@@ -851,7 +1046,10 @@ pub extern "C" fn rust_set_audio_enabled(enabled: i32) -> i32 {
     msg.set_misc(misc);
     let result = queue_peer_message(msg);
     if result == 0 {
-        emit_event(&format!("remote audio updated: {}", if enabled { "enabled" } else { "disabled" }));
+        emit_event(&format!(
+            "remote audio updated: {}",
+            if enabled { "enabled" } else { "disabled" }
+        ));
     }
     result
 }
@@ -890,7 +1088,10 @@ pub extern "C" fn rust_set_background_video_mode(enabled: i32) -> i32 {
     if result != 0 {
         return result;
     }
-    emit_event(&format!("background video mode updated: {} fps={}", enabled, performance.fps));
+    emit_event(&format!(
+        "background video mode updated: {} fps={}",
+        enabled, performance.fps
+    ));
     if enabled {
         let mut fps_misc = Misc::new();
         fps_misc.set_auto_adjust_fps(performance.fps as u32);
@@ -914,6 +1115,9 @@ pub extern "C" fn rust_disconnect() -> i32 {
     }
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
+    CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
+    CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
     ALLOW_INSECURE_SESSION.store(false, Ordering::SeqCst);
     reset_audio_async();
     reset_display_state();
@@ -939,18 +1143,28 @@ pub extern "C" fn rust_get_connection_route() -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_mouse_event(
-    x: f64,
-    y: f64,
-    action: i32,
-    modifier_mask: i32,
-) -> i32 {
+pub extern "C" fn rust_get_connection_transport() -> i32 {
+    CONNECTION_TRANSPORT.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_connection_delay_ms() -> i32 {
+    CONNECTION_DELAY_MS.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_connection_target_bitrate_kb() -> i32 {
+    CONNECTION_TARGET_BITRATE_KB.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_send_mouse_event(x: f64, y: f64, action: i32, modifier_mask: i32) -> i32 {
     let mask = match action {
-        0 => 0,             // move
-        1 => (1 << 3) | 1,  // left down
-        2 => (1 << 3) | 2,  // left up
-        3 => (2 << 3) | 1,  // right down
-        4 => (2 << 3) | 2,  // right up
+        0 => 0,            // move
+        1 => (1 << 3) | 1, // left down
+        2 => (1 << 3) | 2, // left up
+        3 => (2 << 3) | 1, // right down
+        4 => (2 << 3) | 2, // right up
         _ => 0,
     };
     let (offset_x, offset_y) = current_display_origin();
@@ -966,11 +1180,7 @@ pub extern "C" fn rust_send_mouse_event(
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_mouse_wheel(
-    delta_x: f64,
-    delta_y: f64,
-    modifier_mask: i32,
-) -> i32 {
+pub extern "C" fn rust_send_mouse_wheel(delta_x: f64, delta_y: f64, modifier_mask: i32) -> i32 {
     let mut msg = PeerMessage::new();
     msg.set_mouse_event(MouseEvent {
         mask: 3,
@@ -1012,11 +1222,16 @@ pub extern "C" fn rust_send_physical_key_event(
         .lock()
         .map(|guard| guard.clone())
         .unwrap_or_default();
-    let Some(peer_code) = map_usb_hid_to_peer_code(usb_hid_code.max(0) as u32, &peer_platform) else {
+    let Some(peer_code) = map_usb_hid_to_peer_code(usb_hid_code.max(0) as u32, &peer_platform)
+    else {
         emit_event(&format!(
             "keyboard map unsupported hid={} peer_platform={}",
             usb_hid_code,
-            if peer_platform.is_empty() { "unknown" } else { peer_platform.as_str() }
+            if peer_platform.is_empty() {
+                "unknown"
+            } else {
+                peer_platform.as_str()
+            }
         ));
         return -3;
     };
@@ -1071,16 +1286,21 @@ pub extern "C" fn rust_can_send_ctrl_alt_del() -> i32 {
         .lock()
         .map(|guard| guard.to_ascii_lowercase())
         .unwrap_or_default();
-    if peer_platform.contains("linux") ||
-        (peer_platform.contains("windows") && PEER_SAS_ENABLED.load(Ordering::SeqCst)) {
+    if peer_platform.contains("linux")
+        || (peer_platform.contains("windows") && PEER_SAS_ENABLED.load(Ordering::SeqCst))
+    {
         1
     } else {
         0
     }
 }
 
-fn lookup_usb_hid_code(hid: u32, letters: &[u32; 26], digits: &[u32; 10],
-    printable: &[u32; 17]) -> Option<u32> {
+fn lookup_usb_hid_code(
+    hid: u32,
+    letters: &[u32; 26],
+    digits: &[u32; 10],
+    printable: &[u32; 17],
+) -> Option<u32> {
     let code = match hid {
         0x04..=0x1D => letters[(hid - 0x04) as usize],
         0x1E..=0x27 => digits[(hid - 0x1E) as usize],
@@ -1092,13 +1312,13 @@ fn lookup_usb_hid_code(hid: u32, letters: &[u32; 26], digits: &[u32; 10],
 
 fn usb_hid_to_windows_scan_code(hid: u32) -> Option<u32> {
     const LETTERS: [u32; 26] = [
-        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
-        0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18,
+        0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
     ];
     const DIGITS: [u32; 10] = [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B];
     const PRINTABLE: [u32; 17] = [
-        0x1C, 0x01, 0x0E, 0x0F, 0x39, 0x0C, 0x0D, 0x1A, 0x1B, 0x2B, 0, 0x27, 0x28,
-        0x29, 0x33, 0x34, 0x35,
+        0x1C, 0x01, 0x0E, 0x0F, 0x39, 0x0C, 0x0D, 0x1A, 0x1B, 0x2B, 0, 0x27, 0x28, 0x29, 0x33,
+        0x34, 0x35,
     ];
     lookup_usb_hid_code(hid, &LETTERS, &DIGITS, &PRINTABLE)
 }
@@ -1107,8 +1327,8 @@ fn usb_hid_to_linux_xorg_code(hid: u32) -> Option<u32> {
     // RustDesk's Linux Map receiver expects Xorg/XKB keycodes, which are
     // Linux evdev codes plus the X11 offset of eight.
     const LETTERS: [u32; 26] = [
-        38, 56, 54, 40, 26, 41, 42, 43, 31, 44, 45, 46, 58, 57, 32, 33, 24, 27, 39,
-        28, 30, 55, 25, 53, 29, 52,
+        38, 56, 54, 40, 26, 41, 42, 43, 31, 44, 45, 46, 58, 57, 32, 33, 24, 27, 39, 28, 30, 55, 25,
+        53, 29, 52,
     ];
     const DIGITS: [u32; 10] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
     const PRINTABLE: [u32; 17] = [
@@ -1119,12 +1339,28 @@ fn usb_hid_to_linux_xorg_code(hid: u32) -> Option<u32> {
 
 fn usb_hid_to_macos_code(hid: u32) -> Option<u32> {
     const LETTERS: [u32; 26] = [
-        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17,
-        32, 9, 13, 7, 16, 6,
+        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16,
+        6,
     ];
     const DIGITS: [u32; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
     const PRINTABLE: [u32; 17] = [
-        36, 53, 51, 48, 49, 27, 24, 33, 30, 42, u32::MAX, 41, 39, 50, 43, 47, 44,
+        36,
+        53,
+        51,
+        48,
+        49,
+        27,
+        24,
+        33,
+        30,
+        42,
+        u32::MAX,
+        41,
+        39,
+        50,
+        43,
+        47,
+        44,
     ];
     // macOS virtual keycode 0 is a valid A key, so use a sentinel for the
     // unsupported HID 0x32 slot instead of treating zero as missing.
@@ -1139,8 +1375,8 @@ fn usb_hid_to_macos_code(hid: u32) -> Option<u32> {
 
 fn usb_hid_to_android_code(hid: u32) -> Option<u32> {
     const LETTERS: [u32; 26] = [
-        29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-        48, 49, 50, 51, 52, 53, 54,
+        29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+        52, 53, 54,
     ];
     const DIGITS: [u32; 10] = [8, 9, 10, 11, 12, 13, 14, 15, 16, 7];
     const PRINTABLE: [u32; 17] = [
@@ -1340,9 +1576,7 @@ pub extern "C" fn rust_send_mobile_action(action: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_is_peer_android() -> i32 {
-    if CONNECTION_ACTIVE.load(Ordering::SeqCst)
-        && PEER_IS_ANDROID.load(Ordering::SeqCst)
-    {
+    if CONNECTION_ACTIVE.load(Ordering::SeqCst) && PEER_IS_ANDROID.load(Ordering::SeqCst) {
         1
     } else {
         0
@@ -1351,7 +1585,9 @@ pub extern "C" fn rust_is_peer_android() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_send_2fa(code: *const c_char, client_hwid: *const c_char) -> i32 {
-    let Some(code) = cstr_to_string(code) else { return -1 };
+    let Some(code) = cstr_to_string(code) else {
+        return -1;
+    };
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return -2;
     }
@@ -1377,7 +1613,9 @@ pub extern "C" fn rust_send_2fa(code: *const c_char, client_hwid: *const c_char)
 
 #[no_mangle]
 pub extern "C" fn rust_request_remote_directory(path: *const c_char) -> i32 {
-    let Some(mut path) = cstr_to_string(path) else { return -1 };
+    let Some(mut path) = cstr_to_string(path) else {
+        return -1;
+    };
     if path.is_empty() {
         path = "/".to_string();
     }
@@ -1395,10 +1633,15 @@ pub extern "C" fn rust_request_remote_directory(path: *const c_char) -> i32 {
     });
     let mut msg = PeerMessage::new();
     msg.set_file_action(action);
-    let Some(sender) = ensure_file_session() else { return -3 };
+    let Some(sender) = ensure_file_session() else {
+        return -3;
+    };
     let session_id = SESSION_ID.load(Ordering::SeqCst);
     sender
-        .send(QueuedPeerCommand::Message { session_id, message: msg })
+        .send(QueuedPeerCommand::Message {
+            session_id,
+            message: msg,
+        })
         .map(|_| 0)
         .unwrap_or(-4)
 }
@@ -1420,9 +1663,15 @@ pub extern "C" fn rust_start_file_upload(
     file_name: *const c_char,
     remote_directory: *const c_char,
 ) -> i32 {
-    let Some(local_path) = cstr_to_string(local_path) else { return -1 };
-    let Some(file_name) = cstr_to_string(file_name) else { return -1 };
-    let Some(remote_directory) = cstr_to_string(remote_directory) else { return -1 };
+    let Some(local_path) = cstr_to_string(local_path) else {
+        return -1;
+    };
+    let Some(file_name) = cstr_to_string(file_name) else {
+        return -1;
+    };
+    let Some(remote_directory) = cstr_to_string(remote_directory) else {
+        return -1;
+    };
     if file_name.is_empty()
         || file_name.len() > 255
         || file_name.contains(['/', '\\', '\0'])
@@ -1431,7 +1680,9 @@ pub extern "C" fn rust_start_file_upload(
     {
         return -2;
     }
-    let Ok(metadata) = std::fs::metadata(&local_path) else { return -3 };
+    let Ok(metadata) = std::fs::metadata(&local_path) else {
+        return -3;
+    };
     if !metadata.is_file() {
         return -4;
     }
@@ -1467,10 +1718,16 @@ pub extern "C" fn rust_start_file_upload(
     job.set_overwrite_strategy(Some(true));
     let receive = fs::new_receive(id, remote_path, 0, job.files().clone(), job.total_size());
     let session_id = SESSION_ID.load(Ordering::SeqCst);
-    let Some(sender) = ensure_file_session() else { return -6 };
+    let Some(sender) = ensure_file_session() else {
+        return -6;
+    };
     set_file_transfer_status("starting", 0, job.total_size(), "");
     sender
-        .send(QueuedPeerCommand::StartUpload { session_id, job, receive })
+        .send(QueuedPeerCommand::StartUpload {
+            session_id,
+            job,
+            receive,
+        })
         .map(|_| 0)
         .unwrap_or(-7)
 }
@@ -1480,9 +1737,14 @@ pub extern "C" fn rust_start_file_download_batch(
     requests_json: *const c_char,
     local_root: *const c_char,
 ) -> i32 {
-    let Some(requests_json) = cstr_to_string(requests_json) else { return -1 };
-    let Some(local_root) = cstr_to_string(local_root) else { return -1 };
-    if local_root.is_empty() || local_root.len() > 4096 || local_root.bytes().any(|byte| byte == 0) {
+    let Some(requests_json) = cstr_to_string(requests_json) else {
+        return -1;
+    };
+    let Some(local_root) = cstr_to_string(local_root) else {
+        return -1;
+    };
+    if local_root.is_empty() || local_root.len() > 4096 || local_root.bytes().any(|byte| byte == 0)
+    {
         return -2;
     }
     let Ok(requests) = serde_json::from_str::<Vec<FileDownloadRequest>>(&requests_json) else {
@@ -1528,11 +1790,16 @@ pub extern "C" fn rust_start_file_download_batch(
         commands.push(DownloadJobCommand { job, send });
     }
 
-    let Some(sender) = ensure_file_session() else { return -8 };
+    let Some(sender) = ensure_file_session() else {
+        return -8;
+    };
     let session_id = SESSION_ID.load(Ordering::SeqCst);
     set_file_transfer_status_detail("download", "starting", 0, 0, "", 0, commands.len());
     sender
-        .send(QueuedPeerCommand::StartDownload { session_id, jobs: commands })
+        .send(QueuedPeerCommand::StartDownload {
+            session_id,
+            jobs: commands,
+        })
         .map(|_| 0)
         .unwrap_or(-9)
 }
@@ -1547,7 +1814,10 @@ fn next_file_job_id() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn rust_get_file_transfer_status() -> *mut c_char {
-    let value = FILE_TRANSFER_STATUS.lock().map(|status| status.clone()).unwrap_or_default();
+    let value = FILE_TRANSFER_STATUS
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default();
     CString::new(value)
         .unwrap_or_else(|_| CString::new("").unwrap())
         .into_raw()
@@ -1555,7 +1825,11 @@ pub extern "C" fn rust_get_file_transfer_status() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn rust_cancel_file_transfer() -> i32 {
-    let Some(sender) = FILE_MESSAGE_SENDER.lock().ok().and_then(|guard| guard.clone()) else {
+    let Some(sender) = FILE_MESSAGE_SENDER
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    else {
         return -1;
     };
     let session_id = SESSION_ID.load(Ordering::SeqCst);
@@ -1569,7 +1843,11 @@ fn ensure_file_session() -> Option<Sender<QueuedPeerCommand>> {
     if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         return None;
     }
-    if let Some(sender) = FILE_MESSAGE_SENDER.lock().ok().and_then(|guard| guard.clone()) {
+    if let Some(sender) = FILE_MESSAGE_SENDER
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
         return Some(sender);
     }
     let config = CURRENT_CONNECTION_CONFIG.lock().ok()?.clone()?;
@@ -1597,14 +1875,23 @@ async fn run_file_session(
     receiver: mpsc::Receiver<QueuedPeerCommand>,
 ) {
     emit_event("file-session:connecting");
-    let connection = await_connection_attempt(session_id, &SESSION_ID, CONNECTION_DEADLINE,
-        connect_file_stream(&config)).await;
+    let connection = await_connection_attempt(
+        session_id,
+        &SESSION_ID,
+        CONNECTION_DEADLINE,
+        connect_file_stream(&config),
+    )
+    .await;
     let result = match connection {
         Err(ConnectionAttemptError::Cancelled) => return,
-        Err(ConnectionAttemptError::Deadline) => Err("file connection deadline exceeded".to_string()),
+        Err(ConnectionAttemptError::Deadline) => {
+            Err("file connection deadline exceeded".to_string())
+        }
         Ok(result) => result,
     };
-    if SESSION_ID.load(Ordering::SeqCst) != session_id { return; }
+    if SESSION_ID.load(Ordering::SeqCst) != session_id {
+        return;
+    }
     let mut stream = match result {
         Ok(stream) => stream,
         Err(error) => {
@@ -1635,7 +1922,9 @@ async fn run_file_session(
                     &mut read_jobs,
                     &mut write_jobs,
                     &mut download_state,
-                ).await {
+                )
+                .await
+                {
                     return;
                 }
             } else {
@@ -1655,12 +1944,16 @@ async fn run_file_session(
         }
         match stream.next_timeout(20).await {
             Some(Ok(bytes)) => {
-                let Ok(message) = PeerMessage::parse_from_bytes(&bytes) else { continue };
+                let Ok(message) = PeerMessage::parse_from_bytes(&bytes) else {
+                    continue;
+                };
                 match message.union {
                     Some(message::Union::Hash(hash)) => {
                         if let Err(error) = send_file_login(hash, &config, &mut stream).await {
                             set_remote_directory_result(RemoteDirectoryResult {
-                                path: String::new(), entries: Vec::new(), error: error.to_string(),
+                                path: String::new(),
+                                entries: Vec::new(),
+                                error: error.to_string(),
                             });
                             return;
                         }
@@ -1668,7 +1961,9 @@ async fn run_file_session(
                     Some(message::Union::LoginResponse(response)) => match response.union {
                         Some(login_response::Union::Error(error)) => {
                             set_remote_directory_result(RemoteDirectoryResult {
-                                path: String::new(), entries: Vec::new(), error,
+                                path: String::new(),
+                                entries: Vec::new(),
+                                error,
                             });
                             return;
                         }
@@ -1686,7 +1981,9 @@ async fn run_file_session(
                                     &mut read_jobs,
                                     &mut write_jobs,
                                     &mut download_state,
-                                ).await {
+                                )
+                                .await
+                                {
                                     return;
                                 }
                             }
@@ -1699,7 +1996,8 @@ async fn run_file_session(
                             &mut write_jobs,
                             &mut download_state,
                             &mut stream,
-                        ).await;
+                        )
+                        .await;
                     }
                     Some(message::Union::FileAction(action)) => {
                         if let Some(file_action::Union::SendConfirm(confirm)) = action.union {
@@ -1722,8 +2020,12 @@ async fn run_file_session(
 }
 
 fn is_root_directory_command(command: &QueuedPeerCommand) -> bool {
-    let QueuedPeerCommand::Message { message, .. } = command else { return false };
-    let Some(message::Union::FileAction(action)) = &message.union else { return false };
+    let QueuedPeerCommand::Message { message, .. } = command else {
+        return false;
+    };
+    let Some(message::Union::FileAction(action)) = &message.union else {
+        return false;
+    };
     matches!(
         &action.union,
         Some(file_action::Union::ReadDir(read_dir)) if read_dir.path == "/"
@@ -1739,10 +2041,15 @@ async fn send_file_command(
     download_state: &mut DownloadBatchState,
 ) -> bool {
     match command {
-        QueuedPeerCommand::Message { session_id: command_session, message } => {
-            command_session == session_id && stream.send(&message).await.is_ok()
-        }
-        QueuedPeerCommand::StartUpload { session_id: command_session, job, receive } => {
+        QueuedPeerCommand::Message {
+            session_id: command_session,
+            message,
+        } => command_session == session_id && stream.send(&message).await.is_ok(),
+        QueuedPeerCommand::StartUpload {
+            session_id: command_session,
+            job,
+            receive,
+        } => {
             if command_session != session_id || stream.send(&receive).await.is_err() {
                 return false;
             }
@@ -1754,7 +2061,10 @@ async fn send_file_command(
             set_file_transfer_status("transferring", 0, total, "");
             true
         }
-        QueuedPeerCommand::StartDownload { session_id: command_session, jobs } => {
+        QueuedPeerCommand::StartDownload {
+            session_id: command_session,
+            jobs,
+        } => {
             if command_session != session_id || jobs.is_empty() {
                 return false;
             }
@@ -1767,7 +2077,12 @@ async fn send_file_command(
             };
             for command in jobs {
                 if stream.send(&command.send).await.is_err() {
-                    set_download_transfer_status("failed", write_jobs, download_state, "发送下载请求失败");
+                    set_download_transfer_status(
+                        "failed",
+                        write_jobs,
+                        download_state,
+                        "发送下载请求失败",
+                    );
                     write_jobs.clear();
                     download_state.active = false;
                     return false;
@@ -1775,21 +2090,36 @@ async fn send_file_command(
                 write_jobs.push(command.job);
             }
             set_download_transfer_status("transferring", write_jobs, download_state, "");
-            emit_event(&format!("file-session:download-started items={}", download_state.total_jobs));
+            emit_event(&format!(
+                "file-session:download-started items={}",
+                download_state.total_jobs
+            ));
             true
         }
-        QueuedPeerCommand::CancelTransfer { session_id: command_session } => {
+        QueuedPeerCommand::CancelTransfer {
+            session_id: command_session,
+        } => {
             if command_session != session_id {
                 return true;
             }
             let is_download = download_state.active || !write_jobs.is_empty();
             let direction = if is_download { "download" } else { "upload" };
             let completed_items = download_state.completed_jobs;
-            let total_items = if is_download { download_state.total_jobs } else { 1 };
+            let total_items = if is_download {
+                download_state.total_jobs
+            } else {
+                1
+            };
             let completed_bytes = download_state.completed_bytes;
-            let active_finished = write_jobs.iter().map(TransferJob::finished_size).sum::<u64>();
+            let active_finished = write_jobs
+                .iter()
+                .map(TransferJob::finished_size)
+                .sum::<u64>();
             let active_total = write_jobs.iter().map(TransferJob::total_size).sum::<u64>();
-            let upload_finished = read_jobs.iter().map(TransferJob::finished_size).sum::<u64>();
+            let upload_finished = read_jobs
+                .iter()
+                .map(TransferJob::finished_size)
+                .sum::<u64>();
             let upload_total = read_jobs.iter().map(TransferJob::total_size).sum::<u64>();
 
             for job in read_jobs.iter().chain(write_jobs.iter()) {
@@ -1820,9 +2150,17 @@ async fn send_file_command(
                 upload_total
             };
             set_file_transfer_status_detail(
-                direction, "cancelled", transferred, total, "", completed_items, total_items,
+                direction,
+                "cancelled",
+                transferred,
+                total,
+                "",
+                completed_items,
+                total_items,
             );
-            emit_event(&format!("file-session:transfer-cancelled direction={direction}"));
+            emit_event(&format!(
+                "file-session:transfer-cancelled direction={direction}"
+            ));
             true
         }
         QueuedPeerCommand::Close { completed, .. } => {
@@ -1883,7 +2221,11 @@ pub extern "C" fn rust_take_remote_clipboard_text() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn rust_get_display_count() -> i32 {
-    DISPLAY_COUNT.try_lock().map(|guard| *guard).unwrap_or(1).max(1)
+    DISPLAY_COUNT
+        .try_lock()
+        .map(|guard| *guard)
+        .unwrap_or(1)
+        .max(1)
 }
 
 #[no_mangle]
@@ -1897,7 +2239,11 @@ pub extern "C" fn rust_get_remote_cursor_position(
     y: *mut i32,
     sequence: *mut u64,
 ) -> i32 {
-    if !REMOTE_CURSOR_VALID.load(Ordering::SeqCst) || x.is_null() || y.is_null() || sequence.is_null() {
+    if !REMOTE_CURSOR_VALID.load(Ordering::SeqCst)
+        || x.is_null()
+        || y.is_null()
+        || sequence.is_null()
+    {
         return 0;
     }
     let (origin_x, origin_y) = current_display_origin();
@@ -1978,7 +2324,27 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     });
     let mut msg = PeerMessage::new();
     msg.set_misc(misc);
-    queue_peer_message(msg)
+    let switch_result = queue_peer_message(msg);
+    if switch_result != 0 {
+        return switch_result;
+    }
+
+    // Since RustDesk 1.2.4 a client advertising multi-UI support must also
+    // narrow the capture subscription. Without this message every newly
+    // selected monitor remains subscribed and its VideoFrames are interleaved
+    // on our single HarmonyOS rendering surface.
+    let mut capture_misc = Misc::new();
+    capture_misc.set_capture_displays(CaptureDisplays {
+        set: vec![display],
+        ..Default::default()
+    });
+    let mut capture_msg = PeerMessage::new();
+    capture_msg.set_misc(capture_misc);
+    let capture_result = queue_peer_message(capture_msg);
+    emit_event(&format!(
+        "switch display requested display={display} capture_set_result={capture_result}"
+    ));
+    capture_result
 }
 
 #[no_mangle]
@@ -2057,7 +2423,10 @@ pub extern "C" fn rust_query_peer_online_states(
         return 1;
     }
 
-    let server = cstr_to_string(rendezvous_server).unwrap_or_default().trim().to_string();
+    let server = cstr_to_string(rendezvous_server)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     // OnlineRequest is handled by hbbs on the auxiliary NAT-test port, which
     // is one lower than the normal rendezvous port (21115 for the default
     // 21116 service). Sending it to the main port makes hbbs close the stream
@@ -2074,15 +2443,23 @@ pub extern "C" fn rust_query_peer_online_states(
 
     runtime().spawn(async move {
         let started = Instant::now();
-        let result = match tokio::time::timeout(ONLINE_QUERY_DEADLINE,
-            query_peer_online_states(peers, rendezvous_addr, requester_id)).await {
+        let result = match tokio::time::timeout(
+            ONLINE_QUERY_DEADLINE,
+            query_peer_online_states(peers, rendezvous_addr, requester_id),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err("online query deadline exceeded (including DNS)".to_string()),
         };
         let payload = match result {
             Ok(states) => {
-                emit_event(&format!("online state query completed count={} online={} elapsed_ms={}",
-                    states.len(), states.iter().filter(|peer| peer.online).count(), started.elapsed().as_millis()));
+                emit_event(&format!(
+                    "online state query completed count={} online={} elapsed_ms={}",
+                    states.len(),
+                    states.iter().filter(|peer| peer.online).count(),
+                    started.elapsed().as_millis()
+                ));
                 PeerOnlineResult {
                     peers: states,
                     error: String::new(),
@@ -2115,13 +2492,20 @@ async fn query_peer_online_states(
 ) -> Result<Vec<PeerOnlineState>, String> {
     // hbbs knows IDs, not IP listeners. Omit literals so callers retain an
     // unknown status instead of leaking local addresses or inventing offline.
-    let peers: Vec<_> = peers.into_iter()
+    let peers: Vec<_> = peers
+        .into_iter()
         .filter(|peer| matches!(direct_peer_addr(peer), Ok(None)))
         .collect();
-    if peers.is_empty() { return Ok(Vec::new()); }
-    let mut connection = connect_tcp(rendezvous_addr, SERVER_CONNECT_TIMEOUT)
-        .await
-        .map_err(|error| format!("connect failed: {error}"))?;
+    if peers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = connect_transport_endpoint(
+        rendezvous_addr,
+        EndpointRole::Rendezvous,
+        SERVER_CONNECT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| format!("connect failed: {error}"))?;
     let mut request = RendezvousMessage::new();
     request.set_online_request(OnlineRequest {
         id: requester_id,
@@ -2168,7 +2552,12 @@ pub extern "C" fn rust_take_peer_online_states() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn rust_get_device_id() -> *mut c_char {
-    let id = format!("{:03}-{:03}-{:03}", rand_simple(), rand_simple(), rand_simple());
+    let id = format!(
+        "{:03}-{:03}-{:03}",
+        rand_simple(),
+        rand_simple(),
+        rand_simple()
+    );
     CString::new(id).unwrap().into_raw()
 }
 
@@ -2201,7 +2590,10 @@ fn emit_event(message: &str) {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ConnectionAttemptError { Cancelled, Deadline }
+enum ConnectionAttemptError {
+    Cancelled,
+    Deadline,
+}
 
 async fn await_connection_attempt<T>(
     session_id: u64,
@@ -2226,15 +2618,24 @@ fn direct_peer_addr(peer: &str) -> Result<Option<SocketAddr>, &'static str> {
     let address = peer.parse::<SocketAddr>().ok().or_else(|| {
         // Parse bare IPv6 as a whole: a trailing numeric component is not a
         // port. IPv6 with a port must use [address]:port.
-        let ip = peer.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(peer);
-        ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, (RELAY_PORT + 1) as u16))
+        let ip = peer
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(peer);
+        ip.parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, (RELAY_PORT + 1) as u16))
     });
     if let Some(address) = address {
-        if address.port() == 0 { return Err("invalid direct IP port"); }
+        if address.port() == 0 {
+            return Err("invalid direct IP port");
+        }
         return Ok(Some(address));
     }
-    if peer.is_empty() || peer.contains([':', '[', ']'])
-        || (peer.contains('.') && peer.chars().all(|c| c.is_ascii_digit() || c == '.')) {
+    if peer.is_empty()
+        || peer.contains([':', '[', ']'])
+        || (peer.contains('.') && peer.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    {
         return Err("invalid direct IP address or port");
     }
     Ok(None)
@@ -2244,29 +2645,48 @@ async fn connect_ip_literal(address: SocketAddr) -> hbb_common::ResultType<Strea
     // Match upstream's IP-listener protocol: no PunchHoleRequest, no empty
     // compatibility handshake, no signed-ID exchange. The receive loop handles
     // the listener's Hash/password challenge normally.
-    tokio::time::timeout(Duration::from_millis(SERVER_CONNECT_TIMEOUT),
-        connect_tcp_local(address, None, SERVER_CONNECT_TIMEOUT)).await?
+    tokio::time::timeout(
+        Duration::from_millis(SERVER_CONNECT_TIMEOUT),
+        connect_tcp_local(address, None, SERVER_CONNECT_TIMEOUT),
+    )
+    .await?
 }
 
 fn default_server_key(server: &str, key: &str) -> String {
     // Upstream common::get_key supplies RS_PUB_KEY for public service access.
     // Never replace an explicit key (even invalid: validation must fail closed)
     // or inject a public key into a custom self-hosted configuration.
-    if server.trim().is_empty() && key.is_empty() { RS_PUB_KEY.to_string() } else { key.to_string() }
+    if server.trim().is_empty() && key.is_empty() {
+        RS_PUB_KEY.to_string()
+    } else {
+        key.to_string()
+    }
 }
 
-fn punch_hole_request(peer: &str, key: &str, conn_type: ConnType, force_relay: bool) -> RendezvousMessage {
+fn punch_hole_request(
+    peer: &str,
+    key: &str,
+    conn_type: ConnType,
+    force_relay: bool,
+    nat_type: NatType,
+    udp_port: u16,
+    socket_addr_v6: Vec<u8>,
+    webrtc_sdp_offer: String,
+) -> RendezvousMessage {
     // Deliberately no password parameter. The remote password belongs only to
     // peer login; token is an account access token, not a password or server key.
     let mut request = RendezvousMessage::new();
     request.set_punch_hole_request(PunchHoleRequest {
         id: peer.to_string(),
         token: String::new(),
-        nat_type: NatType::UNKNOWN_NAT.into(),
+        nat_type: nat_type.into(),
         licence_key: key.to_string(),
         conn_type: conn_type.into(),
         force_relay,
-        version: "1.2.0".to_string(),
+        version: RUSTDESK_PROTOCOL_VERSION.to_string(),
+        udp_port: udp_port as i32,
+        socket_addr_v6: socket_addr_v6.into(),
+        webrtc_sdp_offer,
         ..Default::default()
     });
     request
@@ -2277,11 +2697,714 @@ fn default_rendezvous_addr(server: &str) -> String {
     // desktop client can also use configured/latency-selected servers; this
     // standalone core has no discovery mediator and uses the shipped bootstrap.
     // Never redirect an explicitly configured self-hosted server to public.
-    with_port(if server.trim().is_empty() { RENDEZVOUS_SERVERS[0] } else { server }, RENDEZVOUS_PORT)
+    with_port(
+        if server.trim().is_empty() {
+            RENDEZVOUS_SERVERS[0]
+        } else {
+            server
+        },
+        RENDEZVOUS_PORT,
+    )
+}
+
+fn rendezvous_candidates(server: &str) -> Vec<String> {
+    if !server.trim().is_empty() {
+        return vec![default_rendezvous_addr(server)];
+    }
+    let mut candidates = Vec::new();
+    // StarRustDesk keeps self-hosted settings outside hbb_common. Reading
+    // Config::get_rendezvous_server(s) here could therefore leak a stale
+    // custom-rendezvous-server into the public-server path. Only consume the
+    // server list delivered by an official ConfigureUpdate plus the built-in
+    // official bootstrap list.
+    for candidate in Config::get_option("rendezvous-servers")
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(str::to_string)
+        .chain(RENDEZVOUS_SERVERS.iter().map(|server| server.to_string()))
+    {
+        let candidate = with_port(&candidate, RENDEZVOUS_PORT);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push(default_rendezvous_addr(""));
+    }
+    candidates
+}
+
+#[derive(Clone, Copy)]
+enum EndpointRole {
+    Rendezvous,
+    Relay,
+}
+
+fn websocket_fallback_candidates(endpoint: &str, role: EndpointRole) -> Vec<String> {
+    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+        return Vec::new();
+    }
+    let Some((host, port)) = split_host_port(endpoint) else {
+        return Vec::new();
+    };
+    let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
+    let is_ip = host_without_brackets.parse::<IpAddr>().is_ok();
+    let path = match role {
+        EndpointRole::Rendezvous => "/ws/id",
+        EndpointRole::Relay => "/ws/relay",
+    };
+    let websocket_port = port + 2;
+    let mut candidates = Vec::new();
+    if is_ip {
+        candidates.push(format!("ws://{host}:{websocket_port}"));
+    } else {
+        // Official deployments commonly expose the path on HTTPS/443, while
+        // self-hosted deployments commonly expose the dedicated +2 port.
+        candidates.push(format!("wss://{host_without_brackets}{path}"));
+        candidates.push(format!(
+            "ws://{host_without_brackets}:{websocket_port}{path}"
+        ));
+        candidates.push(format!("ws://{host_without_brackets}{path}"));
+    }
+    candidates
+}
+
+async fn connect_transport_endpoint(
+    endpoint: String,
+    role: EndpointRole,
+    timeout_ms: u64,
+) -> hbb_common::ResultType<Stream> {
+    let mut candidates = vec![endpoint.clone()];
+    candidates.extend(websocket_fallback_candidates(&endpoint, role));
+    let attempts: Vec<BoxFuture<'static, hbb_common::ResultType<(Stream, usize)>>> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            async move {
+                connect_tcp(candidate, timeout_ms)
+                    .await
+                    .map(|stream| (stream, index))
+            }
+            .boxed()
+        })
+        .collect();
+    let ((stream, index), _) = select_ok(attempts).await?;
+    if index > 0 {
+        emit_event(match role {
+            EndpointRole::Rendezvous => "rendezvous websocket fallback connected",
+            EndpointRole::Relay => "relay websocket fallback connected",
+        });
+    }
+    Ok(stream)
+}
+
+async fn connect_rendezvous(candidates: &[String]) -> Result<(Stream, String), String> {
+    if candidates.is_empty() {
+        return Err("no rendezvous server configured".to_string());
+    }
+    let total = candidates.len();
+    let attempts: Vec<BoxFuture<'static, Result<(Stream, String), String>>> = candidates
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, candidate)| {
+            async move {
+                emit_event(&format!(
+                    "rendezvous candidate attempt={}/{}",
+                    index + 1,
+                    total
+                ));
+                connect_transport_endpoint(
+                    candidate.clone(),
+                    EndpointRole::Rendezvous,
+                    SERVER_CONNECT_TIMEOUT,
+                )
+                .await
+                .map(|stream| (stream, candidate))
+                .map_err(|error| error.to_string())
+            }
+            .boxed()
+        })
+        .collect();
+    select_ok(attempts)
+        .await
+        .map(|(winner, _)| winner)
+        .map_err(|error| error.to_string())
+}
+
+struct ConnectedTransport {
+    stream: Stream,
+    kcp: Option<KcpStream>,
+    label: &'static str,
+    route: i32,
+    transport: i32,
+}
+
+const TRANSPORT_TCP: i32 = 1;
+const TRANSPORT_UDP_KCP: i32 = 2;
+const TRANSPORT_IPV6_KCP: i32 = 3;
+const TRANSPORT_WEBRTC: i32 = 4;
+const TRANSPORT_WEBSOCKET: i32 = 5;
+
+fn stream_transport_code(stream: &Stream) -> i32 {
+    match stream {
+        Stream::Tcp(_) => TRANSPORT_TCP,
+        Stream::WebSocket(_) => TRANSPORT_WEBSOCKET,
+        Stream::WebRTC(_) => TRANSPORT_WEBRTC,
+    }
+}
+
+fn stream_transport_label(transport: i32) -> &'static str {
+    match transport {
+        TRANSPORT_TCP => "TCP",
+        TRANSPORT_UDP_KCP => "UDP/KCP",
+        TRANSPORT_IPV6_KCP => "IPv6/KCP",
+        TRANSPORT_WEBRTC => "WebRTC",
+        TRANSPORT_WEBSOCKET => "WebSocket",
+        _ => "Unknown",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransportPreparationPolicy {
+    udp_kcp: bool,
+    ipv6_kcp: bool,
+    webrtc: bool,
+}
+
+fn transport_preparation_policy(
+    public_server: bool,
+    force_relay: bool,
+) -> TransportPreparationPolicy {
+    if force_relay {
+        return TransportPreparationPolicy {
+            udp_kcp: false,
+            ipv6_kcp: false,
+            webrtc: false,
+        };
+    }
+    TransportPreparationPolicy {
+        udp_kcp: true,
+        ipv6_kcp: true,
+        // A self-hosted hbbs/hbbr does not advertise WebRTC capability before
+        // PunchHoleRequest. Starting ICE unconditionally made every custom
+        // connection wait for STUN even when the server could never use it.
+        webrtc: public_server,
+    }
+}
+
+const UDP_NAT_TEST_TIMEOUT: Duration = Duration::from_millis(300);
+const IPV6_PREPARATION_TIMEOUT: u64 = 300;
+const WEBRTC_OFFER_TIMEOUT: u64 = 500;
+const WEBRTC_CONNECT_TIMEOUT: u64 = 3_500;
+const PUNCH_PROBE: [u8; 4] = *b"RDP?";
+const PUNCH_ACK: [u8; 4] = *b"RDP!";
+const PUNCH_PACKET_LEN: usize = 12;
+
+async fn prepare_udp_punch_socket(
+    rendezvous: &str,
+    public_server: bool,
+) -> Option<(Arc<UdpSocket>, u16)> {
+    let (socket, server_addr) = match new_direct_udp_for(rendezvous).await {
+        Ok(value) => value,
+        Err(error) => {
+            emit_event(&format!("udp mapping socket unavailable: {error}"));
+            return None;
+        }
+    };
+    let request = {
+        let mut message = RendezvousMessage::new();
+        message.set_test_nat_request(TestNatRequest {
+            serial: Config::get_serial(),
+            ..Default::default()
+        });
+        match message.write_to_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                emit_event(&format!("udp mapping request encode failed: {error}"));
+                return None;
+            }
+        }
+    };
+    let socket_for_probe = socket.clone();
+    let result = tokio::time::timeout(UDP_NAT_TEST_TIMEOUT, async move {
+        let mut retry = Duration::from_millis(20);
+        let mut buf = [0_u8; 1500];
+        loop {
+            let _ = socket_for_probe.send_to(&request, server_addr).await;
+            match tokio::time::timeout(retry, socket_for_probe.recv_from(&mut buf)).await {
+                Ok(Ok((size, source))) if source.ip() == server_addr.ip() => {
+                    let Ok(message) = RendezvousMessage::parse_from_bytes(&buf[..size]) else {
+                        continue;
+                    };
+                    if let Some(rendezvous_message::Union::TestNatResponse(response)) =
+                        message.union
+                    {
+                        if public_server {
+                            if let Some(update) = response.cu.as_ref() {
+                                apply_rendezvous_config_update(update);
+                            }
+                        }
+                        if response.port > 0 && response.port <= u16::MAX as i32 {
+                            return Some(response.port as u16);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            retry = std::cmp::min(retry.mul_f64(1.5), Duration::from_millis(180));
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    match result {
+        Some(port) => {
+            emit_event(&format!("udp mapping available port={port}"));
+            Some((socket, port))
+        }
+        None => {
+            emit_event("udp mapping unavailable; keep tcp/webrtc/relay fallbacks");
+            None
+        }
+    }
+}
+
+async fn prepare_ipv6_punch_socket(rendezvous: &str) -> Option<(Arc<UdpSocket>, Vec<u8>)> {
+    let addresses = hbb_common::tokio::net::lookup_host(rendezvous).await.ok()?;
+    let server = addresses.into_iter().find(SocketAddr::is_ipv6)?;
+    let probe = UdpSocket::bind("[::]:0").await.ok()?;
+    probe.connect(server).await.ok()?;
+    let local = probe.local_addr().ok()?;
+    if local.ip().is_unspecified() || local.ip().is_loopback() {
+        return None;
+    }
+    drop(probe);
+    let socket = Arc::new(UdpSocket::bind(SocketAddr::new(local.ip(), 0)).await.ok()?);
+    let advertised = AddrMangle::encode(socket.local_addr().ok()?);
+    emit_event("ipv6 punch candidate prepared");
+    Some((socket, advertised))
+}
+
+async fn prepare_webrtc_offerer(force_relay: bool) -> Option<(WebRTCStream, String)> {
+    let stream = match tokio::time::timeout(
+        Duration::from_millis(WEBRTC_OFFER_TIMEOUT),
+        WebRTCStream::new("", force_relay, WEBRTC_CONNECT_TIMEOUT),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            emit_event(&format!("webrtc offer unavailable: {error}"));
+            return None;
+        }
+        Err(_) => {
+            emit_event("webrtc offer skipped after fast budget");
+            return None;
+        }
+    };
+    match stream.get_local_endpoint().await {
+        Ok(endpoint) => {
+            emit_event("webrtc offer prepared");
+            Some((stream, endpoint))
+        }
+        Err(error) => {
+            emit_event(&format!("webrtc local endpoint unavailable: {error}"));
+            None
+        }
+    }
+}
+
+fn punch_packet(tag: &[u8; 4], transaction: u64) -> [u8; PUNCH_PACKET_LEN] {
+    let mut packet = [0_u8; PUNCH_PACKET_LEN];
+    packet[..4].copy_from_slice(tag);
+    packet[4..].copy_from_slice(&transaction.to_le_bytes());
+    packet
+}
+
+fn punch_transaction(packet: &[u8], tag: &[u8; 4]) -> Option<u64> {
+    if packet.len() != PUNCH_PACKET_LEN || packet[..4] != tag[..] {
+        return None;
+    }
+    packet[4..].try_into().ok().map(u64::from_le_bytes)
+}
+
+async fn punch_udp(socket: Arc<UdpSocket>) -> hbb_common::ResultType<()> {
+    let transaction =
+        ((hbb_common::time_based_rand() as u64) << 32) | hbb_common::time_based_rand() as u64;
+    let probe = punch_packet(&PUNCH_PROBE, transaction);
+    let mut buf = [0_u8; 1500];
+    while socket.try_recv(&mut buf).is_ok() {}
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut retry = Duration::from_millis(20);
+    loop {
+        socket.send(&probe).await.ok();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            hbb_common::bail!("UDP punch timeout");
+        }
+        match tokio::time::timeout(std::cmp::min(retry, remaining), socket.recv(&mut buf)).await {
+            Ok(Ok(size)) => {
+                if punch_transaction(&buf[..size], &PUNCH_ACK) == Some(transaction) {
+                    return Ok(());
+                }
+                if let Some(peer_transaction) = punch_transaction(&buf[..size], &PUNCH_PROBE) {
+                    socket
+                        .send(&punch_packet(&PUNCH_ACK, peer_transaction))
+                        .await
+                        .ok();
+                } else if size > 0 {
+                    return Ok(());
+                }
+            }
+            Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(_) => {}
+        }
+        retry = std::cmp::min(retry.mul_f64(1.5), Duration::from_millis(200));
+    }
+}
+
+async fn connect_udp_kcp(
+    socket: Arc<UdpSocket>,
+    label: &'static str,
+    timeout_ms: u64,
+) -> hbb_common::ResultType<ConnectedTransport> {
+    punch_udp(socket.clone()).await?;
+    let (kcp, stream) = KcpStream::connect(socket, Duration::from_millis(timeout_ms)).await?;
+    Ok(ConnectedTransport {
+        stream,
+        kcp: Some(kcp),
+        label,
+        route: 1,
+        transport: if label == "IPv6/KCP" {
+            TRANSPORT_IPV6_KCP
+        } else {
+            TRANSPORT_UDP_KCP
+        },
+    })
+}
+
+async fn connect_direct_transports(
+    tcp_peer: Option<SocketAddr>,
+    local_addr: SocketAddr,
+    timeout_ms: u64,
+    udp: Option<Arc<UdpSocket>>,
+    ipv6: Option<Arc<UdpSocket>>,
+    webrtc: Option<WebRTCStream>,
+    webrtc_route: i32,
+) -> Result<ConnectedTransport, String> {
+    let mut attempts: Vec<BoxFuture<'static, hbb_common::ResultType<ConnectedTransport>>> =
+        Vec::new();
+    if let Some(peer) = tcp_peer {
+        attempts.push(
+            async move {
+                let stream = connect_direct_peer(peer, local_addr, timeout_ms).await?;
+                Ok(ConnectedTransport {
+                    stream,
+                    kcp: None,
+                    label: "TCP",
+                    route: 1,
+                    transport: TRANSPORT_TCP,
+                })
+            }
+            .boxed(),
+        );
+    }
+    if let Some(socket) = udp {
+        attempts.push(connect_udp_kcp(socket, "UDP/KCP", timeout_ms).boxed());
+    }
+    if let Some(socket) = ipv6 {
+        attempts.push(connect_udp_kcp(socket, "IPv6/KCP", timeout_ms).boxed());
+    }
+    if let Some(mut stream) = webrtc {
+        attempts.push(
+            async move {
+                stream.wait_connected(WEBRTC_CONNECT_TIMEOUT).await?;
+                Ok(ConnectedTransport {
+                    stream: Stream::WebRTC(stream),
+                    kcp: None,
+                    label: "WebRTC",
+                    route: webrtc_route,
+                    transport: TRANSPORT_WEBRTC,
+                })
+            }
+            .boxed(),
+        );
+    }
+    if attempts.is_empty() {
+        return Err("no direct transport candidate".to_string());
+    }
+    select_ok(attempts)
+        .await
+        .map(|(winner, _)| winner)
+        .map_err(|error| error.to_string())
+}
+
+async fn send_punch_request(
+    conn: &mut Stream,
+    request: &RendezvousMessage,
+    allow_config_updates: bool,
+) -> Result<Option<RendezvousMessage>, ()> {
+    for (index, reply_timeout) in PUNCH_REPLY_TIMEOUTS.into_iter().enumerate() {
+        let attempt = index + 1;
+        if conn.send(request).await.is_err() {
+            emit_event("punch request send failed");
+            return Err(());
+        }
+        emit_event(&format!(
+            "punch request sent attempt={attempt}/{}",
+            PUNCH_REPLY_TIMEOUTS.len()
+        ));
+        if let Some(response) =
+            next_rendezvous_with_updates(conn, reply_timeout, allow_config_updates).await
+        {
+            return Ok(Some(response));
+        }
+    }
+    Ok(None)
+}
+
+async fn detect_nat_type(server: &str, public_server: bool) -> NatType {
+    let cached = NatType::from_i32(Config::get_nat_type()).unwrap_or(NatType::UNKNOWN_NAT);
+    if cached != NatType::UNKNOWN_NAT {
+        return cached;
+    }
+    let mut request = RendezvousMessage::new();
+    request.set_test_nat_request(TestNatRequest {
+        serial: Config::get_serial(),
+        ..Default::default()
+    });
+    let mut ports = [0_i32; 2];
+    let mut local_addr = None;
+    for (index, endpoint) in [server.to_string(), online_query_addr(server)]
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(mut socket) = connect_tcp_local(endpoint, local_addr, NAT_PROBE_TIMEOUT).await
+        else {
+            emit_event("nat probe unavailable");
+            return NatType::UNKNOWN_NAT;
+        };
+        if index == 0 {
+            local_addr = Some(socket.local_addr());
+        }
+        if socket.send(&request).await.is_err() {
+            return NatType::UNKNOWN_NAT;
+        }
+        let Some(response) = next_rendezvous(&mut socket, NAT_PROBE_TIMEOUT).await else {
+            return NatType::UNKNOWN_NAT;
+        };
+        let Some(rendezvous_message::Union::TestNatResponse(response)) = response.union else {
+            return NatType::UNKNOWN_NAT;
+        };
+        ports[index] = response.port;
+        if public_server {
+            if let Some(update) = response.cu.as_ref() {
+                apply_rendezvous_config_update(update);
+            }
+        }
+    }
+    let detected = if ports[0] > 0 && ports[1] > 0 {
+        if ports[0] == ports[1] {
+            NatType::ASYMMETRIC
+        } else {
+            NatType::SYMMETRIC
+        }
+    } else {
+        NatType::UNKNOWN_NAT
+    };
+    if detected != NatType::UNKNOWN_NAT {
+        Config::set_nat_type(detected.value());
+    }
+    emit_event(&format!("nat probe completed type={}", detected.value()));
+    detected
+}
+
+fn apply_rendezvous_config_update(update: &hbb_common::rendezvous_proto::ConfigUpdate) {
+    if !update.rendezvous_servers.is_empty() {
+        Config::set_option(
+            "rendezvous-servers".to_string(),
+            update.rendezvous_servers.join(","),
+        );
+    }
+    Config::set_serial(update.serial);
+    emit_event(&format!(
+        "rendezvous configuration updated serial={} servers={}",
+        update.serial,
+        update.rendezvous_servers.len()
+    ));
+}
+
+fn classify_rendezvous_refusal(reason: &str) -> &'static str {
+    if reason.is_empty() {
+        return "none";
+    }
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("version") || reason.contains("update") || reason.contains("old client") {
+        "client_version"
+    } else if reason.contains("license") || reason.contains("licence") || reason.contains("key") {
+        "server_key"
+    } else if reason.contains("token") || reason.contains("auth") || reason.contains("login") {
+        "authentication"
+    } else if reason.contains("rate") || reason.contains("frequent") || reason.contains("limit") {
+        "rate_limit"
+    } else if reason.contains("deny") || reason.contains("forbid") || reason.contains("block") {
+        "policy"
+    } else if reason.contains("busy")
+        || reason.contains("overload")
+        || reason.contains("unavailable")
+    {
+        "server_busy"
+    } else {
+        "other"
+    }
+}
+
+fn official_direct_timeout(
+    is_local: bool,
+    peer_nat_type: NatType,
+    _local_nat_type: NatType,
+    relay_available: bool,
+    recent_direct_failures: u8,
+) -> u64 {
+    if is_local || peer_nat_type == NatType::SYMMETRIC {
+        return LOCAL_DIRECT_CONNECT_TIMEOUT;
+    }
+    if relay_available {
+        return if recent_direct_failures > 0 {
+            LOCAL_DIRECT_CONNECT_TIMEOUT
+        } else {
+            DIRECT_CONNECT_TIMEOUT
+        };
+    }
+    DIRECT_ONLY_CONNECT_TIMEOUT
+}
+
+fn peer_route_history_key(peer: &str) -> String {
+    Sha256::digest(peer.trim().as_bytes())[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn load_peer_route_history() -> BTreeMap<String, PeerRouteRecord> {
+    serde_json::from_str(&Config::get_option(PEER_ROUTE_HISTORY_OPTION)).unwrap_or_default()
+}
+
+fn prune_peer_route_history(history: &mut BTreeMap<String, PeerRouteRecord>, now: u64) {
+    history.retain(|_, record| {
+        record.updated_ms > 0 && now.saturating_sub(record.updated_ms) <= PEER_ROUTE_HISTORY_TTL_MS
+    });
+    if history.len() <= PEER_ROUTE_HISTORY_MAX_ENTRIES {
+        return;
+    }
+    let mut oldest = history
+        .iter()
+        .map(|(key, record)| (record.updated_ms, key.clone()))
+        .collect::<Vec<_>>();
+    oldest.sort_unstable();
+    for (_, key) in oldest
+        .into_iter()
+        .take(history.len() - PEER_ROUTE_HISTORY_MAX_ENTRIES)
+    {
+        history.remove(&key);
+    }
+}
+
+fn apply_peer_direct_failure(
+    history: &mut BTreeMap<String, PeerRouteRecord>,
+    peer_key: String,
+    now: u64,
+) -> u8 {
+    let record = history.entry(peer_key).or_default();
+    record.direct_failures = record
+        .direct_failures
+        .saturating_add(1)
+        .min(PEER_ROUTE_HISTORY_MAX_FAILURES);
+    record.direct_failure_ms = now;
+    record.updated_ms = now;
+    record.direct_failures
+}
+
+fn apply_peer_route_success(
+    history: &mut BTreeMap<String, PeerRouteRecord>,
+    peer_key: String,
+    route: i32,
+    transport: i32,
+    now: u64,
+) -> PeerRouteRecord {
+    let record = history.entry(peer_key).or_default();
+    record.route = route;
+    record.transport = transport;
+    record.updated_ms = now;
+    if route == 1 {
+        record.direct_failures = 0;
+        record.direct_failure_ms = 0;
+    }
+    record.clone()
+}
+
+fn recent_direct_failures(record: Option<&PeerRouteRecord>, now: u64) -> u8 {
+    record
+        .filter(|record| {
+            record.direct_failure_ms > 0
+                && now.saturating_sub(record.direct_failure_ms) <= PEER_ROUTE_HISTORY_TTL_MS
+        })
+        .map(|record| record.direct_failures)
+        .unwrap_or(0)
+}
+
+fn recent_peer_direct_failures(peer: &str, now: u64) -> u8 {
+    let Ok(_guard) = PEER_ROUTE_HISTORY_LOCK.lock() else {
+        return 0;
+    };
+    let history = load_peer_route_history();
+    recent_direct_failures(history.get(&peer_route_history_key(peer)), now)
+}
+
+fn save_peer_route_history(history: &BTreeMap<String, PeerRouteRecord>) {
+    if let Ok(serialized) = serde_json::to_string(history) {
+        Config::set_option(PEER_ROUTE_HISTORY_OPTION.to_string(), serialized);
+    }
+}
+
+fn record_peer_direct_failure(peer: &str, now: u64) {
+    let Ok(_guard) = PEER_ROUTE_HISTORY_LOCK.lock() else {
+        return;
+    };
+    let mut history = load_peer_route_history();
+    let failures = apply_peer_direct_failure(&mut history, peer_route_history_key(peer), now);
+    prune_peer_route_history(&mut history, now);
+    save_peer_route_history(&history);
+    emit_event(&format!("route history direct_failure count={failures}"));
+}
+
+fn record_peer_route_success(peer: &str, route: i32, transport: i32, now: u64) {
+    let Ok(_guard) = PEER_ROUTE_HISTORY_LOCK.lock() else {
+        return;
+    };
+    let mut history = load_peer_route_history();
+    let record = apply_peer_route_success(
+        &mut history,
+        peer_route_history_key(peer),
+        route,
+        transport,
+        now,
+    );
+    prune_peer_route_history(&mut history, now);
+    save_peer_route_history(&history);
+    emit_event(&format!(
+        "route history success route={} transport={} direct_failures={}",
+        record.route, record.transport, record.direct_failures
+    ));
 }
 
 fn with_port(host: &str, port: i32) -> String {
     let host = host.trim();
+    if host.starts_with("ws://") || host.starts_with("wss://") {
+        return host.to_string();
+    }
     if host.is_empty() {
         return format!("127.0.0.1:{port}");
     }
@@ -2359,40 +3482,63 @@ fn should_skip_rendezvous_message(union: &Option<rendezvous_message::Union>) -> 
     matches!(
         union,
         Some(rendezvous_message::Union::KeyExchange(_))
-            | Some(rendezvous_message::Union::ConfigureUpdate(_))
             | Some(rendezvous_message::Union::SoftwareUpdate(_))
             | Some(rendezvous_message::Union::Hc(_))
     )
 }
 
 async fn next_rendezvous(conn: &mut Stream, timeout: u64) -> Option<RendezvousMessage> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
-    tokio::time::timeout_at(deadline, async {
-    while let Some(Ok(bytes)) = conn.next_timeout(timeout).await {
-        match RendezvousMessage::parse_from_bytes(&bytes) {
-            Ok(msg) => {
-                let kind = rendezvous_message_kind(&msg.union);
-                if should_skip_rendezvous_message(&msg.union) {
-                    emit_event(&format!("skip rendezvous message kind={kind}"));
-                    continue;
-                }
-                emit_event(&format!("rendezvous message kind={kind}"));
-                return Some(msg);
-            }
-            Err(e) => {
-                emit_event(&format!(
-                    "rendezvous parse failed len={} err={e}",
-                    bytes.len()
-                ));
-            }
-        }
-    }
-    None
-    }).await.ok().flatten()
+    next_rendezvous_with_updates(conn, timeout, false).await
 }
 
-async fn connect_direct_peer(addr: SocketAddr, local: SocketAddr, timeout: u64)
-    -> hbb_common::ResultType<Stream> {
+async fn next_rendezvous_with_updates(
+    conn: &mut Stream,
+    timeout: u64,
+    allow_config_updates: bool,
+) -> Option<RendezvousMessage> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
+    tokio::time::timeout_at(deadline, async {
+        while let Some(Ok(bytes)) = conn.next_timeout(timeout).await {
+            match RendezvousMessage::parse_from_bytes(&bytes) {
+                Ok(msg) => {
+                    let kind = rendezvous_message_kind(&msg.union);
+                    if let Some(rendezvous_message::Union::ConfigureUpdate(update)) =
+                        msg.union.as_ref()
+                    {
+                        if allow_config_updates {
+                            apply_rendezvous_config_update(update);
+                        } else {
+                            emit_event("skip rendezvous message kind=configure_update");
+                        }
+                        continue;
+                    }
+                    if should_skip_rendezvous_message(&msg.union) {
+                        emit_event(&format!("skip rendezvous message kind={kind}"));
+                        continue;
+                    }
+                    emit_event(&format!("rendezvous message kind={kind}"));
+                    return Some(msg);
+                }
+                Err(e) => {
+                    emit_event(&format!(
+                        "rendezvous parse failed len={} err={e}",
+                        bytes.len()
+                    ));
+                }
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn connect_direct_peer(
+    addr: SocketAddr,
+    local: SocketAddr,
+    timeout: u64,
+) -> hbb_common::ResultType<Stream> {
     // Reuse the punch-hole port, but don't force IPv4 peers through an
     // unrelated IPv6 socket and external nip.io DNS on dual-stack Wi-Fi.
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
@@ -2400,8 +3546,12 @@ async fn connect_direct_peer(addr: SocketAddr, local: SocketAddr, timeout: u64)
         if addr.is_ipv4() != local.is_ipv4() {
             let mut matching = hbb_common::config::Config::get_any_listen_addr(addr.is_ipv4());
             matching.set_port(local.port());
-            if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_millis(timeout / 2),
-                connect_tcp_local(addr, Some(matching), timeout / 2)).await {
+            if let Ok(Ok(stream)) = tokio::time::timeout(
+                Duration::from_millis(timeout / 2),
+                connect_tcp_local(addr, Some(matching), timeout / 2),
+            )
+            .await
+            {
                 emit_event("direct peer address-family fallback connected");
                 return Ok(stream);
             }
@@ -2413,13 +3563,31 @@ async fn connect_direct_peer(addr: SocketAddr, local: SocketAddr, timeout: u64)
 
 async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String> {
     if let Some(address) = direct_peer_addr(&config.peer).map_err(str::to_string)? {
-        return connect_ip_literal(address).await.map_err(|error| error.to_string());
+        return connect_ip_literal(address)
+            .await
+            .map_err(|error| error.to_string());
     }
-    let mut rendezvous = connect_tcp(config.rendezvous_addr.clone(), SERVER_CONNECT_TIMEOUT)
+    let mut rendezvous = connect_transport_endpoint(
+        config.rendezvous_addr.clone(),
+        EndpointRole::Rendezvous,
+        SERVER_CONNECT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let request = punch_hole_request(
+        &config.peer,
+        &config.key,
+        ConnType::FILE_TRANSFER,
+        false,
+        NatType::from_i32(Config::get_nat_type()).unwrap_or(NatType::UNKNOWN_NAT),
+        0,
+        Vec::new(),
+        String::new(),
+    );
+    rendezvous
+        .send(&request)
         .await
         .map_err(|error| error.to_string())?;
-    let request = punch_hole_request(&config.peer, &config.key, ConnType::FILE_TRANSFER, false);
-    rendezvous.send(&request).await.map_err(|error| error.to_string())?;
     let local_addr = rendezvous.local_addr();
     let response = next_rendezvous(&mut rendezvous, RENDEZVOUS_REPLY_TIMEOUT)
         .await
@@ -2449,10 +3617,15 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         )
         .await
         .map_err(|error| error.to_string())?;
-        secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream,
-            ALLOW_INSECURE_SESSION.load(Ordering::SeqCst))
-            .await
-            .map_err(|error| error.to_string())?;
+        secure_peer_connection(
+            &config.peer,
+            &signed_id_pk,
+            &config.key,
+            &mut stream,
+            ALLOW_INSECURE_SESSION.load(Ordering::SeqCst),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         return Ok(stream);
     } else {
         match response.union {
@@ -2519,10 +3692,15 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     } else {
         return Err("远端没有可用的文件传输路径".to_string());
     };
-    secure_peer_connection(&config.peer, &signed_id_pk, &config.key, &mut stream,
-        ALLOW_INSECURE_SESSION.load(Ordering::SeqCst))
-        .await
-        .map_err(|error| error.to_string())?;
+    secure_peer_connection(
+        &config.peer,
+        &signed_id_pk,
+        &config.key,
+        &mut stream,
+        ALLOW_INSECURE_SESSION.load(Ordering::SeqCst),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(stream)
 }
 
@@ -2561,7 +3739,13 @@ async fn request_relay_with_type(
         // hbbs pairs every retry by a fresh source socket and UUID. Reusing the
         // first rendezvous socket can leave a valid peer waiting on another
         // relay slot, which is why the official clients reconnect per attempt.
-        let mut rv_conn = match connect_tcp(rendezvous_server.to_string(), SERVER_CONNECT_TIMEOUT).await {
+        let mut rv_conn = match connect_transport_endpoint(
+            rendezvous_server.to_string(),
+            EndpointRole::Rendezvous,
+            SERVER_CONNECT_TIMEOUT,
+        )
+        .await
+        {
             Ok(conn) => conn,
             Err(error) => {
                 last_error = error.to_string();
@@ -2598,15 +3782,8 @@ async fn request_relay_with_type(
                     if resp.refuse_reason.is_empty() =>
                 {
                     emit_event(&format!("relay request accepted attempt={attempt}/3"));
-                    return create_relay_with_type(
-                        peer,
-                        &uuid,
-                        relay_server,
-                        key,
-                        ipv4,
-                        conn_type,
-                    )
-                    .await;
+                    return create_relay_with_type(peer, &uuid, relay_server, key, ipv4, conn_type)
+                        .await;
                 }
                 Some(rendezvous_message::Union::RelayResponse(resp)) => {
                     hbb_common::bail!("relay refused: {}", resp.refuse_reason)
@@ -2691,13 +3868,22 @@ async fn create_relay_with_type(
     conn_type: ConnType,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
     let relay_addr = check_port(relay_server.to_string(), RELAY_PORT);
-    let mut relay_conn = match connect_tcp(relay_addr.clone(), SERVER_CONNECT_TIMEOUT).await {
+    let mut relay_conn = match connect_transport_endpoint(
+        relay_addr.clone(),
+        EndpointRole::Relay,
+        SERVER_CONNECT_TIMEOUT,
+    )
+    .await
+    {
         Ok(conn) => conn,
         Err(error) => {
             let fallback = ipv4_to_ipv6(relay_addr.clone(), ipv4);
-            if fallback == relay_addr { return Err(error); }
+            if fallback == relay_addr {
+                return Err(error);
+            }
             emit_event("relay address-family fallback started");
-            connect_tcp(fallback, SERVER_CONNECT_TIMEOUT).await?
+            connect_transport_endpoint(fallback, EndpointRole::Relay, SERVER_CONNECT_TIMEOUT)
+                .await?
         }
     };
     relay_conn.set_send_timeout(5000);
@@ -2749,7 +3935,9 @@ async fn secure_peer_connection(
             }
             Err(_) => {
                 if allow_insecure_fallback {
-                    emit_event("secure peer: invalid_rendezvous_signature user_approved_insecure_once");
+                    emit_event(
+                        "secure peer: invalid_rendezvous_signature user_approved_insecure_once",
+                    );
                     conn.send(&PeerMessage::new()).await?;
                     return Ok(());
                 }
@@ -2824,7 +4012,10 @@ fn get_pk(bytes: &[u8]) -> Option<[u8; 32]> {
     Some(pk)
 }
 
-fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> Result<(String, [u8; 32]), hbb_common::anyhow::Error> {
+fn decode_id_pk(
+    signed: &[u8],
+    key: &sign::PublicKey,
+) -> Result<(String, [u8; 32]), hbb_common::anyhow::Error> {
     let verified = verify_signed_payload(signed, key)?;
     let res = IdPk::parse_from_bytes(&verified)?;
     let Some(pk) = get_pk(&res.pk) else {
@@ -2833,11 +4024,20 @@ fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> Result<(String, [u8; 32
     Ok((res.id, pk))
 }
 
-fn verify_signed_payload(signed: &[u8], key: &sign::PublicKey) -> Result<Vec<u8>, hbb_common::anyhow::Error> {
+fn verify_signed_payload(
+    signed: &[u8],
+    key: &sign::PublicKey,
+) -> Result<Vec<u8>, hbb_common::anyhow::Error> {
     sign::verify(signed, key).map_err(|_| hbb_common::anyhow::anyhow!("signature mismatch"))
 }
 
-fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (hbb_common::bytes::Bytes, hbb_common::bytes::Bytes, secretbox::Key) {
+fn create_symmetric_key_msg(
+    their_pk_b: [u8; 32],
+) -> (
+    hbb_common::bytes::Bytes,
+    hbb_common::bytes::Bytes,
+    secretbox::Key,
+) {
     let their_pk_b = box_::PublicKey(their_pk_b);
     let (our_pk_b, out_sk_b) = box_::gen_keypair();
     let key = secretbox::gen_key();
@@ -2846,7 +4046,7 @@ fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (hbb_common::bytes::Bytes, 
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
 }
 
-fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
+fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<KcpStream>) {
     let (tx, mut rx) = tokio_mpsc::unbounded_channel::<QueuedPeerCommand>();
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.lock() {
         *guard = Some((session_id, tx));
@@ -2854,6 +4054,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
     let (task_completed, task_completed_receiver) = mpsc::channel();
     let task = runtime().spawn(async move {
             let _task_completion = PeerTaskCompletion(Some(task_completed));
+            let _kcp_guard = kcp_guard;
             let mut stale = false;
             let mut read_jobs: Vec<TransferJob> = Vec::new();
             let receive_started_at = Instant::now();
@@ -3041,9 +4242,13 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream) {
                 last_message_kind,
                 last_message_at.elapsed().as_millis(),
             ));
+            stream.close_webrtc().await;
             if SESSION_ID.load(Ordering::SeqCst) == session_id {
                 CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
                 CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+                CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
+                CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
+                CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
                 reset_audio_async();
                 reset_display_state();
                 clear_peer_message_sender_for_session(session_id);
@@ -3066,7 +4271,10 @@ async fn handle_peer_bytes(
     let msg = match PeerMessage::parse_from_bytes(bytes) {
         Ok(m) => m,
         Err(e) => {
-            emit_event(&format!("peer message parse failed len={} err={e}", bytes.len()));
+            emit_event(&format!(
+                "peer message parse failed len={} err={e}",
+                bytes.len()
+            ));
             return "parse_error";
         }
     };
@@ -3102,11 +4310,24 @@ async fn handle_peer_bytes(
                     if let Ok(mut guard) = CURRENT_PEER_VERSION.try_lock() {
                         *guard = info.version.clone();
                     }
+                    PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(
+                        !info.version.trim().is_empty()
+                            && version_at_least(&info.version, [1, 2, 4]),
+                        Ordering::SeqCst,
+                    );
                     let display_count = info.displays.len().max(1) as i32;
                     let displays: Vec<(i32, i32, i32, i32, bool)> = info
                         .displays
                         .iter()
-                        .map(|display| (display.x, display.y, display.width, display.height, display.cursor_embedded))
+                        .map(|display| {
+                            (
+                                display.x,
+                                display.y,
+                                display.width,
+                                display.height,
+                                display.cursor_embedded,
+                            )
+                        })
                         .collect();
                     if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
                         *guard = display_count;
@@ -3305,7 +4526,12 @@ async fn handle_file_session_response(
                 };
                 job.confirm(&confirm).await;
                 if let Err(error) = stream.send(&fs::new_send_confirm(confirm)).await {
-                    set_download_transfer_status("failed", write_jobs, download_state, &error.to_string());
+                    set_download_transfer_status(
+                        "failed",
+                        write_jobs,
+                        download_state,
+                        &error.to_string(),
+                    );
                     write_jobs.clear();
                     download_state.active = false;
                 }
@@ -3329,7 +4555,9 @@ async fn handle_file_session_response(
         Some(file_response::Union::Done(done)) => {
             if let Some(job) = fs::remove_job(done.id, write_jobs) {
                 job.modify_time();
-                download_state.completed_bytes = download_state.completed_bytes.saturating_add(job.finished_size());
+                download_state.completed_bytes = download_state
+                    .completed_bytes
+                    .saturating_add(job.finished_size());
                 download_state.completed_jobs = download_state.completed_jobs.saturating_add(1);
             }
             if download_state.active
@@ -3407,7 +4635,12 @@ async fn handle_file_response(
                 };
                 job.confirm(&confirm).await;
                 if let Err(error) = stream.send(&fs::new_send_confirm(confirm)).await {
-                    set_file_transfer_status("failed", job.finished_size(), job.total_size(), &error.to_string());
+                    set_file_transfer_status(
+                        "failed",
+                        job.finished_size(),
+                        job.total_size(),
+                        &error.to_string(),
+                    );
                 }
             }
         }
@@ -3457,17 +4690,16 @@ fn set_download_transfer_status(
         .iter()
         .map(TransferJob::finished_size)
         .sum::<u64>();
-    let active_total = write_jobs
-        .iter()
-        .map(TransferJob::total_size)
-        .sum::<u64>();
-    let total = download_state.total_bytes.max(
-        download_state.completed_bytes.saturating_add(active_total),
-    );
+    let active_total = write_jobs.iter().map(TransferJob::total_size).sum::<u64>();
+    let total = download_state
+        .total_bytes
+        .max(download_state.completed_bytes.saturating_add(active_total));
     set_file_transfer_status_detail(
         "download",
         state,
-        download_state.completed_bytes.saturating_add(active_finished),
+        download_state
+            .completed_bytes
+            .saturating_add(active_finished),
         total,
         error,
         download_state.completed_jobs,
@@ -3509,9 +4741,11 @@ fn handle_misc_message(misc_msg: Misc) -> &'static str {
         }
         Some(misc::Union::SwitchDisplay(display)) => {
             let index = display.display.max(0) as usize;
-            if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
-                *guard = display.display.max(0);
-            }
+            // The HarmonyOS client owns a single selected surface. Keep the
+            // local selection as the source of truth because an acknowledgement
+            // from an old subscription can still be queued ahead of the new
+            // capture set and must not switch the UI back.
+            let selected_display = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
             if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
                 if guard.len() <= index {
                     guard.resize(index + 1, (0, 0, 1920, 1080, false));
@@ -3520,15 +4754,27 @@ fn handle_misc_message(misc_msg: Misc) -> &'static str {
                 guard[index] = (
                     display.x,
                     display.y,
-                    if display.width > 0 { display.width } else { previous.2 },
-                    if display.height > 0 { display.height } else { previous.3 },
+                    if display.width > 0 {
+                        display.width
+                    } else {
+                        previous.2
+                    },
+                    if display.height > 0 {
+                        display.height
+                    } else {
+                        previous.3
+                    },
                     display.cursor_embedded,
                 );
             }
             REMOTE_CURSOR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
             emit_event(&format!(
-                "switch display received display={} size={}x{} cursor_embedded={}",
-                display.display, display.width, display.height, display.cursor_embedded
+                "switch display received display={} selected={} size={}x{} cursor_embedded={}",
+                display.display,
+                selected_display,
+                display.width,
+                display.height,
+                display.cursor_embedded
             ));
             "misc_switch_display"
         }
@@ -3695,7 +4941,7 @@ async fn send_login(hash: Hash) {
             ..Default::default()
         }),
         session_id: PROTOCOL_SESSION_ID.load(Ordering::SeqCst),
-        version: "1.2.0".to_string(),
+        version: RUSTDESK_PROTOCOL_VERSION.to_string(),
         os_login: MessageField::some(OSLogin::new()),
         hwid: client_hwid.into(),
         ..Default::default()
@@ -3850,6 +5096,10 @@ fn performance_config() -> PerformanceConfig {
 
 async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream) {
     let should_respond = !delay.from_client;
+    if let Some((delay_ms, target_bitrate_kb)) = test_delay_quality_values(&delay) {
+        CONNECTION_DELAY_MS.store(delay_ms, Ordering::Relaxed);
+        CONNECTION_TARGET_BITRATE_KB.store(target_bitrate_kb, Ordering::Relaxed);
+    }
     emit_event(&format!(
         "test delay received time={} from_client={} last_delay={} target_bitrate={} action={}",
         delay.time,
@@ -3875,7 +5125,39 @@ async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream) {
     send_auto_adjust_fps_if_due().await;
 }
 
+fn test_delay_quality_values(delay: &TestDelay) -> Option<(i32, i32)> {
+    if delay.from_client {
+        None
+    } else {
+        Some((
+            i32::try_from(delay.last_delay).unwrap_or(i32::MAX),
+            i32::try_from(delay.target_bitrate).unwrap_or(i32::MAX),
+        ))
+    }
+}
+
 fn forward_video_frame(frame: VideoFrame) {
+    let frame_display = frame.display.max(0);
+    let current_display = CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(0);
+    if !should_forward_video_display(
+        frame_display,
+        current_display,
+        PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.load(Ordering::SeqCst),
+    ) {
+        let now = now_ms();
+        let last = LAST_DROPPED_DISPLAY_FRAME_LOG_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 2_000
+            && LAST_DROPPED_DISPLAY_FRAME_LOG_MS
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            emit_event(&format!(
+                "video frame: ignored stale display={} selected={}",
+                frame_display, current_display
+            ));
+        }
+        return;
+    }
     let forwarded = match frame.union {
         Some(video_frame::Union::Vp9s(frames)) => forward_encoded_frames(frames, b'V'),
         Some(video_frame::Union::H264s(frames)) => forward_encoded_frames(frames, b'H'),
@@ -3904,6 +5186,14 @@ fn forward_video_frame(frame: VideoFrame) {
         return;
     }
     queue_video_received_if_due();
+}
+
+fn should_forward_video_display(
+    frame_display: i32,
+    current_display: i32,
+    supports_display_tag: bool,
+) -> bool {
+    !supports_display_tag || frame_display == current_display
 }
 
 fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8) -> usize {
@@ -3962,7 +5252,11 @@ fn current_display_rect() -> (i32, i32, i32, i32) {
     DISPLAY_INFOS
         .try_lock()
         .ok()
-        .and_then(|guard| guard.get(index).map(|display| (display.0, display.1, display.2, display.3)))
+        .and_then(|guard| {
+            guard
+                .get(index)
+                .map(|display| (display.0, display.1, display.2, display.3))
+        })
         .unwrap_or((0, 0, 1920, 1080))
 }
 
@@ -3984,26 +5278,21 @@ fn queue_peer_message(msg: PeerMessage) -> i32 {
 }
 
 fn request_graceful_peer_close(session_id: u64) -> bool {
-    let sender = PEER_MESSAGE_SENDER
-        .lock()
-        .ok()
-        .and_then(|guard| {
-            guard
-                .as_ref()
-                .filter(|(stored_session_id, _)| *stored_session_id == session_id)
-                .map(|(_, sender)| sender.clone())
-        });
+    let sender = PEER_MESSAGE_SENDER.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .filter(|(stored_session_id, _)| *stored_session_id == session_id)
+            .map(|(_, sender)| sender.clone())
+    });
     let Some(sender) = sender else {
         emit_event("close request: active sender unavailable");
         return false;
     };
     let (completed, receiver) = mpsc::channel();
-    if let Err(error) = sender
-        .send(QueuedPeerCommand::Close {
-            session_id,
-            completed,
-        })
-    {
+    if let Err(error) = sender.send(QueuedPeerCommand::Close {
+        session_id,
+        completed,
+    }) {
         emit_event(&format!("close request: command send failed: {error}"));
         return false;
     }
@@ -4039,9 +5328,7 @@ fn finish_peer_task(session_id: u64, graceful_close_completed: bool) {
     {
         emit_event("peer task abort: completion timeout");
         control.abort_handle.abort();
-        let _ = control
-            .completed
-            .recv_timeout(Duration::from_millis(250));
+        let _ = control.completed.recv_timeout(Duration::from_millis(250));
     }
 }
 
@@ -4055,6 +5342,9 @@ fn mark_connection_lost(session_id: u64, reason: &str) {
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     set_file_transfer_status("failed", 0, 0, "connection lost");
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
+    CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
+    CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
+    CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
     reset_audio_async();
     reset_display_state();
     clear_peer_message_sender_for_session(session_id);
@@ -4177,7 +5467,9 @@ fn trace_input_message(stage: &str, msg: &PeerMessage) {
         }
         Some(message::Union::KeyEvent(event)) => {
             let key = match &event.union {
-                Some(key_event::Union::ControlKey(control)) => format!("control:{}", control.value()),
+                Some(key_event::Union::ControlKey(control)) => {
+                    format!("control:{}", control.value())
+                }
                 Some(key_event::Union::Chr(chr)) => format!("scan:{chr}"),
                 Some(_) => "other".to_string(),
                 None => "none".to_string(),

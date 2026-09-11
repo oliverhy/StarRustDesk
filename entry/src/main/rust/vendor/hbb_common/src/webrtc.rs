@@ -397,6 +397,34 @@ impl WebRTCStream {
         Ok(())
     }
 
+    /// Wait until ICE, DTLS and the RustDesk data channel are usable.
+    pub async fn wait_connected(&mut self, ms: u64) -> ResultType<()> {
+        timeout(Duration::from_millis(ms), async {
+            loop {
+                match self.pc.connection_state() {
+                    RTCPeerConnectionState::Connected => return Ok(()),
+                    RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Closed
+                    | RTCPeerConnectionState::Disconnected => {
+                        return Err(anyhow::anyhow!("WebRTC connection failed"));
+                    }
+                    _ => {
+                        self.state_notify
+                            .changed()
+                            .await
+                            .map_err(|_| anyhow::anyhow!("WebRTC state channel closed"))?;
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("WebRTC wait_connected timeout"))?
+    }
+
+    pub async fn close(&self) {
+        self.pc.close().await.ok();
+    }
+
     #[inline]
     pub fn set_raw(&mut self) {
         // not-supported
@@ -586,10 +614,7 @@ mod tests {
             "turn:example.com:3478"
         );
         assert_eq!(WebRTCStream::get_ice_servers().len(), 2);
-        config::Config::set_option(
-            "ice-servers".to_string(),
-            "".to_string(),
-        );
+        config::Config::set_option("ice-servers".to_string(), "".to_string());
     }
 
     #[test]

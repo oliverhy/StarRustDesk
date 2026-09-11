@@ -9,6 +9,7 @@ import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundT
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { PeerOnlineResult, PeerOnlineState, RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
+import { CloudSyncService } from '../service/CloudSyncService'
 import {
   ConnectionBackupGroup,
   ConnectionBackupItem,
@@ -68,6 +69,9 @@ export struct ConnectionPage {
   @State isIdEmpty: boolean = true
   @State isConnecting: boolean = false
   @StorageLink('isDarkMode') isDarkMode: boolean = false
+  @StorageLink('serverConfigVersion') @Watch('onServerConfigVersionChanged') serverConfigVersion: number = 0
+  @StorageLink('savedConnectionsCloudRevision') @Watch('onCloudConnectionsChanged')
+  savedConnectionsCloudRevision: number = 0
   @State showUpdateBanner: boolean = false
   @State isUsingPublicServer: boolean = true
   @State customServerHint: string = ''
@@ -85,9 +89,10 @@ export struct ConnectionPage {
   @State connectionGroups: SavedConnectionGroup[] = []
   @State savedConnectionsExpanded: boolean = true
   @State savedConnectionSort: string = 'id'
+  @State savedConnectionSortAscending: boolean = true
   @State savedConnectionSearch: string = ''
   @State savedConnectionSearchExpanded: boolean = false
-  @State connectionFormExpanded: boolean = true
+  @State connectionFormExpanded: boolean = false
   @State ungroupedExpanded: boolean = true
   @State showGroupNameDialog: boolean = false
   @State editingGroupId: string = ''
@@ -99,6 +104,10 @@ export struct ConnectionPage {
   @State groupPickerConnectionId: string = ''
   @State groupPickerForForm: boolean = false
   @State showBackupPasswordDialog: boolean = false
+  @State showConnectionPasswordDialog: boolean = false
+  @State connectionPasswordDraft: string = ''
+  @State rememberConnectionPassword: boolean = false
+  @State connectionPasswordError: string = ''
   @State backupPasswordMode: string = ''
   @State backupPasswordDraft: string = ''
   @State backupPasswordConfirm: string = ''
@@ -116,6 +125,7 @@ export struct ConnectionPage {
   private peerOnlineQueryInFlight: boolean = false
   private peerOnlineQueryStartedAt: number = 0
   private nextPeerOnlineRefreshAt: number = 0
+  private peerStateServer: string = ''
 
   aboutToAppear(): void {
     this.checkServerConfig()
@@ -136,14 +146,31 @@ export struct ConnectionPage {
 
   checkServerConfig(): void {
     try {
-      let idServer: string = RustDeskNapi.getOption('custom-rendezvous-server')
-      this.isUsingPublicServer = idServer.length === 0
-      this.customServerHint = idServer
+      let idServer: string = RustDeskNapi.getOption('custom-rendezvous-server').trim()
+      let relayServer: string = RustDeskNapi.getOption('relay-server').trim()
+      this.isUsingPublicServer = idServer.length === 0 && relayServer.length === 0
+      this.customServerHint = idServer.length > 0 ? idServer : relayServer
+      this.peerStateServer = idServer
     } catch (error) {
       // Server status is informational and must never prevent app startup.
       this.isUsingPublicServer = true
       this.customServerHint = ''
+      this.peerStateServer = ''
     }
+  }
+
+  onServerConfigVersionChanged(): void {
+    this.checkServerConfig()
+    this.markAllPeerStatesUnknown()
+    this.nextPeerOnlineRefreshAt = 0
+    if (!this.peerOnlineQueryInFlight) {
+      this.refreshSavedConnectionOnlineStates(true)
+    }
+  }
+
+  onCloudConnectionsChanged(): void {
+    this.loadConnectionGroups()
+    this.loadSavedConnections()
   }
 
   startStatusPolling(): void {
@@ -207,12 +234,12 @@ export struct ConnectionPage {
           Row({ space: 18 }) {
             Scroll() {
               Column() {
-                this.buildSavedConnections()
+                this.buildConnectionForm()
               }
               .width('100%')
-              .padding({ bottom: 8 })
+              .padding({ bottom: 94 })
             }
-            .layoutWeight(1)
+            .layoutWeight(0.9)
             .height('100%')
             .align(Alignment.Top)
             .scrollBar(BarState.Off)
@@ -220,12 +247,12 @@ export struct ConnectionPage {
 
             Scroll() {
               Column() {
-                this.buildConnectionForm()
+                this.buildSavedConnections()
               }
               .width('100%')
-              .padding({ bottom: 8 })
+              .padding({ bottom: 94 })
             }
-            .layoutWeight(1.2)
+            .layoutWeight(1.3)
             .height('100%')
             .align(Alignment.Top)
             .scrollBar(BarState.Off)
@@ -237,11 +264,11 @@ export struct ConnectionPage {
         } else {
           Scroll() {
             Column({ space: 14 }) {
-              this.buildSavedConnections()
               this.buildConnectionForm()
+              this.buildSavedConnections()
             }
             .width('100%')
-            .padding({ bottom: 8 })
+            .padding({ bottom: 94 })
           }
           .width('100%')
           .layoutWeight(1)
@@ -255,7 +282,7 @@ export struct ConnectionPage {
       .padding({ left: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING, right: this.pageWidth >= 820 ? 32 : RustDeskTheme.PAGE_PADDING })
       .alignItems(HorizontalAlign.Center)
 
-      if (this.showGroupNameDialog || this.showGroupPicker ||
+      if (this.showGroupNameDialog || this.showGroupPicker || this.showConnectionPasswordDialog ||
         this.showBackupPasswordDialog || this.showImportPreviewDialog) {
         Column()
           .width('100%')
@@ -270,6 +297,8 @@ export struct ConnectionPage {
           this.buildGroupNameDialog()
         } else if (this.showGroupPicker) {
           this.buildGroupPickerDialog()
+        } else if (this.showConnectionPasswordDialog) {
+          this.buildConnectionPasswordDialog()
         } else if (this.showBackupPasswordDialog) {
           this.buildBackupPasswordDialog()
         } else if (this.showImportPreviewDialog) {
@@ -289,7 +318,7 @@ export struct ConnectionPage {
     Row() {
       Column({ space: 4 }) {
         Text('StarRustDesk')
-          .fontSize(this.pageWidth >= 820 ? 30 : 26)
+          .fontSize(this.pageWidth >= 820 ? 34 : 30)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
           .width('100%')
@@ -317,64 +346,62 @@ export struct ConnectionPage {
       .borderRadius(12)
     }
     .width('100%')
-    .height(this.pageWidth >= 820 ? 116 : 104)
-    .padding({ top: 24, bottom: 18 })
+    .height(this.pageWidth >= 820 ? 116 : 112)
+    .padding({ top: 28, bottom: 16 })
     .alignItems(VerticalAlign.Center)
   }
 
   @Builder
   buildConnectionForm() {
-    Column({ space: 12 }) {
+    Column({ space: 10 }) {
       Row() {
-        Button() {
-          Image(this.connectionFormExpanded ?
-            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
-            .width(12)
-            .height(12)
-            .objectFit(ImageFit.Contain)
-        }
-          .width(44)
-          .height(34)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .padding(0)
-          .onClick(() => {
-            this.setConnectionFormExpanded(!this.connectionFormExpanded)
-          })
         Text(this.selectedConnectionId.length > 0 ? '编辑连接' : '新建连接')
-          .fontSize(18)
+          .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Text(this.performancePreset === 'stable' ? '稳定优先' : this.performancePreset === 'high_fps' ? '帧率优先' : this.performancePreset === 'silky' ? '丝滑优先' : '流畅优先')
-          .fontSize(12)
+        Button(this.connectionFormExpanded ? '收起选项⌃' : '更多选项›')
+          .height(34)
+          .fontSize(14)
           .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          .backgroundColor(Color.Transparent)
+          .padding({ left: 8, right: 4 })
+          .onClick(() => {
+            this.setConnectionFormExpanded(!this.connectionFormExpanded)
+          })
       }
       .width('100%')
-      .margin({ bottom: 2 })
+      .height(38)
+
+      this.buildRemoteIdInput()
 
       if (this.connectionFormExpanded) {
-        this.buildRemoteIdInput()
-        this.buildConnectionNameInput()
-        this.buildConnectionGroupSelector()
-        this.buildPasswordInput()
-        this.buildPerformancePresetSelector()
-        this.buildConnectionEditActions()
-        if (this.connectionStatusText.length > 0) {
-          this.buildConnectionStatus()
+        Column({ space: 10 }) {
+          this.buildConnectionNameInput()
+          this.buildConnectionGroupSelector()
+          this.buildPasswordInput()
+          this.buildPerformancePresetSelector()
+          this.buildConnectionEditActions()
+          if (this.connectionStatusText.length > 0) {
+            this.buildConnectionStatus()
+          }
+          if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
+            this.buildCustomServerIndicator()
+          }
         }
-        if (!this.isUsingPublicServer && this.customServerHint.length > 0) {
-          this.buildCustomServerIndicator()
-        }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY
+          .combine(TransitionEffect.translate({ y: -8 }))
+          .animation({ duration: 220, curve: Curve.EaseInOut }))
       }
     }
     .width('100%')
-    .padding(16)
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
     .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .margin({ bottom: 18 })
+    .margin({ bottom: 4 })
   }
 
   @Builder
@@ -442,14 +469,14 @@ export struct ConnectionPage {
     Column() {
       Row() {
         Stack({ alignContent: Alignment.End }) {
-          TextInput({ placeholder: translate('Remote ID'), text: this.remoteId })
+          TextInput({ placeholder: '远端 ID / IP', text: this.remoteId })
             .type(InputType.Normal)
-            .fontSize(RustDeskTheme.FONT_SIZE_ID)
+            .fontSize(20)
             .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
             .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .width('100%')
-            .height(52)
+            .height(50)
             .padding({ left: 12, right: 44 })
             .backgroundColor(Color.Transparent)
             .onFocus(() => { this.focusedConnectionField = 'id' })
@@ -478,22 +505,25 @@ export struct ConnectionPage {
           }
         }
         .layoutWeight(1)
-        .height(52)
+        .height(50)
 
-        Button({ type: ButtonType.Circle }) {
-          Text('→')
-            .fontSize(24)
-            .fontColor(Color.White)
+        Button() {
+          Image($r('app.media.connect_arrow'))
+            .width(26)
+            .height(26)
+            .objectFit(ImageFit.Contain)
         }
-        .width(44)
-        .height(44)
-        .backgroundColor(this.remoteId.trim().length > 0 && this.password.trim().length > 0 ? RustDeskTheme.ACCENT : RustDeskTheme.DARK_GRAY)
+        .width(50)
+        .height(50)
+        .padding(0)
+        .borderRadius(12)
+        .backgroundColor(RustDeskTheme.ACCENT)
         .onClick(() => {
           this.onConnect()
         })
       }
-      .padding({ left: 16, right: 8 })
-      .height(68)
+      .padding({ left: 14, right: 6 })
+      .height(62)
       .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
       .border({ width: 1, color: this.connectionInputBorder('id') })
       .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
@@ -605,42 +635,31 @@ export struct ConnectionPage {
             .height(12)
             .objectFit(ImageFit.Contain)
         }
-          .width(44)
-          .height(34)
+          .width(42)
+          .height(42)
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .borderRadius(21)
           .padding(0)
           .onClick(() => {
-            this.savedConnectionsExpanded = !this.savedConnectionsExpanded
-            RustDeskNapi.setOption('saved-connections-expanded', this.savedConnectionsExpanded ? '1' : '0')
+            this.toggleSavedConnectionsExpanded()
           })
         Text('已保存连接')
-          .fontSize(18)
+          .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .layoutWeight(1)
           .maxLines(1)
-          .minFontSize(14)
-          .maxFontSize(18)
-          .margin({ left: 6, right: 6 })
-        Button(`排序：${this.savedConnectionSort === 'name' ? '名称' :
-          this.savedConnectionSort === 'online' ? '在线优先' : 'ID'}`)
-          .height(30)
+          .margin({ left: 8 })
+        Text(`${this.savedConnections.length}`)
           .fontSize(12)
-          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .padding({ left: 10, right: 10 })
-          .bindMenu([
-            { value: `${this.savedConnectionSort === 'id' ? '✓ ' : ''}远端 ID`,
-              action: () => { this.setSavedConnectionSort('id') } },
-            { value: `${this.savedConnectionSort === 'name' ? '✓ ' : ''}设备名称`,
-              action: () => { this.setSavedConnectionSort('name') } },
-            { value: `${this.savedConnectionSort === 'online' ? '✓ ' : ''}在线优先`,
-              action: () => { this.setSavedConnectionSort('online') } }
-          ], { placement: Placement.BottomRight, enableArrow: true })
+          .borderRadius(9)
+          .margin({ left: 8 })
+        Blank()
       }
       .width('100%')
+      .height(46)
 
       Row() {
         if (this.savedConnectionSearchExpanded) {
@@ -654,31 +673,42 @@ export struct ConnectionPage {
             .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
             .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
             .margin({ right: 8 })
+            .transition(TransitionEffect.OPACITY
+              .combine(TransitionEffect.translate({ x: -8 }))
+              .animation({ duration: 200, curve: Curve.EaseInOut }))
             .onChange((value: string) => {
               this.savedConnectionSearch = value
             })
         } else {
-          Text(`${this.savedConnections.length} 个设备`)
+          Button(`排序：${this.savedConnectionSort === 'name' ? '名称' :
+            this.savedConnectionSort === 'online' ? '在线' : 'ID'}`)
+            .height(30)
             .fontSize(12)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY)
+            .backgroundColor(Color.Transparent)
+            .padding({ left: 0, right: 2 })
+            .bindMenu([
+              { value: `${this.savedConnectionSort === 'id' ? '✓ ' : ''}远端 ID`,
+                action: () => { this.setSavedConnectionSort('id') } },
+              { value: `${this.savedConnectionSort === 'name' ? '✓ ' : ''}设备名称`,
+                action: () => { this.setSavedConnectionSort('name') } },
+              { value: `${this.savedConnectionSort === 'online' ? '✓ ' : ''}在线优先`,
+                action: () => { this.setSavedConnectionSort('online') } }
+            ], { placement: Placement.BottomLeft, enableArrow: true })
+          Button() {
+            Text(this.savedConnectionSortAscending ? '▲' : '▼')
+              .fontSize(10)
+              .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY)
+          }
+            .width(28)
+            .height(30)
+            .padding(0)
+            .backgroundColor(Color.Transparent)
+            .onClick(() => {
+              this.toggleSavedConnectionSortDirection()
+            })
           Blank()
         }
-        Button(this.savedConnectionSearchExpanded ? '收起' : '搜索')
-          .width(48)
-          .height(30)
-          .fontSize(12)
-          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .padding(0)
-          .enabled(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded)
-          .opacity(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded ? 1 : 0.45)
-          .onClick(() => {
-            if (this.savedConnectionSearchExpanded) {
-              this.savedConnectionSearch = ''
-            }
-            this.savedConnectionSearchExpanded = !this.savedConnectionSearchExpanded
-          })
         Button('备份')
           .width(48)
           .height(30)
@@ -723,82 +753,145 @@ export struct ConnectionPage {
           .onClick(() => {
             this.openNewGroupDialog()
           })
+        Button(this.savedConnectionSearchExpanded ? '收起' : '搜索')
+          .width(48)
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .padding(0)
+          .margin({ left: 8 })
+          .enabled(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded)
+          .opacity(this.savedConnections.length > 0 || this.savedConnectionSearchExpanded ? 1 : 0.45)
+          .onClick(() => {
+            if (this.savedConnectionSearchExpanded) {
+              this.savedConnectionSearch = ''
+            }
+            this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
+              this.savedConnectionSearchExpanded = !this.savedConnectionSearchExpanded
+            })
+          })
       }
       .width('100%')
       .margin({ bottom: 2 })
 
       if (this.savedConnectionsExpanded) {
-        if (this.savedConnections.length === 0 && this.connectionGroups.length === 0) {
-          Column({ space: 8 }) {
-            Text('暂无保存的连接')
-              .fontSize(15)
-              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
-            Text('可先创建分组，再保存连接')
-              .fontSize(12)
-              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          }
-          .width('100%')
-          .height(112)
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-        } else if (this.filteredSavedConnectionCount() === 0) {
-          Column({ space: 6 }) {
-            Text('未找到匹配的设备')
-              .fontSize(15)
-              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
-            Text('可按设备名称或远端 ID 搜索')
-              .fontSize(12)
-              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          }
-          .width('100%')
-          .height(88)
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-        } else {
-          if (this.connectionsForGroup('').length > 0) {
-            this.buildSavedConnectionGroup('', '未分组', this.ungroupedExpanded, false)
-          }
-
-          ForEach(this.connectionGroups, (group: SavedConnectionGroup) => {
-            if (this.shouldShowSavedConnectionGroup(group.id)) {
-              this.buildSavedConnectionGroup(group.id, group.name, group.expanded, true)
+        Column({ space: 8 }) {
+          if (this.savedConnections.length === 0 && this.connectionGroups.length === 0) {
+            Column({ space: 8 }) {
+              Text('暂无保存的连接')
+                .fontSize(15)
+                .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+              Text('可先创建分组，再保存连接')
+                .fontSize(12)
+                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             }
-          }, (group: SavedConnectionGroup) =>
-            `${group.id}-${this.savedConnectionsVersion}-${this.savedConnectionSearch}`)
+            .width('100%')
+            .height(112)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+            .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          } else if (this.filteredSavedConnectionCount() === 0) {
+            Column({ space: 6 }) {
+              Text('未找到匹配的设备')
+                .fontSize(15)
+                .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_PRIMARY)
+              Text('可按设备名称或远端 ID 搜索')
+                .fontSize(12)
+                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            }
+            .width('100%')
+            .height(88)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+            .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          } else {
+            if (this.connectionsForGroup('').length > 0) {
+              this.buildSavedConnectionGroup('', '未分组', this.ungroupedExpanded, false)
+            }
+
+            ForEach(this.connectionGroups, (group: SavedConnectionGroup) => {
+              if (this.shouldShowSavedConnectionGroup(group.id)) {
+                this.buildSavedConnectionGroup(group.id, group.name, group.expanded, true)
+              }
+            }, (group: SavedConnectionGroup) =>
+              `${group.id}-${this.savedConnectionsVersion}-${this.savedConnectionSearch}`)
+          }
+          if (this.savedConnections.length > 0 && this.filteredSavedConnectionCount() > 0) {
+            this.buildConnectionStatusLegend()
+          }
         }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY
+          .combine(TransitionEffect.translate({ y: -8 }))
+          .animation({ duration: 240, curve: Curve.EaseInOut }))
       }
     }
     .width('100%')
-    .padding(16)
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
     .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .margin({ bottom: 18 })
+    .margin({ bottom: 8 })
+  }
+
+  @Builder
+  buildConnectionStatusLegend() {
+    Row({ space: 14 }) {
+      Row({ space: 5 }) {
+        Circle().width(8).height(8).fill(RustDeskTheme.SUCCESS)
+        Text('在线')
+          .fontSize(11)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      }
+      Row({ space: 5 }) {
+        Circle().width(8).height(8).fill(this.isDarkMode ? '#697386' : '#A5ADBA')
+        Text('离线')
+          .fontSize(11)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      }
+      Row({ space: 5 }) {
+        Circle().width(8).height(8).fill(RustDeskTheme.WARNING)
+        Text('待确认')
+          .fontSize(11)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      }
+    }
+    .width('100%')
+    .height(28)
+    .justifyContent(FlexAlign.Center)
+  }
+
+  @Builder
+  buildGroupFolderIcon() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Row()
+        .width(10)
+        .height(6)
+        .border({ width: 2, color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.ACCENT })
+        .borderRadius(2)
+        .position({ x: 2, y: 1 })
+      Row()
+        .width(24)
+        .height(16)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 2, color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.ACCENT })
+        .borderRadius(3)
+        .position({ x: 0, y: 5 })
+    }
+    .width(24)
+    .height(22)
   }
 
   @Builder
   buildSavedConnectionGroup(groupId: string, groupName: string, expanded: boolean, canRename: boolean) {
     Column() {
       Row({ space: 6 }) {
-        Button() {
-          Image((groupId.length <= 0 ? this.ungroupedExpanded : expanded) ?
-            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
-            .width(12)
-            .height(12)
-            .objectFit(ImageFit.Contain)
-        }
-          .width(44)
-          .height(34)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .onClick(() => {
-            this.toggleConnectionGroup(groupId)
-          })
+        this.buildGroupFolderIcon()
         Text(groupName)
           .fontSize(14)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -813,24 +906,40 @@ export struct ConnectionPage {
           .borderRadius(8)
         Blank()
         if (canRename) {
-          Button('重命名')
+          Button('⋯')
+            .width(34)
             .height(28)
-            .fontSize(11)
+            .fontSize(14)
             .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
             .backgroundColor(Color.Transparent)
-            .onClick(() => {
-              this.openRenameGroupDialog(groupId)
-            })
+            .padding(0)
+            .bindMenu([{ value: '重命名分组', action: () => { this.openRenameGroupDialog(groupId) } }],
+              { placement: Placement.BottomRight, enableArrow: true })
         }
+        Button() {
+          Image((groupId.length <= 0 ? this.ungroupedExpanded : expanded) ?
+            $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+            .width(11)
+            .height(11)
+            .objectFit(ImageFit.Contain)
+        }
+          .width(32)
+          .height(30)
+          .backgroundColor(Color.Transparent)
+          .padding(0)
+          .onClick(() => {
+            this.toggleConnectionGroup(groupId)
+          })
       }
       .width('100%')
-      .height(42)
+      .height(38)
       .padding({ left: 4, right: 4 })
       .alignItems(VerticalAlign.Center)
 
       if (groupId.length <= 0 ? this.ungroupedExpanded : expanded) {
-        ForEach(this.connectionsForGroup(groupId), (item: SavedConnectionInfo) => {
-          Row({ space: 8 }) {
+        Column() {
+          ForEach(this.connectionsForGroup(groupId), (item: SavedConnectionInfo) => {
+            Row({ space: 8 }) {
             Stack() {
               Column() {
                 Text(item.name.length > 0 ? item.name.substring(0, 1).toUpperCase() : 'R')
@@ -868,30 +977,29 @@ export struct ConnectionPage {
                 .fontSize(12)
                 .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
                 .width('100%')
-              Text(this.peerOnlineStateHint(item.remoteId))
-                .fontSize(10)
-                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-                .width('100%')
-                .maxLines(2)
             }
             .layoutWeight(1)
 
             Button('连接')
+              .width(68)
               .height(32)
               .fontSize(12)
-              .fontColor(Color.White)
-              .backgroundColor(RustDeskTheme.ACCENT)
+              .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+              .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
               .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
               .onClick(() => {
                 this.connectSavedConnection(item)
               })
 
-            Button('更多')
+            Button('⋯')
+              .width(42)
               .height(32)
-              .fontSize(12)
+              .fontSize(15)
               .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-              .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+              .backgroundColor(Color.Transparent)
               .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+              .padding(0)
               .bindMenu([
                 {
                   value: '移动到分组',
@@ -915,13 +1023,18 @@ export struct ConnectionPage {
                 placement: Placement.BottomRight,
                 enableArrow: true
               })
-          }
-          .width('100%')
-          .height(58)
-          .padding({ left: 8, right: 4 })
-          .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
-        }, (item: SavedConnectionInfo) =>
-          `${item.id}-${this.savedConnectionsVersion}-${this.peerOnlineStatesVersion}`)
+            }
+            .width('100%')
+            .height(58)
+            .padding({ left: 8, right: 4 })
+            .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
+          }, (item: SavedConnectionInfo) =>
+            `${item.id}-${this.savedConnectionsVersion}-${this.peerOnlineStatesVersion}`)
+        }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY
+          .combine(TransitionEffect.translate({ y: -6 }))
+          .animation({ duration: 210, curve: Curve.EaseInOut }))
       }
     }
     .width('100%')
@@ -1034,6 +1147,100 @@ export struct ConnectionPage {
         .onClick(() => {
           this.openNewGroupDialog(this.groupPickerForForm, this.groupPickerForForm ? '' : this.groupPickerConnectionId)
         })
+    }
+    .width(this.pageWidth >= 820 ? 420 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
+  }
+
+  @Builder
+  buildConnectionPasswordDialog() {
+    Column({ space: 12 }) {
+      Text('输入连接密码')
+        .fontSize(19)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      Text(`请输入远端设备 ${this.remoteId} 的连接密码`)
+        .fontSize(13)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+
+      TextInput({ placeholder: '连接密码', text: this.connectionPasswordDraft })
+        .type(InputType.Password)
+        .width('100%')
+        .height(48)
+        .fontSize(15)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.connectionPasswordError.length > 0 ? RustDeskTheme.ERROR :
+          (this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER) })
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => {
+          this.connectionPasswordDraft = value
+          this.connectionPasswordError = ''
+        })
+        .onSubmit(() => {
+          this.confirmConnectionPassword()
+        })
+
+      Row({ space: 10 }) {
+        Toggle({ type: ToggleType.Checkbox, isOn: this.rememberConnectionPassword })
+          .selectedColor(RustDeskTheme.ACCENT)
+          .onChange((isOn: boolean) => {
+            this.rememberConnectionPassword = isOn
+          })
+        Column({ space: 2 }) {
+          Text(this.selectedConnectionId.length > 0 ? '保存密码到此连接' : '保存密码并保存此连接')
+            .fontSize(14)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .width('100%')
+          Text('密码将写入系统安全凭据库')
+            .fontSize(11)
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.connectionPasswordError.length > 0) {
+        Text(this.connectionPasswordError)
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%')
+      }
+
+      Row({ space: 10 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .onClick(() => {
+            this.closeConnectionPasswordDialog()
+          })
+        Button('连接')
+          .layoutWeight(1)
+          .height(40)
+          .fontColor(Color.White)
+          .backgroundColor(RustDeskTheme.ACCENT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .onClick(() => {
+            this.confirmConnectionPassword()
+          })
+      }
+      .width('100%')
     }
     .width(this.pageWidth >= 820 ? 420 : '88%')
     .padding(20)
@@ -1352,7 +1559,6 @@ export struct ConnectionPage {
     let peerId: string = this.normalizeRemoteId(this.remoteId)
     this.remoteId = peerId
     this.isIdEmpty = peerId.length === 0
-    let password: string = this.password.trim()
     let nativeStatus: ConnectionStatus = this.syncConnectionState()
     if (nativeStatus === ConnectionStatus.CONNECTED || nativeStatus === ConnectionStatus.WAITING_2FA) {
       // A user-triggered connect action means this page is currently visible.
@@ -1362,9 +1568,14 @@ export struct ConnectionPage {
       router.pushUrl({ url: 'pages/RemotePage' })
       return
     }
-    if (password.length <= 0) {
-      this.connectionStatusText = translate('Password is required')
+    if (peerId.length <= 0) {
+      this.connectionStatusText = '请输入远程 ID'
       this.connectionStatusColor = RustDeskTheme.ERROR
+      return
+    }
+    let password: string = this.password.trim()
+    if (password.length <= 0) {
+      this.openConnectionPasswordDialog()
       return
     }
     if (peerId.length > 0 && !this.isConnecting) {
@@ -1388,15 +1599,25 @@ export struct ConnectionPage {
 
   loadConnectionFormState(): void {
     try {
-      this.connectionFormExpanded = RustDeskNapi.getOption('connection-form-expanded') !== '0'
+      this.connectionFormExpanded = RustDeskNapi.getOption('connection-advanced-expanded') === '1'
     } catch (_error) {
-      this.connectionFormExpanded = true
+      this.connectionFormExpanded = false
     }
   }
 
   setConnectionFormExpanded(expanded: boolean): void {
-    this.connectionFormExpanded = expanded
-    RustDeskNapi.setOption('connection-form-expanded', expanded ? '1' : '0')
+    this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
+      this.connectionFormExpanded = expanded
+    })
+    RustDeskNapi.setOption('connection-advanced-expanded', expanded ? '1' : '0')
+  }
+
+  toggleSavedConnectionsExpanded(): void {
+    const expanded: boolean = !this.savedConnectionsExpanded
+    this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => {
+      this.savedConnectionsExpanded = expanded
+    })
+    RustDeskNapi.setOption('saved-connections-expanded', expanded ? '1' : '0')
   }
 
   loadConnectionGroups(): void {
@@ -1433,6 +1654,7 @@ export struct ConnectionPage {
       rows.push({ id: group.id, name: group.name, expanded: group.expanded })
     })
     RustDeskNapi.setOption('saved-connection-groups', JSON.stringify(rows))
+    CloudSyncService.markLocalChanged()
   }
 
   cloneConnectionGroups(groups: SavedConnectionGroup[]): SavedConnectionGroup[] {
@@ -1447,14 +1669,23 @@ export struct ConnectionPage {
     try {
       const mode: string = RustDeskNapi.getOption('saved-connections-sort')
       this.savedConnectionSort = mode === 'name' || mode === 'online' ? mode : 'id'
+      this.savedConnectionSortAscending = RustDeskNapi.getOption('saved-connections-sort-direction') !== 'desc'
     } catch (_error) {
       this.savedConnectionSort = 'id'
+      this.savedConnectionSortAscending = true
     }
   }
 
   setSavedConnectionSort(mode: string): void {
     this.savedConnectionSort = mode === 'name' || mode === 'online' ? mode : 'id'
     RustDeskNapi.setOption('saved-connections-sort', this.savedConnectionSort)
+    this.savedConnectionsVersion++
+  }
+
+  toggleSavedConnectionSortDirection(): void {
+    this.savedConnectionSortAscending = !this.savedConnectionSortAscending
+    RustDeskNapi.setOption('saved-connections-sort-direction',
+      this.savedConnectionSortAscending ? 'asc' : 'desc')
     this.savedConnectionsVersion++
   }
 
@@ -1469,19 +1700,23 @@ export struct ConnectionPage {
   }
 
   compareSavedConnections(left: SavedConnectionInfo, right: SavedConnectionInfo): number {
+    let order: number = 0
     if (this.savedConnectionSort === 'online') {
       const rank: number = this.savedConnectionOnlineRank(left.remoteId) -
         this.savedConnectionOnlineRank(right.remoteId)
-      if (rank !== 0) return rank
+      if (rank !== 0) order = rank
     }
-    if (this.savedConnectionSort === 'name' || this.savedConnectionSort === 'online') {
+    if (order === 0 && (this.savedConnectionSort === 'name' || this.savedConnectionSort === 'online')) {
       const leftName: string = (left.name.trim() || left.remoteId).toLowerCase()
       const rightName: string = (right.name.trim() || right.remoteId).toLowerCase()
       const nameOrder: number = leftName.localeCompare(rightName, 'zh-CN')
-      if (nameOrder !== 0) return nameOrder
+      if (nameOrder !== 0) order = nameOrder
     }
-    const idOrder: number = this.compareSavedConnectionIds(left.remoteId, right.remoteId)
-    return idOrder !== 0 ? idOrder : this.compareSavedConnectionIds(left.id, right.id)
+    if (order === 0) {
+      const idOrder: number = this.compareSavedConnectionIds(left.remoteId, right.remoteId)
+      order = idOrder !== 0 ? idOrder : this.compareSavedConnectionIds(left.id, right.id)
+    }
+    return this.savedConnectionSortAscending ? order : -order
   }
 
   connectionsForGroup(groupId: string): SavedConnectionInfo[] {
@@ -1535,8 +1770,11 @@ export struct ConnectionPage {
 
   toggleConnectionGroup(groupId: string): void {
     if (groupId.length <= 0) {
-      this.ungroupedExpanded = !this.ungroupedExpanded
-      RustDeskNapi.setOption('saved-connections-ungrouped-expanded', this.ungroupedExpanded ? '1' : '0')
+      const expanded: boolean = !this.ungroupedExpanded
+      this.getUIContext().animateTo({ duration: 210, curve: Curve.EaseInOut }, () => {
+        this.ungroupedExpanded = expanded
+      })
+      RustDeskNapi.setOption('saved-connections-ungrouped-expanded', expanded ? '1' : '0')
       return
     }
     let groups: SavedConnectionGroup[] = []
@@ -1547,8 +1785,10 @@ export struct ConnectionPage {
         expanded: group.id === groupId ? !group.expanded : group.expanded
       })
     })
-    this.connectionGroups = groups
-    this.savedConnectionsVersion++
+    this.getUIContext().animateTo({ duration: 210, curve: Curve.EaseInOut }, () => {
+      this.connectionGroups = groups
+      this.savedConnectionsVersion++
+    })
     this.persistConnectionGroups()
   }
 
@@ -1676,8 +1916,46 @@ export struct ConnectionPage {
   }
 
   closeAllDialogs(): void {
+    this.closeConnectionPasswordDialog()
     this.closeGroupDialogs()
     this.closeBackupDialogs()
+  }
+
+  openConnectionPasswordDialog(): void {
+    let peerId: string = this.normalizeRemoteId(this.remoteId)
+    if (peerId.length <= 0) {
+      this.connectionStatusText = '请输入远程 ID'
+      this.connectionStatusColor = RustDeskTheme.ERROR
+      return
+    }
+    this.remoteId = peerId
+    this.closeGroupDialogs()
+    this.connectionPasswordDraft = ''
+    this.rememberConnectionPassword = false
+    this.connectionPasswordError = ''
+    this.showConnectionPasswordDialog = true
+  }
+
+  closeConnectionPasswordDialog(): void {
+    this.showConnectionPasswordDialog = false
+    this.connectionPasswordDraft = ''
+    this.rememberConnectionPassword = false
+    this.connectionPasswordError = ''
+  }
+
+  async confirmConnectionPassword(): Promise<void> {
+    let password: string = this.connectionPasswordDraft.trim()
+    if (password.length <= 0) {
+      this.connectionPasswordError = '请输入连接密码'
+      return
+    }
+    let remember: boolean = this.rememberConnectionPassword
+    this.password = password
+    this.closeConnectionPasswordDialog()
+    if (remember) {
+      await this.saveCurrentConnection()
+    }
+    this.onConnect()
   }
 
   closeBackupDialogs(): void {
@@ -2053,7 +2331,7 @@ export struct ConnectionPage {
       }
       this.savedConnections = this.cloneSavedConnections(list)
       this.savedConnectionsVersion++
-      this.persistSavedConnections(list)
+      this.persistSavedConnections(list, false)
       RustDeskNapi.setOption('password', '')
       this.nextPeerOnlineRefreshAt = 0
       this.refreshSavedConnectionOnlineStates(true)
@@ -2063,7 +2341,7 @@ export struct ConnectionPage {
     }
   }
 
-  persistSavedConnections(list: SavedConnectionInfo[]): void {
+  persistSavedConnections(list: SavedConnectionInfo[], markChanged: boolean = true): void {
     let rows: SavedConnectionRow[] = []
     list.forEach((item: SavedConnectionInfo) => {
       rows.push({
@@ -2076,6 +2354,9 @@ export struct ConnectionPage {
       })
     })
     RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
+    if (markChanged) {
+      CloudSyncService.markLocalChanged()
+    }
   }
 
   refreshSavedConnectionOnlineStates(force: boolean = false): void {
@@ -2102,7 +2383,7 @@ export struct ConnectionPage {
       this.peerOnlineStates = checkingStates
       this.peerOnlineStatesVersion++
     }
-    let result: number = RustDeskNapi.queryPeerOnlineStates(peerIds, this.customServerHint)
+    let result: number = RustDeskNapi.queryPeerOnlineStates(peerIds, this.peerStateServer)
     if (result === 0 || result === 1) {
       this.peerOnlineQueryInFlight = true
       this.peerOnlineQueryStartedAt = Date.now()
@@ -2130,7 +2411,7 @@ export struct ConnectionPage {
     this.peerOnlineQueryInFlight = false
     try {
       let result: PeerOnlineResult = JSON.parse(raw) as PeerOnlineResult
-      if (result.server !== this.customServerHint.trim()) {
+      if (result.server !== this.peerStateServer) {
         this.nextPeerOnlineRefreshAt = 0
         return
       }

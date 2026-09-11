@@ -462,6 +462,10 @@ export class ConnectionService {
     return RustDeskNapi.getConnectionRoute()
   }
 
+  static getConnectionTransport(): number {
+    return RustDeskNapi.getConnectionTransport()
+  }
+
   static getPeerId(): string {
     return RustDeskNapi.getOption('last_connected_peer')
   }

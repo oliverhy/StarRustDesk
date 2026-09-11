@@ -8,11 +8,11 @@ const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages
 const start = source.indexOf('  loadSavedConnectionSort():');
 const end = source.indexOf('  groupNameForId(', start);
 assert(start >= 0 && end > start);
-let preference = '', storageFails = false;
+let preferences = {'saved-connections-sort':'', 'saved-connections-sort-direction':''}, storageFails = false;
 const context = vm.createContext({
   RustDeskNapi: {
-    getOption: () => { if (storageFails) throw Error('storage'); return preference; },
-    setOption: (key, value) => { assert.equal(key, 'saved-connections-sort'); preference = value; }
+    getOption: key => { if (storageFails) throw Error('storage'); return preferences[key] || ''; },
+    setOption: (key, value) => { preferences[key] = value; }
   }, PEER_STATE_CHECKING: 0, PEER_STATE_ONLINE: 1, PEER_STATE_OFFLINE: 2
 });
 vm.runInContext(ts.transpileModule(`class Page { ${source.slice(start, end)} } globalThis.Page = Page;`,
@@ -29,7 +29,10 @@ const ids = group => Array.from(page.connectionsForGroup(group), row => row.id);
 let passed=0;
 function test(name, fn) { fn(); passed++; console.log(`PASS ${name}`); }
 test('default and invalid preferences fall back to ID', () => {
-  for (preference of ['', 'invalid']) { page.loadSavedConnectionSort(); assert.equal(page.savedConnectionSort,'id'); }
+  for (const preference of ['', 'invalid']) {
+    preferences['saved-connections-sort'] = preference;
+    page.loadSavedConnectionSort(); assert.equal(page.savedConnectionSort,'id');
+  }
   assert.deepEqual(ids(''), ['b','a','c','f']);
 });
 test('ID matches official string ordering, not numeric ordering', () => {
@@ -60,8 +63,17 @@ test('preference survives new page instance and storage failure is safe', () => 
   const next = new context.Page(); next.loadSavedConnectionSort(); assert.equal(next.savedConnectionSort,'online');
   storageFails=true; next.loadSavedConnectionSort(); assert.equal(next.savedConnectionSort,'id');
 });
+test('triangle toggles ascending and descending without changing sort mode', () => {
+  storageFails=false; preferences['saved-connections-sort']='id'; preferences['saved-connections-sort-direction']='';
+  page.loadSavedConnectionSort(); assert.equal(page.savedConnectionSortAscending, true);
+  assert.deepEqual(ids('g'), ['e','d']);
+  page.toggleSavedConnectionSortDirection();
+  assert.equal(page.savedConnectionSortAscending, false);
+  assert.equal(preferences['saved-connections-sort-direction'], 'desc');
+  assert.deepEqual(ids('g'), ['d','e']);
+});
 test('equal display name and remote ID have a deterministic final tie breaker', () => {
-  page.savedConnectionSort='name';
+  page.savedConnectionSort='name'; page.savedConnectionSortAscending=true;
   assert(page.compareSavedConnections(item('a','123','PC'), item('b','123','pc')) < 0);
   assert.equal(page.compareSavedConnections(item('a','123','PC'), item('a','123','PC')), 0);
 });

@@ -1,6 +1,6 @@
-use crate::{config, tcp, websocket, ResultType};
 #[cfg(feature = "webrtc")]
 use crate::webrtc;
+use crate::{config, tcp, websocket, ResultType};
 use sodiumoxide::crypto::secretbox::Key;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -71,6 +71,23 @@ impl Stream {
             Stream::WebRTC(s) => s.is_secured(),
             Stream::WebSocket(s) => s.is_secured(),
             Stream::Tcp(s) => s.is_secured(),
+        }
+    }
+
+    #[inline]
+    pub fn is_webrtc(&self) -> bool {
+        match self {
+            #[cfg(feature = "webrtc")]
+            Stream::WebRTC(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub async fn close_webrtc(&self) {
+        #[cfg(feature = "webrtc")]
+        if let Stream::WebRTC(stream) = self {
+            stream.close().await;
         }
     }
 

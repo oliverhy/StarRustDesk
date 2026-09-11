@@ -11,7 +11,9 @@ pub mod base64 {
     }
 
     pub fn decode<T: AsRef<[u8]>>(data: T, _variant: Variant) -> Result<Vec<u8>, ()> {
-        ::base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| ())
+        ::base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| ())
     }
 }
 
@@ -30,7 +32,10 @@ pub mod utils {
 
 pub mod crypto {
     pub mod secretbox {
-        use crypto_secretbox::{aead::{Aead, KeyInit}, Key as CryptoKey, Nonce as CryptoNonce, XSalsa20Poly1305};
+        use crypto_secretbox::{
+            aead::{Aead, KeyInit},
+            Key as CryptoKey, Nonce as CryptoNonce, XSalsa20Poly1305,
+        };
         use rand::RngCore;
 
         pub const KEYBYTES: usize = 32;
@@ -58,17 +63,23 @@ pub mod crypto {
 
         pub fn seal(data: &[u8], nonce: &Nonce, key: &Key) -> Vec<u8> {
             let cipher = XSalsa20Poly1305::new(CryptoKey::from_slice(&key.0));
-            cipher.encrypt(CryptoNonce::from_slice(&nonce.0), data).unwrap_or_default()
+            cipher
+                .encrypt(CryptoNonce::from_slice(&nonce.0), data)
+                .unwrap_or_default()
         }
 
         pub fn open(data: &[u8], nonce: &Nonce, key: &Key) -> Result<Vec<u8>, ()> {
             let cipher = XSalsa20Poly1305::new(CryptoKey::from_slice(&key.0));
-            cipher.decrypt(CryptoNonce::from_slice(&nonce.0), data).map_err(|_| ())
+            cipher
+                .decrypt(CryptoNonce::from_slice(&nonce.0), data)
+                .map_err(|_| ())
         }
     }
 
     pub mod box_ {
-        use crypto_box::{aead::Aead, PublicKey as CryptoPublicKey, SalsaBox, SecretKey as CryptoSecretKey};
+        use crypto_box::{
+            aead::Aead, PublicKey as CryptoPublicKey, SalsaBox, SecretKey as CryptoSecretKey,
+        };
         use rand::RngCore;
 
         pub const PUBLICKEYBYTES: usize = 32;
@@ -97,7 +108,12 @@ pub mod crypto {
                 .unwrap_or_default()
         }
 
-        pub fn open(data: &[u8], nonce: &Nonce, public: &PublicKey, secret: &SecretKey) -> Result<Vec<u8>, ()> {
+        pub fn open(
+            data: &[u8],
+            nonce: &Nonce,
+            public: &PublicKey,
+            secret: &SecretKey,
+        ) -> Result<Vec<u8>, ()> {
             let public = CryptoPublicKey::from(public.0);
             let secret = CryptoSecretKey::from(secret.0);
             SalsaBox::new(&public, &secret)

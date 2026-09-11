@@ -1,7 +1,7 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.1.0'
-export const RELEASE_NOTES_BUILD: string = '1001007'
+export const RELEASE_NOTES_VERSION: string = '1.2.0'
+export const RELEASE_NOTES_BUILD: string = '1002000'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -44,6 +44,16 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.0（1002000）· 云同步、连接协议与界面体验', [
+            '新增华为个人云空间同步，可在同一华为账号的设备间同步已保存连接、分组和服务器配置。',
+            '密码与服务器密钥默认不上传；用户可选择使用 AES-256-GCM 加密后同步敏感信息，并支持手动同步和云端恢复。',
+            '完善官方服务器与自建服务器连接流程，补充 IPv4/IPv6、TCP、中继、UDP/KCP 与 WebRTC 连接能力及诊断信息。',
+            '优化连接建立、打洞和中继回退速度，修复候选地址选择、连接重试及快速重连中的多项稳定性问题。',
+            '修复多屏远控时屏幕画面与远端光标状态可能串屏、跳动或显示不一致的问题。',
+            '自建服务器配置保存后立即生效，支持配置导入与导出；连接密码弹窗可直接输入，并可选择是否保存。',
+            '优化长按拖动判定，降低鼠标左键长按和触摸操作的误触发。',
+            '更新连接页紧凑布局、排序操作和连接信息面板；首页展开折叠及“连接 / 设置”切换增加平滑过渡动画。',
+          ])
           this.buildSection('1.1.0（1001007）· 界面、文件排序与连接恢复', [
             '连接页与设置页统一柔和卡片、悬浮导航和淡蓝色选中风格，同时适配深色模式。',
             '远控上方默认显示折叠的“键”快捷栏；上下“键 / 控”统一收放样式、尺寸与伸缩过渡，降低展开面板的遮挡。',

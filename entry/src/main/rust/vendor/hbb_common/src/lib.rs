@@ -57,9 +57,9 @@ pub use uuid;
 pub mod fingerprint;
 pub use flexi_logger;
 pub mod stream;
-pub mod websocket;
 #[cfg(feature = "webrtc")]
 pub mod webrtc;
+pub mod websocket;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub use rustls_platform_verifier;
 pub use stream::Stream;
@@ -67,9 +67,9 @@ pub use whoami;
 pub mod tls;
 pub mod verifier;
 pub use async_recursion;
+pub use libloading;
 #[cfg(target_os = "linux")]
 pub use users;
-pub use libloading;
 #[cfg(target_os = "linux")]
 pub use x11;
 
@@ -405,7 +405,10 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
         #[cfg(debug_assertions)]
         {
             use env_logger::*;
-            init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "info,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn"));
+            init_from_env(Env::default().filter_or(
+                DEFAULT_FILTER_ENV,
+                "info,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn",
+            ));
         }
         #[cfg(not(debug_assertions))]
         {
@@ -420,7 +423,9 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
                 path.push(_name);
             }
             use flexi_logger::*;
-            if let Ok(x) = Logger::try_with_env_or_str("debug,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn") {
+            if let Ok(x) = Logger::try_with_env_or_str(
+                "debug,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn",
+            ) {
                 logger_holder = x
                     .log_to_file(FileSpec::default().directory(path))
                     .write_mode(if _is_async {

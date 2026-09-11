@@ -18,6 +18,8 @@ export interface VideoFrameInfo {
   security?: number;
   codec?: number;
   decoderMode?: number;
+  delayMs?: number;
+  targetBitrateKb?: number;
 }
 
 export interface RemoteCursorPosition {
@@ -119,6 +121,7 @@ export const queryPeerOnlineStates: (peersJson: string, rendezvousServer: string
 export const takePeerOnlineStates: () => string;
 export const getConnectionStatus: () => number;
 export const getConnectionRoute: () => number;
+export const getConnectionTransport: () => number;
 export const getLastConnectionError: () => string;
 export const getDeviceName: () => string;
 export const getClipboardText: () => string;

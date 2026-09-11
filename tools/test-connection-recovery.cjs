@@ -33,7 +33,7 @@ const Online = subject(slice('entry/src/main/ets/pages/ConnectionPage.ets',
 });
 const online = Object.assign(new Online(), { savedConnections: [{remoteId: 'a'}, {remoteId: 'b'}],
   peerOnlineQueryInFlight: true, peerOnlineQueryStartedAt: 1000, peerOnlineStatesVersion: 0,
-  customServerHint: 'server', peerOnlineStates: {} });
+  customServerHint: 'server', peerStateServer: 'server', peerOnlineStates: {} });
 test('timeout marks unknown without inventing offline', () => {
   now = 14000; online.pollPeerOnlineStates();
   assert.equal(online.peerOnlineQueryInFlight, false); assert.equal(online.peerOnlineStates.a, 3);
@@ -220,10 +220,18 @@ test('encoded input alone does not make UI display success',()=>{
 const Stats = subject(slice('entry/src/main/ets/pages/RemotePage.ets',
   '  updateStats(frame:', '  videoCodecName('), {Date:clock});
 test('FPS counts presented frames while speed counts received bytes',()=>{
-  const stats=Object.assign(new Stats(),{lastStatsTime:0,smoothFps:0,smoothKbps:0,videoCodecStatus:()=>''});
+  const stats=Object.assign(new Stats(),{lastStatsTime:0,smoothFps:0,smoothKbps:0,
+    videoCodecStatus:()=>'',videoCodecName:()=>'',videoDecoderName:()=>''});
   now=1000; stats.updateStats({totalFrames:100,renderedFrames:10,totalBytes:1024});
   now=2000; stats.updateStats({totalFrames:200,renderedFrames:20,totalBytes:2048});
   assert.equal(stats.fpsText,'10.0 fps'); assert.equal(stats.speedText,'1 KB/s');
+});
+const remotePageSource=fs.readFileSync(path.resolve(__dirname,'..','entry/src/main/ets/pages/RemotePage.ets'),'utf8');
+test('connection quality panel can be hidden and restored',()=>{
+  assert.match(remotePageSource, /@State showQualityMonitor: boolean = true/);
+  assert.match(remotePageSource, /this\.showQualityMonitor = false/);
+  assert.match(remotePageSource, /buildStatsPanelRestoreButton\(\)/);
+  assert.match(remotePageSource, /this\.showQualityMonitor = true/);
 });
 const device = {sdkApiVersion:22};
 const bg = {BackgroundTaskMode:{MODE_MULTI_DEVICE_CONNECTION:6,MODE_AV_PLAYBACK_AND_RECORD:12,

@@ -1,6 +1,9 @@
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { RustDeskNapi } from '../service/RustDeskNapi'
+import { ServerConfigModel } from '../model/ServerConfigModel'
+import { CloudSyncService } from '../service/CloudSyncService'
+import { promptAction } from '@kit.ArkUI'
 
 @CustomDialog
 export struct ServerConfigDialog {
@@ -23,12 +26,37 @@ export struct ServerConfigDialog {
 
   build() {
     Column({ space: 12 }) {
-      Text(translate('ID/Relay Server'))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .textAlign(TextAlign.Start)
+      Row({ space: 8 }) {
+        Text(translate('ID/Relay Server'))
+          .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+
+        Button('导入')
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(8)
+          .padding({ left: 10, right: 10 })
+          .onClick(() => {
+            this.importServerConfigFromClipboard()
+          })
+
+        Button('导出')
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .borderRadius(8)
+          .padding({ left: 10, right: 10 })
+          .onClick(() => {
+            this.exportServerConfigToClipboard()
+          })
+      }
+      .width('100%')
 
       Text('为连接指定自建的 ID、Relay 与 API 服务')
         .fontSize(13)
@@ -72,6 +100,11 @@ export struct ServerConfigDialog {
         }
         .width('100%')
       }
+
+      Text('导出配置与 RustDesk 官方格式兼容，并包含服务器 Key，请勿发送给不可信的人。')
+        .fontSize(11)
+        .fontColor('#B7791F')
+        .width('100%')
 
       Row({ space: 12 }) {
         Button(translate('Cancel'))
@@ -133,13 +166,64 @@ export struct ServerConfigDialog {
   }
 
   saveConfig(): void {
-    RustDeskNapi.setOption('custom-rendezvous-server', this.idServer.trim())
-    RustDeskNapi.setOption('relay-server', this.relayServer.trim())
-    RustDeskNapi.setOption('api-server', this.apiServer.trim())
-    RustDeskNapi.setOption('key', this.serverKey.trim())
+    const idServer: string = this.idServer.trim()
+    const relayServer: string = this.relayServer.trim()
+    const apiServer: string = this.apiServer.trim()
+    const serverKey: string = this.serverKey.trim()
+    this.applyConfig(idServer, relayServer, apiServer, serverKey)
     if (this.controller != undefined) {
       this.controller.close()
     }
+  }
+
+  private applyConfig(idServer: string, relayServer: string, apiServer: string, serverKey: string): void {
+    RustDeskNapi.setOption('custom-rendezvous-server', idServer.trim())
+    RustDeskNapi.setOption('relay-server', relayServer.trim())
+    RustDeskNapi.setOption('api-server', apiServer.trim())
+    RustDeskNapi.setOption('key', serverKey.trim())
+    CloudSyncService.markLocalChanged()
+    let version: number = AppStorage.get<number>('serverConfigVersion') ?? 0
+    AppStorage.set<number>('serverConfigVersion', version + 1)
+    RustDeskNapi.appendDiagnosticLog('server-config',
+      `saved custom=${idServer.length > 0 || relayServer.length > 0 ? 1 : 0} ` +
+      `relay=${relayServer.length > 0 ? 1 : 0} api=${apiServer.length > 0 ? 1 : 0} ` +
+      `key=${serverKey.length > 0 ? 1 : 0}`)
+  }
+
+  async exportServerConfigToClipboard(): Promise<void> {
+    const config: ServerConfigModel = new ServerConfigModel(
+      this.idServer, this.relayServer, this.apiServer, this.serverKey)
+    if (!config.isValid()) {
+      promptAction.showToast({ message: '请先填写 ID 服务器地址' })
+      return
+    }
+    const result: number = await RustDeskNapi.setClipboardTextAsync(config.encode())
+    if (result === 0) {
+      RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_exported')
+      promptAction.showToast({ message: '服务器配置已导出到剪贴板' })
+    } else {
+      promptAction.showToast({ message: '导出失败，请重试' })
+    }
+  }
+
+  async importServerConfigFromClipboard(): Promise<void> {
+    const source: string = await RustDeskNapi.getClipboardTextAsync()
+    if (source.trim().length === 0) {
+      promptAction.showToast({ message: '剪贴板为空，请先复制服务器配置' })
+      return
+    }
+    const config: ServerConfigModel = ServerConfigModel.decode(source)
+    if (!config.isValid()) {
+      promptAction.showToast({ message: '服务器配置无效' })
+      return
+    }
+    this.idServer = config.idServer
+    this.relayServer = config.relayServer
+    this.apiServer = config.apiServer
+    this.serverKey = config.serverKey
+    this.applyConfig(this.idServer, this.relayServer, this.apiServer, this.serverKey)
+    RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_imported')
+    promptAction.showToast({ message: '服务器配置已导入并生效' })
   }
 
   @Builder

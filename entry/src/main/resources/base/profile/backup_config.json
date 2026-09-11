@@ -1,3 +1,6 @@
 {
-  "allowToBackupRestore": false
+  "allowToBackupRestore": true,
+  "includes": [
+    "/data/storage/el2/base/files/cloud_backup/"
+  ]
 }

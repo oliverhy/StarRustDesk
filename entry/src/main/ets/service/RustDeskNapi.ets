@@ -24,6 +24,8 @@ export interface VideoFrameInfo {
   security?: number
   codec?: number
   decoderMode?: number
+  delayMs?: number
+  targetBitrateKb?: number
 }
 
 export interface RemoteCursorPosition {
@@ -292,6 +294,10 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).getConnectionRoute()
   }
 
+  static getConnectionTransport(): number {
+    return (rustdeskNapi as ESObject).getConnectionTransport()
+  }
+
   static getLastConnectionError(): string {
     return rustdeskNapi.getLastConnectionError()
   }
@@ -359,6 +365,16 @@ export class RustDeskNapi {
 
   static sendClipboardText(text: string): number {
     return (rustdeskNapi as ESObject).sendClipboardText(text)
+  }
+
+  static async setClipboardTextAsync(text: string): Promise<number> {
+    try {
+      let pasteData: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text)
+      await systemPasteboard.setData(pasteData)
+      return 0
+    } catch (_e) {
+      return -1
+    }
   }
 
   static requestRemoteDirectory(path: string): number {

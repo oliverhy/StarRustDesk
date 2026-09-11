@@ -512,7 +512,10 @@ impl Proxy {
     where
         Input: AsyncRead + AsyncWrite + Unpin,
     {
-        Err(ProxyError::IoError(std::io::Error::new(std::io::ErrorKind::Unsupported, "native-tls not supported on this platform")))
+        Err(ProxyError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "native-tls not supported on this platform",
+        )))
     }
 
     #[async_recursion]
