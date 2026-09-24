@@ -154,6 +154,15 @@ export class RustDeskApiService {
   }
 
   async prepareConnection(): Promise<void> {
+    // An anonymous custom ID server does not need API session restoration.
+    // A remembered session must still be checked even if the API field was cleared.
+    if (RustDeskNapi.getOption('custom-rendezvous-server').trim().length > 0 &&
+      RustDeskNapi.getOption('api-server').trim().length === 0 &&
+      RustDeskNapi.getOption('api-session-disabled') !== '0' &&
+      !this.token && !this.restorePromise && !this.restoring) {
+      this.trace('prepare_skipped reason=custom_server_without_api_account');
+      return;
+    }
     const started = Date.now();
     this.trace(`prepare_start restore_pending=${this.restorePromise !== undefined} token_present=${this.token.length > 0}`);
     try {

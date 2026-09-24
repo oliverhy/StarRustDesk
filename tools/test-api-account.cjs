@@ -6,9 +6,9 @@ const ts = require('C:/Program Files/Huawei/DevEco Studio/tools/ohpm/node_module
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
 const options = new Map();
-let stored, sequence = 0, pending = [], calls = [], clearWait;
+let stored, sequence = 0, pending = [], calls = [], clearWait, loads = 0;
 const vault = {
-  load: async () => stored,
+  load: async () => { loads++; return stored; },
   save: async value => { stored = value; },
   clear: async () => { if (clearWait) await clearWait; stored = undefined; }
 };
@@ -72,9 +72,35 @@ async function login(api, provider = 'official') {
     assert.throws(() => Api.normalizeServer(bad, false));
   }
   assert.equal(Api.normalizeServer('http://192.168.1.2:21114/', true), 'http://192.168.1.2:21114');
+  const anonymous = new Api();
+  options.set('custom-rendezvous-server', '[2001:db8::1]:21116');
+  const loadsBeforeSkip = loads;
+  await anonymous.prepareConnection();
+  assert.equal(loads, loadsBeforeSkip, 'custom IPv6 ID server without API/account skips secure-store restoration');
+  options.set('api-session-disabled', '0');
+  await anonymous.prepareConnection();
+  assert.equal(loads, loadsBeforeSkip + 1, 'remembered account still restores when the API field is empty');
+  options.delete('api-session-disabled');
+  options.set('api-server', 'https://pro.test');
+  await anonymous.prepareConnection();
+  assert.equal(loads, loadsBeforeSkip + 2, 'explicit API keeps account preparation enabled');
+  options.delete('api-server');
+  options.delete('custom-rendezvous-server');
+  options.set('relay-server', 'relay.test');
+  await anonymous.prepareConnection();
+  assert.equal(loads, loadsBeforeSkip + 3, 'relay alone does not identify an anonymous custom ID network');
+  options.delete('relay-server');
   const api = new Api(); await login(api);
   assert.equal(diagnostics.length, 0, 'account diagnostics disabled by default');
   options.set('diagnostic-log-enabled', '1');
+  options.set('custom-rendezvous-server', '[2001:db8::1]:21116');
+  options.delete('api-server');
+  const beforeActivePreparation = diagnostics.length;
+  await api.prepareConnection();
+  assert(diagnostics.slice(beforeActivePreparation).some(event => event.message.includes('prepare_complete')),
+    'active account still prepares even when the API field was cleared');
+  options.delete('custom-rendezvous-server');
+  options.set('api-server', 'https://example.test');
   assert.equal(stored.token, 'private-token');
   assert(!JSON.stringify([...options]).includes('private-token'));
   assert(!JSON.stringify(stored).includes('private-password'));

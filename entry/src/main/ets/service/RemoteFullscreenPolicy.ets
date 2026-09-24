@@ -1,5 +1,5 @@
 import { window } from '@kit.ArkUI';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { RemoteDisplayPolicy } from './RemoteDisplayPolicy';
 import { RustDeskNapi } from './RustDeskNapi';
 
@@ -9,6 +9,8 @@ export class RemoteFullscreenPolicy {
   private static pending: Promise<void> = Promise.resolve();
   private static owner: window.Window | undefined;
   private static enabled: boolean = false;
+  private static pcRestoreStatus: window.WindowStatusType | undefined;
+  private static pcImmersiveEntered: boolean = false;
 
   static apply(enabled: boolean, rollbackOnFailure: boolean = true): Promise<void> {
     const main = RemoteDisplayPolicy.getMainWindow();
@@ -20,6 +22,8 @@ export class RemoteFullscreenPolicy {
       if (RemoteFullscreenPolicy.owner !== main) {
         RemoteFullscreenPolicy.owner = main;
         RemoteFullscreenPolicy.enabled = false;
+        RemoteFullscreenPolicy.pcRestoreStatus = undefined;
+        RemoteFullscreenPolicy.pcImmersiveEntered = false;
       }
       const previous = RemoteFullscreenPolicy.enabled;
       try {
@@ -28,7 +32,7 @@ export class RemoteFullscreenPolicy {
         try {
           const properties = main.getWindowProperties();
           RustDeskNapi.appendDiagnosticLog('fullscreen',
-            `window_applied requested=${enabled} layout=${properties.isLayoutFullScreen} full=${properties.isFullScreen} width=${properties.windowRect.width} height=${properties.windowRect.height}`);
+            `window_applied requested=${enabled} status=${main.getWindowStatus()} layout=${properties.isLayoutFullScreen} full=${properties.isFullScreen} width=${properties.windowRect.width} height=${properties.windowRect.height}`);
         } catch (_e) {
           RustDeskNapi.appendDiagnosticLog('fullscreen', `window_applied requested=${enabled} properties=unavailable`);
         }
@@ -50,6 +54,40 @@ export class RemoteFullscreenPolicy {
   }
 
   private static async setWindowState(main: window.Window, enabled: boolean): Promise<void> {
+    if (RemoteFullscreenPolicy.isPc()) {
+      if (enabled) {
+        if (RemoteFullscreenPolicy.pcRestoreStatus === undefined) {
+          const status = main.getWindowStatus();
+          if (status !== window.WindowStatusType.FLOATING && status !== window.WindowStatusType.MAXIMIZE &&
+            status !== window.WindowStatusType.FULL_SCREEN) {
+            RustDeskNapi.appendDiagnosticLog('fullscreen', `pc_window_status_unsupported status=${status}`);
+            throw new Error('PC window status cannot be safely restored');
+          }
+          RemoteFullscreenPolicy.pcRestoreStatus = status;
+        }
+        await main.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+        RemoteFullscreenPolicy.pcImmersiveEntered = true;
+        RustDeskNapi.appendDiagnosticLog('fullscreen',
+          `pc_immersive_entered previous_status=${RemoteFullscreenPolicy.pcRestoreStatus}`);
+      } else if (RemoteFullscreenPolicy.pcRestoreStatus !== undefined) {
+        const previousStatus = RemoteFullscreenPolicy.pcRestoreStatus;
+        const currentStatus = main.getWindowStatus();
+        if ((RemoteFullscreenPolicy.pcImmersiveEntered || currentStatus !== previousStatus) &&
+          !(previousStatus === window.WindowStatusType.FLOATING && currentStatus === previousStatus)) {
+          if (previousStatus === window.WindowStatusType.MAXIMIZE) {
+            await main.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
+          } else if (previousStatus === window.WindowStatusType.FULL_SCREEN) {
+            await main.maximize(window.MaximizePresentation.ENTER_IMMERSIVE);
+          } else {
+            await main.recover();
+          }
+        }
+        RemoteFullscreenPolicy.pcRestoreStatus = undefined;
+        RemoteFullscreenPolicy.pcImmersiveEntered = false;
+        RustDeskNapi.appendDiagnosticLog('fullscreen', `pc_window_restored previous_status=${previousStatus}`);
+      }
+      return;
+    }
     let failure: BusinessError | undefined;
     try {
       await main.setWindowLayoutFullScreen(enabled);
@@ -71,5 +109,10 @@ export class RemoteFullscreenPolicy {
       if (!failure) failure = barError;
     }
     if (failure) throw failure as Error;
+  }
+
+  private static isPc(): boolean {
+    return deviceInfo.deviceType === '2in1' || deviceInfo.deviceType === 'pc' ||
+      deviceInfo.deviceType === 'desktop';
   }
 }

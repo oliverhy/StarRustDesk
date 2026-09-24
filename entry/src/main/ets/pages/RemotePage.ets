@@ -1404,8 +1404,12 @@ struct RemotePage {
         this.buildToolbarOrderEditorOverlay();
       }
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
-        (this.isHandheldDevice() || (!this.isFullScreen && !this.isLargeLayout()))) {
+        (this.isHandheldDevice() || this.isFullScreen || !this.isLargeLayout())) {
         this.buildFloatingToolbar();
+      }
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
+        this.isFullScreen && !this.isHandheldDevice()) {
+        this.buildPcFullscreenExitButton();
       }
       if (this.showCommunicationPanel) {
         CommunicationPanel({ onClose: () => { this.closeCommunication(); } });
@@ -1604,97 +1608,32 @@ struct RemotePage {
         }
         .width('100%').height('100%')
 
-        if (this.isFullScreen && !this.isHandheldDevice()) {
-        Row({ space: 8 }) {
-          if (this.isPeerAndroid) {
-            Button('手机操作')
-              .width(92)
-              .height(36)
-              .fontSize(12)
-              .fontColor(Color.White)
-              .backgroundColor('#99000000')
-              .border({ width: 1, color: '#66FFFFFF' })
-              .borderRadius(18)
-              .onClick(() => {
-                this.showMobileActions = true;
-              })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
-          }
-          if (this.canPanViewport()) {
-            Button(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随')
-              .width(92)
-              .height(36)
-              .fontSize(12)
-              .fontWeight(this.edgeAutoPanEnabled ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-              .fontColor(this.edgeAutoPanEnabled ? this.controlSelectedTextColor() : Color.White)
-              .backgroundColor(this.edgeAutoPanEnabled ? this.controlSelectedBackgroundColor() : '#99000000')
-              .border({
-                width: 1,
-                color: this.edgeAutoPanEnabled ? this.controlSelectedBorderColor() : '#66FFFFFF',
-              })
-              .borderRadius(18)
-              .onClick(() => {
-                this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled);
-              })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
-            if (this.isPanMode) {
-              Button('结束移动')
-                .width(92)
-                .height(36)
-                .fontSize(12)
-                .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-                .fontColor(this.controlSelectedTextColor())
-                .backgroundColor(this.controlSelectedBackgroundColor())
-                .border({ width: 1, color: this.controlSelectedBorderColor() })
-                .borderRadius(18)
-                .onClick(() => {
-                  this.setPanMode(false);
-                })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
-            } else {
-              Button('移动画面')
-                .width(92)
-                .height(36)
-                .fontSize(12)
-                .fontWeight(500)
-                .fontColor(Color.White)
-                .backgroundColor('#99000000')
-                .border({ width: 1, color: '#66FFFFFF' })
-                .borderRadius(18)
-                .onClick(() => {
-                  this.setPanMode(true);
-                })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
-            }
-          }
-          Button(this.fullscreenTransitioning ? '切换中…' : '退出全屏')
-            .width(88)
-            .height(36)
-            .fontSize(12)
-            .fontColor(Color.White)
-            .backgroundColor('#99000000')
-            .border({ width: 1, color: '#66FFFFFF' })
-            .borderRadius(18)
-            .onClick(() => {
-              this.exitFullScreen();
-            })
-            .enabled(!this.fullscreenTransitioning)
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
-        }
-        .position({
-          x: Math.max(12, this.pageWidth - (this.canPanViewport() ?
-            (this.isPeerAndroid ? 400 : 300) : (this.isPeerAndroid ? 200 : 100))),
-          y: 12,
-        })
-        .onHover((isHovering: boolean) => {
-          this.handleNonRemoteHover(isHovering);
-        })
-        }
-
       }
       .width('100%')
       .height('100%')
       .backgroundColor(this.isFullScreen ? '#090D14' : (this.isDarkMode ? RustDeskTheme.BG_DARK : '#DCE5F2'));
+  }
+
+  @Builder
+  buildPcFullscreenExitButton() {
+    Button(this.fullscreenTransitioning ? '切换中…' : '退出全屏')
+      .width(88)
+      .height(36)
+      .fontSize(12)
+      .fontColor(Color.White)
+      .backgroundColor('#99000000')
+      .border({ width: 1, color: '#66FFFFFF' })
+      .borderRadius(18)
+      .enabled(!this.fullscreenTransitioning)
+      .onClick(() => {
+        this.exitFullScreen();
+      })
+      .onHover((isHovering: boolean) => {
+        this.handleNonRemoteHover(isHovering);
+      })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
+      .position({ x: Math.max(12, this.pageWidth - 100), y: 12 })
+      .zIndex(70)
   }
 
   @Builder
@@ -2231,7 +2170,7 @@ struct RemotePage {
 
   @Builder
   buildFloatingCollapseButton(keyboard: boolean) {
-    Button(this.isHandheldLandscape() ? '⌃' : '‹')
+    Button(this.isHandheldLandscape() || (!keyboard && this.isFullScreen && !this.isHandheldDevice()) ? '⌃' : '‹')
       .width(34)
       .height(38)
       .padding(0)
@@ -2601,7 +2540,7 @@ struct RemotePage {
       })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 16, ButtonType.Capsule))
     } else {
-      if (this.isHandheldLandscape()) {
+      if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) {
         Column({ space: 5 }) {
           Row({ space: 4 }) {
             this.buildFloatingDragHandle(false)
@@ -4080,7 +4019,8 @@ struct RemotePage {
   getQualityMonitorX(): number {
     const max: number = Math.max(0, this.qualityViewportWidth - this.getQualityMonitorWidth() - 8);
     return Math.max(Math.min(8, max), Math.min(max,
-      this.qualityMonitorX < 0 ? max - 2 : this.qualityMonitorX));
+      this.qualityMonitorX < 0 ? (this.isFullScreen && !this.isHandheldDevice() ? 8 : max - 2) :
+        this.qualityMonitorX));
   }
 
   getQualityMonitorY(): number {
@@ -4225,9 +4165,17 @@ struct RemotePage {
     if (this.fullscreenTransitioning || !this.remotePageVisible || this.isLeavingAfterDisconnect ||
       this.isFullScreen === enabled) return;
     const previous = this.isFullScreen;
+    const previousToolbarCollapsed = this.remoteToolbarCollapsed;
+    const previousToolbarOffsetX = this.remoteToolbarOffsetX;
+    const previousToolbarOffsetY = this.remoteToolbarOffsetY;
     const requestId = ++this.fullscreenRequestId;
     const started = Date.now();
     this.fullscreenTransitioning = true;
+    if (enabled && !this.isHandheldDevice()) {
+      this.remoteToolbarCollapsed = true;
+      this.remoteToolbarOffsetX = 0;
+      this.remoteToolbarOffsetY = 0;
+    }
     this.isFullScreen = enabled;
     RustDeskNapi.appendDiagnosticLog('fullscreen',
       `switch_requested id=${requestId} from=${previous} to=${enabled} viewport=${Math.round(this.componentWidth)}x${Math.round(this.componentHeight)}`);
@@ -4239,6 +4187,9 @@ struct RemotePage {
     }).catch((error: BusinessError) => {
       if (requestId !== this.fullscreenRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
       this.isFullScreen = previous;
+      this.remoteToolbarCollapsed = previousToolbarCollapsed;
+      this.remoteToolbarOffsetX = previousToolbarOffsetX;
+      this.remoteToolbarOffsetY = previousToolbarOffsetY;
       RustDeskNapi.appendDiagnosticLog('fullscreen',
         `switch_failed id=${requestId} restored=${previous} code=${error.code ?? -1} elapsed_ms=${Date.now() - started}`);
       this.showFileToast('全屏切换失败，请稍后重试');
@@ -6299,13 +6250,13 @@ struct RemotePage {
   }
 
   getRemoteToolbarWidth(): number {
-    if (this.isHandheldLandscape()) return 104;
+    if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) return 104;
     const available: number = Math.max(280, (this.pageWidth > 0 ? this.pageWidth : 360) - 16);
     return Math.min(720, available);
   }
 
   getRemoteToolbarHeight(): number {
-    if (this.isHandheldLandscape()) {
+    if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) {
       return Math.max(150, Math.min(520, (this.pageHeight > 0 ? this.pageHeight : 360) - 16));
     }
     return 54;
@@ -6325,6 +6276,9 @@ struct RemotePage {
 
   getRemoteToolbarBaseX(): number {
     const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
+    if (this.isFullScreen && !this.isHandheldDevice()) {
+      return Math.max(8, width - this.getRemoteToolbarCurrentWidth() - 108);
+    }
     if (this.isHandheldLandscape()) {
       return Math.max(8, width - this.getRemoteToolbarCurrentWidth() - 8);
     }
@@ -6333,7 +6287,7 @@ struct RemotePage {
 
   getRemoteToolbarBaseY(): number {
     const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
-    if (this.isHandheldLandscape()) return 8;
+    if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) return 8;
     return Math.max(8, height - this.getRemoteToolbarHeight() - 18);
   }
 

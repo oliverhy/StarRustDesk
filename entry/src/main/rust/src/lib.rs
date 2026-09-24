@@ -2762,8 +2762,9 @@ async fn query_peer_online_states(
     if peers.is_empty() {
         return Ok(Vec::new());
     }
-    // Do not add a second DNS lookup just for diagnostics. Resolution and
-    // transport handshakes remain in the existing connector, under one deadline.
+    // OnlineRequest belongs on hbbs's auxiliary TCP port (ID port - 1).
+    // The generic connector also probes WebSocket ports, which are not valid
+    // online-query endpoints and can compete with a real connection.
     online_query_phase(query_id, started, "resolve_connect_start");
     let endpoint_kind = match rendezvous_addr.parse::<SocketAddr>() {
         Ok(addr) if addr.is_ipv6() => "ipv6_literal",
@@ -2774,11 +2775,10 @@ async fn query_peer_online_states(
         Err(_) => "hostname_or_url",
     };
     emit_event(&format!("online query id={query_id} endpoint_kind={endpoint_kind}"));
-    let mut connection = connect_transport_endpoint_traced(
+    let mut connection = connect_tcp_local(
         rendezvous_addr,
-        EndpointRole::Rendezvous,
+        None,
         SERVER_CONNECT_TIMEOUT,
-        Some((query_id, started)),
     )
     .await
     .map_err(|error| format!("connect failed: {error}"))?;

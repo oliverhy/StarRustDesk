@@ -1,8 +1,8 @@
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.14'
-export const RELEASE_NOTES_BUILD: string = '1002014'
+export const RELEASE_NOTES_VERSION: string = '1.2.15'
+export const RELEASE_NOTES_BUILD: string = '1002015'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -46,6 +46,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.15（1002015）· 连接稳定性与 PC 全屏', [
+            '自建 ID 服务器未配置 API 账号时，连接前跳过不必要的账号会话准备；已记住账号或配置 API 时仍按原流程处理。',
+            '在线状态查询只连接 ID 服务器的辅助 TCP 端口，不再探测相邻 WebSocket 端口，减少对远控建链的干扰。',
+            'WebSocket 连接失败后的重试限定次数并共用超时期限，避免异常服务器导致反复尝试。',
+            '修复鸿蒙 PC 远控全屏：进入沉浸式全屏后，右侧功能栏收为右上角悬浮“控”按钮，保留独立的“退出全屏”按钮；退出后恢复固定侧栏。'
+          ])
           this.buildSection('1.2.14（1002014）· 虚拟鼠标边缘操作', [
             '放大远端画面后，虚拟鼠标拖到右侧或下侧边缘时，继续拖动可让画面移开并露出黑色操作空间；控件和自带箭头保持贴合。',
             '修复在画面其他区域平移后，虚拟鼠标控件与自带箭头可能分离的问题；反向拖动可收回边缘空白。',

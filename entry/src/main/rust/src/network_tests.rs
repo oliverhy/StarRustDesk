@@ -615,3 +615,34 @@ fn online_queries_exclude_ip_literals_and_reject_truncated_bitmaps() {
         }
     });
 }
+
+#[test]
+fn online_query_does_not_probe_neighboring_websocket_port() {
+    runtime().block_on(async {
+        let (aux_port, websocket_listener) = loop {
+            let aux = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = aux.local_addr().unwrap().port();
+            if let Some(websocket_port) = port.checked_add(2) {
+                if let Ok(websocket) = tokio::net::TcpListener::bind(("127.0.0.1", websocket_port)).await {
+                    drop(aux);
+                    break (port, websocket);
+                }
+            }
+        };
+        let result = query_peer_online_states(
+            vec!["123456789".into()],
+            format!("127.0.0.1:{aux_port}"),
+            "test".into(),
+            3,
+            Instant::now(),
+        )
+        .await;
+        assert!(result.is_err(), "closed auxiliary port must fail safely");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), websocket_listener.accept())
+                .await
+                .is_err(),
+            "online status must not connect to a neighboring WebSocket port"
+        );
+    });
+}

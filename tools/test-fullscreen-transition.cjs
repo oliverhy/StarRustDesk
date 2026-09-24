@@ -49,10 +49,11 @@ function pageHarness(overrides = {}) {
     lastLayoutViewportWidth: 1318, lastLayoutViewportHeight: 800,
     surfaceRebindTimer: -1, surfaceRebindForced: false, connectionStatus: 2,
     isFullScreen: false, fullscreenTransitioning: false, fullscreenRequestId: 0,
+    remoteToolbarCollapsed: false, remoteToolbarOffsetX: 0, remoteToolbarOffsetY: 0,
     remotePageVisible: true, isLeavingAfterDisconnect: false,
     xComponentController: { getXComponentSurfaceId: () => target },
     showFileToast: message => calls.push(['toast', message]),
-    restoreKeyboardAvoidMode() {}, closeRemoteKeyboard() {}
+    restoreKeyboardAvoidMode() {}, closeRemoteKeyboard() {}, isHandheldDevice() { return false; }
   }, overrides);
   const runTimer = ms => {
     const entry = [...timers].find(([, t]) => t.ms === ms);
@@ -60,12 +61,21 @@ function pageHarness(overrides = {}) {
   };
   return { page, timers, calls, logs, windows, runTimer, target: id => { target = id; } };
 }
-function policyHarness() {
+function policyHarness(deviceType = 'phone', initialStatus = 4) {
   const calls = [], logs = [];
-  let layoutGate, barGate, failLayout = 0, failBars = 0;
+  let layoutGate, barGate, maximizeGate, failLayout = 0, failBars = 0, failMaximize = 0;
+  let status = initialStatus;
   const main = {
+    getWindowStatus: () => status,
     getWindowProperties: () => ({ isLayoutFullScreen: false, isFullScreen: false,
       windowRect: { width: 2800, height: 1840 } }),
+    async maximize(presentation) {
+      calls.push(['maximize', presentation]);
+      if (failMaximize-- > 0) throw Object.assign(new Error('maximize'), { code: 1300003 });
+      if (maximizeGate) { const gate = maximizeGate; maximizeGate = undefined; await gate.promise; }
+      status = presentation === 1 ? 2 : 1;
+    },
+    async recover() { calls.push(['recover']); status = 4; },
     async setWindowLayoutFullScreen(enabled) {
       calls.push(['layout', enabled]);
       if (failLayout-- > 0) throw Object.assign(new Error('layout'), { code: 1300002 });
@@ -79,13 +89,19 @@ function policyHarness() {
   };
   let attached = main;
   const context = vm.createContext({ exports: {},
+    deviceInfo: { deviceType },
+    window: { WindowStatusType: { FULL_SCREEN: 1, MAXIMIZE: 2, FLOATING: 4 },
+      MaximizePresentation: { ENTER_IMMERSIVE: 2, ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER: 3,
+        EXIT_IMMERSIVE: 1 } },
     RemoteDisplayPolicy: { getMainWindow: () => attached },
     RustDeskNapi: { appendDiagnosticLog: (c, m) => logs.push([c, m]) }
   });
   vm.runInContext(ts.transpile(policySource.replace(/^import .*;\r?\n/gm, '')), context);
   return { policy: context.exports.RemoteFullscreenPolicy, calls, logs,
     failLayout: n => { failLayout = n; }, failBars: n => { failBars = n; },
+    failMaximize: n => { failMaximize = n; },
     gateLayout: d => { layoutGate = d; }, gateBars: d => { barGate = d; },
+    gateMaximize: d => { maximizeGate = d; }, status: () => status, setStatus: value => { status = value; },
     detach: () => { attached = undefined; } };
 }
 
@@ -99,6 +115,35 @@ function policyHarness() {
     assert(method('buildFullscreenButton').includes('.backgroundColor(this.isFullScreen ?'));
     assert(method('buildControlToolbarItem').includes('this.buildFullscreenButton('));
     assert(!method('buildControlToolbarItem').includes("buildToolbarButton(this.isFullScreen"));
+  });
+  await test('PC controls float only in fullscreen and expand downward from the top right', () => {
+    const screen = method('buildRemoteScreen');
+    const floating = method('buildFloatingToolbar');
+    const exitButton = method('buildPcFullscreenExitButton');
+    assert(source.includes('this.isHandheldDevice() || this.isFullScreen || !this.isLargeLayout()'));
+    assert(source.includes('this.isFullScreen && !this.isHandheldDevice()) {\n        this.buildPcFullscreenExitButton()'));
+    assert(screen.includes('if (!this.isFullScreen && this.isLargeLayout() && !this.isHandheldDevice())'));
+    assert(screen.includes('this.buildSideToolbar()'));
+    assert(exitButton.includes("Button(this.fullscreenTransitioning ? '切换中…' : '退出全屏')"));
+    assert(exitButton.includes('this.exitFullScreen()'));
+    assert(exitButton.includes('this.pageWidth - 100'));
+    assert(exitButton.includes('.zIndex(70)'));
+    assert(floating.includes('this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())'));
+    assert(method('getRemoteToolbarBaseX').includes('width - this.getRemoteToolbarCurrentWidth() - 108'));
+    assert(method('getRemoteToolbarBaseY').includes('return 8'));
+    assert(method('buildControlToolbarItem').includes("item === 'fullscreen'"));
+  });
+  await test('PC fullscreen floating controls leave an 8 px gap before fixed exit button', () => {
+    const context = vm.createContext({});
+    vm.runInContext(ts.transpile('class Layout {' + method('getRemoteToolbarBaseX') +
+      '} globalThis.Layout = Layout;'), context);
+    const layout = Object.assign(new context.Layout(), {
+      pageWidth: 1920, isFullScreen: true, isHandheldDevice: () => false,
+      isHandheldLandscape: () => false, getRemoteToolbarCurrentWidth: () => 56
+    });
+    assert.equal(layout.getRemoteToolbarBaseX() + 56 + 8, 1820);
+    layout.getRemoteToolbarCurrentWidth = () => 104;
+    assert.equal(layout.getRemoteToolbarBaseX() + 104 + 8, 1820);
   });
   await test('log reproduction: 800/866 height toggles never pause or rebind 1318x741 video', () => {
     const h = pageHarness();
@@ -173,6 +218,29 @@ function policyHarness() {
     h.page.exitFullScreen(); assert.equal(h.page.isFullScreen, false);
     h.windows[1].resolve(); await settle(); assert.equal(h.page.fullscreenTransitioning, false);
   });
+  await test('PC enters with collapsed control button and failed entry restores toolbar placement', async () => {
+    const h = pageHarness({ remoteToolbarCollapsed: false, remoteToolbarOffsetX: 30,
+      remoteToolbarOffsetY: -12 });
+    h.page.enterFullScreen();
+    assert.equal(h.page.remoteToolbarCollapsed, true);
+    assert.equal(h.page.remoteToolbarOffsetX, 0);
+    assert.equal(h.page.remoteToolbarOffsetY, 0);
+    h.windows[0].reject(Object.assign(new Error('failure'), { code: 1300003 }));
+    await settle();
+    assert.equal(h.page.isFullScreen, false);
+    assert.equal(h.page.remoteToolbarCollapsed, false);
+    assert.equal(h.page.remoteToolbarOffsetX, 30);
+    assert.equal(h.page.remoteToolbarOffsetY, -12);
+  });
+  await test('handheld fullscreen keeps existing floating control state', async () => {
+    const h = pageHarness({ remoteToolbarCollapsed: false, remoteToolbarOffsetX: 12,
+      remoteToolbarOffsetY: 16, isHandheldDevice() { return true; } });
+    h.page.enterFullScreen();
+    assert.equal(h.page.remoteToolbarCollapsed, false);
+    assert.equal(h.page.remoteToolbarOffsetX, 12);
+    assert.equal(h.page.remoteToolbarOffsetY, 16);
+    h.windows[0].resolve(); await settle();
+  });
   await test('enter and exit failures restore previous button state and show a tip', async () => {
     for (const previous of [false, true]) {
       const h = pageHarness({ isFullScreen: previous }); h.page.requestFullscreen(!previous);
@@ -222,6 +290,52 @@ function policyHarness() {
     await assert.rejects(h.policy.apply(false)); assert.deepEqual(h.calls.at(-1), ['bars', []]);
     h.calls.length = 0; h.failLayout(1); await assert.rejects(h.policy.apply(false, false));
     assert.deepEqual(h.calls, [['layout', false], ['bars', ['status', 'navigation']]]);
+  });
+  await test('PC floating window uses immersive maximize and recovers on exit', async () => {
+    const h = policyHarness('2in1');
+    await h.policy.apply(true);
+    assert.deepEqual(h.calls, [['maximize', 3]]);
+    assert.equal(h.status(), 1);
+    await h.policy.apply(false);
+    assert.deepEqual(h.calls, [['maximize', 3], ['recover']]);
+    assert.equal(h.status(), 4);
+    assert(h.logs.some(([, message]) => message.includes('pc_window_restored')));
+  });
+  await test('PC previously maximized window stays maximized after exit', async () => {
+    const h = policyHarness('pc', 2);
+    await h.policy.apply(true);
+    await h.policy.apply(false);
+    assert.deepEqual(h.calls, [['maximize', 3], ['maximize', 1]]);
+    assert.equal(h.status(), 2);
+  });
+  await test('PC manual floating-window restore does not trigger a repeated recover', async () => {
+    const h = policyHarness('2in1');
+    await h.policy.apply(true);
+    h.setStatus(4);
+    await h.policy.apply(false);
+    assert.deepEqual(h.calls, [['maximize', 3]]);
+  });
+  await test('PC split-screen state is preserved when fullscreen cannot restore it', async () => {
+    const h = policyHarness('pc', 5);
+    await assert.rejects(h.policy.apply(true));
+    assert.deepEqual(h.calls, []);
+    assert.equal(h.status(), 5);
+  });
+  await test('PC fullscreen enter failure keeps original window and queue recovers', async () => {
+    const h = policyHarness('desktop'); h.failMaximize(1);
+    await assert.rejects(h.policy.apply(true));
+    assert.deepEqual(h.calls, [['maximize', 3]]);
+    assert.equal(h.status(), 4);
+    await h.policy.apply(true);
+    await h.policy.apply(false);
+    assert.deepEqual(h.calls.slice(-2), [['maximize', 3], ['recover']]);
+  });
+  await test('PC leave during pending fullscreen enter restores window in order', async () => {
+    const h = policyHarness('2in1'), gate = deferred(); h.gateMaximize(gate);
+    const enter = h.policy.apply(true), leave = h.policy.apply(false, false);
+    await settle(); assert.deepEqual(h.calls, [['maximize', 3]]);
+    gate.resolve(); await Promise.all([enter, leave]);
+    assert.deepEqual(h.calls, [['maximize', 3], ['recover']]);
   });
   await test('missing main window produces diagnostic rejection, never targets an overlay', async () => {
     const h = policyHarness(); h.detach(); await assert.rejects(h.policy.apply(true));
