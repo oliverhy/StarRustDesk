@@ -19,7 +19,7 @@ vm.runInContext(ts.transpileModule(`class Page { ${source.slice(start, end)} } g
   { compilerOptions: { target: ts.ScriptTarget.ES2021 } }).outputText, context);
 const item = (id, remoteId, name, groupId = '') => ({id, remoteId, name, groupId, password:'test-only'});
 const page = Object.assign(new context.Page(), {
-  savedConnectionSort:'id', savedConnectionsVersion:0, peerOnlineStates:{},
+  savedConnectionSort:'id', savedConnectionsVersion:0, peerOnlineQueryEnabled:true, peerOnlineStates:{},
   connectionGroups:[{id:'g',name:'group'}], savedConnections:[
     item('c','300','Beta'), item('a','200','alpha'), item('b','100','Alpha'),
     item('d','2','', 'g'), item('e','10','', 'g'), item('f','400','Z', 'removed-group')
@@ -52,6 +52,12 @@ test('online changes update ordering; name mode stays fixed', () => {
   page.peerOnlineStates={'300':1,'100':2,'200':2};
   assert.deepEqual(ids(''), ['c','b','a','f']);
   page.setSavedConnectionSort('name'); assert.deepEqual(ids(''), ['b','a','c','f']);
+});
+test('online sorting ignores stale states when queries are disabled', () => {
+  page.peerOnlineQueryEnabled=false;
+  page.setSavedConnectionSort('online'); assert.deepEqual(ids(''), ['b','a','c','f']);
+  page.peerOnlineQueryEnabled=true;
+  assert.deepEqual(ids(''), ['c','b','a','f']);
 });
 test('sorting does not mutate saved array, group membership or credentials', () => {
   const original = JSON.stringify(page.savedConnections);

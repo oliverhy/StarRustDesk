@@ -33,7 +33,13 @@ const Online = subject(slice('entry/src/main/ets/pages/ConnectionPage.ets',
 });
 const online = Object.assign(new Online(), { savedConnections: [{remoteId: 'a'}, {remoteId: 'b'}],
   peerOnlineQueryInFlight: true, peerOnlineQueryStartedAt: 1000, peerOnlineStatesVersion: 0,
-  customServerHint: 'server', peerStateServer: 'server', peerOnlineStates: {} });
+  peerOnlineQueryEnabled: false, customServerHint: 'server', peerStateServer: 'server', peerOnlineStates: {} });
+test('disabled online query does not mark a pending request as timed out', () => {
+  now = 14000; online.pollPeerOnlineStates();
+  assert.equal(online.peerOnlineQueryInFlight, true);
+  assert.equal(online.peerOnlineStates.a, undefined);
+  online.peerOnlineQueryEnabled = true;
+});
 test('timeout marks unknown without inventing offline', () => {
   now = 14000; online.pollPeerOnlineStates();
   assert.equal(online.peerOnlineQueryInFlight, false); assert.equal(online.peerOnlineStates.a, 3);
@@ -235,10 +241,11 @@ test('connection quality panel can be hidden and restored',()=>{
   assert.match(remotePageSource, /this\.setQualityMonitorExpanded\(true\)/);
 });
 test('quality monitor drag preserves anchor, clamps bounds and suppresses drag clicks',()=>{
-  const methods = remotePageSource.slice(remotePageSource.indexOf('  getQualityMonitorWidth():'),
-    remotePageSource.indexOf('  @Builder\n  buildStatsPanel()')).replace(/: number|: boolean|: void/g,'');
+  const methods = slice('entry/src/main/ets/pages/RemotePage.ets',
+    '  getQualityMonitorWidth():', '  @Builder');
   const clock = { now:()=>1000 };
-  const panel = new Function('Date',`return new class {${methods}}`)(clock);
+  const Panel = subject(methods, {Date:clock});
+  const panel = new Panel();
   Object.assign(panel,{qualityViewportWidth:800,qualityViewportHeight:400,showQualityMonitor:false,
     qualityMonitorX:-1,qualityMonitorY:-1,qualityLastDragAt:0,isFullScreen:false});
   assert.equal(panel.getQualityMonitorWidth(),64);
