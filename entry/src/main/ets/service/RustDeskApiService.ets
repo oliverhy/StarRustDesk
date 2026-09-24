@@ -487,10 +487,17 @@ export class RustDeskApiService {
     return books;
   }
 
+  // The official client does not restrict address book ID format; only drop
+  // obviously invalid rows. "." and ":" are allowed for direct-IP entries
+  // (e.g. 192.168.0.100:21117).
+  static validPeerId(id: string): boolean {
+    return /^[A-Za-z0-9_.:\-]{1,64}$/.test(id);
+  }
+
   static parsePeers(rows: ApiRow[]): ApiPeer[] {
     const peers: ApiPeer[] = [];
     for (const row of rows) {
-      if (!row || typeof row.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(row.id)) continue;
+      if (!row || typeof row.id !== 'string' || !RustDeskApiService.validPeerId(row.id)) continue;
       if (peers.some((peer: ApiPeer) => peer.id === row.id)) continue;
       const name = typeof row.alias === 'string' && row.alias ? row.alias :
         (typeof row.hostname === 'string' ? row.hostname : row.id);
@@ -522,24 +529,26 @@ export class RustDeskApiService {
       return parsed;
     }
     const peers: ApiPeer[] = [];
+    let total = 0;
     for (let page = 1; page <= 50; page++) {
       const result = await this.request(`/api/ab/peers?current=${page}&pageSize=100&ab=${encodeURIComponent(book.guid)}`, 'POST');
       if (result.data === undefined || result.data === null) throw new ApiFailure('服务器未返回完整设备列表，已取消同步');
       if (!Array.isArray(result.data)) throw new ApiFailure('地址簿设备列表无效');
+      // Official-client semantics (upstream _fetchPeers): total is a first-page hint for
+      // loop counting only, never a completeness guarantee. Some servers ignore
+      // current/pageSize and always return the whole table, so a mismatch between total
+      // and accumulated rows must not fail the fetch.
+      if (total === 0 && typeof result.total === 'number' && result.total > 0) total = result.total;
       const rows = RustDeskApiService.parsePeers(result.data);
       if (strict && rows.length !== result.data.length) throw new ApiFailure('设备列表含无效或重复记录，已取消同步');
       let added = 0;
       for (const row of rows) {
         if (!peers.some((peer: ApiPeer) => peer.id === row.id)) { peers.push(row); added++; }
       }
-      // Some third-party releases ignore pagination and return 1000 entries.
-      // Never spin forever or silently claim a partial list is complete.
-      if (typeof result.total === 'number' && result.total > 0 && peers.length >= result.total) break;
-      if (!added) {
-        if (typeof result.total === 'number' && result.total > peers.length) throw new ApiFailure('服务器未正确分页，设备列表不完整，请升级 API 服务');
-        break;
-      }
-      if (result.data.length < 100 && !(typeof result.total === 'number' && result.total > peers.length)) break;
+      if (total > 0 && peers.length >= total) break;
+      if (total > 0 && page * 100 >= total) break;
+      if (!added) break;
+      if (result.data.length < 100 && !(total > peers.length)) break;
       if (page === 50) throw new ApiFailure('设备超过分页限制，请在服务端分组后重试');
     }
     return peers;
@@ -547,7 +556,7 @@ export class RustDeskApiService {
 
   async writePeer(book: ApiBook, peer: ApiPeer, create: boolean): Promise<void> {
     if (!book.writable) throw new ApiFailure('当前地址簿为只读，不能上传或修改');
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(peer.id)) throw new ApiFailure('设备 ID 不支持地址簿同步');
+    if (!RustDeskApiService.validPeerId(peer.id)) throw new ApiFailure('设备 ID 不支持地址簿同步');
     const data: ApiRow = { id: peer.id, alias: peer.name.slice(0, 100), tags: peer.tags.slice(0, 20) };
     if (book.legacy) { await this.editLegacyPeer(data, false); return; }
     const action = create ? 'add' : 'update';

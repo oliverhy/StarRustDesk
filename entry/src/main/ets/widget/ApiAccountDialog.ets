@@ -357,7 +357,13 @@ export struct ApiAccountDialog {
               }.width('100%');
               ForEach(this.peers, (peer: ApiPeer) => {
                 Row({ space: 8 }) {
-                  Checkbox({ name: peer.id }).select(this.selected.includes(peer.id)).onChange(() => { this.toggle(peer.id); });
+                  // The framework also fires onChange for state-driven select()
+                  // changes. Only toggle on a real user click (callback value
+                  // disagrees with the selection set); otherwise "select all"
+                  // would oscillate forever against toggle()'s unconditional flip.
+                  Checkbox({ name: peer.id }).select(this.selected.includes(peer.id)).onChange((value: boolean) => {
+                    if (value !== this.selected.includes(peer.id)) this.toggle(peer.id);
+                  });
                   Column({ space: 3 }) {
                     Text(peer.name).fontSize(15).fontColor(this.textColor()).width('100%');
                     Text(`${peer.id} · ${peer.platform || '设备'}${peer.tags.length > 0 ? ' · ' + peer.tags.join(' / ') : ''}`)

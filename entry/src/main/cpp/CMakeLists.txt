@@ -69,7 +69,7 @@ target_link_libraries(entry PUBLIC ${NATIVE_LIBS})
 
 # Link Rust core library
 if(CMAKE_OHOS_ARCH_ABI STREQUAL "x86_64")
-    target_link_libraries(entry PUBLIC ${NATIVE_LIBS} "C:/Users/YIN/DevecostudioProjects/StarRustDesk/entry/libs/x86_64/librustdesk_core.a")
+    target_link_libraries(entry PUBLIC ${NATIVE_LIBS} "${NATIVERENDER_ROOT_PATH}/../../../libs/x86_64/librustdesk_core.a")
 else()
-    target_link_libraries(entry PUBLIC ${NATIVE_LIBS} "C:/Users/YIN/DevecostudioProjects/StarRustDesk/entry/libs/arm64-v8a/librustdesk_core.a")
+    target_link_libraries(entry PUBLIC ${NATIVE_LIBS} "${NATIVERENDER_ROOT_PATH}/../../../libs/arm64-v8a/librustdesk_core.a")
 endif()

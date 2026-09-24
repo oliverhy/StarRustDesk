@@ -5,7 +5,11 @@ const { preserveAppIcon } = require('../tools/preserve-app-icon.cjs');
 hvigor.afterNodeEvaluate(node => {
   // Preserve the approved opaque source after SDK validation/conversion and
   // before packaging (also covers cached resource tasks on incremental builds).
-  node.getTaskByName('default@ProcessResource')?.afterRun(() => preserveAppIcon(node.getNodePath()));
+  // SDK >= 26 runs restool (icon conversion) in `CompileResource`; older SDKs
+  // did it inside `ProcessResource`. Hook whichever of the two compiles resources.
+  const resourceTask = node.getTaskByName('default@CompileResource')
+    ?? node.getTaskByName('default@ProcessResource');
+  resourceTask?.afterRun(() => preserveAppIcon(node.getNodePath()));
   node.getTaskByName('default@PackageHap')?.beforeRun(() => preserveAppIcon(node.getNodePath()));
 });
 

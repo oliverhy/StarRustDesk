@@ -26,6 +26,12 @@ export class ApiBookSync {
     }
     return result;
   }
+  // By design, direct-IP entries do not take part in two-way sync: both sides
+  // (local and remote) are filtered to syncable IDs, so direct-IP peers never
+  // produce "download" changes that can never settle.
+  static syncableId(id: string): boolean {
+    return /^[A-Za-z0-9_-]{1,64}$/.test(id);
+  }
   static key(api: RustDeskApiService, book: ApiBook): string {
     return `api-book-sync:${encodeURIComponent(api.server)}:${encodeURIComponent(api.username)}:${encodeURIComponent(book.guid || 'legacy')}`;
   }
@@ -45,10 +51,10 @@ export class ApiBookSync {
     if (!Array.isArray(base) || base.some((p: ApiPeer) => !p || typeof p.id !== 'string' ||
       typeof p.name !== 'string' || !Array.isArray(p.tags))) throw new ApiFailure('同步基线格式错误，已停止，未改动数据');
     trace.event('read_remote');
-    const remote = await api.peers(book, true);
+    const remote = (await api.peers(book, true)).filter((p: ApiPeer) => ApiBookSync.syncableId(p.id));
     if (key !== ApiBookSync.key(api, book) || revision !== api.sessionRevision() ||
       rows !== RustDeskNapi.getOption('saved-connections')) throw new ApiFailure('账号或本地连接已改变，请重试');
-    const local = ApiBookSync.readLocal().filter((p: Record<string, string>) => /^[A-Za-z0-9_-]{1,64}$/.test(p.remoteId))
+    const local = ApiBookSync.readLocal().filter((p: Record<string, string>) => ApiBookSync.syncableId(p.remoteId))
       .map((p: Record<string, string>) => {
         const old = base.find((v: ApiPeer) => v.id === p.remoteId);
         return { id: p.remoteId, name: p.name || p.remoteId, platform: old?.platform || '', tags: old?.tags || [] } as ApiPeer;
@@ -68,7 +74,7 @@ export class ApiBookSync {
     if (plan.key !== ApiBookSync.key(api, book) || plan.revision !== api.sessionRevision() ||
       plan.rows !== RustDeskNapi.getOption('saved-connections')) throw new ApiFailure('账号或本地数据已变化，请重新预览');
     trace.event('read_remote');
-    const current = await api.peers(book, true);
+    const current = (await api.peers(book, true)).filter((p: ApiPeer) => ApiBookSync.syncableId(p.id));
     if (JSON.stringify(current) !== JSON.stringify(plan.remote)) throw new ApiFailure('服务器数据已变化，请重新预览');
     // Preflight permissions before any operation. A read-only book can still be imported.
     const push = plan.changes.some((c: BookSyncChange) => c.kind === 'upload' || c.kind === 'deleteRemote' || (c.kind === 'conflict' && preferLocal));
@@ -105,7 +111,7 @@ export class ApiBookSync {
     AppStorage.setOrCreate('savedConnectionsCloudRevision', (AppStorage.get<number>('savedConnectionsCloudRevision') ?? 0) + 1);
     const applied = RustDeskNapi.getOption('saved-connections');
     trace.event('verify');
-    const verified = await api.peers(book, true);
+    const verified = (await api.peers(book, true)).filter((p: ApiPeer) => ApiBookSync.syncableId(p.id));
     if (plan.key !== ApiBookSync.key(api, book) || plan.revision !== api.sessionRevision() ||
       applied !== RustDeskNapi.getOption('saved-connections')) throw new ApiFailure('同步期间数据发生变化，请重新预览');
     if (expected.length !== verified.length || expected.some((p: ApiPeer) =>
