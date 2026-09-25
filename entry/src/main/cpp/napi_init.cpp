@@ -718,18 +718,18 @@ static void OnRustEvent(const char* message) {
         }
     } else if (text == "peer transport interrupted") {
         if (g_connectionStatus.load() == 2) {
-            SetLastConnectionMessage("Peer transport interrupted");
+            SetLastConnectionMessage("远端传输中断");
             g_lastConnectionResult.store(-18);
             g_connectionStatus.store(3);
         }
     } else if (text.rfind("connection lost:", 0) == 0) {
-        SetLastConnectionMessage("Peer connection closed");
+        SetLastConnectionMessage("远端连接已断开");
         g_lastConnectionResult.store(-18);
         g_connectionStatus.store(3);
     } else if (text == "receive loop ended" &&
                (g_connectionStatus.load() == 1 || g_connectionStatus.load() == 2 ||
                 g_connectionStatus.load() == 4)) {
-        SetLastConnectionMessage("Peer connection closed");
+        SetLastConnectionMessage("远端连接已断开");
         g_lastConnectionResult.store(-18);
         g_connectionStatus.store(3);
     }
@@ -764,34 +764,35 @@ static void OnRustAudioFrame(const unsigned char* data, int length) {
 static std::string ConnectionResultToMessage(int result) {
     switch (result) {
         case 0: return "";
-        case -1: return "Unable to connect to rendezvous server";
-        case -2: return "Failed to send rendezvous request";
-        case -3: return "Rendezvous response has no peer address";
-        case -4: return "Rendezvous response has no peer or relay address";
-        case -5: return "Unexpected rendezvous response";
-        case -6: return "Failed to parse rendezvous response";
-        case -7: return "Rendezvous server did not respond";
-        case -8: return "Remote ID does not exist";
-        case -9: return "Remote device is offline";
-        case -10: return "Server key mismatch";
-        case -11: return "Server license overuse";
-        case -13: return "Rendezvous server rejected the request";
-        case -14: return "Direct peer connection failed";
-        case -15: return "Relay connection failed";
-        case -16: return "Peer secure handshake failed";
-        case -17: return "Remote login failed";
-        case -18: return "Peer connection closed";
-        case -19: return "Connection was replaced";
-        case -20: return "Connection timed out";
-        case -21: return "Previous connection is still closing";
-        case -22: return "Connection state is busy";
-        case -23: return "Invalid direct IP address or port";
-        case -24: return "Server key is invalid";
+        case -1: return "无法连接 ID 服务器";
+        case -2: return "向 ID 服务器发送连接请求失败";
+        case -3: return "ID 服务器未返回远端地址";
+        case -4: return "ID 服务器未返回远端或中继地址";
+        case -5: return "ID 服务器返回了异常响应";
+        case -6: return "无法解析 ID 服务器的响应";
+        case -7: return "ID 服务器未响应";
+        case -8: return "远端 ID 不存在";
+        case -9: return "远端设备已离线";
+        // PunchHoleResponse::LICENSE_MISMATCH is a server refusal, not a local key-verification failure.
+        case -10: return "ID 服务器密钥不匹配";
+        case -11: return "服务器授权使用量已超限";
+        case -13: return "ID 服务器拒绝了连接请求";
+        case -14: return "与远端直连失败";
+        case -15: return "中继连接失败";
+        case -16: return "与远端安全握手失败";
+        case -17: return "远端登录失败";
+        case -18: return "远端连接已断开";
+        case -19: return "当前连接已被其他连接替换";
+        case -20: return "连接超时";
+        case -21: return "上一次连接尚未关闭，请稍后重试";
+        case -22: return "连接正忙，请稍后重试";
+        case -23: return "直连 IP 地址或端口无效";
+        case -24: return "服务器密钥无效";
         case -25: return "服务器要求账号登录，请到设置中的 API 账号登录；这不是远端设备密码";
         case -26: return "服务器账号登录已过期或令牌无效，请到设置中的 API 账号重新登录";
         case -27: return "服务器拒绝访问，请检查账号的远控权限";
         case -28: return "ID 服务器连接中断，请重试；如持续失败，请导出诊断日志";
-        default: return "Connection failed (" + std::to_string(result) + ")";
+        default: return "连接失败（错误码：" + std::to_string(result) + "）";
     }
 }
 
@@ -1252,7 +1253,7 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
             g_videoReadyGeneration.store(0);
             g_connectionStartedAtMs.store(0);
             g_lastConnectionResult.store(-20);
-            SetLastConnectionMessage("Connection timed out");
+            SetLastConnectionMessage("连接超时");
             g_connectionStatus.store(3);
             bool expected = false;
             if (g_disconnectInProgress.compare_exchange_strong(expected, true)) {
@@ -1272,7 +1273,7 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
         status = 3;
         g_connectionStatus.store(status);
         if (GetLastConnectionMessage().empty()) {
-            SetLastConnectionMessage("Peer connection closed");
+            SetLastConnectionMessage("远端连接已断开");
             g_lastConnectionResult.store(-18);
         }
     }
@@ -1293,14 +1294,34 @@ static napi_value GetConnectionTransport(napi_env env, napi_callback_info info) 
     return ret;
 }
 
+static std::string LocalizePeerLoginError(const std::string& error) {
+    if (error == "Wrong Password") return "远端密码错误";
+    if (error == "No Password Access") return "远端未启用密码访问";
+    if (error == "Connection not allowed" || error == "Connection is not allowed") return "远端拒绝连接";
+    if (error == "Too many wrong password attempts") return "远端密码错误次数过多，请稍后重试";
+    if (error == "Permission denied") return "远端拒绝访问，请检查权限";
+    if (error == "Remote desktop is offline") return "远端设备已离线";
+    if (error == "Connection closed manually by the peer") return "远端已主动断开连接";
+    return "";
+}
+
 static napi_value GetLastConnectionError(napi_env env, napi_callback_info info) {
+    const int result = g_lastConnectionResult.load();
     std::string message = GetLastConnectionMessage();
+    if (!message.empty()) {
+        const std::string loginMessage = LocalizePeerLoginError(message);
+        if (!loginMessage.empty()) {
+            message = loginMessage;
+        } else if (result == -17) {
+            // Unknown peer-controlled login text may contain private input.
+            message = "远端登录失败，请检查远端设备并导出诊断日志";
+        }
+    }
     if (!message.empty()) {
         napi_value ret;
         napi_create_string_utf8(env, message.c_str(), message.length(), &ret);
         return ret;
     }
-    int result = g_lastConnectionResult.load();
     message = ConnectionResultToMessage(result);
     napi_value ret;
     napi_create_string_utf8(env, message.c_str(), message.length(), &ret);

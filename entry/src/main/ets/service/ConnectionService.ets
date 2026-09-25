@@ -104,7 +104,8 @@ export class ConnectionService {
 
   static recoverInterruptedSession(message: string): boolean {
     if (ConnectionService.recoveryPending) return true
-    if (ConnectionService.fileOnly || message !== 'Peer transport interrupted' || !ConnectionService.sessionAuthenticated ||
+    if (ConnectionService.fileOnly ||
+      (message !== '远端传输中断' && message !== 'Peer transport interrupted') || !ConnectionService.sessionAuthenticated ||
       ConnectionService.recoveryAttempts >= 2 || !ConnectionService.retryPeer ||
       ConnectionService.sessionAccountRevision !== AccountSession.getApi().sessionRevision() ||
       RemoteSessionBackgroundTask.isAppBackground() || ConnectionService.insecureRetryUsed ||
@@ -276,7 +277,8 @@ export class ConnectionService {
     }
 
     const route: number = RustDeskNapi.getConnectionRoute()
-    if (message === 'Peer secure handshake failed' && route === 1 && !ConnectionService.relayRetryUsed) {
+    if ((message === '与远端安全握手失败' || message === 'Peer secure handshake failed') &&
+      route === 1 && !ConnectionService.relayRetryUsed) {
       ConnectionService.relayRetryUsed = true
       if (ConnectionService.restartConnection(true, 'direct_secure_handshake_failed', 1, 1)) {
         return '直连安全握手失败，正在通过加密中继重试'
@@ -284,7 +286,8 @@ export class ConnectionService {
       return ''
     }
 
-    if (message === 'Rendezvous server did not respond' && ConnectionService.rendezvousRetryCount < 2) {
+    if ((message === 'ID 服务器未响应' || message === 'Rendezvous server did not respond') &&
+      ConnectionService.rendezvousRetryCount < 2) {
       ConnectionService.rendezvousRetryCount++
       const attempt: number = ConnectionService.rendezvousRetryCount
       // Preserve a forced-relay recovery selected after a direct secure
@@ -297,7 +300,8 @@ export class ConnectionService {
       return ''
     }
 
-    if (message === 'Relay connection failed' && ConnectionService.relayFailureRetryCount < 1) {
+    if ((message === '中继连接失败' || message === 'Relay connection failed') &&
+      ConnectionService.relayFailureRetryCount < 1) {
       ConnectionService.relayFailureRetryCount++
       ConnectionService.relayRetryUsed = true
       if (ConnectionService.restartConnection(true, 'relay_connection_failed', 1, 1)) {
@@ -330,9 +334,10 @@ export class ConnectionService {
   }
 
   static canRetryWithoutEncryption(): boolean {
+    const message: string = RustDeskNapi.getLastConnectionError()
     return !ConnectionService.insecureRetryUsed && ConnectionService.retryPeer.length > 0 &&
       RustDeskNapi.getConnectionStatus() === ConnectionStatus.FAILED &&
-      RustDeskNapi.getLastConnectionError() === 'Server key is invalid'
+      (message === '服务器密钥无效' || message === 'Server key is invalid')
   }
 
   static retryWithoutEncryption(): boolean {

@@ -16,22 +16,22 @@ Object.assign(S, { sessionAccountRevision: 1, preparationGeneration: 1, retryPee
   authNetworkSnapshot: () => '', releaseModifiers() {}, isDirectAddress: () => false,
   restartConnection: () => restarts++ });
 (async () => {
-  assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false, 'no retry before authentication');
+  assert.equal(S.recoverInterruptedSession('远端传输中断'), false, 'no retry before authentication');
   S.observeSession(2);
   for (const error of ['Wrong Password', 'Peer connection closed', 'Peer secure handshake failed']) {
     assert.equal(S.recoverInterruptedSession(error), false);
   }
-  S.fileOnly = true; assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false); S.fileOnly = false;
-  S.insecureRetryUsed = true; assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false); S.insecureRetryUsed = false;
-  background = true; assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false); background = false;
-  revision = 2; assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false); revision = 1;
-  assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), true); assert.equal(delay, 1000);
-  assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), true); assert.equal(S.recoveryAttempts, 1);
+  S.fileOnly = true; assert.equal(S.recoverInterruptedSession('远端传输中断'), false); S.fileOnly = false;
+  S.insecureRetryUsed = true; assert.equal(S.recoverInterruptedSession('远端传输中断'), false); S.insecureRetryUsed = false;
+  background = true; assert.equal(S.recoverInterruptedSession('远端传输中断'), false); background = false;
+  revision = 2; assert.equal(S.recoverInterruptedSession('远端传输中断'), false); revision = 1;
+  assert.equal(S.recoverInterruptedSession('远端传输中断'), true); assert.equal(delay, 1000);
+  assert.equal(S.recoverInterruptedSession('远端传输中断'), true); assert.equal(S.recoveryAttempts, 1);
   await pending(); assert.equal(restarts, 1); assert.equal(prepared, 1);
-  assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), true); assert.equal(delay, 3000);
+  assert.equal(S.recoverInterruptedSession('远端传输中断'), true); assert.equal(delay, 3000);
   revision = 2; await pending(); assert.equal(restarts, 1, 'account changes cancel an already scheduled retry');
-  revision = 1; assert.equal(S.recoverInterruptedSession('Peer transport interrupted'), false, 'max two attempts');
-  S.recoveryAttempts = 0; S.recoverInterruptedSession('Peer transport interrupted'); S.cancelRecovery();
+  revision = 1; assert.equal(S.recoverInterruptedSession('远端传输中断'), false, 'max two attempts');
+  S.recoveryAttempts = 0; S.recoverInterruptedSession('远端传输中断'); S.cancelRecovery();
   assert.equal(pending, undefined); assert.equal(S.isRecoveryPending(), false);
   console.log('PASS bounded transport recovery: authenticated only, account/network scope, foreground, no insecure downgrade, no manual-close retry');
 })().catch(e => { console.error(e); process.exitCode = 1; });

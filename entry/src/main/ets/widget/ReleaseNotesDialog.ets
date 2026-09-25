@@ -1,8 +1,8 @@
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.15'
-export const RELEASE_NOTES_BUILD: string = '1002015'
+export const RELEASE_NOTES_VERSION: string = '1.2.16'
+export const RELEASE_NOTES_BUILD: string = '1002016'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -46,6 +46,10 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.16（1002016）· 连接错误提示', [
+            '连接失败错误码改为中文提示，区分 ID 服务器密钥不匹配、服务器密钥无效、连接超时及中继失败等情况。',
+            '远端密码错误、权限拒绝与连接中断等常见提示同步中文化；保留自动重连和用户确认后降级连接的原有判断。'
+          ])
           this.buildSection('1.2.15（1002015）· 连接稳定性与 PC 全屏', [
             '自建 ID 服务器未配置 API 账号时，连接前跳过不必要的账号会话准备；已记住账号或配置 API 时仍按原流程处理。',
             '在线状态查询只连接 ID 服务器的辅助 TCP 端口，不再探测相邻 WebSocket 端口，减少对远控建链的干扰。',
