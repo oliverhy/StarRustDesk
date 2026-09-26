@@ -1,5 +1,6 @@
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { inputCompatibilityKey, selectedKeyboardMode, selectedCursorMode, shouldSuppressCursor } from '../model/InputCompatibility';
+import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavigationKeys } from '../model/RemoteNavigationKeys';
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
 import { CommunicationService } from '../service/CommunicationService';
@@ -113,6 +114,7 @@ const KEYBOARD_TOOLBAR_DEFAULT_ORDER: string[] = [
   'ctrl', 'alt', 'shift', 'meta', 'function', 'more', 'release'
 ];
 const KEYBOARD_MORE_DEFAULT_ORDER: string[] = [
+  'Left', 'Up', 'Down', 'Right',
   'Esc', 'Tab', 'Home', 'End', 'Ins', 'Del', 'PgUp', 'PgDn',
   'Ctrl+Shift+Esc', 'Ctrl+Shift+Del', 'Alt+F4', 'Ctrl+Alt+Del'
 ];
@@ -219,6 +221,8 @@ struct RemotePage {
   @State showLocalCursor: boolean = true;
   @State showLeftButtonHoldIndicator: boolean = false;
   @State keyboardInput: string = KEYBOARD_CAPTURE_SENTINEL;
+  private keyboardComposing: boolean = false;
+  private navigationKeys: RemoteNavigationKeys = new RemoteNavigationKeys();
   @State showCursor: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
   @State embeddedCursorOverlayFallback: boolean = false;
@@ -538,6 +542,7 @@ struct RemotePage {
     this.stopEdgeAutoPan();
     this.releaseVirtualMouseButtons();
     this.releaseHeldMouseButtons('page_disappear');
+    this.releaseRemoteNavigationKeys('page_disappear');
     ConnectionService.releaseModifiers();
     if (this.surfaceRebindTimer !== -1) {
       clearTimeout(this.surfaceRebindTimer);
@@ -710,6 +715,8 @@ struct RemotePage {
         this.pollFileTransferStatus();
       }
       if (status !== ConnectionStatus.CONNECTED) {
+        this.navigationKeys.reset();
+        this.keyboardComposing = false;
         this.displayStateInitialized = false;
         this.isPeerAndroid = false;
         this.privacyModeState = 0;
@@ -1118,6 +1125,7 @@ struct RemotePage {
     for (const event of events) {
       if (event.reset) {
         this.releaseHeldMouseButtons('input_queue_reset');
+        this.releaseRemoteNavigationKeys('input_queue_reset');
         ConnectionService.releaseModifiers();
       } else if (event.key !== undefined) {
         this.handleNativeKeyInput(event.key);
@@ -1237,7 +1245,7 @@ struct RemotePage {
 
   handleNativeKeyInput(event: NativeKeyInputEvent): void {
     if (this.showCommunicationPanel) return;
-    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
     if (event.action !== 0 && event.action !== 1) {
@@ -1248,6 +1256,12 @@ struct RemotePage {
     }
     const action: number = event.action === 0 ? 0 : 1;
     const controlCode: number = this.mapControlKeyCode(event.keyCode);
+    if (isNavigationControlKey(controlCode)) {
+      if (event.modifierValid) ConnectionService.syncNativeModifierState(event.modifierMask);
+      this.forwardRemoteNavigationKey(controlCode, action === 0, 'native');
+      return;
+    }
+    if (this.showKeyboardPanel) return;
     if (controlCode === 20) {
       ConnectionService.sendCapsLockEvent(action, event.capsLockValid ? event.capsLockOn : undefined);
       return;
@@ -2032,6 +2046,7 @@ struct RemotePage {
             return;
           }
           this.releaseHeldMouseButtons('input_blur');
+          this.releaseRemoteNavigationKeys('input_blur');
         })
         .onAxisEvent((event: AxisEvent) => {
           this.handleRemoteAxis(event);
@@ -2055,6 +2070,7 @@ struct RemotePage {
           .hitTestBehavior(HitTestMode.None)
           .id('remoteNativeInputCapture')
           .focusable(true)
+          .onBlur(() => { this.releaseRemoteNavigationKeys('native_input_blur'); })
           .onLoad(() => {
             this.onSurfaceReady();
             setTimeout(() => this.requestRemoteInputFocus(), 60);
@@ -2382,6 +2398,10 @@ struct RemotePage {
       case 'function': return 'Fn 功能键';
       case 'more': return '更多按键';
       case 'release': return '释放修饰键';
+      case 'Left': return '← 向左';
+      case 'Up': return '↑ 向上';
+      case 'Down': return '↓ 向下';
+      case 'Right': return '→ 向右';
       default: return item;
     }
   }
@@ -3683,7 +3703,8 @@ struct RemotePage {
       .width(buttonWidth)
       .height(38)
       .padding({ left: 3, right: 3 })
-      .fontSize(label === '释放' ? 11 : (label.length > 10 ? 10 : 12))
+      .fontSize(label === '←' || label === '↑' || label === '↓' || label === '→' ? 20 :
+        (label === '释放' ? 11 : (label.length > 10 ? 10 : 12)))
       .fontWeight(this.keyboardToolSelected(label, selected) ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(danger ? RustDeskTheme.ERROR : (this.keyboardToolSelected(label, selected) ?
         this.controlSelectedTextColor() : this.primaryTextColor()))
@@ -3696,6 +3717,7 @@ struct RemotePage {
       .enabled(enabled)
       .opacity(enabled ? 1 : 0.5)
       .focusable(false)
+      .accessibilityText(orderKey.length > 0 ? this.toolbarOrderLabel(orderKey) : label)
       .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
         if (orderKey.length > 0) this.openToolbarOrderEditor(orderKind, orderKey);
       }))
@@ -3801,7 +3823,23 @@ struct RemotePage {
 
   @Builder
   buildKeyboardMoreItem(item: string, vertical: boolean) {
-    if (item === 'Esc') {
+    if (item === 'Left') {
+      this.buildKeyboardToolButton('←', vertical ? 96 : 48, false, false, true, () => {
+        this.sendVirtualControlKey(37, 'Left');
+      }, false, item, 'keyboardMore')
+    } else if (item === 'Up') {
+      this.buildKeyboardToolButton('↑', vertical ? 96 : 48, false, false, true, () => {
+        this.sendVirtualControlKey(38, 'Up');
+      }, false, item, 'keyboardMore')
+    } else if (item === 'Down') {
+      this.buildKeyboardToolButton('↓', vertical ? 96 : 48, false, false, true, () => {
+        this.sendVirtualControlKey(40, 'Down');
+      }, false, item, 'keyboardMore')
+    } else if (item === 'Right') {
+      this.buildKeyboardToolButton('→', vertical ? 96 : 48, false, false, true, () => {
+        this.sendVirtualControlKey(39, 'Right');
+      }, false, item, 'keyboardMore')
+    } else if (item === 'Esc') {
     this.buildKeyboardToolButton('Esc', vertical ? 96 : 50, false, false, true, () => {
       this.sendVirtualControlKey(27, 'Esc');
     }, true, item, 'keyboardMore')
@@ -3966,6 +4004,16 @@ struct RemotePage {
       .focusable(true)
       .defaultFocus(true)
       .enablePreviewText(true)
+      .onKeyPreIme((event: KeyEvent) => {
+        // Only navigation bypasses the hidden text field. Letters, Enter and
+        // Backspace retain the IME's composition/commit path.
+        if (!isNavigationControlKey(this.mapControlKeyCode(event.keyCode))) return false;
+        return this.handleRemoteKey(event);
+      })
+      .onBlur(() => {
+        this.releaseRemoteNavigationKeys('keyboard_blur');
+        this.keyboardComposing = false;
+      })
       .onChange((value: string, previewText?: PreviewText) => {
         this.handleDirectKeyboardChange(value, previewText);
       })
@@ -4149,6 +4197,8 @@ struct RemotePage {
 
   enterFullScreen(): void {
     if (this.isFullScreen || this.fullscreenTransitioning) return;
+    this.releaseRemoteNavigationKeys('fullscreen');
+    this.resetKeyboardCaptureBuffer();
     this.showKeyboardPanel = false;
     this.restoreKeyboardAvoidMode();
     this.showGestureHelp = false;
@@ -4376,6 +4426,7 @@ struct RemotePage {
         .selected(this.keyboardCompatibilityMode)
         .value(this.keyboardCompatibilityMode === 1 ? '1:1 映射' : (this.keyboardCompatibilityMode === 2 ? '传统' : '自动'))
         .onSelect((index: number) => {
+          this.releaseRemoteNavigationKeys('keyboard_mode');
           ConnectionService.releaseModifiers();
           this.keyboardCompatibilityMode = index;
           RustDeskNapi.setOption(this.compatibilityOptionKey('keyboard'), index.toString());
@@ -5404,6 +5455,7 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return false;
     }
+    if (event.type !== KeyType.Down && event.type !== KeyType.Up) return false;
 
     let controlCode: number = this.mapControlKeyCode(event.keyCode);
     let action: number = event.type === KeyType.Down ? 0 : 1;
@@ -5416,6 +5468,9 @@ struct RemotePage {
       if (event.isCapsLockOn !== undefined) {
         ConnectionService.syncCapsLockState(event.isCapsLockOn);
       }
+    }
+    if (isNavigationControlKey(controlCode)) {
+      return this.forwardRemoteNavigationKey(controlCode, action === 0, 'ark');
     }
     if (this.showKeyboardPanel) {
       if (this.isModifierControlCode(controlCode)) {
@@ -5451,6 +5506,27 @@ struct RemotePage {
       return true;
     }
     return false;
+  }
+
+  forwardRemoteNavigationKey(controlCode: number, down: boolean, source: string): boolean {
+    const composing: boolean = this.showKeyboardPanel && this.keyboardComposing;
+    const action: number = this.navigationKeys.route(controlCode, down, source, composing);
+    if (action >= 0) {
+      ConnectionService.sendKeyEvent(controlCode, action);
+    }
+    // Navigation names contain no typed text, passwords or candidate contents.
+    RustDeskNapi.appendDiagnosticLog('input-navigation',
+      `key=${navigationKeyName(controlCode)} source=${source} action=${action} ` +
+      `ime=${composing ? 1 : 0} panel=${this.showKeyboardPanel ? 1 : 0}`);
+    return action !== NAVIGATION_LOCAL;
+  }
+
+  releaseRemoteNavigationKeys(reason: string): void {
+    const held: number[] = this.navigationKeys.reset();
+    for (const code of held) ConnectionService.sendKeyEvent(code, 1);
+    if (held.length > 0) {
+      RustDeskNapi.appendDiagnosticLog('input-navigation', `release reason=${reason} count=${held.length}`);
+    }
   }
 
   syncModifiersFromKeyEvent(event: KeyEvent): void {
@@ -5597,6 +5673,10 @@ struct RemotePage {
         return 13;
       case 2055:
         return 8;
+      case 2068:
+        return 33;
+      case 2069:
+        return 34;
       case 2070:
         return 27;
       case 2071:
@@ -5611,6 +5691,12 @@ struct RemotePage {
         return 91;
       case 2077:
         return 92;
+      case 2081:
+        return 36;
+      case 2082:
+        return 35;
+      case 2083:
+        return 45;
       default:
         return 0;
     }
@@ -6191,6 +6277,7 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
+    this.releaseRemoteNavigationKeys('keyboard_open');
     if (!this.showKeyboardPanel) {
       this.keyboardLayoutWidth = this.pageWidth;
       this.keyboardLayoutHeight = this.pageHeight;
@@ -6208,6 +6295,7 @@ struct RemotePage {
   }
 
   closeRemoteKeyboard(): void {
+    this.releaseRemoteNavigationKeys('keyboard_close');
     this.releaseVirtualModifiers();
     this.keyboardToolsCollapsed = !this.isHandheldLandscape();
     this.showKeyboardPanel = false;
@@ -6513,6 +6601,7 @@ struct RemotePage {
   }
 
   resetKeyboardCaptureBuffer(): void {
+    this.keyboardComposing = false;
     this.keyboardInput = KEYBOARD_CAPTURE_SENTINEL;
     this.directKeyboardCommittedText = KEYBOARD_CAPTURE_SENTINEL;
   }
@@ -6536,7 +6625,12 @@ struct RemotePage {
 
   handleDirectKeyboardChange(value: string, previewText?: PreviewText): void {
     this.keyboardInput = value;
-    if (previewText !== undefined && previewText.value.length > 0) {
+    const composing: boolean = previewText !== undefined && previewText.value.length > 0;
+    if (composing !== this.keyboardComposing) {
+      RustDeskNapi.appendDiagnosticLog('input-navigation', `ime_composition active=${composing ? 1 : 0}`);
+    }
+    this.keyboardComposing = composing;
+    if (composing) {
       return;
     }
 
@@ -7619,6 +7713,7 @@ struct RemotePage {
     }
     this.stopEdgeAutoPan();
     this.releaseHeldMouseButtons('disconnect');
+    this.releaseRemoteNavigationKeys('disconnect');
     ConnectionService.releaseModifiers();
     this.restoreFullscreenOnLeave();
     if (this.statusTimer !== -1) {

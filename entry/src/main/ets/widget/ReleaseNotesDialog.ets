@@ -1,8 +1,8 @@
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.16'
-export const RELEASE_NOTES_BUILD: string = '1002016'
+export const RELEASE_NOTES_VERSION: string = '1.2.17'
+export const RELEASE_NOTES_BUILD: string = '1002017'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -46,6 +46,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.17（1002017）· 方向键与翻页操作', [
+            '“键 → 更多”新增 ←、↑、↓、→ 四个方向按钮，支持配合选中的 Ctrl、Shift 等修饰键操作；点击不主动弹出软键盘，长按可调整顺序。',
+            '修复打开本地键盘后，外接键盘或 PC 键盘的方向键、翻页键未正确传递到远端的问题；补齐 PageUp、PageDown、Home、End 和 Insert 映射。',
+            '优化实体方向键长按连续输入、重复事件去重及失去焦点后的松键处理，避免重复发送和卡键；中文组字时保留本地输入法选词。',
+            '补充方向键与输入法状态的脱敏诊断记录，不记录输入文字或候选内容；保留原有自定义按键排序。'
+          ])
           this.buildSection('1.2.16（1002016）· 连接错误提示', [
             '连接失败错误码改为中文提示，区分 ID 服务器密钥不匹配、服务器密钥无效、连接超时及中继失败等情况。',
             '远端密码错误、权限拒绝与连接中断等常见提示同步中文化；保留自动重连和用户确认后降级连接的原有判断。'

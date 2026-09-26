@@ -114,8 +114,10 @@ const dc=vm.createContext({RustDeskNapi:{takeNativeInputEvents:()=>[
 vm.runInContext(ts.transpile('class Drain {'+method('drainNativeInputEvents')+'};globalThis.Drain=Drain;'),dc);
 test('unified native drain preserves keyboard-before-click and resets overflow',()=>{
   const d=Object.assign(new dc.Drain(),{handleNativeKeyInput:()=>ordered.push('key'),
-    handleNativeMouseInput:()=>ordered.push('mouse'),releaseHeldMouseButtons:()=>ordered.push('reset_mouse')});
-  d.drainNativeInputEvents();assert.deepEqual(ordered,['key','mouse','reset_mouse','reset_keys']);
+    handleNativeMouseInput:()=>ordered.push('mouse'),releaseHeldMouseButtons:()=>ordered.push('reset_mouse'),
+    releaseRemoteNavigationKeys:reason=>ordered.push(`reset_navigation:${reason}`)});
+  d.drainNativeInputEvents();assert.deepEqual(ordered,
+    ['key','mouse','reset_mouse','reset_navigation:input_queue_reset','reset_keys']);
 });
 test('touchpad drag waits for confirmed movement before left-down',()=>{
   assert.match(source,/const TOUCHPAD_DRAG_START_THRESHOLD: number = 18;/);

@@ -22,9 +22,12 @@ let passed = 0;
 async function test(name, run) { await run(); passed++; console.log('PASS ' + name); }
 function pageHarness(overrides = {}) {
   const timers = new Map(), calls = [], logs = [], windows = [];
+  const navigationPackets = [];
   let timerId = 0;
   const context = vm.createContext({
     ConnectionStatus: { CONNECTED: 2 },
+    ConnectionService: { sendKeyEvent: (...args) => navigationPackets.push(args) },
+    KEYBOARD_CAPTURE_SENTINEL: '1'.repeat(60),
     RustDeskNapi: {
       appendDiagnosticLog: (category, message) => logs.push([category, message]),
       prepareSurfaceRebind: () => { calls.push('prepare'); return 0; },
@@ -40,8 +43,11 @@ function pageHarness(overrides = {}) {
   });
   const names = ['requestFullscreen', 'enterFullScreen', 'exitFullScreen', 'restoreFullscreenOnLeave',
     'bindSurfaceIfReady', 'scheduleSurfaceRebindIfSizeChanged', 'rebindSurfaceAfterLayoutChange',
-    'readCurrentSurfaceId', 'getDisplayWidth', 'getDisplayHeight', 'requestVideoRefreshAfterSurfaceRebind'];
-  vm.runInContext(ts.transpile('class Page {' + names.map(method).join('\n') + '} globalThis.Page = Page;'), context);
+    'readCurrentSurfaceId', 'getDisplayWidth', 'getDisplayHeight', 'requestVideoRefreshAfterSurfaceRebind',
+    'releaseRemoteNavigationKeys', 'resetKeyboardCaptureBuffer'];
+  const navigationModel = read('entry/src/main/ets/model/RemoteNavigationKeys.ets').replace(/^export /gm, '');
+  vm.runInContext(ts.transpile(navigationModel + '\nclass Page {' + names.map(method).join('\n') +
+    '} globalThis.Page = Page; globalThis.RemoteNavigationKeys = RemoteNavigationKeys;'), context);
   let target = 'surface-a';
   const page = Object.assign(new context.Page(), {
     componentWidth: 1318, componentHeight: 800, remoteWidth: 2560, remoteHeight: 1440,
@@ -51,6 +57,7 @@ function pageHarness(overrides = {}) {
     isFullScreen: false, fullscreenTransitioning: false, fullscreenRequestId: 0,
     remoteToolbarCollapsed: false, remoteToolbarOffsetX: 0, remoteToolbarOffsetY: 0,
     remotePageVisible: true, isLeavingAfterDisconnect: false,
+    navigationKeys: new context.RemoteNavigationKeys(), keyboardComposing: false,
     xComponentController: { getXComponentSurfaceId: () => target },
     showFileToast: message => calls.push(['toast', message]),
     restoreKeyboardAvoidMode() {}, closeRemoteKeyboard() {}, isHandheldDevice() { return false; }
@@ -59,7 +66,7 @@ function pageHarness(overrides = {}) {
     const entry = [...timers].find(([, t]) => t.ms === ms);
     assert(entry, 'expected timer ' + ms); timers.delete(entry[0]); entry[1].fn();
   };
-  return { page, timers, calls, logs, windows, runTimer, target: id => { target = id; } };
+  return { page, timers, calls, logs, windows, navigationPackets, runTimer, target: id => { target = id; } };
 }
 function policyHarness(deviceType = 'phone', initialStatus = 4) {
   const calls = [], logs = [];
@@ -208,6 +215,16 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     h.page.bindSurfaceIfReady();
     assert(Math.abs(h.page.lastSurfaceHeight - 741.375) < 1e-6);
     assert(!h.calls.includes('prepare'));
+  });
+  await test('fullscreen releases held navigation and clears local IME composition', async () => {
+    const h = pageHarness({ keyboardComposing: true, keyboardInput: 'preview' });
+    h.page.navigationKeys.route(38, true, 'ark', false);
+    h.page.enterFullScreen();
+    assert.deepEqual(h.navigationPackets, [[38, 1]]);
+    assert.equal(h.page.keyboardComposing, false);
+    assert.equal(h.page.keyboardInput, '1'.repeat(60));
+    assert.equal(h.page.showKeyboardPanel, false);
+    h.windows[0].resolve(); await settle();
   });
   await test('button state changes immediately, duplicate clicks are ignored until completion', async () => {
     const h = pageHarness(); h.page.enterFullScreen(); h.page.exitFullScreen(); h.page.enterFullScreen();

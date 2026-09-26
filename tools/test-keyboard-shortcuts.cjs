@@ -89,7 +89,7 @@ const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmon
 const stateStart = page.indexOf('  keyboardToolSelected(');
 assert.match(page, /buildKeyboardToolButton\('释放', vertical \? 96 : 48, false, false, true, \(\) => \{\s*this\.releaseVirtualModifiers\(\);\s*\}, false, item\)/,
   'Release clears modifiers without collapsing or refocusing the IME');
-assert.match(page, /fontSize\(label === '释放' \? 11/,
+assert.match(page, /\(label === '释放' \? 11 : \(label.length > 10 \? 10 : 12\)\)/,
   'The two-character release label must fit in its fixed-width control');
 assert.match(page, /backgroundColor\(this\.isDarkMode \? '#A61B2638' : '#A6FFFFFF'\)/,
   'Expanded shortcut background must remain translucent in both themes');
