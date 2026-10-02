@@ -152,7 +152,7 @@ async function login(api, provider = 'official') {
   await login(api);
   pending.push({ raw: 'x'.repeat(2 * 1024 * 1024 + 1) }); await assert.rejects(api.books(), /安全/);
   respond({ total: 2, data: [{ id: '123' }] }); respond({ total: 2, data: [{ id: '123' }] });
-  await assert.rejects(api.peers({ guid: 'broken', legacy: false }), /分页/);
+  await assert.rejects(api.peers({ guid: 'broken', legacy: false }, true), /分页/);
   let release; clearWait = new Promise(resolve => { release = resolve; });
   const before = calls.length; const canceled = api.login('alice', 'password', false); api.cancel(); release();
   await assert.rejects(canceled, /取消/); clearWait = undefined; assert.equal(calls.length, before);

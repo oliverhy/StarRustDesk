@@ -1,10 +1,17 @@
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path'), assert = require('node:assert/strict');
 const ts = require('C:/Program Files/Huawei/DevEco Studio/tools/ohpm/node_modules/typescript');
 const options = new Map(); let writes = 0, imports = 0;
-class ApiFailure extends Error {}
 const native = { getOption: k => options.get(k) || '', setOption: (k,v) => options.set(k,v), appendDiagnosticLog() {} };
 const context = { exports: {}, AppStorage: { get:()=>0,setOrCreate(){} }, require: name => {
-  if (name === './RustDeskApiService') return { ApiFailure };
+  if (name === './RustDeskApiService') {
+    const module = { exports: {}, require: context.require };
+    const service = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/service/RustDeskApiService.ets'), 'utf8');
+    vm.runInNewContext(ts.transpileModule(service, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText, module);
+    return module.exports;
+  }
+  if (name === '@kit.RemoteCommunicationKit') return { rcp: {} };
+  if (name === '@kit.ArkTS') return { url: { URL }, util: {} };
+  if (name === './ApiAccountStore') return { ApiAccountStore: {} };
   if (name === './RustDeskNapi') return { RustDeskNapi: native };
   if (name === './OperationDiagnostic') {
     const module = { exports: {}, require: context.require };
