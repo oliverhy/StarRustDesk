@@ -4,7 +4,7 @@ import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.2.21'
 export const RELEASE_NOTES_BUILD: string = '1002021'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r2`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,7 +48,10 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
-          this.buildSection('1.2.21（1002021）· 键盘输入、投屏鼠标与屏幕方向', [
+          this.buildSection('1.2.21（1002021）· 地址簿同步、键盘与投屏', [
+            '修复 API 地址簿中的 IPv4、IPv6 及带端口设备被过滤的问题，支持导入与双向同步，并保留本地密码、分组及连接设置。',
+            '加强地址簿同步保护：遇到重复分页、数量不一致或不完整列表时停止同步，避免误删本地连接；仍可浏览非标准服务器返回的有效设备。',
+            '修复地址簿“全选”后选中状态可能反复切换的问题，避免重复触发勾选回调。',
             '新增独立键盘悬浮按钮，手机和平板不用展开“控”即可打开或收起软键盘，支持拖动调整位置。',
             '新增连续输入：打开软键盘后，点击远端其他输入框仍保持键盘开启，输入直接传给远端；用户主动收起后结束。保留全屏三指上滑，实体键盘和完整组合键不自动弹出软键盘。',
             '优化应用单独投屏的实体鼠标接收通路、电视与本屏坐标换算及跨通路去重，避免兼容触摸事件提前松键后补发重复点击；有线投屏效果仍需真机验证。',

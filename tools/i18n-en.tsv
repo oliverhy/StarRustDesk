@@ -1022,6 +1022,10 @@ H264 解码无画面时自动请求关键帧，并支持切换 VP9 恢复画面�
 完善鼠标和触摸模式，支持拖动、右键、滚动与双指缩放。	Improved mouse/touch dragging, right click, scrolling and pinch zoom.
 同步远端真实鼠标位置，并在远端已显示光标时自动隐藏本地指针。	Synchronizes remote cursors and avoids duplicate local overlays.
 动态范围	Dynamic range
+1.2.21（1002021）· 地址簿同步、键盘与投屏	1.2.21 (1002021) - Address-book sync, keyboard and projection
+修复 API 地址簿中的 IPv4、IPv6 及带端口设备被过滤的问题，支持导入与双向同步，并保留本地密码、分组及连接设置。	Fixed filtering of IPv4, IPv6 and IP-with-port devices in API address books. These devices now support import and two-way sync while preserving local passwords, groups and connection settings.
+加强地址簿同步保护：遇到重复分页、数量不一致或不完整列表时停止同步，避免误删本地连接；仍可浏览非标准服务器返回的有效设备。	Address-book sync now stops on repeated pages, inconsistent counts or incomplete lists to prevent accidental deletion of local connections. Valid devices from non-standard servers remain available for browsing.
+修复地址簿“全选”后选中状态可能反复切换的问题，避免重复触发勾选回调。	Fixed repeated selection changes after Select all in address books by avoiding duplicate checkbox callbacks.
 未标记	Unspecified
 系统适配	System managed
 输出不支持	Output unsupported
