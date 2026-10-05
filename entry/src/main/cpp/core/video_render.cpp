@@ -37,7 +37,6 @@ enum class ActiveDecoder {
 std::mutex g_decoderMutex;
 ActiveDecoder g_activeDecoder = ActiveDecoder::None;
 std::atomic<bool> g_releaseInProgress{false};
-std::atomic<bool> g_flushInProgress{false};
 std::once_flag g_decoderCapabilitiesOnce;
 VideoDecoderCapabilities g_decoderCapabilities{false, false, false, false, false};
 VideoDecodeMode g_h264SystemMode = VideoDecodeMode::Unknown;
@@ -216,6 +215,7 @@ static bool isAnnexB(const uint8_t* data, int length) {
 }
 
 void VideoRender::onFrameReceived(const uint8_t* data, int length, int width, int height, bool key, int64_t pts) {
+    if (data == nullptr || length <= 0 || width <= 0 || height <= 0) return;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         frameWidth_ = width;
@@ -225,12 +225,10 @@ void VideoRender::onFrameReceived(const uint8_t* data, int length, int width, in
         receivedByteCount_.fetch_add(length > 0 ? length : 0);
     }
 
-    if (XComponentRender::instance().isReady()) {
-        flushPendingFrames();
-        renderFrameNow(data, length, width, height, key, pts);
-    } else if (hasRustDeskFrameTag(data, length)) {
-        queuePendingFrame(data, length, width, height, key, pts);
-    }
+    // Return to the peer receive loop immediately. A slow video driver must
+    // never prevent heartbeats, input, close, or reconnection commands.
+    queuePendingFrame(data, length, width, height, key, pts);
+    flushPendingFramesAsync();
 
     if (frameCallback_) {
         frameCallback_(data, length, width, height);
@@ -294,6 +292,7 @@ bool VideoRender::getLatestFrame(uint8_t*& data, int& length, int& width, int& h
 }
 
 void VideoRender::setSurfaceId(const std::string& surfaceId) {
+    std::lock_guard<std::mutex> rendering(renderMutex_);
     bool unchanged = false;
     {
         std::lock_guard<std::mutex> lock(surfaceMutex_);
@@ -324,6 +323,7 @@ void VideoRender::prepareSurfaceRebind() {
 }
 
 void VideoRender::rebindSurface(const std::string& surfaceId) {
+    std::lock_guard<std::mutex> rendering(renderMutex_);
     DiagnosticLog::instance().append("I", "surface", "layout_rebind_start");
     {
         std::lock_guard<std::mutex> lock(g_decoderMutex);
@@ -352,6 +352,7 @@ std::string VideoRender::getSurfaceId() {
 
 void VideoRender::resetSession() {
     DiagnosticLog::instance().append("I", "video", "session_reset");
+    std::lock_guard<std::mutex> rendering(renderMutex_);
     // Called on the connection lifecycle worker. Drain old decoder callbacks
     // before clearing session counters, including an already queued release.
     while (g_releaseInProgress.load()) {
@@ -360,6 +361,7 @@ void VideoRender::resetSession() {
     releaseActiveDecoder();
     std::lock_guard<std::mutex> lock(mutex_);
     pendingFrames_.clear();
+    pendingFrameBytes_ = 0;
     frameWidth_ = 0;
     frameHeight_ = 0;
     decodedFrameWidth_ = 0;
@@ -376,7 +378,18 @@ void VideoRender::resetSession() {
 
 void VideoRender::restartDecoder() {
     DiagnosticLog::instance().append("I", "video-recovery", "decoder_restart_requested");
+    // NAPI already runs this on its lifecycle worker; finish before it requests
+    // a keyframe, otherwise the refreshed frame could reach the old decoder.
+    std::lock_guard<std::mutex> rendering(renderMutex_);
     releaseActiveDecoder();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // These frames reference the decoder that was just destroyed. The
+        // lifecycle worker requests a fresh keyframe after this method returns.
+        pendingFrames_.clear();
+        pendingFrameBytes_ = 0;
+    }
+    DiagnosticLog::instance().append("I", "video-recovery", "decoder_restart_completed");
 }
 
 void VideoRender::renderFrameNow(const uint8_t* data, int length, int width, int height, bool key, int64_t pts) {
@@ -467,6 +480,8 @@ void VideoRender::renderFrameNow(const uint8_t* data, int length, int width, int
 }
 
 void VideoRender::queuePendingFrame(const uint8_t* data, int length, int width, int height, bool key, int64_t pts) {
+    constexpr size_t MAX_PENDING_BYTES = 32 * 1024 * 1024;
+    if (static_cast<size_t>(length) > MAX_PENDING_BYTES) return;
     PendingFrame frame;
     frame.data.assign(data, data + length);
     frame.width = width;
@@ -475,37 +490,42 @@ void VideoRender::queuePendingFrame(const uint8_t* data, int length, int width, 
     frame.pts = pts;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    while (pendingFrames_.size() >= 120) {
+    while (!pendingFrames_.empty() && (pendingFrames_.size() >= 120 ||
+        pendingFrameBytes_ + frame.data.size() > MAX_PENDING_BYTES)) {
+        pendingFrameBytes_ -= pendingFrames_.front().data.size();
         pendingFrames_.pop_front();
     }
+    pendingFrameBytes_ += frame.data.size();
     pendingFrames_.push_back(std::move(frame));
 }
 
 void VideoRender::flushPendingFrames() {
-    if (!XComponentRender::instance().isReady()) {
-        return;
+    // A short batch yields to queued recovery jobs. Taking a frame and decoding
+    // it share the reset/rebind barrier, so old frames cannot cross sessions.
+    for (int count = 0; count < 8; ++count) {
+        std::lock_guard<std::mutex> rendering(renderMutex_);
+        PendingFrame frame;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pendingFrames_.empty() || !XComponentRender::instance().isReady()) {
+                flushScheduled_ = false;
+                return;
+            }
+            frame = std::move(pendingFrames_.front());
+            pendingFrames_.pop_front();
+            pendingFrameBytes_ -= frame.data.size();
+        }
+        renderFrameNow(frame.data.data(), static_cast<int>(frame.data.size()),
+            frame.width, frame.height, frame.key, frame.pts);
     }
-
-    std::deque<PendingFrame> frames;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        frames.swap(pendingFrames_);
-    }
-
-    for (const PendingFrame& frame : frames) {
-        renderFrameNow(frame.data.data(), static_cast<int>(frame.data.size()), frame.width, frame.height,
-                       frame.key, frame.pts);
-    }
+    frameWorker_.post([this]() { flushPendingFrames(); });
 }
 
 void VideoRender::flushPendingFramesAsync() {
-    bool expected = false;
-    if (!g_flushInProgress.compare_exchange_strong(expected, true)) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (flushScheduled_) return;
+        flushScheduled_ = true;
     }
-
-    std::thread([]() {
-        VideoRender::instance().flushPendingFrames();
-        g_flushInProgress.store(false);
-    }).detach();
+    frameWorker_.post([this]() { flushPendingFrames(); });
 }

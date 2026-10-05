@@ -20,6 +20,7 @@ import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog'
 import { RecordingDialog } from '../widget/RecordingDialog'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { CloudSyncResult, CloudSyncService } from '../service/CloudSyncService'
+import { PeerOnlinePreference } from '../service/PeerOnlinePreference'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
@@ -36,7 +37,7 @@ export struct SettingsPage {
   @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   @StorageLink('isDarkModeManual') isDarkModeManual: boolean = false
-  @StorageLink('peerOnlineQueryEnabled') peerOnlineQueryEnabled: boolean = false
+  @StorageLink('peerOnlineQueryEnabled') peerOnlineQueryEnabled: boolean = true
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
   @State showResolutionPicker: boolean = false
@@ -112,7 +113,7 @@ export struct SettingsPage {
     RustDeskNapi.setRemoteAudioEnabled(this.remoteAudioEnabled)
     this.diagnosticLogEnabled = RustDeskNapi.getOption('diagnostic-log-enabled') === '1'
     RustDeskNapi.setDiagnosticLogEnabled(this.diagnosticLogEnabled)
-    this.peerOnlineQueryEnabled = RustDeskNapi.getOption('peer-online-query-enabled') === '1'
+    this.peerOnlineQueryEnabled = AppStorage.get<boolean>('peerOnlineQueryEnabled') ?? true
     this.cloudSyncEnabled = CloudSyncService.isEnabled()
     this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
     this.updateCloudSyncStatus()
@@ -180,17 +181,53 @@ export struct SettingsPage {
   @Builder
   buildLanguageCard() {
     Column({ space: 12 }) {
-      Text(translate('Language', this.uiLanguage))
-        .fontSize(17)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.buildLanguageChoice('system', '跟随系统')
-        this.buildLanguageChoice('zh-Hans', '简体中文')
-        this.buildLanguageChoice('zh-Hant', '繁體中文')
-        this.buildLanguageChoice('en', 'English')
-      }.width('100%')
+      Row({ space: 12 }) {
+        Text(translate('Language', this.uiLanguage))
+          .fontSize(17)
+          .minFontSize(13)
+          .maxFontSize(17)
+          .maxLines(1)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .layoutWeight(1)
+        Button() {
+          Row({ space: 8 }) {
+            Text(this.languagePreferenceLabel())
+              .fontSize(14)
+              .minFontSize(11)
+              .maxFontSize(14)
+              .maxLines(2)
+              .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+              .layoutWeight(1)
+            Text('▾')
+              .fontSize(14)
+              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          }
+          .width('100%')
+        }
+        .id('language-selector')
+        .layoutWeight(1.4)
+        .constraintSize({ minHeight: this.buttonShapeOptionHeight() })
+        .padding({ left: 16, right: 12, top: 10, bottom: 10 })
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+        .border({ width: 1,
+          color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER })
+        .accessibilityText(translate('Language', this.uiLanguage) + ': ' + this.languagePreferenceLabel())
+        .bindMenu([
+          { value: this.languageMenuLabel('system', '跟随系统'),
+            action: () => { LanguageService.setPreference('system') } },
+          { value: this.languageMenuLabel('zh-Hans', '简体中文'),
+            action: () => { LanguageService.setPreference('zh-Hans') } },
+          { value: this.languageMenuLabel('zh-Hant', '繁體中文'),
+            action: () => { LanguageService.setPreference('zh-Hant') } },
+          { value: this.languageMenuLabel('en', 'English'),
+            action: () => { LanguageService.setPreference('en') } }
+        ], { placement: Placement.BottomRight, enableArrow: true })
+        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+      }
+      .width('100%')
       Text(translate('界面语言立即生效，不影响远控连接；系统权限提示在下次启动时应用。', this.uiLanguage))
         .fontSize(12)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
@@ -202,24 +239,17 @@ export struct SettingsPage {
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
   }
 
-  @Builder
-  buildLanguageChoice(value: string, label: string) {
-    Button(value === 'system' ? translate('跟随系统', this.uiLanguage) : label)
-      .id('language-' + value)
-      .fontSize(14)
-      .labelStyle({ maxLines: 2, minFontSize: 11, maxFontSize: 14,
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST })
-      .constraintSize({ minHeight: this.buttonShapeOptionHeight(), minWidth: 110 })
-      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-      .margin({ right: 8, bottom: 8 })
-      .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-      .backgroundColor(this.uiLanguagePreference === value ?
-        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) :
-        (this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE))
-      .border({ width: this.uiLanguagePreference === value ? 2 : 1,
-        color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER })
-      .onClick(() => { LanguageService.setPreference(value) })
-      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+  languagePreferenceLabel(): string {
+    if (this.uiLanguagePreference === 'zh-Hans') return '简体中文'
+    if (this.uiLanguagePreference === 'zh-Hant') return '繁體中文'
+    if (this.uiLanguagePreference === 'en') return 'English'
+    return translate('跟随系统', this.uiLanguage)
+  }
+
+  languageMenuLabel(value: string, label: string): string {
+    // Keep language self-names recognizable even when the current UI language changes.
+    const text: string = value === 'system' ? translate('跟随系统', this.uiLanguage) : label
+    return (this.uiLanguagePreference === value ? '✓ ' : '') + text
   }
 
   @Builder
@@ -1160,7 +1190,7 @@ export struct SettingsPage {
             .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
             .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
             .width('100%')
-          Text(translate('默认关闭；开启后定期查询已保存设备，手动连接不受影响', this.uiLanguage))
+          Text(translate('默认开启；定期查询已保存设备，可手动关闭，手动连接不受影响', this.uiLanguage))
             .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .width('100%')
@@ -1174,8 +1204,11 @@ export struct SettingsPage {
             (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
             (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
           .onChange((isOn: boolean) => {
-            RustDeskNapi.setOption('peer-online-query-enabled', isOn ? '1' : '0')
-            this.peerOnlineQueryEnabled = isOn
+            if (PeerOnlinePreference.setEnabled(isOn)) {
+              this.peerOnlineQueryEnabled = isOn
+            } else {
+              promptAction.showToast({ message: translate('保存设置失败，请重试', this.uiLanguage) })
+            }
           })
       }
       .width('100%')
@@ -1191,50 +1224,66 @@ export struct SettingsPage {
   @Builder
   buildButtonShapeCard() {
     Column({ space: 12 }) {
-      Text(translate('按钮样式', this.uiLanguage))
-        .fontSize(16)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
+      Row({ space: 12 }) {
+        Text(translate('按钮样式', this.uiLanguage))
+          .fontSize(16)
+          .minFontSize(13)
+          .maxFontSize(16)
+          .maxLines(1)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+          .layoutWeight(1)
+        Button() {
+          Row({ space: 8 }) {
+            Text(this.buttonShapeLabel())
+              .fontSize(14)
+              .minFontSize(11)
+              .maxFontSize(14)
+              .maxLines(2)
+              .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+              .layoutWeight(1)
+            Text('▾')
+              .fontSize(14)
+              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          }
+          .width('100%')
+        }
+        .id('button-shape-selector')
+        .layoutWeight(1.4)
+        .constraintSize({ minHeight: this.buttonShapeOptionHeight() })
+        .padding({ left: 16, right: 12, top: 10, bottom: 10 })
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+        .border({ width: 1,
+          color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER })
+        .accessibilityText(translate('按钮样式', this.uiLanguage) + ': ' + this.buttonShapeLabel())
+        .bindMenu([
+          { value: this.buttonShapeMenuLabel(true), action: () => { this.setButtonShape(true) } },
+          { value: this.buttonShapeMenuLabel(false), action: () => { this.setButtonShape(false) } }
+        ], { placement: Placement.BottomRight, enableArrow: true })
+        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+      }
+      .width('100%')
       Text(translate('应用到连接、设置、远控功能栏和弹窗，立即生效并记住选择', this.uiLanguage))
         .fontSize(12)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
-      Row({ space: 12 }) {
-        Button(translate(this.roundedRectButtons ? '✓ 圆角长方形' : '圆角长方形', this.uiLanguage), { type: ButtonType.Normal })
-          .id('buttonShapeRectangle')
-          .layoutWeight(1)
-          .height(this.buttonShapeOptionHeight())
-          .borderRadius(12)
-          .fontSize(14)
-          .labelStyle({ maxLines: 2, minFontSize: 11, maxFontSize: 14,
-            heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
-          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          .backgroundColor(this.roundedRectButtons ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) : Color.Transparent)
-          .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-          .onClick(() => { this.setButtonShape(true) })
-          .borderRadius(12)
-        Button(translate(this.roundedRectButtons ? '经典圆润' : '✓ 经典圆润', this.uiLanguage), { type: ButtonType.Capsule })
-          .id('buttonShapeClassic')
-          .layoutWeight(1)
-          .height(this.buttonShapeOptionHeight())
-          .fontSize(14)
-          .labelStyle({ maxLines: 2, minFontSize: 11, maxFontSize: 14,
-            heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
-          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          .backgroundColor(!this.roundedRectButtons ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) : Color.Transparent)
-          .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-          .onClick(() => { this.setButtonShape(false) })
-      }
-      .width('100%')
     }
     .padding(16)
     .width('100%')
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+  }
+
+  buttonShapeLabel(): string {
+    return translate(this.roundedRectButtons ? '圆角长方形' : '经典圆润', this.uiLanguage)
+  }
+
+  buttonShapeMenuLabel(rectangular: boolean): string {
+    return (this.roundedRectButtons === rectangular ? '✓ ' : '') +
+      translate(rectangular ? '圆角长方形' : '经典圆润', this.uiLanguage)
   }
 
   setButtonShape(rectangular: boolean): void {

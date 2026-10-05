@@ -6,6 +6,7 @@ mod refusal_diagnostics;
 mod performance;
 mod session_recording;
 mod input_compat;
+mod session_health;
 use performance::PerformanceConfig;
 #[cfg(test)]
 mod keyboard_tests;
@@ -135,6 +136,7 @@ static CONNECTION_TARGET_BITRATE_KB: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static REMOTE_AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 static BACKGROUND_VIDEO_MODE: AtomicBool = AtomicBool::new(false);
+static APP_LIFECYCLE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static ALLOW_INSECURE_SESSION: AtomicBool = AtomicBool::new(false);
 // Conservative defaults keep older native shells safe until they report the
 // decoders that can actually be created on the current device.
@@ -329,10 +331,10 @@ fn reset_display_state() {
     if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
         *guard = 1;
     }
-    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
+    if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
         *guard = 0;
     }
-    if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
+    if let Ok(mut guard) = DISPLAY_INFOS.lock() {
         guard.clear();
     }
     PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(false, Ordering::SeqCst);
@@ -1150,6 +1152,7 @@ pub extern "C" fn rust_set_audio_enabled(enabled: i32) -> i32 {
 pub extern "C" fn rust_set_background_video_mode(enabled: i32) -> i32 {
     let enabled = enabled != 0;
     BACKGROUND_VIDEO_MODE.store(enabled, Ordering::SeqCst);
+    APP_LIFECYCLE_EPOCH.fetch_add(1, Ordering::SeqCst);
     if !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
         return 0;
     }
@@ -2577,7 +2580,7 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     if display < 0 {
         return -1;
     }
-    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
+    if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
         *guard = display;
     }
     let mut misc = Misc::new();
@@ -4428,6 +4431,10 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
             let mut misc_messages = 0_u64;
             let mut last_message_kind = "none";
             let mut last_message_at = receive_started_at;
+            let mut health = session_health::PeerHealth::new(receive_started_at,
+                APP_LIFECYCLE_EPOCH.load(Ordering::SeqCst));
+            let mut health_timer = tokio::time::interval(Duration::from_secs(1));
+            health_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             emit_event(&format!("receive loop started session_id={session_id}"));
             loop {
                 if SESSION_ID.load(Ordering::SeqCst) != session_id {
@@ -4447,6 +4454,18 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                     }
                 }
                 let keep_running = tokio::select! {
+                    _ = health_timer.tick() => {
+                        if health.timed_out(Instant::now(), APP_LIFECYCLE_EPOCH.load(Ordering::SeqCst),
+                            BACKGROUND_VIDEO_MODE.load(Ordering::SeqCst),
+                            video_messages > 0 && test_delay_messages > 0) {
+                            emit_event(&format!("peer heartbeat timeout session_id={} idle_ms={} received={} video={} test_delay={}",
+                                session_id, last_message_at.elapsed().as_millis(), received_messages,
+                                video_messages, test_delay_messages));
+                            mark_connection_lost(session_id, "peer heartbeat timeout");
+                            break;
+                        }
+                        true
+                    }
                     command = rx.recv() => {
                         let Some(command) = command else {
                             emit_event("peer command channel closed");
@@ -4551,6 +4570,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                                 }
                                 last_message_kind = message_kind;
                                 last_message_at = Instant::now();
+                                health.received(last_message_at);
                                 true
                             }
                             Some(Err(e)) => {
@@ -4726,10 +4746,10 @@ async fn handle_peer_bytes(
                     if let Ok(mut guard) = DISPLAY_COUNT.try_lock() {
                         *guard = display_count;
                     }
-                    if let Ok(mut guard) = CURRENT_DISPLAY.try_lock() {
+                    if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
                         *guard = info.current_display;
                     }
-                    if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
+                    if let Ok(mut guard) = DISPLAY_INFOS.lock() {
                         *guard = displays;
                     }
                     emit_event(&format!(
@@ -5173,9 +5193,9 @@ fn handle_misc_message(misc_msg: Misc) -> &'static str {
             // from an old subscription can still be queued ahead of the new
             // capture set and must not switch the UI back.
             let selected_display = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
-            if let Ok(mut guard) = DISPLAY_INFOS.try_lock() {
+            if let Ok(mut guard) = DISPLAY_INFOS.lock() {
                 if guard.len() <= index {
-                    guard.resize(index + 1, (0, 0, 1920, 1080, false));
+                    guard.resize(index + 1, (0, 0, 0, 0, false));
                 }
                 let previous = guard[index];
                 guard[index] = (
@@ -5759,7 +5779,10 @@ fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8) -> usize {
     let Some(cb) = callback else {
         return 0;
     };
-    let (_, _, width, height) = current_display_rect();
+    let Some((_, _, width, height)) = current_display_rect() else {
+        // Wait for real display metadata, never rebuild using invented dimensions.
+        return 0;
+    };
     let mut forwarded = 0;
     for frame in frames.frames {
         if frame.data.is_empty() {
@@ -5801,22 +5824,12 @@ fn queue_video_received() -> i32 {
     queue_peer_message(msg)
 }
 
-fn current_display_rect() -> (i32, i32, i32, i32) {
-    let current = CURRENT_DISPLAY.try_lock().map(|guard| *guard).unwrap_or(0);
-    let index = current.max(0) as usize;
-    DISPLAY_INFOS
-        .try_lock()
-        .ok()
-        .and_then(|guard| {
-            guard
-                .get(index)
-                .map(|display| (display.0, display.1, display.2, display.3))
-        })
-        .unwrap_or((0, 0, 1920, 1080))
+fn current_display_rect() -> Option<(i32, i32, i32, i32)> {
+    session_health::display_rect(&CURRENT_DISPLAY, &DISPLAY_INFOS)
 }
 
 fn current_display_origin() -> (i32, i32) {
-    let (x, y, _, _) = current_display_rect();
+    let (x, y, _, _) = current_display_rect().unwrap_or((0, 0, 0, 0));
     (x, y)
 }
 

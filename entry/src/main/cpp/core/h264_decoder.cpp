@@ -29,6 +29,9 @@ void H264Decoder::setSurface(OHNativeWindow* window, int width, int height) {
     if (window_ == window && width_ == width && height_ == height && (started_ || createFailed_)) {
         return;
     }
+    DiagnosticLog::instance().append("I", "h264",
+        "surface_reconfigure from=" + std::to_string(width_) + "x" + std::to_string(height_) +
+        " to=" + std::to_string(width) + "x" + std::to_string(height));
     stopLocked();
     window_ = window;
     width_ = width;
@@ -79,6 +82,7 @@ void H264Decoder::release() {
     OH_AVCodec* codec = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (callbackContext_) callbackContext_->active->store(false);
         codec = codec_;
         codec_ = nullptr;
         started_ = false;
@@ -125,7 +129,8 @@ bool H264Decoder::startLocked(OHNativeWindow* window, int width, int height) {
     callback.onStreamChanged = H264Decoder::onStreamChanged;
     callback.onNeedInputBuffer = H264Decoder::onNeedInputBuffer;
     callback.onNewOutputBuffer = H264Decoder::onNewOutputBuffer;
-    OH_AVErrCode ret = OH_VideoDecoder_RegisterCallback(codec_, callback, this);
+    callbackContext_ = std::make_unique<VideoCallbackContext<H264Decoder>>(this);
+    OH_AVErrCode ret = OH_VideoDecoder_RegisterCallback(codec_, callback, callbackContext_.get());
     if (ret != AV_ERR_OK) {
         OH_LOG_ERROR(LOG_APP, "Register callback failed ret=%{public}d", ret);
         DiagnosticLog::instance().append("E", "h264",
@@ -200,10 +205,15 @@ bool H264Decoder::startLocked(OHNativeWindow* window, int width, int height) {
 }
 
 void H264Decoder::stopLocked() {
+    if (callbackContext_) callbackContext_->active->store(false);
     if (codec_ != nullptr) {
+        // Native callbacks only post jobs; they never wait for this mutex.
+        // Invalidate queued jobs before Stop/Destroy or native handle reuse.
+        DiagnosticLog::instance().append("I", "h264", "decoder_reconfigure_stop");
         OH_VideoDecoder_Stop(codec_);
         OH_VideoDecoder_Destroy(codec_);
         codec_ = nullptr;
+        DiagnosticLog::instance().append("I", "h264", "decoder_reconfigure_stopped");
     }
     started_ = false;
     decodeMode_ = VideoDecodeMode::Unknown;
@@ -350,12 +360,13 @@ void H264Decoder::onError(OH_AVCodec* codec, int32_t errorCode, void* userData) 
 }
 
 void H264Decoder::onStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void* userData) {
-    auto* decoder = static_cast<H264Decoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<H264Decoder>*>(userData);
+    auto* decoder = context ? context->owner : nullptr;
     if (!decoder) return;
     decoder->colorFormatDirty_.store(true);
     std::unique_lock<std::mutex> lock(decoder->mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return;
-    if (!decoder->started_ || decoder->codec_ != codec) return;
+    if (!context->active->load() || !decoder->started_ || decoder->codec_ != codec) return;
     decoder->color_ = readVideoColorFormat(format);
     decoder->colorFormatDirty_.store(false);
     OH_LOG_INFO(LOG_APP, "Decoder stream changed");
@@ -363,50 +374,58 @@ void H264Decoder::onStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void* 
 }
 
 void H264Decoder::onNeedInputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData) {
-    H264Decoder* decoder = static_cast<H264Decoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<H264Decoder>*>(userData);
+    H264Decoder* decoder = context ? context->owner : nullptr;
     if (decoder == nullptr || buffer == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(decoder->mutex_);
-    if (!decoder->started_ || decoder->codec_ != codec) {
-        return;
-    }
-    InputSlot slot;
-    slot.index = index;
-    slot.buffer = buffer;
-    decoder->inputSlots_.push_back(slot);
-    decoder->feedLocked();
+    const auto active = context->active;
+    decoder->callbackQueue_.post([decoder, active, codec, index, buffer]() {
+        std::lock_guard<std::mutex> lock(decoder->mutex_);
+        if (!active->load() || !decoder->started_ || decoder->codec_ != codec) {
+            return;
+        }
+        InputSlot slot;
+        slot.index = index;
+        slot.buffer = buffer;
+        decoder->inputSlots_.push_back(slot);
+        decoder->feedLocked();
+    });
 }
 
 void H264Decoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData) {
-    H264Decoder* decoder = static_cast<H264Decoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<H264Decoder>*>(userData);
+    H264Decoder* decoder = context ? context->owner : nullptr;
     if (decoder == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(decoder->mutex_);
-    if (!decoder->started_ || decoder->codec_ != codec) {
-        return;
-    }
-    if (decoder->colorFormatDirty_.exchange(false)) {
-        OH_AVFormat* format = OH_VideoDecoder_GetOutputDescription(codec);
-        decoder->color_ = readVideoColorFormat(format);
-        if (format) OH_AVFormat_Destroy(format);
-    }
-    auto color = decoder->color_;
-    enrichVideoColorFromBuffer(buffer, color);
-    color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
-    VideoRender::instance().updateColorInfo(color);
-    OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
-    VideoRender::instance().markDecodedFrame(1, decoder->width_, decoder->height_,
-        static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
-    if (ret != AV_ERR_OK) {
-        OH_LOG_WARN(LOG_APP, "Render H264 output failed index=%{public}u ret=%{public}d", index, ret);
-        DiagnosticLog::instance().append("E", "h264",
-            "render_output_failed result=" + std::to_string(ret));
-    } else {
-        decoder->outputFrames_ += 1;
-        if (decoder->outputFrames_ == 1) {
-            DiagnosticLog::instance().append("I", "h264", "first_output_rendered");
+    const auto active = context->active;
+    decoder->callbackQueue_.post([decoder, active, codec, index, buffer]() {
+        std::lock_guard<std::mutex> lock(decoder->mutex_);
+        if (!active->load() || !decoder->started_ || decoder->codec_ != codec) {
+            return;
         }
-    }
+        if (decoder->colorFormatDirty_.exchange(false)) {
+            OH_AVFormat* format = OH_VideoDecoder_GetOutputDescription(codec);
+            decoder->color_ = readVideoColorFormat(format);
+            if (format) OH_AVFormat_Destroy(format);
+        }
+        auto color = decoder->color_;
+        enrichVideoColorFromBuffer(buffer, color);
+        color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
+        VideoRender::instance().updateColorInfo(color);
+        OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
+        VideoRender::instance().markDecodedFrame(1, decoder->width_, decoder->height_,
+            static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
+        if (ret != AV_ERR_OK) {
+            OH_LOG_WARN(LOG_APP, "Render H264 output failed index=%{public}u ret=%{public}d", index, ret);
+            DiagnosticLog::instance().append("E", "h264",
+                "render_output_failed result=" + std::to_string(ret));
+        } else {
+            decoder->outputFrames_ += 1;
+            if (decoder->outputFrames_ == 1) {
+                DiagnosticLog::instance().append("I", "h264", "first_output_rendered");
+            }
+        }
+    });
 }

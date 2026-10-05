@@ -51,7 +51,7 @@ expect(remotePage, /getKeyboardToolsBaseX\(\)[\s\S]*isHandheldLandscape\(\)\) re
   'the keyboard toolbar must default to the top-left in handheld landscape')
 expect(remotePage, /getRemoteToolbarBaseX\(\)[\s\S]*width - this\.getRemoteToolbarCurrentWidth\(\) - 8/,
   'the control toolbar must default to the top-right in handheld landscape')
-expect(remotePage, /buildControlToolbarItems\(true\)[\s\S]*ScrollDirection\.Vertical/,
+expect(remotePage, /buildUnifiedControlItems\(true\)[\s\S]*ScrollDirection\.Vertical/,
   'the landscape control toolbar must expand downward')
 expect(remotePage, /buildKeyboardToolbarItems\(true\)[\s\S]*ScrollDirection\.Vertical/,
   'the landscape keyboard toolbar must expand downward')
@@ -59,7 +59,7 @@ expect(remotePage, /LongPressGesture\(\{ repeat: false, duration: 550 \}\)[\s\S]
   'toolbar buttons must expose long-press ordering')
 expect(remotePage, /getOption\('show-virtual-mouse'\)[\s\S]*setOption\('show-virtual-mouse'/,
   'the RustDesk-style virtual mouse preference must be toggleable')
-expect(remotePage, /control-\$\{item\}[\s\S]*showVirtualMouse \? 1 : 0/,
+expect(remotePage, /menu-\$\{item\}[\s\S]*showVirtualMouse \? 1 : 0/,
   'the control toolbar key must refresh when virtual mouse visibility changes')
 expect(remotePage, /this\.showVirtualMouse[\s\S]*this\.isHandheldDevice\(\)[\s\S]*this\.buildVirtualMouseOverlay\(\)/,
   'the RustDesk-style virtual mouse must render only on handheld devices')

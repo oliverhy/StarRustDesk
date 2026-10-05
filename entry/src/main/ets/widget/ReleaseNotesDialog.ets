@@ -2,9 +2,9 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.21'
-export const RELEASE_NOTES_BUILD: string = '1002021'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r2`
+export const RELEASE_NOTES_VERSION: string = '1.2.22'
+export const RELEASE_NOTES_BUILD: string = '1002022'
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,6 +48,16 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.22（1002022）· 远控窗口与设置优化', [
+            '优化 PC 切换本机应用后的画面和输入恢复：异步处理视频解码回调和收帧任务，减少重入阻塞；通过心跳识别失效连接，不把静止画面误判为断线。',
+            '新增系统画中画入口，复用远端视频画面，支持小窗观看与恢复主窗口；小窗不包含远控操作层，控制时请返回主窗口，设备和系统需支持画中画。',
+            '整合远控操作菜单为屏幕、输入、键盘、画面、更多和断开，统一淡蓝色选中状态、圆角样式和展开动画，保留手机、平板与 PC 的布局差异。',
+            'PC 新增适应窗口、原始比例和 25%～300% 自定义缩放，以及按远端比例调整窗口；沉浸与全屏工具栏可固定或自动收起，保留退出入口。',
+            '优化 PC 窗口失焦后的键鼠释放、恢复焦点与系统指针处理；完善真实显示器尺寸读取和视频 Surface 重绑定，避免使用虚构分辨率。',
+            '新安装或首次升级至此版本默认开启已保存设备在线状态显示；之后手动关闭会被记住，不会在每次启动或后续升级时强制开启。',
+            '已保存连接的“更多”菜单新增重命名，独立修改名称，不改变连接 ID、密码或分组，并沿用现有云同步机制。',
+            '设置中的语言和按钮样式改为紧凑下拉选择，平时只显示当前选项，菜单中标记已选项；保留立即生效、记忆选择及大字体适配。'
+          ])
           this.buildSection('1.2.21（1002021）· 地址簿同步、键盘与投屏', [
             '修复 API 地址簿中的 IPv4、IPv6 及带端口设备被过滤的问题，支持导入与双向同步，并保留本地密码、分组及连接设置。',
             '加强地址簿同步保护：遇到重复分页、数量不一致或不完整列表时停止同步，避免误删本地连接；仍可浏览非标准服务器返回的有效设备。',

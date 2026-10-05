@@ -1,7 +1,8 @@
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { RemoteDisplayPolicy } from './RemoteDisplayPolicy';
 import { RustDeskNapi } from './RustDeskNapi';
+import { desktopWindowFrame } from '../model/RemoteDesktopView';
 
 // One queue for the main window, including page cleanup. A late enter request
 // must complete before cleanup restores the bars or a new session enters.
@@ -11,6 +12,8 @@ export class RemoteFullscreenPolicy {
   private static enabled: boolean = false;
   private static pcRestoreStatus: window.WindowStatusType | undefined;
   private static pcImmersiveEntered: boolean = false;
+  private static pcBorderless: boolean = false;
+  private static pcDecorBefore: boolean | undefined;
 
   static apply(enabled: boolean, rollbackOnFailure: boolean = true): Promise<void> {
     const main = RemoteDisplayPolicy.getMainWindow();
@@ -24,6 +27,8 @@ export class RemoteFullscreenPolicy {
         RemoteFullscreenPolicy.enabled = false;
         RemoteFullscreenPolicy.pcRestoreStatus = undefined;
         RemoteFullscreenPolicy.pcImmersiveEntered = false;
+        RemoteFullscreenPolicy.pcBorderless = false;
+        RemoteFullscreenPolicy.pcDecorBefore = undefined;
       }
       const previous = RemoteFullscreenPolicy.enabled;
       try {
@@ -50,6 +55,89 @@ export class RemoteFullscreenPolicy {
     });
     // Keep the queue usable after a rejection; callers still receive the error.
     RemoteFullscreenPolicy.pending = operation.catch(() => {});
+    return operation;
+  }
+
+  // Shares the fullscreen queue: a late title-bar change cannot run after page
+  // cleanup, and leaving fullscreen respects the current borderless preference.
+  static setBorderless(enabled: boolean): Promise<void> {
+    const main = RemoteDisplayPolicy.getMainWindow();
+    const operation = RemoteFullscreenPolicy.pending.then(() => {
+      if (!RemoteFullscreenPolicy.isPc() || !main || main !== RemoteDisplayPolicy.getMainWindow()) {
+        throw new Error('PC main window unavailable');
+      }
+      if (RemoteFullscreenPolicy.owner !== main) {
+        RemoteFullscreenPolicy.owner = main;
+        RemoteFullscreenPolicy.enabled = false;
+        RemoteFullscreenPolicy.pcRestoreStatus = undefined;
+        RemoteFullscreenPolicy.pcImmersiveEntered = false;
+        RemoteFullscreenPolicy.pcBorderless = false;
+        RemoteFullscreenPolicy.pcDecorBefore = undefined;
+      }
+      if (enabled === RemoteFullscreenPolicy.pcBorderless) return;
+      if (enabled) {
+        const previous = main.getWindowDecorVisible();
+        main.setWindowDecorVisible(false);
+        RemoteFullscreenPolicy.pcDecorBefore = previous;
+        RemoteFullscreenPolicy.pcBorderless = true;
+      } else {
+        main.setWindowDecorVisible(RemoteFullscreenPolicy.pcDecorBefore ?? true);
+        RemoteFullscreenPolicy.pcBorderless = false;
+        RemoteFullscreenPolicy.pcDecorBefore = undefined;
+      }
+      RustDeskNapi.appendDiagnosticLog('remote-window', `borderless_applied enabled=${enabled}`);
+    });
+    RemoteFullscreenPolicy.pending = operation.catch(() => {});
+    return operation;
+  }
+
+  // Serialize manual resize with fullscreen/title-bar requests and cleanup.
+  // A request captured by an old page may never resize a later session.
+  static fitRemoteWindow(remoteWidth: number, remoteHeight: number, viewportWidth: number,
+    viewportHeight: number, isCurrent: () => boolean): Promise<boolean> {
+    const main = RemoteDisplayPolicy.getMainWindow();
+    const operation = RemoteFullscreenPolicy.pending.then(async (): Promise<boolean> => {
+      if (!isCurrent()) return false;
+      if (!RemoteFullscreenPolicy.isPc() || !main || main !== RemoteDisplayPolicy.getMainWindow()) {
+        throw new Error('PC main window unavailable');
+      }
+      if (main.getWindowStatus() !== window.WindowStatusType.FLOATING) {
+        throw new Error('Floating window required');
+      }
+      const before = main.getWindowProperties();
+      const screen = display.getDisplayByIdSync(before.displayId);
+      const available = await screen.getAvailableArea();
+      if (!isCurrent() || main !== RemoteDisplayPolicy.getMainWindow()) return false;
+      if (main.getWindowStatus() !== window.WindowStatusType.FLOATING) throw new Error('Window state changed');
+      const latest = main.getWindowProperties();
+      if (latest.displayId !== before.displayId || latest.windowRect.width !== before.windowRect.width ||
+        latest.windowRect.height !== before.windowRect.height) throw new Error('Window geometry changed');
+      const density: number = screen.densityPixels > 0 ? screen.densityPixels : 1;
+      const frame = desktopWindowFrame(remoteWidth, remoteHeight,
+        before.windowRect.width - viewportWidth * density,
+        before.windowRect.height - viewportHeight * density,
+        { left: before.windowRect.left, top: before.windowRect.top,
+          width: before.windowRect.width, height: before.windowRect.height },
+        { left: available.left, top: available.top, width: available.width, height: available.height });
+      if (!frame) throw new Error('Window geometry unavailable');
+      await main.resize(frame.width, frame.height);
+      if (!isCurrent() || main !== RemoteDisplayPolicy.getMainWindow()) return false;
+      try {
+        const resized = main.getWindowProperties().windowRect;
+        if (Math.abs(resized.width - frame.width) > 2 || Math.abs(resized.height - frame.height) > 2) {
+          throw new Error('Window size constrained by system');
+        }
+        await main.moveWindowTo(frame.left, frame.top);
+      } catch (error) {
+        // A partial resize is not a successful adjustment. Restore the size.
+        try { await main.resize(before.windowRect.width, before.windowRect.height); } catch (_e) {}
+        throw error as Error;
+      }
+      RustDeskNapi.appendDiagnosticLog('remote-window',
+        `fit_applied remote=${remoteWidth}x${remoteHeight} width=${frame.width} height=${frame.height} density=${density}`);
+      return true;
+    });
+    RemoteFullscreenPolicy.pending = operation.then(() => {}).catch(() => {});
     return operation;
   }
 
@@ -86,6 +174,7 @@ export class RemoteFullscreenPolicy {
         RemoteFullscreenPolicy.pcImmersiveEntered = false;
         RustDeskNapi.appendDiagnosticLog('fullscreen', `pc_window_restored previous_status=${previousStatus}`);
       }
+      if (!enabled && RemoteFullscreenPolicy.pcBorderless) main.setWindowDecorVisible(false);
       return;
     }
     let failure: BusinessError | undefined;

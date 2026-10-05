@@ -22,7 +22,7 @@ assert.match(remote, /getRemoteToolbarHeight\(\)[\s\S]*?return this\.getRemoteTo
 assert.match(remote, /getKeyboardToolsHeight\(\)[\s\S]*?const rows: number = 1 \+ \(this\.showKeyboardFunctionKeys \? 1 : 0\) \+ \(this\.showKeyboardMoreKeys \? 1 : 0\)/)
 assert.match(connection, /Flex\(\{ direction: FlexDirection\.Row, wrap: FlexWrap\.Wrap, alignItems: ItemAlign\.Center \}\)[\s\S]*?savedConnectionSearchExpanded/)
 assert.match(home, /\.height\(this\.tabItemHeight\(\) \+ 14\)/)
-assert.match(settings, /\.height\(this\.buttonShapeOptionHeight\(\)\)/)
+assert.match(settings, /\.constraintSize\(\{ minHeight: this\.buttonShapeOptionHeight\(\) \}\)/)
 for (const page of [remote, home, connection, settings]) {
   assert.doesNotMatch(page, /\.maxFontScale\(1\.3\)/,
     'Adaptive controls must not uniformly cap the system font scale')

@@ -28,7 +28,11 @@ import { RecordingDialog } from '../widget/RecordingDialog';
 import { sortRemoteFiles } from '../utils/RemoteFileSort';
 import { RemoteDisplayPolicy, RemoteOrientationMode } from '../service/RemoteDisplayPolicy';
 import { RemoteFullscreenPolicy } from '../service/RemoteFullscreenPolicy';
+import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent } from '../model/RemoteDesktopView';
+import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
 import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
+import { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, remoteControlCategoryLabel,
+  clampControlMenuAxis } from '../model/RemoteControlMenu';
 
 class ViewportFrameCallback extends FrameCallback {
   private apply: () => void;
@@ -109,7 +113,7 @@ const KEYBOARD_CAPTURE_SENTINEL: string =
   '1111111111111111111111111111111111111111111111111111111111111111';
 const CONTROL_TOOLBAR_DEFAULT_ORDER: string[] = [
   'displays', 'input', 'virtualMouse', 'edgePan', 'keyboard', 'mobileActions', 'gestureHelp',
-  'pan', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'orientation', 'disconnect'
+  'pan', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
 ];
 const KEYBOARD_TOOLBAR_DEFAULT_ORDER: string[] = [
   'ctrl', 'alt', 'shift', 'meta', 'function', 'more', 'release'
@@ -170,6 +174,17 @@ struct RemotePage {
   @State communicationUnread: number = 0;
   @State communicationCallActive: boolean = false;
   @State zoomScale: number = 1.0;
+  @State desktopViewMode: DesktopViewMode = 'adaptive';
+  @State desktopCustomPercent: number = 100;
+  @State desktopDensity: number = 1;
+  @State desktopWindowAdjusting: boolean = false;
+  private desktopWindowRequestId: number = 0;
+  private desktopWindow: window.Window | undefined;
+  private desktopWindowListener: ((event: window.WindowEventType) => void) | undefined;
+  private desktopWindowActive: boolean = true;
+  private desktopReturnInputFocus: boolean = false;
+  @State pcToolbarPinned: boolean = false;
+  private pcToolbarCollapseTimer: number = -1;
   @State offsetX: number = 0;
   @State offsetY: number = 0;
   @State toolbarOpacity: number = 1.0;
@@ -208,6 +223,10 @@ struct RemotePage {
   @State remoteToolbarCollapsed: boolean = false;
   @State remoteToolbarOffsetX: number = 0;
   @State remoteToolbarOffsetY: number = 0;
+  @State controlMenu: string = '';
+  @State immersiveWindow: boolean = false;
+  @State immersiveWindowTransitioning: boolean = false;
+  private immersiveWindowRequestId: number = 0;
   @State showVirtualMouse: boolean = false;
   @State virtualMouseX: number = 0;
   @State virtualMouseY: number = 0;
@@ -316,6 +335,10 @@ struct RemotePage {
   @State isFullScreen: boolean = false;
   @State fullscreenTransitioning: boolean = false;
   private fullscreenRequestId: number = 0;
+  @State pipPhase: RemotePiPPhase = 'idle';
+  @State pipSurfaceOwned: boolean = false;
+  private pictureInPicture: RemotePictureInPicture | undefined;
+  private pipDisconnectPending: boolean = false;
   @State isPanMode: boolean = false;
   @State edgeAutoPanEnabled: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
@@ -532,6 +555,16 @@ struct RemotePage {
 
   aboutToAppear(): void {
     this.remotePageVisible = true;
+    this.pictureInPicture = new RemotePictureInPicture((phase: RemotePiPPhase) => {
+      this.pipPhase = phase;
+      this.pipSurfaceOwned = phase !== 'idle';
+    }, () => { this.restoreSurfaceAfterPictureInPicture(); }, (stage: string, _code: number) => {
+      if (this.remotePageVisible && !this.isLeavingAfterDisconnect) {
+        this.showFileToast(stage === 'unsupported' ? '当前设备不支持系统画中画' :
+          stage === 'disabled' ? '请在系统设置中允许 StarRustDesk 使用画中画' :
+          stage === 'stop' ? '画中画关闭失败，请重试或使用小窗关闭按钮' : '画中画启动失败，请稍后重试');
+      }
+    });
     this.fileOnly = ConnectionService.isFileOnly();
     RemoteDisplayPolicy.setActive(!this.fileOnly);
     RustDeskNapi.appendDiagnosticLog('remote-page', 'about_to_appear')
@@ -557,6 +590,7 @@ struct RemotePage {
     this.startPolling();
     if (this.fileOnly) { this.showGestureHelp = false; return; }
     this.startRemoteKeyboardTracking();
+    this.startDesktopWindowTracking();
     this.startRemoteCursorPolling();
     this.startNativeMousePolling();
     CommunicationService.start(() => {
@@ -567,6 +601,8 @@ struct RemotePage {
 
   aboutToDisappear(): void {
     this.remotePageVisible = false;
+    this.stopDesktopWindowTracking();
+    this.pictureInPicture?.dispose();
     this.remoteKeyboardFocusGeneration++;
     this.stopRemoteKeyboardTracking();
     this.showKeyboardPanel = false;
@@ -610,10 +646,15 @@ struct RemotePage {
     this.pointerOverRemoteViewport = false;
     this.setSystemPointerHidden(false);
     this.restoreFullscreenOnLeave();
+    this.restoreImmersiveWindowOnLeave();
   }
 
   onBackPress(): boolean {
     if (this.fullscreenTransitioning) return true;
+    if (this.controlMenu.length > 0) {
+      this.setControlMenu('');
+      return true;
+    }
     if (this.showCommunicationPanel) {
       this.closeCommunication();
       return true;
@@ -702,6 +743,9 @@ struct RemotePage {
         }
       }
       this.connectionStatus = status as ConnectionStatus;
+      if (status !== ConnectionStatus.CONNECTED && this.pipSurfaceOwned && this.pipPhase !== 'stopping') {
+        this.pictureInPicture?.stop();
+      }
       ConnectionService.observeSession(status);
       if (status === ConnectionStatus.CONNECTED && !this.inputCompatibilityLoaded && !this.fileOnly) {
         this.loadInputCompatibility();
@@ -847,6 +891,7 @@ struct RemotePage {
           let previousHeight: number = this.remoteHeight;
           this.remoteWidth = frame.width;
           this.remoteHeight = frame.height;
+          this.pictureInPicture?.updateContentSize(frame.width, frame.height);
           this.resetViewportTransform();
           RustDeskNapi.appendDiagnosticLog('video-layout',
             `decoded_size width=${frame.width} height=${frame.height} previous=${previousWidth}x${previousHeight}`)
@@ -906,9 +951,12 @@ struct RemotePage {
     this.pinchStartScale = 1.0;
     this.pinchStartDistance = 0;
     this.isPinching = false;
+    if (this.desktopViewMode === 'original' || this.desktopViewMode === 'custom') this.syncDesktopViewScale();
   }
 
   resetRemoteViewportForSession(): void {
+    this.desktopViewMode = 'adaptive';
+    this.desktopCustomPercent = 100;
     this.resetViewportTransform();
     this.physicalMouseDeduplicator.clear();
     this.compatibilityLeftSequence = false;
@@ -1012,7 +1060,8 @@ struct RemotePage {
   }
 
   checkDecoderHealth(frame: VideoFrameInfo): void {
-    if (this.connectionStatus !== ConnectionStatus.CONNECTED || RemoteSessionBackgroundTask.isAppBackground()) {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      (RemoteSessionBackgroundTask.isAppBackground() && !this.pipSurfaceOwned)) {
       this.decoderStallStartedAt = 0;
       return;
     }
@@ -1034,6 +1083,10 @@ struct RemotePage {
     if (decodedMore || codec === 0) {
       this.decoderStallStartedAt = 0;
       this.videoRecoveryRefreshRequested = false;
+      // A recovered stream may stall again after another resize/background
+      // transition. Recovery is bounded per stall, not disabled for the session.
+      this.videoDecoderRestartRequested = false;
+      this.videoFallbackRequested = false;
     } else if (receivedMore && this.decoderStallStartedAt === 0) {
       this.decoderStallStartedAt = Date.now();
     }
@@ -1267,7 +1320,10 @@ struct RemotePage {
   }
 
   syncHardwareKeyState(): void {
+    if (this.pipSurfaceOwned) return;
+    if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
       this.hardwareModifierTrackingActive = false;
       this.hardwareCapsLockInitialized = false;
@@ -1314,7 +1370,10 @@ struct RemotePage {
   }
 
   handleNativeMouseInput(event: NativeMouseInputEvent): void {
+    if (this.pipSurfaceOwned) return;
+    if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.desktopWindowActive === false) return;
     if (event.hover >= 0) {
       this.handleRemoteHover(event.hover === 1);
       return;
@@ -1404,7 +1463,10 @@ struct RemotePage {
   }
 
   handleNativeKeyInput(event: NativeKeyInputEvent): void {
+    if (this.pipSurfaceOwned) return;
+    if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
@@ -1562,7 +1624,7 @@ struct RemotePage {
           })
         }.padding(20).borderRadius(16).backgroundColor(this.isDarkMode ? '#202B3A' : '#FFFFFF')
       }
-      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly) {
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && !this.keyboardToolsCollapsed) {
         this.buildKeyboardShortcutOverlay();
       }
       if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
@@ -1578,10 +1640,10 @@ struct RemotePage {
         this.buildToolbarOrderEditorOverlay();
       }
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
-        (this.isHandheldDevice() || this.isFullScreen || !this.isLargeLayout())) {
+        (this.isHandheldDevice() || this.isFullScreen || this.immersiveWindow || !this.isLargeLayout())) {
         this.buildFloatingToolbar();
       }
-      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() &&
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() && this.remoteToolbarCollapsed &&
         !this.showGestureHelp && !this.showRemoteFileBrowser && !this.showMobileActions &&
         !this.showToolbarOrderEditor && !this.showCommunicationPanel) {
         this.buildKeyboardLauncher();
@@ -1589,6 +1651,12 @@ struct RemotePage {
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
         this.isFullScreen && !this.isHandheldDevice()) {
         this.buildPcFullscreenExitButton();
+      }
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.immersiveWindow && !this.isFullScreen) {
+        this.buildImmersiveWindowControls();
+      }
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.controlMenu.length > 0) {
+        this.buildControlMenuOverlay();
       }
       if (this.showCommunicationPanel) {
         CommunicationPanel({ onClose: () => { this.closeCommunication(); } });
@@ -1784,7 +1852,7 @@ struct RemotePage {
         }
         .layoutWeight(1)
         .height('100%')
-        if (!this.isFullScreen && this.isLargeLayout() && !this.isHandheldDevice()) {
+        if (!this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice()) {
           this.buildSideToolbar();
         }
         }
@@ -1816,6 +1884,265 @@ struct RemotePage {
       .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
       .position({ x: Math.max(12, this.pageWidth - 100), y: 12 })
       .zIndex(70)
+  }
+
+  isPcDevice(): boolean {
+    return deviceInfo.deviceType === '2in1' || deviceInfo.deviceType === 'pc' || deviceInfo.deviceType === 'desktop';
+  }
+
+  getDesktopFitScale(): number {
+    return desktopFitScale(this.componentWidth, this.componentHeight, this.remoteWidth, this.remoteHeight);
+  }
+
+  refreshDesktopDensity(): void {
+    if (!this.isPcDevice()) return;
+    try {
+      const density: number = this.getUIContext().vp2px(100) / 100;
+      this.desktopDensity = Number.isFinite(density) && density > 0 ? density : 1;
+    } catch (_e) {}
+  }
+
+  syncDesktopViewScale(): void {
+    if (!this.isPcDevice() || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      this.componentWidth <= 0 || this.componentHeight <= 0) return;
+    this.refreshDesktopDensity();
+    this.zoomScale = desktopZoomScale(this.desktopViewMode, this.desktopCustomPercent,
+      this.getDesktopFitScale(), this.desktopDensity);
+    this.relativePointerSampleValid = false;
+    this.clampViewportOffset();
+  }
+
+  selectDesktopViewMode(mode: DesktopViewMode): void {
+    if (!this.isPcDevice() || this.pipSurfaceOwned || this.remoteWidth <= 0 || this.remoteHeight <= 0) return;
+    this.cancelActiveTouchGesture();
+    this.desktopViewMode = mode;
+    this.offsetX = 0;
+    this.offsetY = 0;
+    this.syncDesktopViewScale();
+    this.syncVirtualMouseToCurrentPointer();
+    if (!this.canPanViewport()) this.setPanMode(false);
+    RustDeskNapi.appendDiagnosticLog('remote-window',
+      `view_mode mode=${mode} percent=${this.getDesktopDisplayedPercent()} density=${this.desktopDensity}`);
+  }
+
+  getDesktopDisplayedPercent(): number {
+    return Math.round(this.zoomScale * this.getDesktopFitScale() * this.desktopDensity * 100);
+  }
+
+  setDesktopCustomPercent(percent: number, anchorRemoteX?: number, anchorRemoteY?: number): void {
+    if (!this.isPcDevice() || this.pipSurfaceOwned) return;
+    this.refreshDesktopDensity();
+    this.desktopViewMode = 'custom';
+    this.desktopCustomPercent = desktopScalePercent(percent);
+    const nextScale: number = desktopZoomScale('custom', this.desktopCustomPercent,
+      this.getDesktopFitScale(), this.desktopDensity);
+    // Coordinates are relative to the fit-sized surface before its transform.
+    // Toolbar/slider changes zoom around the view center, not its letterbox.
+    const localX: number = anchorRemoteX !== undefined ? anchorRemoteX * this.getDisplayWidth() / this.remoteWidth :
+      this.componentWidth / 2 - this.getDisplayLeft() - this.offsetX / Math.max(0.01, this.zoomScale);
+    const localY: number = anchorRemoteY !== undefined ? anchorRemoteY * this.getDisplayHeight() / this.remoteHeight :
+      this.componentHeight / 2 - this.getDisplayTop() - this.offsetY / Math.max(0.01, this.zoomScale);
+    this.applyZoomAt(localX, localY, nextScale);
+    RustDeskNapi.appendDiagnosticLog('remote-window', `custom_scale percent=${this.desktopCustomPercent}`);
+  }
+
+  adjustDesktopWindow(): void {
+    if (!this.isPcDevice() || this.isFullScreen || this.fullscreenTransitioning ||
+      this.immersiveWindowTransitioning || this.desktopWindowAdjusting || this.pipSurfaceOwned ||
+      !this.remotePageVisible || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      this.componentWidth <= 0 || this.componentHeight <= 0) return;
+    const requestId: number = ++this.desktopWindowRequestId;
+    this.desktopWindowAdjusting = true;
+    this.setControlMenu('');
+    RemoteFullscreenPolicy.fitRemoteWindow(this.remoteWidth, this.remoteHeight, this.componentWidth,
+      this.componentHeight, () => requestId === this.desktopWindowRequestId && this.remotePageVisible &&
+        !this.isLeavingAfterDisconnect).then((applied: boolean) => {
+      if (!applied || requestId !== this.desktopWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      this.selectDesktopViewMode('adaptive');
+      this.showFileToast('窗口已按远端比例调整');
+    }).catch((error: BusinessError) => {
+      if (requestId !== this.desktopWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      RustDeskNapi.appendDiagnosticLog('remote-window', `fit_failed code=${error.code ?? -1}`);
+      this.showFileToast('窗口调整失败，请先退出全屏或最大化后重试');
+    }).finally(() => {
+      if (requestId === this.desktopWindowRequestId) this.desktopWindowAdjusting = false;
+    });
+  }
+
+  startDesktopWindowTracking(): void {
+    if (!this.isPcDevice()) return;
+    this.stopDesktopWindowTracking();
+    this.desktopWindowActive = true;
+    this.refreshDesktopDensity();
+    this.pcToolbarPinned = RustDeskNapi.getOption('pc-toolbar-pinned') === '1';
+    const main = RemoteDisplayPolicy.getMainWindow();
+    if (!main) return;
+    const listener = (event: window.WindowEventType): void => { this.handleDesktopWindowEvent(event); };
+    try {
+      main.on('windowEvent', listener);
+      this.desktopWindow = main;
+      this.desktopWindowListener = listener;
+    } catch (_e) {
+      RustDeskNapi.appendDiagnosticLog('remote-window', 'focus_listener_unavailable');
+    }
+  }
+
+  stopDesktopWindowTracking(): void {
+    ++this.desktopWindowRequestId;
+    this.desktopWindowAdjusting = false;
+    this.cancelPcToolbarAutoCollapse();
+    const main = this.desktopWindow;
+    const listener = this.desktopWindowListener;
+    this.desktopWindow = undefined;
+    this.desktopWindowListener = undefined;
+    if (main && listener) { try { main.off('windowEvent', listener); } catch (_e) {} }
+  }
+
+  handleDesktopWindowEvent(event: window.WindowEventType): void {
+    if (!this.remotePageVisible || !this.isPcDevice()) return;
+    if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
+      if (this.desktopWindowActive) this.desktopReturnInputFocus = this.pointerOverRemoteViewport || this.pointerCaptureFocused;
+      this.desktopWindowActive = false;
+      this.cancelPcToolbarAutoCollapse();
+      this.cancelRemoteKeyboardRefocus();
+      this.cancelPointerHoverExit();
+      this.releaseVirtualMouseButtons();
+      this.cancelActiveTouchGesture();
+      this.releaseRemoteNavigationKeys('window_inactive');
+      ConnectionService.releaseModifiers();
+      this.hardwareModifierTrackingActive = false;
+      this.hardwareCapsLockInitialized = false;
+      this.physicalMouseDeduplicator.clear();
+      this.relativePointerSampleValid = false;
+      this.pointerCaptureFocused = false;
+      this.pointerOverRemoteViewport = false;
+      this.setSystemPointerHidden(false);
+      RustDeskNapi.takeNativeInputEvents();
+      RustDeskNapi.appendDiagnosticLog('remote-window', 'focus_lost input_released=1');
+    } else if (event === window.WindowEventType.WINDOW_ACTIVE) {
+      // The inactive poll already discards old events. Do not clear here:
+      // the pointer press that activated this window may already be queued.
+      this.desktopWindowActive = true;
+      this.relativePointerSampleValid = false;
+      this.refreshDesktopDensity();
+      this.syncDesktopViewScale();
+      if (this.desktopReturnInputFocus && !this.controlMenu && !this.showCommunicationPanel &&
+        !this.showToolbarOrderEditor && !this.showRemoteFileBrowser) this.requestRemoteInputFocus();
+      this.desktopReturnInputFocus = false;
+      RustDeskNapi.appendDiagnosticLog('remote-window', 'focus_restored');
+    }
+  }
+
+  cancelPcToolbarAutoCollapse(): void {
+    if (this.pcToolbarCollapseTimer !== -1) {
+      clearTimeout(this.pcToolbarCollapseTimer);
+      this.pcToolbarCollapseTimer = -1;
+    }
+  }
+
+  schedulePcToolbarAutoCollapse(): void {
+    this.cancelPcToolbarAutoCollapse();
+    if (!this.isPcDevice() || (!this.immersiveWindow && !this.isFullScreen) ||
+      this.pcToolbarPinned || this.remoteToolbarCollapsed || this.controlMenu ||
+      !this.pointerOverRemoteViewport || !this.desktopWindowActive) return;
+    this.pcToolbarCollapseTimer = setTimeout(() => {
+      this.pcToolbarCollapseTimer = -1;
+      if (!this.remotePageVisible || this.isLeavingAfterDisconnect || !this.desktopWindowActive ||
+        this.pcToolbarPinned || this.controlMenu || !this.pointerOverRemoteViewport ||
+        this.leftButtonHeld || this.rightButtonHeld || this.localPointerGestureActive ||
+        (!this.immersiveWindow && !this.isFullScreen)) return;
+      this.setFloatingPanelCollapsed(false, true);
+    }, 5000);
+  }
+
+  togglePcToolbarPinned(): void {
+    this.pcToolbarPinned = !this.pcToolbarPinned;
+    RustDeskNapi.setOption('pc-toolbar-pinned', this.pcToolbarPinned ? '1' : '0');
+    if (this.pcToolbarPinned) this.cancelPcToolbarAutoCollapse();
+    else this.schedulePcToolbarAutoCollapse();
+  }
+
+  toggleImmersiveWindow(): void {
+    if (!this.isPcDevice() || this.immersiveWindowTransitioning || this.fullscreenTransitioning ||
+      this.isFullScreen || this.pipSurfaceOwned || this.desktopWindowAdjusting || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+    this.setControlMenu('');
+    this.closeRemoteKeyboard();
+    const previous = this.immersiveWindow;
+    const enabled = !previous;
+    const requestId = ++this.immersiveWindowRequestId;
+    this.immersiveWindowTransitioning = true;
+    this.immersiveWindow = enabled;
+    if (enabled) {
+      this.remoteToolbarCollapsed = false;
+      this.remoteToolbarOffsetX = 0;
+      this.remoteToolbarOffsetY = 0;
+    }
+    RemoteFullscreenPolicy.setBorderless(enabled).then(() => {
+      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      this.scheduleSurfaceRebindIfSizeChanged();
+    }).catch((error: BusinessError) => {
+      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      this.immersiveWindow = previous;
+      RustDeskNapi.appendDiagnosticLog('remote-window', `borderless_failed code=${error.code ?? -1}`);
+      this.showFileToast('当前设备无法切换沉浸窗口');
+    }).finally(() => {
+      if (requestId === this.immersiveWindowRequestId) this.immersiveWindowTransitioning = false;
+    });
+  }
+
+  restoreImmersiveWindowOnLeave(): void {
+    if (!this.immersiveWindow && !this.immersiveWindowTransitioning) return;
+    ++this.immersiveWindowRequestId;
+    this.immersiveWindow = false;
+    this.immersiveWindowTransitioning = false;
+    RemoteFullscreenPolicy.setBorderless(false).catch((error: BusinessError) => {
+      RustDeskNapi.appendDiagnosticLog('remote-window', `borderless_restore_failed code=${error.code ?? -1}`);
+    });
+  }
+
+  moveImmersiveWindow(event: TouchEvent): void {
+    if (event.type !== TouchType.Down || !this.immersiveWindow || this.isFullScreen) return;
+    this.handleNonRemoteHover(true);
+    // startMoving must be called from the Down callback, not queued after drag.
+    RemoteDisplayPolicy.getMainWindow()?.startMoving().catch((error: BusinessError) => {
+      RustDeskNapi.appendDiagnosticLog('remote-window', `move_failed code=${error.code ?? -1}`);
+    });
+  }
+
+  minimizeImmersiveWindow(): void {
+    if (!this.immersiveWindow || this.immersiveWindowTransitioning) return;
+    this.handleNonRemoteHover(true);
+    this.releaseRemoteNavigationKeys('window_minimize');
+    ConnectionService.releaseModifiers();
+    RemoteDisplayPolicy.getMainWindow()?.minimize().catch((error: BusinessError) => {
+      RustDeskNapi.appendDiagnosticLog('remote-window', `minimize_failed code=${error.code ?? -1}`);
+    });
+  }
+
+  @Builder
+  buildImmersiveWindowControls() {
+    Row({ space: 4 }) {
+      Row({ space: 6 }) {
+        Text('⠿').fontSize(17).fontColor(this.secondaryTextColor())
+        Text('StarRustDesk').fontSize(12).fontColor(this.primaryTextColor()).maxLines(1)
+      }.height(34).layoutWeight(1).onTouch((event: TouchEvent) => { this.moveImmersiveWindow(event); })
+        .accessibilityText(translate('拖动窗口', this.uiLanguage))
+      Button('−', { type: ButtonType.Normal }).width(30).height(30).fontSize(20).padding(0)
+        .backgroundColor(Color.Transparent).fontColor(this.primaryTextColor()).focusable(false)
+        .accessibilityText(translate('最小化', this.uiLanguage)).onClick(() => { this.minimizeImmersiveWindow(); })
+      Button(translate('退出沉浸', this.uiLanguage), { type: ButtonType.Normal })
+        .height(30).padding({ left: 10, right: 10 }).fontSize(11).borderRadius(10)
+        .backgroundColor(this.controlSelectedBackgroundColor()).fontColor(this.controlSelectedTextColor())
+        .enabled(!this.immersiveWindowTransitioning).focusable(false).onClick(() => { this.toggleImmersiveWindow(); })
+      Button('×', { type: ButtonType.Normal }).width(30).height(30).fontSize(19).padding(0)
+        .backgroundColor(Color.Transparent).fontColor(RustDeskTheme.ERROR).focusable(false)
+        .accessibilityText(translate('断开', this.uiLanguage)).onClick(() => { this.disconnectSession(); })
+    }
+    .width(Math.min(350, Math.max(240, this.pageWidth - 24))).height(42).padding({ left: 10, right: 6 })
+    .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
+    .border({ width: 1, color: this.themeBorderColor() }).borderRadius(14)
+    .position({ x: 12, y: 10 }).zIndex(70)
+    .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
   }
 
   @Builder
@@ -2156,7 +2483,7 @@ struct RemotePage {
       // handheld aspect ratios, including square/portrait foldable inner screens.
       Stack({ alignContent: Alignment.TopEnd }) {
         this.buildRemoteViewport();
-        if (this.showVirtualMouse && this.isHandheldDevice()) {
+        if (this.showVirtualMouse && this.isHandheldDevice() && !this.pipSurfaceOwned) {
           this.buildVirtualMousePointer();
           this.buildVirtualMouseOverlay();
         }
@@ -2167,7 +2494,10 @@ struct RemotePage {
       .align(Alignment.Center)
       .translate({ y: this.getKeyboardCanvasShiftY() })
       .backgroundColor('#090D14')
-      this.buildDraggableQualityMonitor();
+      if (this.pipSurfaceOwned) {
+        this.buildPictureInPicturePlaceholder();
+      }
+      if (this.showQualityMonitor) this.buildDraggableQualityMonitor();
     }
     .width('100%')
     .layoutWeight(1)
@@ -2180,6 +2510,23 @@ struct RemotePage {
         this.traceRemoteKeyboardState('visible_viewport_changed');
       }
     })
+  }
+
+  @Builder
+  buildPictureInPicturePlaceholder() {
+    // Outside the zoom/pan transform so the return button is always reachable.
+    Column({ space: 16 }) {
+      Text(translate('远端画面正在画中画中显示', this.uiLanguage))
+        .fontSize(16).fontColor(Color.White)
+      Text(translate('小窗用于查看画面，返回主窗口后继续操作', this.uiLanguage))
+        .fontSize(13).fontColor('#C3CBD5').textAlign(TextAlign.Center)
+      Button(translate('返回主画面', this.uiLanguage))
+        .onClick(() => { this.pictureInPicture?.stop(); })
+        .enabled(this.pipPhase === 'active')
+    }
+    .padding(24).width('100%').height('100%')
+    .justifyContent(FlexAlign.Center).backgroundColor('#111820')
+    .hitTestBehavior(HitTestMode.Default).zIndex(40)
   }
 
   @Builder
@@ -2320,6 +2667,7 @@ struct RemotePage {
       if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
         Math.abs(this.componentHeight - previousHeight) > 0.5) {
         this.stopEdgeAutoPan();
+        this.syncDesktopViewScale();
         this.clampViewportOffset();
         this.syncVirtualMouseToCurrentPointer();
       }
@@ -2365,6 +2713,7 @@ struct RemotePage {
         this.remoteToolbarCollapsed = collapsed;
       }
     });
+    if (!keyboard && !collapsed) this.schedulePcToolbarAutoCollapse();
   }
 
   @Builder
@@ -2412,12 +2761,225 @@ struct RemotePage {
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
   }
 
+  setControlMenu(category: string): void {
+    this.cancelPcToolbarAutoCollapse();
+    this.handleNonRemoteHover(true);
+    this.releaseVirtualMouseButtons();
+    this.cancelActiveTouchGesture();
+    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseOut }, () => {
+      this.controlMenu = category;
+    });
+    RustDeskNapi.appendDiagnosticLog('remote-ui', `control_menu category=${category || 'closed'}`);
+  }
+
+  toggleControlMenu(category: string): void {
+    this.setControlMenu(this.controlMenu === category ? '' : category);
+  }
+
+  controlMenuIcon(category: string): Resource {
+    switch (category) {
+      case 'screens': return $r('app.media.remote_menu_screens');
+      case 'input': return $r('app.media.remote_menu_input');
+      case 'keyboard': return $r('app.media.keyboard_launcher');
+      case 'view': return $r('app.media.remote_menu_view');
+      case 'disconnect': return $r('app.media.remote_menu_disconnect');
+      default: return $r('app.media.remote_menu_more');
+    }
+  }
+
+  controlMenuSelected(category: string): boolean {
+    if (category === 'keyboard') return this.showKeyboardPanel || !this.keyboardToolsCollapsed;
+    return this.controlMenu === category;
+  }
+
   @Builder
-  buildControlToolbarItems(vertical: boolean) {
-    ForEach(this.controlToolbarOrder, (item: string) => {
-      this.buildControlToolbarItem(item, vertical)
-    }, (item: string) =>
-      `control-${item}-${this.currentDisplay}-${this.displayCount}-${this.showVirtualMouse ? 1 : 0}`)
+  buildUnifiedControlItems(vertical: boolean) {
+    ForEach(REMOTE_CONTROL_CATEGORIES, (category: string) => {
+      if (category === 'keyboard') {
+        Row({ space: 0 }) {
+          this.buildControlCategoryButton(category, vertical)
+          Button('⌄', { type: ButtonType.Normal })
+            .width(18).height(this.getRemoteToolbarButtonHeight() + 8)
+            .fontSize(14).padding(0).focusable(false)
+            .fontColor(!this.keyboardToolsCollapsed ? this.controlSelectedTextColor() : this.secondaryTextColor())
+            .backgroundColor(!this.keyboardToolsCollapsed ? this.controlSelectedBackgroundColor() : Color.Transparent)
+            .borderRadius(8)
+            .accessibilityText(translate('组合键', this.uiLanguage))
+            .onClick(() => {
+              this.setControlMenu('');
+              this.setFloatingPanelCollapsed(true, !this.keyboardToolsCollapsed);
+            })
+        }
+      } else {
+        this.buildControlCategoryButton(category, vertical)
+      }
+    }, (category: string) => category)
+  }
+
+  @Builder
+  buildControlCategoryButton(category: string, vertical: boolean) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 3 }) {
+        Image(this.controlMenuIcon(category)).width(19).height(19)
+          .fillColor(category === 'disconnect' ? RustDeskTheme.ERROR :
+            (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
+        Text(translate(remoteControlCategoryLabel(category), this.uiLanguage))
+          .fontSize(11).minFontSize(9).maxFontSize(11).maxLines(1)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontWeight(this.controlMenuSelected(category) ? 600 : 500)
+          .fontColor(category === 'disconnect' ? RustDeskTheme.ERROR :
+            (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
+      }
+    }
+    .width(this.adaptiveToolbarButtonWidth(vertical ? (category === 'keyboard' ? 62 : 80) : 38))
+    .height(this.getRemoteToolbarButtonHeight() + 8)
+    .padding({ left: 2, right: 2, top: 3, bottom: 3 })
+    .backgroundColor(this.controlMenuSelected(category) ? this.controlSelectedBackgroundColor() : Color.Transparent)
+    .border({ width: this.controlMenuSelected(category) ? 1 : 0, color: this.controlSelectedBorderColor() })
+    .borderRadius(10).focusable(false)
+    .accessibilityText(translate(remoteControlCategoryLabel(category), this.uiLanguage))
+    .onClick(() => {
+      if (category === 'keyboard') {
+        this.setControlMenu('');
+        this.toggleRemoteKeyboard();
+      } else if (category === 'disconnect') {
+        this.setControlMenu('');
+        this.disconnectSession();
+      } else {
+        this.toggleControlMenu(category);
+      }
+    })
+  }
+
+  getControlMenuWidth(): number {
+    return Math.min(300, Math.max(180, this.pageWidth - 16));
+  }
+
+  getControlMenuHeight(): number {
+    const columns = Math.max(1, Math.floor((this.getControlMenuWidth() - 28) / (this.adaptiveToolbarButtonWidth(80) + 8)));
+    const itemCount = remoteControlCategoryItems(this.controlMenu, this.controlToolbarOrder).length +
+      (this.controlMenu === 'more' ? 2 : (this.controlMenu === 'view' && this.isPcDevice() ? 1 : 0));
+    const itemColumns = Math.max(1, Math.floor((this.getControlMenuWidth() - 28) / (this.adaptiveToolbarButtonWidth(92) + 8)));
+    const rows = this.controlMenu === 'screens' ? Math.max(1, Math.ceil(this.displayCount / columns)) :
+      Math.max(1, Math.ceil(itemCount / itemColumns));
+    return Math.min(rows * (this.getRemoteToolbarButtonHeight() + 10) + 84 +
+      (this.controlMenu === 'view' && this.isPcDevice() ? 180 : 0),
+      Math.max(120, this.pageHeight - 32));
+  }
+
+  getControlMenuX(): number {
+    const fixedSidebar = !this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice();
+    const anchor = fixedSidebar ? this.pageWidth - 116 : this.getRemoteToolbarX();
+    const x = fixedSidebar || this.isHandheldLandscape() || this.isFullScreen || this.immersiveWindow ?
+      anchor - this.getControlMenuWidth() - 10 : anchor;
+    return clampControlMenuAxis(x, this.getControlMenuWidth(), this.pageWidth);
+  }
+
+  getControlMenuY(): number {
+    if (!this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice()) {
+      return clampControlMenuAxis((this.pageHeight - this.getSideToolbarHeight()) / 2,
+        this.getControlMenuHeight(), this.pageHeight);
+    }
+    const anchor = this.getRemoteToolbarY();
+    const y = this.isHandheldLandscape() || this.isFullScreen || this.immersiveWindow ? anchor + 12 :
+      anchor - this.getControlMenuHeight() - 10;
+    return clampControlMenuAxis(y, this.getControlMenuHeight(), this.pageHeight);
+  }
+
+  @Builder
+  buildControlMenuOverlay() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // Modal scrim consumes the dismiss tap instead of passing it to the peer.
+      Column().width('100%').height('100%').backgroundColor('#12000000')
+        .onClick(() => { this.setControlMenu(''); })
+        .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
+      Column({ space: 8 }) {
+        Row() {
+          Text(translate(remoteControlCategoryLabel(this.controlMenu), this.uiLanguage))
+            .fontSize(14).fontWeight(600).fontColor(this.primaryTextColor()).layoutWeight(1)
+          Button('×', { type: ButtonType.Normal }).width(30).height(30).fontSize(20).padding(0)
+            .fontColor(this.secondaryTextColor()).backgroundColor(Color.Transparent)
+            .accessibilityText(translate('关闭菜单', this.uiLanguage)).focusable(false)
+            .onClick(() => { this.setControlMenu(''); })
+        }.width('100%')
+        Divider().color(this.themeBorderColor())
+        Scroll() {
+          Column({ space: 8 }) {
+            if (this.controlMenu === 'view' && this.isPcDevice()) {
+              this.buildDesktopViewOptions();
+            }
+            if (this.controlMenu === 'screens') {
+              Text(translate(`屏幕 ${this.currentDisplay + 1}`, this.uiLanguage))
+                .fontSize(12).fontColor(this.secondaryTextColor())
+            }
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              ForEach(remoteControlCategoryItems(this.controlMenu, this.controlToolbarOrder), (item: string) => {
+                Flex({ wrap: FlexWrap.Wrap }) {
+                  this.buildControlToolbarItem(item, true)
+                }.width(item === 'displays' ? '100%' : this.adaptiveToolbarButtonWidth(92)).margin(4)
+              }, (item: string) => `menu-${item}-${this.currentDisplay}-${this.displayCount}-${this.showVirtualMouse ? 1 : 0}`)
+              if (this.controlMenu === 'view' && this.isPcDevice()) {
+                Column() {
+                  this.buildToolbarButton(this.immersiveWindow ? '退出沉浸' : '沉浸窗口', 92, this.immersiveWindow,
+                    false, !this.fullscreenTransitioning && !this.isFullScreen && !this.pipSurfaceOwned &&
+                    !this.immersiveWindowTransitioning, () => { this.toggleImmersiveWindow(); })
+                }.margin(4)
+              }
+              if (this.controlMenu === 'more') {
+                Column() {
+                  this.buildToolbarButton('连接信息', 92, this.showQualityMonitor, false, true, () => {
+                    this.showQualityMonitor = !this.showQualityMonitor;
+                    this.setControlMenu('');
+                  })
+                }.margin(4)
+                Column() {
+                  this.buildToolbarButton('工具栏排序', 92, false, false, true, () => {
+                    this.setControlMenu('');
+                    this.openToolbarOrderEditor('control', '');
+                  })
+                }.margin(4)
+              }
+            }.width('100%')
+          }.width('100%')
+        }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
+      }
+      .width(this.getControlMenuWidth()).height(this.getControlMenuHeight()).padding(14)
+      .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F2FFFFFF')
+      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' }).borderRadius(18)
+      .shadow({ radius: 20, color: '#33000000', offsetX: 0, offsetY: 6 })
+      .position({ x: this.getControlMenuX(), y: this.getControlMenuY() })
+      .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.97, y: 0.97 })))
+      .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
+    }.width('100%').height('100%').zIndex(68)
+  }
+
+  @Builder
+  buildDesktopViewOptions() {
+    Column({ space: 8 }) {
+      Flex({ wrap: FlexWrap.Wrap }) {
+        this.buildToolbarButton('适应窗口', 80, this.desktopViewMode === 'adaptive', false, true,
+          () => { this.selectDesktopViewMode('adaptive'); })
+        this.buildToolbarButton('原始比例', 80, this.desktopViewMode === 'original', false, true,
+          () => { this.selectDesktopViewMode('original'); })
+        this.buildToolbarButton('自定义', 80, this.desktopViewMode === 'custom', false, true,
+          () => { this.selectDesktopViewMode('custom'); })
+      }.width('100%')
+      Row() {
+        Text(translate('显示比例', this.uiLanguage)).fontSize(12).fontColor(this.secondaryTextColor()).layoutWeight(1)
+        Text(`${this.getDesktopDisplayedPercent()}%`).fontSize(12).fontColor(this.primaryTextColor())
+      }.width('100%')
+      if (this.desktopViewMode === 'custom') {
+        Slider({ value: this.desktopCustomPercent, min: 25, max: 300, step: 5 })
+          .width('100%').onChange((value: number) => { this.setDesktopCustomPercent(value); })
+      }
+      this.buildToolbarButton(this.desktopWindowAdjusting ? '调整中…' : '调整窗口', 120, false, false,
+        !this.isFullScreen && !this.fullscreenTransitioning && !this.immersiveWindowTransitioning &&
+        !this.desktopWindowAdjusting && !this.pipSurfaceOwned,
+        () => { this.adjustDesktopWindow(); })
+      Text(translate('按远端比例调整窗口，不拉伸画面', this.uiLanguage))
+        .fontSize(11).fontColor(this.secondaryTextColor()).maxLines(2)
+      Divider().color(this.themeBorderColor())
+    }.width('100%')
   }
 
   @Builder
@@ -2437,10 +2999,11 @@ struct RemotePage {
           .border({ width: 1, color: display === this.currentDisplay ?
             this.controlSelectedBorderColor() : this.themeBorderColor() })
           .borderRadius(8)
+          .margin({ right: 8, bottom: 8 })
           .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
             this.openToolbarOrderEditor('control', 'displays');
           }))
-          .onClick(() => { this.switchDisplay(display); })
+          .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }, (display: number) => `${display}-${this.currentDisplay}`)
     } else if (item === 'input') {
@@ -2511,6 +3074,12 @@ struct RemotePage {
       }, item)
     } else if (item === 'fullscreen') {
       this.buildFullscreenButton(vertical ? 80 : 68, item)
+    } else if (item === 'pip') {
+      this.buildToolbarButton(this.pipPhase === 'active' ? '关闭小窗' :
+        this.pipPhase === 'idle' ? '画中画' : '切换中…', vertical ? 80 : 88,
+        this.pipSurfaceOwned, false,
+        this.hasVideo && !this.fullscreenTransitioning && (this.pipPhase === 'idle' || this.pipPhase === 'active'),
+        () => { this.togglePictureInPicture(); }, item)
     } else if (item === 'orientation' && this.isHandheldDevice()) {
       this.buildToolbarButton(this.orientationModeLabel(), 88,
         this.remoteOrientationMode !== RemoteOrientationMode.SYSTEM, false, true, () => {
@@ -2524,6 +3093,7 @@ struct RemotePage {
   }
 
   openToolbarOrderEditor(kind: string, _item: string): void {
+    if (this.controlMenu) this.setControlMenu('');
     this.toolbarOrderEditorKind = kind;
     this.showToolbarOrderEditor = true;
   }
@@ -2572,6 +3142,7 @@ struct RemotePage {
       case 'zoomIn': return '放大';
       case 'zoomOut': return '缩小';
       case 'fullscreen': return '全屏';
+      case 'pip': return '画中画';
       case 'orientation': return '屏幕方向';
       case 'disconnect': return '断开';
       case 'ctrl': return 'Ctrl';
@@ -2747,7 +3318,7 @@ struct RemotePage {
       })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 16, ButtonType.Capsule))
     } else {
-      if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) {
+      if (this.isHandheldLandscape() || ((this.isFullScreen || this.immersiveWindow) && !this.isHandheldDevice())) {
         Column({ space: 5 }) {
           Row({ space: 4 }) {
             this.buildFloatingDragHandle(false)
@@ -2756,9 +3327,16 @@ struct RemotePage {
           }
           .width('100%')
           .height(38)
+          if (this.isPcDevice()) {
+            Button(translate(this.pcToolbarPinned ? '已固定' : '自动收起', this.uiLanguage), { type: ButtonType.Normal })
+              .width('100%').height(26).fontSize(10).padding(0).focusable(false).borderRadius(8)
+              .fontColor(this.pcToolbarPinned ? this.controlSelectedTextColor() : this.primaryTextColor())
+              .backgroundColor(this.pcToolbarPinned ? this.controlSelectedBackgroundColor() : Color.Transparent)
+              .onClick(() => { this.togglePcToolbarPinned(); })
+          }
           Scroll() {
             Column({ space: 6 }) {
-              this.buildControlToolbarItems(true)
+              this.buildUnifiedControlItems(true)
             }
             .width('100%')
             .alignItems(HorizontalAlign.Center)
@@ -2779,14 +3357,14 @@ struct RemotePage {
         Row({ space: 4 }) {
           this.buildFloatingDragHandle(false)
           Scroll() {
-            Row({ space: 6 }) {
-              this.buildControlToolbarItems(false)
+            Row({ space: 3 }) {
+              this.buildUnifiedControlItems(false)
             }
-            .height(this.getRemoteToolbarButtonHeight())
+            .height(this.getRemoteToolbarButtonHeight() + 8)
             .alignItems(VerticalAlign.Center)
           }
           .layoutWeight(1)
-          .height(this.getRemoteToolbarButtonHeight())
+          .height(this.getRemoteToolbarButtonHeight() + 8)
           .scrollable(ScrollDirection.Horizontal)
           .scrollBar(BarState.Off)
           this.buildFloatingCollapseButton(false)
@@ -2816,91 +3394,16 @@ struct RemotePage {
   buildSideToolbar() {
     Scroll() {
       Column({ space: 6 }) {
-        if (this.displayCount > 1) {
-          ForEach(this.makeDisplayIndexes(), (display: number) => {
-            Button(translate(`屏${display + 1}`, this.uiLanguage))
-              .width(80)
-              .height(40)
-              .padding({ left: 2, right: 2 })
-              .fontSize(12)
-              .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
-              .fontColor(display === this.currentDisplay ?
-                this.controlSelectedTextColor() : this.primaryTextColor())
-              .backgroundColor(display === this.currentDisplay ?
-                this.controlSelectedBackgroundColor() : this.mutedSurfaceColor())
-              .border({
-                width: 1,
-                color: display === this.currentDisplay ?
-                  this.controlSelectedBorderColor() : this.themeBorderColor(),
-              })
-              .borderRadius(8)
-              .onClick(() => {
-                this.switchDisplay(display);
-              })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
-          }, (display: number) => `${display}-${this.currentDisplay}`)
-        }
-        this.buildInputModeButton(80, true)
-        if (this.canPanViewport()) {
-          this.buildEdgeAutoPanButton(80)
-        }
-        this.buildToolbarButton('键盘', 80, this.showKeyboardPanel, false, true, () => {
-          this.toggleRemoteKeyboard();
-        })
-        if (this.isPeerAndroid) {
-          this.buildToolbarButton('手机操作', 80, this.showMobileActions, false, true, () => {
-            this.showMobileActions = true;
-          })
-        }
-        this.buildToolbarButton('手势说明', 80, false, false, true, () => {
-          this.showGestureHelp = true;
-        })
-        if (this.canPanViewport()) {
-          if (this.isPanMode) {
-            this.buildToolbarButton('结束移动', 80, true, false, true, () => {
-              this.setPanMode(false);
-            })
-          } else {
-            this.buildToolbarButton('移动画面', 80, false, false, true, () => {
-              this.setPanMode(true);
-            })
-          }
-        }
-        this.buildToolbarButton(this.chatToolbarLabel(), 80, this.communicationCallActive, false, true, () => {
-          this.openCommunication();
-        });
-        this.buildToolbarButton('发送文件', 80, false, false, !this.transferActive, () => {
-          this.pickFileForUpload();
-        })
-        this.buildToolbarButton('取回文件', 80, false, false, !this.transferActive, () => {
-          this.openRemoteDownloadBrowser();
-        })
-        this.buildToolbarButton(this.clipboardSyncEnabled ? '剪贴板开' : '剪贴板关', 80, this.clipboardSyncEnabled, false, true, () => {
-          this.toggleClipboardSync();
-        })
-        if (!this.isPeerAndroid) {
-          this.buildToolbarButton(this.privacyModeState === 2 ? '关闭隐私屏' : '隐私屏', 80,
-            this.privacyModeState === 2, false, this.privacyModeState !== 1, () => { this.togglePrivacyMode(); })
-        }
-        this.buildToolbarButton('+', 80, false, false, true, () => {
-          this.adjustZoom(0.25);
-        })
-        this.buildToolbarButton('-', 80, false, false, true, () => {
-          this.adjustZoom(-0.25);
-        })
-        this.buildFullscreenButton(80)
-        this.buildToolbarButton('断开', 80, false, true, true, () => {
-          this.disconnectSession();
-        })
+        this.buildUnifiedControlItems(true)
       }
       .width(80)
       .alignItems(HorizontalAlign.Center)
     }
     .width(104)
-    .height('96%')
+    .height(this.getSideToolbarHeight())
     .margin({ top: 8, right: 8, bottom: 8 })
     .padding({ left: 12, right: 12, top: 10, bottom: 10 })
-    .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F7FFFFFF')
+    .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
     .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
     .borderRadius(15)
     .shadow({ radius: 18, color: '#44000000', offsetX: 0, offsetY: 6 })
@@ -2926,12 +3429,13 @@ struct RemotePage {
       .backgroundColor(this.isFullScreen ? this.controlSelectedBackgroundColor() : this.mutedSurfaceColor())
       .border({ width: 1, color: this.isFullScreen ? this.controlSelectedBorderColor() : this.themeBorderColor() })
       .borderRadius(8)
-      .enabled(!this.fullscreenTransitioning)
+      .enabled(!this.fullscreenTransitioning && !this.immersiveWindowTransitioning && !this.pipSurfaceOwned)
       .opacity(this.fullscreenTransitioning ? 0.6 : 1)
       .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
         if (orderKey.length > 0) this.openToolbarOrderEditor('control', orderKey);
       }))
       .onClick(() => {
+        if (this.controlMenu.length > 0) this.setControlMenu('');
         if (this.isFullScreen) this.exitFullScreen(); else this.enterFullScreen();
       })
       .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
@@ -2964,7 +3468,9 @@ struct RemotePage {
         if (orderKey.length > 0) this.openToolbarOrderEditor('control', orderKey);
       }))
       .onClick(() => {
+        const menuWasOpen = this.controlMenu.length > 0;
         onClick();
+        if (menuWasOpen && label !== '+' && label !== '-') this.setControlMenu('');
       })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
   }
@@ -4469,6 +4975,47 @@ struct RemotePage {
     .position({ x: this.cursorX, y: this.cursorY });
   }
 
+  togglePictureInPicture(): void {
+    if (!this.pictureInPicture || this.isLeavingAfterDisconnect ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED || this.fullscreenTransitioning || this.immersiveWindowTransitioning) return;
+    if (this.pipPhase === 'active') {
+      this.pictureInPicture.stop();
+      return;
+    }
+    if (this.pipPhase !== 'idle' || !this.hasVideo || this.fileOnly) return;
+    this.closeRemoteKeyboard();
+    this.releaseHeldMouseButtons('pip');
+    this.releaseVirtualMouseButtons();
+    this.releaseRemoteNavigationKeys('pip');
+    ConnectionService.releaseModifiers();
+    this.cancelActiveTouchGesture();
+    this.stopEdgeAutoPan();
+    this.pointerOverRemoteViewport = false;
+    this.setSystemPointerHidden(false);
+    if (this.surfaceRebindTimer !== -1) {
+      clearTimeout(this.surfaceRebindTimer);
+      this.surfaceRebindTimer = -1;
+      // A pending resize may already have paused the render writer.
+      this.rebindSurfaceAfterLayoutChange();
+    }
+    this.pictureInPicture.start(getContext(this) as common.UIAbilityContext,
+      this.xComponentController, this.remoteWidth, this.remoteHeight);
+  }
+
+  restoreSurfaceAfterPictureInPicture(): void {
+    // Closing PiP is not disconnecting. Restore only after the system has
+    // returned the XComponent; never steal it from a newer PiP request.
+    setTimeout(() => {
+      if (!this.remotePageVisible || this.isLeavingAfterDisconnect || this.pipSurfaceOwned ||
+        this.connectionStatus !== ConnectionStatus.CONNECTED || RemoteSessionBackgroundTask.isAppBackground()) return;
+      this.surfaceId = this.readCurrentSurfaceId();
+      this.scheduleSurfaceRebindIfSizeChanged(true);
+      this.requestVideoRefreshAfterSurfaceRebind();
+      this.startFramePolling();
+      RustDeskNapi.appendDiagnosticLog('pip', 'main_surface_restored');
+    }, 180);
+  }
+
   enterFullScreen(): void {
     if (this.isFullScreen || this.fullscreenTransitioning) return;
     this.releaseRemoteNavigationKeys('fullscreen');
@@ -4486,6 +5033,9 @@ struct RemotePage {
   }
 
   requestFullscreen(enabled: boolean): void {
+    if (this.desktopWindowAdjusting) return;
+    if (this.pipSurfaceOwned) return;
+    if (this.immersiveWindowTransitioning) return;
     if (this.fullscreenTransitioning || !this.remotePageVisible || this.isLeavingAfterDisconnect ||
       this.isFullScreen === enabled) return;
     const previous = this.isFullScreen;
@@ -4879,7 +5429,8 @@ struct RemotePage {
   }
 
   updateSystemPointerVisibility(): void {
-    const shouldHide: boolean = this.connectionStatus === ConnectionStatus.CONNECTED &&
+    if (this.desktopWindowActive === false) { this.setSystemPointerHidden(false); return; }
+    const shouldHide: boolean = !this.pipSurfaceOwned && this.connectionStatus === ConnectionStatus.CONNECTED &&
       this.inputMode === INPUT_MODE_MOUSE && (!this.showLocalCursor || this.relativeMouseEnabled || this.suppressCompatibilityCursor()) && this.pointerOverRemoteViewport;
     this.setSystemPointerHidden(shouldHide);
   }
@@ -4901,11 +5452,13 @@ struct RemotePage {
   }
 
   handleRemoteHover(isHovering: boolean): void {
+    if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
     if (isHovering) {
       this.cancelPointerHoverExit();
       this.pointerOverRemoteViewport = true;
       this.updateSystemPointerVisibility();
+      if (this.desktopWindow) this.schedulePcToolbarAutoCollapse();
       return;
     }
     if (this.systemPointerHidden) {
@@ -4927,6 +5480,7 @@ struct RemotePage {
   }
 
   handleNonRemoteHover(isHovering: boolean): void {
+    if (isHovering) this.cancelPcToolbarAutoCollapse();
     if (isHovering) this.relativePointerSampleValid = false;
     if (!isHovering) {
       return;
@@ -5002,6 +5556,9 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
+    if (this.desktopWindowActive === false) return;
+    if (this.controlMenu) return;
+    if (this.pipSurfaceOwned) return;
     const pointerCompatibilityEvent: boolean = event.source === SourceType.Mouse ||
       event.sourceTool === SourceTool.MOUSE || event.sourceTool === SourceTool.TOUCHPAD;
     if (pointerCompatibilityEvent) {
@@ -5484,6 +6041,8 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
+    if (this.desktopWindowActive === false) return;
+    if (this.pipSurfaceOwned) return;
     let now: number = Date.now();
     const physicalPointer: boolean = event.sourceTool === SourceTool.MOUSE || event.sourceTool === SourceTool.TOUCHPAD ||
       (event.source === SourceType.Mouse && event.sourceTool !== SourceTool.Finger && event.sourceTool !== SourceTool.Pen);
@@ -5509,6 +6068,9 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
+    if (this.desktopWindowActive === false) return;
+    if (this.pipSurfaceOwned) return;
+    if (this.controlMenu) return;
     const moving: boolean = event.action === MouseAction.Move || event.action === MouseAction.Hover;
     if (moving) this.pointerArkMoves++;
     this.pointerLastSource = event.source;
@@ -5553,6 +6115,7 @@ struct RemotePage {
     this.noteProjectedPhysicalPointer();
     this.lastMouseEventAt = Date.now();
     this.pointerOverRemoteViewport = true;
+    if (this.desktopWindow) this.schedulePcToolbarAutoCollapse();
     this.updateSystemPointerVisibility();
     this.clearLongPressTimer();
     this.clearTapTimer();
@@ -5599,6 +6162,9 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
+    if (this.desktopWindowActive === false) return;
+    if (this.pipSurfaceOwned) return;
+    if (this.controlMenu) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
@@ -5851,7 +6417,13 @@ struct RemotePage {
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
+    if (this.pipSurfaceOwned) return false;
     if (this.showCommunicationPanel) return false;
+    if (this.desktopWindowActive === false) return false;
+    if (this.controlMenu) {
+      if (event.type === KeyType.Down && this.mapControlKeyCode(event.keyCode) === 27) this.setControlMenu('');
+      return true;
+    }
     this.drainNativeInputEvents();
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return false;
@@ -5972,7 +6544,9 @@ struct RemotePage {
   }
 
   requestRemoteInputFocus(): void {
+    if (this.pipSurfaceOwned) return;
     if (this.showCommunicationPanel) return;
+    if (this.desktopWindowActive === false) return;
     if (this.showKeyboardPanel) {
       this.keepRemoteKeyboardForPointer();
       return;
@@ -6550,6 +7124,10 @@ struct RemotePage {
   }
 
   adjustZoom(delta: number): void {
+    if (this.isPcDevice()) {
+      this.setDesktopCustomPercent(this.getDesktopDisplayedPercent() + delta * 100);
+      return;
+    }
     let nextScale: number = Math.max(0.5, Math.min(5.0, this.zoomScale + delta));
     this.applyZoomAt(this.componentWidth / 2, this.componentHeight / 2, nextScale);
   }
@@ -6704,6 +7282,7 @@ struct RemotePage {
   }
 
   toggleRemoteKeyboard(): void {
+    if (this.pipSurfaceOwned) return;
     if (this.showKeyboardPanel) {
       this.closeRemoteKeyboard();
     } else {
@@ -6940,12 +7519,16 @@ struct RemotePage {
     return Math.ceil(40 + Math.max(0, this.uiFontScale - 1) * 20);
   }
 
+  getSideToolbarHeight(): number {
+    return Math.min(338 + Math.max(0, this.uiFontScale - 1) * 120, Math.max(150, this.pageHeight - 16));
+  }
+
   getKeyboardToolbarButtonHeight(): number {
     return Math.ceil(38 + Math.max(0, this.uiFontScale - 1) * 20);
   }
 
   getRemoteToolbarWidth(): number {
-    if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) {
+    if (this.isHandheldLandscape() || ((this.isFullScreen || this.immersiveWindow) && !this.isHandheldDevice())) {
       if (this.uiFontScale <= 1) return 104;
       return Math.min((this.pageWidth > 0 ? this.pageWidth : 360) - 16,
         this.adaptiveToolbarButtonWidth(96) + 16);
@@ -6955,10 +7538,11 @@ struct RemotePage {
   }
 
   getRemoteToolbarHeight(): number {
-    if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) {
-      return Math.max(150, Math.min(520, (this.pageHeight > 0 ? this.pageHeight : 360) - 16));
+    if (this.isHandheldLandscape() || ((this.isFullScreen || this.immersiveWindow) && !this.isHandheldDevice())) {
+      return Math.max(150, Math.min(394 + Math.max(0, this.uiFontScale - 1) * 120,
+        (this.pageHeight > 0 ? this.pageHeight : 360) - 16));
     }
-    return this.getRemoteToolbarButtonHeight() + 14;
+    return this.getRemoteToolbarButtonHeight() + 22;
   }
 
   getRemoteToolbarCollapsedSize(): number {
@@ -6978,7 +7562,7 @@ struct RemotePage {
     if (this.isFullScreen && !this.isHandheldDevice()) {
       return Math.max(8, width - this.getRemoteToolbarCurrentWidth() - 108);
     }
-    if (this.isHandheldLandscape()) {
+    if (this.isHandheldLandscape() || this.immersiveWindow) {
       return Math.max(8, width - this.getRemoteToolbarCurrentWidth() - 8);
     }
     return Math.max(8, (width - this.getRemoteToolbarWidth()) / 2);
@@ -6986,6 +7570,7 @@ struct RemotePage {
 
   getRemoteToolbarBaseY(): number {
     const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
+    if (this.immersiveWindow && !this.isFullScreen) return 58;
     if (this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())) return 8;
     return Math.max(8, height - this.getRemoteToolbarHeight() - 18);
   }
@@ -7007,6 +7592,7 @@ struct RemotePage {
   }
 
   beginRemoteToolbarDrag(): void {
+    this.cancelPcToolbarAutoCollapse();
     this.remoteToolbarDragStartX = this.clampRemoteToolbarOffsetX(this.remoteToolbarOffsetX);
     this.remoteToolbarDragStartY = this.clampRemoteToolbarOffsetY(this.remoteToolbarOffsetY);
   }
@@ -8328,10 +8914,22 @@ struct RemotePage {
   }
 
   disconnectSession(): void {
+    if (this.pipDisconnectPending) return;
+    if (this.pipSurfaceOwned && this.pictureInPicture) {
+      this.pipDisconnectPending = true;
+      this.pictureInPicture.dispose().finally(() => {
+        this.pipSurfaceOwned = false;
+        this.pipPhase = 'idle';
+        this.pipDisconnectPending = false;
+        this.disconnectSession();
+      });
+      return;
+    }
     if (this.isLeavingAfterDisconnect) {
       return;
     }
     this.isLeavingAfterDisconnect = true;
+    this.stopDesktopWindowTracking();
     if (this.transferHistoryStartedAt > 0) {
       this.finishFileTransferHistory('cancelled', '远控连接已断开');
     }
@@ -8340,6 +8938,8 @@ struct RemotePage {
     this.releaseRemoteNavigationKeys('disconnect');
     ConnectionService.releaseModifiers();
     this.restoreFullscreenOnLeave();
+    this.restoreImmersiveWindowOnLeave();
+    this.controlMenu = '';
     if (this.statusTimer !== -1) {
       clearTimeout(this.statusTimer);
       this.statusTimer = -1;
@@ -8532,6 +9132,7 @@ struct RemotePage {
   }
 
   bindSurfaceIfReady(): void {
+    if (this.pipSurfaceOwned) return;
     if (this.surfaceId.length <= 0) {
       try {
         this.surfaceId = this.xComponentController.getXComponentSurfaceId();
@@ -8563,6 +9164,7 @@ struct RemotePage {
   }
 
   scheduleSurfaceRebindIfSizeChanged(force: boolean = false): void {
+    if (this.pipSurfaceOwned) return; // The system owns/resizes the same surface in PiP.
     if (this.componentWidth <= 0 || this.componentHeight <= 0 || this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
@@ -8600,6 +9202,7 @@ struct RemotePage {
   }
 
   rebindSurfaceAfterLayoutChange(): void {
+    if (this.pipSurfaceOwned) return;
     const force = this.surfaceRebindForced;
     this.surfaceRebindForced = false;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.componentWidth <= 0 || this.componentHeight <= 0) {

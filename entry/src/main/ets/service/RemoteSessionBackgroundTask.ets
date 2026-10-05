@@ -33,6 +33,7 @@ export class RemoteSessionBackgroundTask {
   private static audioPlaybackActive: boolean = false
   private static voiceCallActive: boolean = false
   private static appBackground: boolean = false
+  private static pictureInPictureActive: boolean = false
   private static backgroundVideoApplied: boolean = false
   private static taskId: number = -1
   private static currentSignature: string = ''
@@ -97,6 +98,7 @@ export class RemoteSessionBackgroundTask {
     }
     RemoteSessionBackgroundTask.sessionDesired = desired
     if (!desired) {
+      RemoteSessionBackgroundTask.pictureInPictureActive = false
       RemoteSessionBackgroundTask.dataTransferActive = false
       RemoteSessionBackgroundTask.audioPlaybackActive = false
       RemoteSessionBackgroundTask.voiceCallActive = false
@@ -111,7 +113,8 @@ export class RemoteSessionBackgroundTask {
       return
     }
     RemoteSessionBackgroundTask.appBackground = background
-    const reduceVideo: boolean = background && RemoteSessionBackgroundTask.sessionDesired
+    const reduceVideo: boolean = background && RemoteSessionBackgroundTask.sessionDesired &&
+      !RemoteSessionBackgroundTask.pictureInPictureActive
     RemoteSessionBackgroundTask.applyBackgroundVideoMode()
     RustDeskNapi.appendDiagnosticLog('background-task',
       `app_background=${background} reduce_video=${reduceVideo}`)
@@ -119,6 +122,13 @@ export class RemoteSessionBackgroundTask {
 
   static isAppBackground(): boolean {
     return RemoteSessionBackgroundTask.appBackground
+  }
+
+  static setPictureInPictureActive(active: boolean): void {
+    if (RemoteSessionBackgroundTask.pictureInPictureActive === active) return
+    RemoteSessionBackgroundTask.pictureInPictureActive = active
+    RemoteSessionBackgroundTask.applyBackgroundVideoMode()
+    RustDeskNapi.appendDiagnosticLog('background-task', `pip_video_active=${active}`)
   }
 
   static setDataTransferActive(active: boolean): void {
@@ -143,6 +153,7 @@ export class RemoteSessionBackgroundTask {
   static stop(): void {
     RemoteSessionBackgroundTask.clearRetry()
     RemoteSessionBackgroundTask.sessionDesired = false
+    RemoteSessionBackgroundTask.pictureInPictureActive = false
     RemoteSessionBackgroundTask.dataTransferActive = false
     RemoteSessionBackgroundTask.audioPlaybackActive = false
     RemoteSessionBackgroundTask.voiceCallActive = false
@@ -195,7 +206,7 @@ export class RemoteSessionBackgroundTask {
 
   private static applyBackgroundVideoMode(): void {
     const reduceVideo: boolean = RemoteSessionBackgroundTask.appBackground &&
-      RemoteSessionBackgroundTask.sessionDesired
+      RemoteSessionBackgroundTask.sessionDesired && !RemoteSessionBackgroundTask.pictureInPictureActive
     if (reduceVideo === RemoteSessionBackgroundTask.backgroundVideoApplied) {
       return
     }

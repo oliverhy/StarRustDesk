@@ -123,19 +123,19 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     assert(method('buildControlToolbarItem').includes('this.buildFullscreenButton('));
     assert(!method('buildControlToolbarItem').includes("buildToolbarButton(this.isFullScreen"));
   });
-  await test('PC controls float only in fullscreen and expand downward from the top right', () => {
+  await test('PC controls float in fullscreen or opt-in borderless mode, keeping normal sidebar', () => {
     const screen = method('buildRemoteScreen');
     const floating = method('buildFloatingToolbar');
     const exitButton = method('buildPcFullscreenExitButton');
-    assert(source.includes('this.isHandheldDevice() || this.isFullScreen || !this.isLargeLayout()'));
+    assert(source.includes('this.isHandheldDevice() || this.isFullScreen || this.immersiveWindow || !this.isLargeLayout()'));
     assert(source.includes('this.isFullScreen && !this.isHandheldDevice()) {\n        this.buildPcFullscreenExitButton()'));
-    assert(screen.includes('if (!this.isFullScreen && this.isLargeLayout() && !this.isHandheldDevice())'));
+    assert(screen.includes('if (!this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice())'));
     assert(screen.includes('this.buildSideToolbar()'));
     assert(exitButton.includes("Button(translate(this.fullscreenTransitioning ? '切换中…' : '退出全屏', this.uiLanguage))"));
     assert(exitButton.includes('this.exitFullScreen()'));
     assert(exitButton.includes('this.pageWidth - 100'));
     assert(exitButton.includes('.zIndex(70)'));
-    assert(floating.includes('this.isHandheldLandscape() || (this.isFullScreen && !this.isHandheldDevice())'));
+    assert(floating.includes('this.isHandheldLandscape() || ((this.isFullScreen || this.immersiveWindow) && !this.isHandheldDevice())'));
     assert(method('getRemoteToolbarBaseX').includes('width - this.getRemoteToolbarCurrentWidth() - 108'));
     assert(method('getRemoteToolbarBaseY').includes('return 8'));
     assert(method('buildControlToolbarItem').includes("item === 'fullscreen'"));

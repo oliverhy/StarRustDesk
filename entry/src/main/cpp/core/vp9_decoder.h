@@ -1,6 +1,7 @@
 #ifndef RUSTDESK_CORE_VP9_DECODER_H
 #define RUSTDESK_CORE_VP9_DECODER_H
 #include "video_color.h"
+#include "video_task_queue.h"
 
 #include <cstdint>
 #include <atomic>
@@ -66,6 +67,9 @@ private:
     std::atomic<bool> colorFormatDirty_{true};
     std::deque<EncodedFrame> frames_;
     std::deque<InputSlot> inputSlots_;
+    std::unique_ptr<VideoCallbackContext<VP9Decoder>> callbackContext_;
+    // Destroy/drain the worker before any state captured by its jobs.
+    VideoTaskQueue callbackQueue_;
 };
 
 #endif

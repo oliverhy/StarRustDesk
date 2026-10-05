@@ -8,6 +8,7 @@
 #include <mutex>
 #include <vector>
 #include "video_color.h"
+#include "video_task_queue.h"
 
 struct VideoDecoderCapabilities {
     bool h264;
@@ -62,6 +63,9 @@ private:
 
     std::mutex mutex_;
     std::deque<PendingFrame> pendingFrames_;
+    size_t pendingFrameBytes_{0};
+    bool flushScheduled_{false};
+    std::mutex renderMutex_;
     int frameWidth_{0};
     int frameHeight_{0};
     int decodedFrameWidth_{0};
@@ -79,6 +83,7 @@ private:
     std::function<void(const uint8_t*, int, int, int)> frameCallback_;
     std::mutex colorMutex_;
     VideoColorInfo colorInfo_;
+    VideoTaskQueue frameWorker_;
 };
 
 #endif

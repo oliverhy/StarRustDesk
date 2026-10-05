@@ -85,7 +85,7 @@ export struct ConnectionPage {
   @State isConnecting: boolean = false
   private preparingAccount: boolean = false
   @StorageLink('isDarkMode') isDarkMode: boolean = false
-  @StorageLink('peerOnlineQueryEnabled') @Watch('onPeerOnlineQuerySettingChanged') peerOnlineQueryEnabled: boolean = false
+  @StorageLink('peerOnlineQueryEnabled') @Watch('onPeerOnlineQuerySettingChanged') peerOnlineQueryEnabled: boolean = true
   @StorageLink('serverConfigVersion') @Watch('onServerConfigVersionChanged') serverConfigVersion: number = 0
   @StorageLink('savedConnectionsCloudRevision') @Watch('onCloudConnectionsChanged')
   savedConnectionsCloudRevision: number = 0
@@ -126,6 +126,10 @@ export struct ConnectionPage {
   @State editingGroupId: string = ''
   @State groupNameDraft: string = ''
   @State groupNameError: string = ''
+  @State showRenameConnectionDialog: boolean = false
+  @State renamingConnectionId: string = ''
+  @State connectionNameDraft: string = ''
+  @State connectionNameError: string = ''
   @State assignCreatedGroupToForm: boolean = false
   @State assignCreatedGroupConnectionId: string = ''
   @State showGroupPicker: boolean = false
@@ -388,7 +392,7 @@ export struct ConnectionPage {
           .accessibilityText(translate('连接已保存', this.uiLanguage))
       }
 
-      if (this.showGroupNameDialog || this.showGroupPicker || this.showConnectionPasswordDialog ||
+      if (this.showRenameConnectionDialog || this.showGroupNameDialog || this.showGroupPicker || this.showConnectionPasswordDialog ||
         this.showBackupPasswordDialog || this.showImportPreviewDialog) {
         Column()
           .width('100%')
@@ -399,7 +403,9 @@ export struct ConnectionPage {
           })
           .zIndex(10)
 
-        if (this.showGroupNameDialog) {
+        if (this.showRenameConnectionDialog) {
+          this.buildRenameConnectionDialog()
+        } else if (this.showGroupNameDialog) {
           this.buildGroupNameDialog()
         } else if (this.showGroupPicker) {
           this.buildGroupPickerDialog()
@@ -1331,6 +1337,12 @@ export struct ConnectionPage {
                   }
                 },
                 {
+                  value: translate('重命名', this.uiLanguage),
+                  action: () => {
+                    this.openRenameConnectionDialog(item.id)
+                  }
+                },
+                {
                   value: translate('修改连接', this.uiLanguage),
                   action: () => {
                     this.editSavedConnection(item)
@@ -1366,6 +1378,69 @@ export struct ConnectionPage {
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(12)
+  }
+
+  @Builder
+  buildRenameConnectionDialog() {
+    Column({ space: 14 }) {
+      Text(translate('重命名连接', this.uiLanguage))
+        .fontSize(19)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+
+      TextInput({ placeholder: translate('输入连接名称', this.uiLanguage), text: this.connectionNameDraft })
+        .width('100%')
+        .height(48)
+        .fontSize(15)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.connectionNameError.length > 0 ? RustDeskTheme.ERROR :
+          (this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER) })
+        .borderRadius(12)
+        .padding({ left: 12, right: 12 })
+        .onChange((value: string) => {
+          this.connectionNameDraft = value
+          this.connectionNameError = ''
+        })
+
+      if (this.connectionNameError.length > 0) {
+        Text(translate(this.connectionNameError, this.uiLanguage))
+          .fontSize(12)
+          .fontColor(RustDeskTheme.ERROR)
+          .width('100%')
+      }
+
+      Row({ space: 10 }) {
+        Button(translate('取消', this.uiLanguage))
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(14)
+          .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .onClick(() => { this.closeRenameConnectionDialog() })
+          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+        Button(translate('保存名称', this.uiLanguage))
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(14)
+          .fontColor(Color.White)
+          .backgroundColor(RustDeskTheme.ACCENT)
+          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .onClick(() => { this.saveConnectionName() })
+          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+      }
+      .width('100%')
+    }
+    .width(this.pageWidth >= 820 ? 420 : '88%')
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(10)
+    .shadow({ radius: 24, color: '#55000000', offsetX: 0, offsetY: 8 })
+    .zIndex(11)
   }
 
   @Builder
@@ -2217,6 +2292,64 @@ export struct ConnectionPage {
     this.persistConnectionGroups()
   }
 
+  openRenameConnectionDialog(connectionId: string): void {
+    if (this.savingConnection) return
+    const connection: SavedConnectionInfo | undefined = this.savedConnections.find((item: SavedConnectionInfo) =>
+      item.id === connectionId)
+    if (connection === undefined) return
+    this.closeAllDialogs()
+    this.renamingConnectionId = connectionId
+    this.connectionNameDraft = connection.name
+    this.connectionNameError = ''
+    this.showRenameConnectionDialog = true
+  }
+
+  saveConnectionName(): void {
+    if (!this.showRenameConnectionDialog || this.savingConnection) return
+    const name: string = this.connectionNameDraft.trim()
+    if (name.length === 0) {
+      this.connectionNameError = '连接名称不能为空'
+      return
+    }
+    const connection: SavedConnectionInfo | undefined = this.savedConnections.find((item: SavedConnectionInfo) =>
+      item.id === this.renamingConnectionId)
+    if (connection === undefined) {
+      this.connectionNameError = '此连接已不存在，请关闭后重试'
+      return
+    }
+    if (name === connection.name) {
+      this.closeRenameConnectionDialog()
+      return
+    }
+    // Use the latest rows, preserving credentials, ID, group and performance settings.
+    const list: SavedConnectionInfo[] = this.cloneSavedConnections(this.savedConnections)
+    list.forEach((item: SavedConnectionInfo) => {
+      if (item.id === connection.id) item.name = name
+    })
+    try {
+      this.persistSavedConnections(list)
+    } catch (_error) {
+      this.connectionNameError = '保存失败，请重试'
+      return
+    }
+    this.savedConnections = list
+    this.savedConnectionsVersion++
+    // Keep an untouched matching editor in sync, without overwriting a user's draft.
+    if (this.selectedConnectionId === connection.id && this.connectionName === connection.name) {
+      this.connectionName = name
+    }
+    this.closeRenameConnectionDialog()
+    this.showSavedTip()
+    RustDeskNapi.appendDiagnosticLog('connection', 'saved_connection_renamed')
+  }
+
+  closeRenameConnectionDialog(): void {
+    this.showRenameConnectionDialog = false
+    this.renamingConnectionId = ''
+    this.connectionNameDraft = ''
+    this.connectionNameError = ''
+  }
+
   openNewGroupDialog(assignToForm: boolean = false, connectionId: string = ''): void {
     this.showGroupPicker = false
     this.showGroupNameDialog = true
@@ -2341,6 +2474,7 @@ export struct ConnectionPage {
   }
 
   closeAllDialogs(): void {
+    this.closeRenameConnectionDialog()
     this.closeConnectionPasswordDialog()
     this.closeGroupDialogs()
     this.closeBackupDialogs()

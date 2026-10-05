@@ -12,6 +12,7 @@ import { AccountSession } from '../service/RustDeskApiService';
 import { RemoteDisplayPolicy } from '../service/RemoteDisplayPolicy';
 import { SystemFaultDiagnostic } from '../service/SystemFaultDiagnostic';
 import { LanguageService } from '../utils/LanguageService';
+import { PeerOnlinePreference } from '../service/PeerOnlinePreference';
 
 const DOMAIN = 0x0000;
 
@@ -46,7 +47,7 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate('appForegroundEpoch', 0);
     AppStorage.setOrCreate('serverConfigVersion', 0);
     AppStorage.setOrCreate('savedConnectionsCloudRevision', 0);
-    AppStorage.setOrCreate('peerOnlineQueryEnabled', RustDeskNapi.getOption('peer-online-query-enabled') === '1');
+    PeerOnlinePreference.initialize();
     // Validate only the locally remembered account; never log credentials or responses.
     AccountSession.getApi().restore().catch(() => {
       RustDeskNapi.appendDiagnosticLog('api-account', 'startup_restore_failed; retry_before_connection=true');

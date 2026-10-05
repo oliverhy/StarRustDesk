@@ -99,6 +99,26 @@ test('decoded but unpresented frames also trigger decoder recovery', () => {
   now=24000; video.checkDecoderHealth(stalled); assert.equal(restart,2);
   now=30000; video.checkDecoderHealth(stalled); assert.equal(restart,2); assert.equal(fallback,2);
 });
+test('successful rendering re-arms bounded recovery for later resize stalls', () => {
+  const progress={hasFrame:true,totalFrames:9,decodedFrames:9,renderedFrames:9,codec:2};
+  video.videoDecoderRestartRequested=true; video.videoFallbackRequested=true;
+  now=32000; video.checkDecoderHealth(progress);
+  assert.equal(video.videoDecoderRestartRequested,false);
+  assert.equal(video.videoFallbackRequested,false);
+  const before=restart;
+  now=34000; video.checkDecoderHealth({...progress,totalFrames:10});
+  now=38000; video.checkDecoderHealth({...progress,totalFrames:10});
+  assert.equal(restart,before+1);
+  now=39000; video.checkDecoderHealth({...progress,totalFrames:10});
+  assert.equal(restart,before+1);
+});
+test('static desktop with no new input frames does not restart a healthy decoder', () => {
+  const idle={hasFrame:true,totalFrames:11,decodedFrames:11,renderedFrames:11,codec:2};
+  now=40000; video.checkDecoderHealth(idle);
+  const before=restart;
+  now=140000; video.checkDecoderHealth(idle);
+  assert.equal(restart,before);
+});
 let route=1, status=2, forcedConnections=0, normalConnections=0, insecureConnections=0, disconnects=0;
 let lastConnectionError='';
 const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,

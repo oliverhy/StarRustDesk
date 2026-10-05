@@ -52,6 +52,9 @@ void SystemVideoDecoder::setSurface(OHNativeWindow* window, int width, int heigh
     if (window_ == window && width_ == width && height_ == height && (started_ || createFailed_)) {
         return;
     }
+    DiagnosticLog::instance().append("I", component_,
+        "surface_reconfigure from=" + std::to_string(width_) + "x" + std::to_string(height_) +
+        " to=" + std::to_string(width) + "x" + std::to_string(height));
     stopLocked();
     window_ = window;
     width_ = width;
@@ -102,6 +105,7 @@ void SystemVideoDecoder::release() {
     OH_AVCodec* codec = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (callbackContext_) callbackContext_->active->store(false);
         codec = codec_;
         codec_ = nullptr;
         started_ = false;
@@ -142,7 +146,8 @@ bool SystemVideoDecoder::startLocked(OHNativeWindow* window, int width, int heig
     callback.onStreamChanged = SystemVideoDecoder::onStreamChanged;
     callback.onNeedInputBuffer = SystemVideoDecoder::onNeedInputBuffer;
     callback.onNewOutputBuffer = SystemVideoDecoder::onNewOutputBuffer;
-    OH_AVErrCode ret = OH_VideoDecoder_RegisterCallback(codec_, callback, this);
+    callbackContext_ = std::make_unique<VideoCallbackContext<SystemVideoDecoder>>(this);
+    OH_AVErrCode ret = OH_VideoDecoder_RegisterCallback(codec_, callback, callbackContext_.get());
     if (ret != AV_ERR_OK) {
         DiagnosticLog::instance().append("E", component_,
             "register_callback_failed result=" + std::to_string(ret));
@@ -200,10 +205,15 @@ bool SystemVideoDecoder::startLocked(OHNativeWindow* window, int width, int heig
 }
 
 void SystemVideoDecoder::stopLocked() {
+    if (callbackContext_) callbackContext_->active->store(false);
     if (codec_ != nullptr) {
+        // Native callbacks only post jobs; they never wait for this mutex.
+        // Invalidate queued jobs before Stop/Destroy or native handle reuse.
+        DiagnosticLog::instance().append("I", component_, "decoder_reconfigure_stop");
         OH_VideoDecoder_Stop(codec_);
         OH_VideoDecoder_Destroy(codec_);
         codec_ = nullptr;
+        DiagnosticLog::instance().append("I", component_, "decoder_reconfigure_stopped");
     }
     started_ = false;
     decodeMode_ = VideoDecodeMode::Unknown;
@@ -335,7 +345,8 @@ uint32_t SystemVideoDecoder::hevcNalFlags(const std::vector<uint8_t>& frame) {
 }
 
 void SystemVideoDecoder::onError(OH_AVCodec*, int32_t errorCode, void* userData) {
-    SystemVideoDecoder* decoder = static_cast<SystemVideoDecoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<SystemVideoDecoder>*>(userData);
+    SystemVideoDecoder* decoder = context ? context->owner : nullptr;
     if (decoder != nullptr) {
         DiagnosticLog::instance().append("E", decoder->component_,
             "decoder_error code=" + std::to_string(errorCode));
@@ -343,12 +354,13 @@ void SystemVideoDecoder::onError(OH_AVCodec*, int32_t errorCode, void* userData)
 }
 
 void SystemVideoDecoder::onStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void* userData) {
-    SystemVideoDecoder* decoder = static_cast<SystemVideoDecoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<SystemVideoDecoder>*>(userData);
+    SystemVideoDecoder* decoder = context ? context->owner : nullptr;
     if (decoder != nullptr) {
         decoder->colorFormatDirty_.store(true);
         std::unique_lock<std::mutex> lock(decoder->mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return; // Never wait inside a Configure/Stop callback.
-        if (!decoder->started_ || decoder->codec_ != codec) return;
+        if (!context->active->load() || !decoder->started_ || decoder->codec_ != codec) return;
         decoder->color_ = readVideoColorFormat(format);
         decoder->colorFormatDirty_.store(false);
         DiagnosticLog::instance().append("I", decoder->component_, "stream_changed");
@@ -357,46 +369,54 @@ void SystemVideoDecoder::onStreamChanged(OH_AVCodec* codec, OH_AVFormat* format,
 
 void SystemVideoDecoder::onNeedInputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer,
                                            void* userData) {
-    SystemVideoDecoder* decoder = static_cast<SystemVideoDecoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<SystemVideoDecoder>*>(userData);
+    SystemVideoDecoder* decoder = context ? context->owner : nullptr;
     if (decoder == nullptr || buffer == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(decoder->mutex_);
-    if (!decoder->started_ || decoder->codec_ != codec) {
-        return;
-    }
-    decoder->inputSlots_.push_back(InputSlot {index, buffer});
-    decoder->feedLocked();
+    const auto active = context->active;
+    decoder->callbackQueue_.post([decoder, active, codec, index, buffer]() {
+        std::lock_guard<std::mutex> lock(decoder->mutex_);
+        if (!active->load() || !decoder->started_ || decoder->codec_ != codec) {
+            return;
+        }
+        decoder->inputSlots_.push_back(InputSlot {index, buffer});
+        decoder->feedLocked();
+    });
 }
 
 void SystemVideoDecoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData) {
-    SystemVideoDecoder* decoder = static_cast<SystemVideoDecoder*>(userData);
+    auto* context = static_cast<VideoCallbackContext<SystemVideoDecoder>*>(userData);
+    SystemVideoDecoder* decoder = context ? context->owner : nullptr;
     if (decoder == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(decoder->mutex_);
-    if (!decoder->started_ || decoder->codec_ != codec) {
-        return;
-    }
-    if (decoder->colorFormatDirty_.exchange(false)) {
-        OH_AVFormat* format = OH_VideoDecoder_GetOutputDescription(codec);
-        decoder->color_ = readVideoColorFormat(format);
-        if (format) OH_AVFormat_Destroy(format);
-    }
-    auto color = decoder->color_;
-    enrichVideoColorFromBuffer(buffer, color);
-    color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
-    VideoRender::instance().updateColorInfo(color);
-    OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
-    VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
-        static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
-    if (ret != AV_ERR_OK) {
-        DiagnosticLog::instance().append("E", decoder->component_,
-            "render_output_failed result=" + std::to_string(ret));
-        return;
-    }
-    decoder->outputFrames_ += 1;
-    if (decoder->outputFrames_ == 1) {
-        DiagnosticLog::instance().append("I", decoder->component_, "first_output_rendered");
-    }
+    const auto active = context->active;
+    decoder->callbackQueue_.post([decoder, active, codec, index, buffer]() {
+        std::lock_guard<std::mutex> lock(decoder->mutex_);
+        if (!active->load() || !decoder->started_ || decoder->codec_ != codec) {
+            return;
+        }
+        if (decoder->colorFormatDirty_.exchange(false)) {
+            OH_AVFormat* format = OH_VideoDecoder_GetOutputDescription(codec);
+            decoder->color_ = readVideoColorFormat(format);
+            if (format) OH_AVFormat_Destroy(format);
+        }
+        auto color = decoder->color_;
+        enrichVideoColorFromBuffer(buffer, color);
+        color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
+        VideoRender::instance().updateColorInfo(color);
+        OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
+        VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
+            static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
+        if (ret != AV_ERR_OK) {
+            DiagnosticLog::instance().append("E", decoder->component_,
+                "render_output_failed result=" + std::to_string(ret));
+            return;
+        }
+        decoder->outputFrames_ += 1;
+        if (decoder->outputFrames_ == 1) {
+            DiagnosticLog::instance().append("I", decoder->component_, "first_output_rendered");
+        }
+    });
 }
