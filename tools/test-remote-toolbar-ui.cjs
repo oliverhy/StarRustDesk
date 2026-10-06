@@ -33,8 +33,8 @@ expect(remotePage, /display === this\.currentDisplay[\s\S]*controlSelectedBackgr
   'the current remote display must use the pale-blue selected style')
 expect(remotePage, /edgeAutoPanEnabled \? this\.controlSelectedBackgroundColor\(\)/,
   'edge following must use the pale-blue selected style')
-expect(remotePage, /selected \? this\.controlSelectedBackgroundColor\(\) : this\.mutedSurfaceColor\(\)/,
-  'general selected toolbar buttons must use the pale-blue selected style')
+expect(remotePage, /selected \? this\.controlSelectedBackgroundColor\(\) : \(this\.controlMenu \? Color\.Transparent : this\.mutedSurfaceColor\(\)\)/,
+  'general buttons keep pale-blue selection; compact menus use a transparent unselected row')
 expect(remotePage, /按钮变为淡蓝色/,
   'gesture help must describe the new selected state')
 expect(remotePage, /Button\(translate\(`屏\$\{display \+ 1\}`, this\.uiLanguage\)\)[\s\S]*?\.width\(this\.adaptiveToolbarButtonWidth\(vertical \? 80 : 44\)\)/,

@@ -32,7 +32,8 @@ import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
 import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
 import { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, remoteControlCategoryLabel,
-  clampControlMenuAxis } from '../model/RemoteControlMenu';
+  compactControlMenuMetrics, placeCompactControlMenu, remoteControlMenuWidthLabels, estimateControlMenuTextWidth,
+  RemoteMenuMetrics, RemoteMenuAnchor } from '../model/RemoteControlMenu';
 
 class ViewportFrameCallback extends FrameCallback {
   private apply: () => void;
@@ -224,6 +225,15 @@ struct RemotePage {
   @State remoteToolbarOffsetX: number = 0;
   @State remoteToolbarOffsetY: number = 0;
   @State controlMenu: string = '';
+  @State controlMenuProgress: number = 0;
+  @State controlMenuClosing: boolean = false;
+  private controlMenuAnimationEpoch: number = 0;
+  private controlMenuLabelMeasureKey: string = '';
+  private controlMenuLabelMeasuredWidth: number = 0;
+  @State controlMenuAnchors: RemoteMenuAnchor[] = [];
+  @State controlMenuPageOriginX: number = 0;
+  @State controlMenuPageOriginY: number = 0;
+  @State controlMenuKeyboardInset: number = 0;
   @State immersiveWindow: boolean = false;
   @State immersiveWindowTransitioning: boolean = false;
   private immersiveWindowRequestId: number = 0;
@@ -601,6 +611,7 @@ struct RemotePage {
 
   aboutToDisappear(): void {
     this.remotePageVisible = false;
+    this.resetControlMenuAnimation();
     this.stopDesktopWindowTracking();
     this.pictureInPicture?.dispose();
     this.remoteKeyboardFocusGeneration++;
@@ -1673,6 +1684,8 @@ struct RemotePage {
       this.relativePointerSampleValid = false;
       this.pageWidth = newValue.width as number;
       this.pageHeight = newValue.height as number;
+      this.controlMenuPageOriginX = Number(newValue.globalPosition.x) || 0;
+      this.controlMenuPageOriginY = Number(newValue.globalPosition.y) || 0;
       // IME resizing is not folding/rotation. Also detect height-only changes
       // against the owning window, rather than its keyboard-resized content.
       if (this.hasKeyboardViewportSizeChanged()) {
@@ -2762,14 +2775,68 @@ struct RemotePage {
   }
 
   setControlMenu(category: string): void {
+    if (category.length > 0 && (!this.remotePageVisible || this.isLeavingAfterDisconnect)) return;
+    if (category.length === 0 && this.controlMenuClosing) return;
     this.cancelPcToolbarAutoCollapse();
     this.handleNonRemoteHover(true);
     this.releaseVirtualMouseButtons();
     this.cancelActiveTouchGesture();
-    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseOut }, () => {
+    const epoch = ++this.controlMenuAnimationEpoch;
+    if (category.length === 0) {
+      if (this.controlMenu.length === 0 || this.controlMenuProgress === 0) {
+        this.resetControlMenuAnimation();
+      } else {
+        // Keep the category/scrim mounted until the exit finishes so the
+        // closing tap and hardware input cannot leak through to the peer.
+        this.controlMenuClosing = true;
+        this.animateControlMenu(0, epoch);
+      }
+    } else {
+      const mounted = this.controlMenu.length > 0;
       this.controlMenu = category;
-    });
+      this.controlMenuClosing = false;
+      if (mounted) {
+        this.animateControlMenu(1, epoch);
+      } else {
+        this.controlMenuProgress = 0;
+        try {
+          this.getUIContext().postFrameCallback(new ViewportFrameCallback(() => {
+            if (epoch === this.controlMenuAnimationEpoch) this.animateControlMenu(1, epoch);
+          }));
+        } catch (_error) {
+          this.controlMenuProgress = 1;
+        }
+      }
+    }
     RustDeskNapi.appendDiagnosticLog('remote-ui', `control_menu category=${category || 'closed'}`);
+  }
+
+  animateControlMenu(progress: number, epoch: number): void {
+    if (epoch !== this.controlMenuAnimationEpoch) return;
+    try {
+      this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseInOut, onFinish: () => {
+        if (epoch !== this.controlMenuAnimationEpoch) return;
+        if (progress === 0) {
+          this.controlMenu = '';
+          this.controlMenuClosing = false;
+        }
+      } }, () => {
+        if (epoch === this.controlMenuAnimationEpoch) this.controlMenuProgress = progress;
+      });
+    } catch (_error) {
+      this.controlMenuProgress = progress;
+      if (progress === 0) {
+        this.controlMenu = '';
+        this.controlMenuClosing = false;
+      }
+    }
+  }
+
+  resetControlMenuAnimation(): void {
+    this.controlMenuAnimationEpoch++;
+    this.controlMenu = '';
+    this.controlMenuProgress = 0;
+    this.controlMenuClosing = false;
   }
 
   toggleControlMenu(category: string): void {
@@ -2790,6 +2857,14 @@ struct RemotePage {
   controlMenuSelected(category: string): boolean {
     if (category === 'keyboard') return this.showKeyboardPanel || !this.keyboardToolsCollapsed;
     return this.controlMenu === category;
+  }
+
+  controlMenuIconColor(category: string): ResourceColor {
+    if (category === 'disconnect') {
+      return this.isDarkMode ? RustDeskTheme.CONTROL_DANGER_ICON_DARK : RustDeskTheme.ERROR;
+    }
+    if (this.controlMenuSelected(category)) return this.controlSelectedTextColor();
+    return this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON;
   }
 
   @Builder
@@ -2820,14 +2895,14 @@ struct RemotePage {
   buildControlCategoryButton(category: string, vertical: boolean) {
     Button({ type: ButtonType.Normal }) {
       Column({ space: 3 }) {
-        Image(this.controlMenuIcon(category)).width(19).height(19)
-          .fillColor(category === 'disconnect' ? RustDeskTheme.ERROR :
-            (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
+        Image(this.controlMenuIcon(category)).width(20).height(20)
+          .fillColor(this.controlMenuIconColor(category))
+          .hitTestBehavior(HitTestMode.None)
         Text(translate(remoteControlCategoryLabel(category), this.uiLanguage))
           .fontSize(11).minFontSize(9).maxFontSize(11).maxLines(1)
           .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
           .fontWeight(this.controlMenuSelected(category) ? 600 : 500)
-          .fontColor(category === 'disconnect' ? RustDeskTheme.ERROR :
+          .fontColor(category === 'disconnect' ? this.controlMenuIconColor(category) :
             (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
       }
     }
@@ -2838,6 +2913,7 @@ struct RemotePage {
     .border({ width: this.controlMenuSelected(category) ? 1 : 0, color: this.controlSelectedBorderColor() })
     .borderRadius(10).focusable(false)
     .accessibilityText(translate(remoteControlCategoryLabel(category), this.uiLanguage))
+    .onAreaChange((_oldValue: Area, area: Area) => { this.recordControlMenuAnchor(category, area); })
     .onClick(() => {
       if (category === 'keyboard') {
         this.setControlMenu('');
@@ -2852,38 +2928,117 @@ struct RemotePage {
   }
 
   getControlMenuWidth(): number {
-    return Math.min(300, Math.max(180, this.pageWidth - 16));
+    return this.getControlMenuMetrics().width;
   }
 
   getControlMenuHeight(): number {
-    const columns = Math.max(1, Math.floor((this.getControlMenuWidth() - 28) / (this.adaptiveToolbarButtonWidth(80) + 8)));
-    const itemCount = remoteControlCategoryItems(this.controlMenu, this.controlToolbarOrder).length +
-      (this.controlMenu === 'more' ? 2 : (this.controlMenu === 'view' && this.isPcDevice() ? 1 : 0));
-    const itemColumns = Math.max(1, Math.floor((this.getControlMenuWidth() - 28) / (this.adaptiveToolbarButtonWidth(92) + 8)));
-    const rows = this.controlMenu === 'screens' ? Math.max(1, Math.ceil(this.displayCount / columns)) :
-      Math.max(1, Math.ceil(itemCount / itemColumns));
-    return Math.min(rows * (this.getRemoteToolbarButtonHeight() + 10) + 84 +
-      (this.controlMenu === 'view' && this.isPcDevice() ? 180 : 0),
-      Math.max(120, this.pageHeight - 32));
+    return this.getControlMenuMetrics().height;
+  }
+
+  getVisibleControlMenuItems(): string[] {
+    return remoteControlCategoryItems(this.controlMenu, this.controlToolbarOrder).filter((item: string) => {
+      if (item === 'virtualMouse' || item === 'orientation') return this.isHandheldDevice();
+      if (item === 'mobileActions') return this.isPeerAndroid;
+      if (item === 'pan' || item === 'edgePan') return this.canPanViewport();
+      if (item === 'privacy') return !this.isPeerAndroid;
+      return true;
+    });
+  }
+
+  getControlMenuViewportHeight(): number {
+    const height = this.pageHeight > 0 ? this.pageHeight : 640;
+    if (this.showKeyboardPanel && this.controlMenuKeyboardInset > 0 && this.keyboardLayoutHeight > 0) {
+      return Math.min(height, Math.max(1, this.keyboardLayoutHeight - this.controlMenuKeyboardInset));
+    }
+    return height;
+  }
+
+  getControlMenuMetrics(): RemoteMenuMetrics {
+    const desktopView = this.controlMenu === 'view' && this.isPcDevice();
+    const items = this.getVisibleControlMenuItems().length + (this.controlMenu === 'more' ? 2 : desktopView ? 1 : 0);
+    return compactControlMenuMetrics(this.controlMenu, this.pageWidth, this.getControlMenuViewportHeight(),
+      this.uiFontScale, this.displayCount, items, this.isHandheldDevice(), desktopView, this.desktopViewMode === 'custom',
+      this.getControlMenuLabelWidth());
+  }
+
+  getControlMenuLabelWidth(): number {
+    if (this.controlMenu !== 'view' && this.controlMenu !== 'more') return 0;
+    const items = this.getVisibleControlMenuItems();
+    const labels = remoteControlMenuWidthLabels(this.controlMenu, items, this.controlMenu === 'view' && this.isPcDevice());
+    if (this.controlMenu === 'more' && items.includes('chat')) labels.push(this.chatToolbarLabel());
+    let density = 1;
+    try { density = this.getUIContext().vp2px(1); } catch (_error) { }
+    const key = `${this.controlMenu}|${this.uiLanguage}|${this.uiFontScale}|${density}|${this.pageWidth}|${this.pageHeight}|${labels.join('|')}`;
+    if (key === this.controlMenuLabelMeasureKey) return this.controlMenuLabelMeasuredWidth;
+    let width = 0;
+    try {
+      const context = this.getUIContext();
+      const measure = context.getMeasureUtils();
+      for (const label of labels) {
+        const text = translate(label, this.uiLanguage);
+        const measured = context.px2vp(measure.measureText({ textContent: text, fontSize: '13fp', fontWeight: 600 }));
+        width = Math.max(width, Number.isFinite(measured) && measured > 0 ? measured :
+          estimateControlMenuTextWidth(text, this.uiFontScale));
+      }
+    } catch (_error) {
+      for (const label of labels) width = Math.max(width,
+        estimateControlMenuTextWidth(translate(label, this.uiLanguage), this.uiFontScale));
+    }
+    // Plain fields avoid a state/relayout loop; refresh on language, font, density,
+    // window geometry or visible/dynamic labels instead of measuring each frame.
+    this.controlMenuLabelMeasureKey = key;
+    this.controlMenuLabelMeasuredWidth = Math.ceil(width);
+    return this.controlMenuLabelMeasuredWidth;
+  }
+
+  getControlMenuRowWidth(): number {
+    return this.getControlMenuMetrics().contentWidth;
+  }
+
+  getControlActionWidth(base: number): number {
+    return this.controlMenu ? this.getControlMenuRowWidth() : this.adaptiveToolbarButtonWidth(base);
+  }
+
+  getControlActionHeight(): number {
+    return this.controlMenu ? this.getControlMenuMetrics().rowHeight : this.getRemoteToolbarButtonHeight();
+  }
+
+  getControlActionPadding(): number {
+    return this.controlMenu ? this.getControlMenuMetrics().actionPadding : 2;
+  }
+
+  recordControlMenuAnchor(category: string, area: Area): void {
+    const x = Number(area.globalPosition.x), y = Number(area.globalPosition.y);
+    const width = Number(area.width), height = Number(area.height);
+    if (![x, y, width, height].every((value: number) => Number.isFinite(value)) || width <= 0 || height <= 0) return;
+    const previous = this.controlMenuAnchors.find((entry: RemoteMenuAnchor) => entry.category === category);
+    if (previous && Math.abs(previous.x - x) < 0.5 && Math.abs(previous.y - y) < 0.5 &&
+      Math.abs(previous.width - width) < 0.5 && Math.abs(previous.height - height) < 0.5) return;
+    const next: RemoteMenuAnchor = { category, x, y, width, height };
+    this.controlMenuAnchors = this.controlMenuAnchors.filter((entry: RemoteMenuAnchor) => entry.category !== category)
+      .concat([next]);
+  }
+
+  getControlMenuAnchor(): RemoteMenuAnchor {
+    const anchor = this.controlMenuAnchors.find((entry: RemoteMenuAnchor) => entry.category === this.controlMenu);
+    if (anchor) return { category: anchor.category, x: anchor.x - this.controlMenuPageOriginX,
+      y: anchor.y - this.controlMenuPageOriginY, width: anchor.width, height: anchor.height };
+    const fixed = !this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice();
+    return { category: this.controlMenu, x: fixed ? this.pageWidth - 116 : this.getRemoteToolbarX(),
+      y: fixed ? (this.pageHeight - this.getSideToolbarHeight()) / 2 : this.getRemoteToolbarY(), width: 48, height: 48 };
+  }
+
+  isControlMenuBesideToolbar(): boolean {
+    return this.isHandheldLandscape() || ((!this.isHandheldDevice()) &&
+      (this.isLargeLayout() || this.isFullScreen || this.immersiveWindow));
   }
 
   getControlMenuX(): number {
-    const fixedSidebar = !this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice();
-    const anchor = fixedSidebar ? this.pageWidth - 116 : this.getRemoteToolbarX();
-    const x = fixedSidebar || this.isHandheldLandscape() || this.isFullScreen || this.immersiveWindow ?
-      anchor - this.getControlMenuWidth() - 10 : anchor;
-    return clampControlMenuAxis(x, this.getControlMenuWidth(), this.pageWidth);
+    return placeCompactControlMenu(this.getControlMenuMetrics(), this.getControlMenuAnchor(), this.isControlMenuBesideToolbar()).x;
   }
 
   getControlMenuY(): number {
-    if (!this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice()) {
-      return clampControlMenuAxis((this.pageHeight - this.getSideToolbarHeight()) / 2,
-        this.getControlMenuHeight(), this.pageHeight);
-    }
-    const anchor = this.getRemoteToolbarY();
-    const y = this.isHandheldLandscape() || this.isFullScreen || this.immersiveWindow ? anchor + 12 :
-      anchor - this.getControlMenuHeight() - 10;
-    return clampControlMenuAxis(y, this.getControlMenuHeight(), this.pageHeight);
+    return placeCompactControlMenu(this.getControlMenuMetrics(), this.getControlMenuAnchor(), this.isControlMenuBesideToolbar()).y;
   }
 
   @Builder
@@ -2891,39 +3046,29 @@ struct RemotePage {
     Stack({ alignContent: Alignment.TopStart }) {
       // Modal scrim consumes the dismiss tap instead of passing it to the peer.
       Column().width('100%').height('100%').backgroundColor('#12000000')
+        .opacity(this.controlMenuProgress)
         .onClick(() => { this.setControlMenu(''); })
         .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
-      Column({ space: 8 }) {
-        Row() {
-          Text(translate(remoteControlCategoryLabel(this.controlMenu), this.uiLanguage))
-            .fontSize(14).fontWeight(600).fontColor(this.primaryTextColor()).layoutWeight(1)
-          Button('×', { type: ButtonType.Normal }).width(30).height(30).fontSize(20).padding(0)
-            .fontColor(this.secondaryTextColor()).backgroundColor(Color.Transparent)
-            .accessibilityText(translate('关闭菜单', this.uiLanguage)).focusable(false)
-            .onClick(() => { this.setControlMenu(''); })
-        }.width('100%')
-        Divider().color(this.themeBorderColor())
-        Scroll() {
-          Column({ space: 8 }) {
-            if (this.controlMenu === 'view' && this.isPcDevice()) {
-              this.buildDesktopViewOptions();
-            }
-            if (this.controlMenu === 'screens') {
-              Text(translate(`屏幕 ${this.currentDisplay + 1}`, this.uiLanguage))
-                .fontSize(12).fontColor(this.secondaryTextColor())
-            }
-            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-              ForEach(remoteControlCategoryItems(this.controlMenu, this.controlToolbarOrder), (item: string) => {
-                Flex({ wrap: FlexWrap.Wrap }) {
+      Column() {
+        if (this.controlMenu === 'screens') {
+          this.buildCompactDisplayMenu();
+        } else {
+          Scroll() {
+            Column({ space: 2 }) {
+              if (this.controlMenu === 'view' && this.isPcDevice()) {
+                this.buildDesktopViewOptions();
+              }
+              ForEach(this.getVisibleControlMenuItems(), (item: string) => {
+                Column() {
                   this.buildControlToolbarItem(item, true)
-                }.width(item === 'displays' ? '100%' : this.adaptiveToolbarButtonWidth(92)).margin(4)
+                }.width('100%')
               }, (item: string) => `menu-${item}-${this.currentDisplay}-${this.displayCount}-${this.showVirtualMouse ? 1 : 0}`)
               if (this.controlMenu === 'view' && this.isPcDevice()) {
                 Column() {
                   this.buildToolbarButton(this.immersiveWindow ? '退出沉浸' : '沉浸窗口', 92, this.immersiveWindow,
                     false, !this.fullscreenTransitioning && !this.isFullScreen && !this.pipSurfaceOwned &&
                     !this.immersiveWindowTransitioning, () => { this.toggleImmersiveWindow(); })
-                }.margin(4)
+                }.width('100%')
               }
               if (this.controlMenu === 'more') {
                 Column() {
@@ -2931,54 +3076,83 @@ struct RemotePage {
                     this.showQualityMonitor = !this.showQualityMonitor;
                     this.setControlMenu('');
                   })
-                }.margin(4)
+                }.width('100%')
                 Column() {
                   this.buildToolbarButton('工具栏排序', 92, false, false, true, () => {
                     this.setControlMenu('');
                     this.openToolbarOrderEditor('control', '');
                   })
-                }.margin(4)
+                }.width('100%')
               }
-            }.width('100%')
-          }.width('100%')
-        }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
+            }.width('100%').justifyContent(FlexAlign.Start)
+          }.width('100%').height(this.getControlMenuMetrics().bodyHeight).scrollBar(BarState.Off)
+            .align(Alignment.TopStart)
+        }
       }
-      .width(this.getControlMenuWidth()).height(this.getControlMenuHeight()).padding(14)
+      .width(this.getControlMenuWidth()).height(this.getControlMenuHeight()).padding(8)
       .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F2FFFFFF')
-      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' }).borderRadius(18)
+      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' }).borderRadius(12)
       .shadow({ radius: 20, color: '#33000000', offsetX: 0, offsetY: 6 })
       .position({ x: this.getControlMenuX(), y: this.getControlMenuY() })
-      .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.97, y: 0.97 })))
+      .opacity(this.controlMenuProgress)
+      .scale({ x: 0.97 + 0.03 * this.controlMenuProgress, y: 0.97 + 0.03 * this.controlMenuProgress })
+      .enabled(!this.controlMenuClosing)
       .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
     }.width('100%').height('100%').zIndex(68)
   }
 
   @Builder
+  buildCompactDisplayMenu() {
+    Scroll() {
+      Row({ space: 6 }) {
+        ForEach(this.makeDisplayIndexes(), (display: number) => {
+          Button(translate(`屏${display + 1}`, this.uiLanguage))
+            .width(this.getControlMenuMetrics().displayWidth).height(this.getControlMenuMetrics().rowHeight)
+            .fontSize(12).labelStyle({ maxLines: 1, minFontSize: 10, maxFontSize: 12,
+              heightAdaptivePolicy: TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST })
+            .fontWeight(display === this.currentDisplay ? 600 : 500)
+            .fontColor(display === this.currentDisplay ? this.controlSelectedTextColor() : this.primaryTextColor())
+            .backgroundColor(display === this.currentDisplay ? this.controlSelectedBackgroundColor() : Color.Transparent)
+            .borderRadius(8).focusable(false)
+            .accessibilityText(translate(`屏幕 ${display + 1}`, this.uiLanguage))
+            .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
+              this.openToolbarOrderEditor('control', 'displays');
+            }))
+            .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
+            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        }, (display: number) => `compact-display-${display}`)
+      }
+    }.width('100%').height(this.getControlMenuMetrics().bodyHeight)
+      .scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+  }
+
+  @Builder
   buildDesktopViewOptions() {
-    Column({ space: 8 }) {
-      Flex({ wrap: FlexWrap.Wrap }) {
-        this.buildToolbarButton('适应窗口', 80, this.desktopViewMode === 'adaptive', false, true,
-          () => { this.selectDesktopViewMode('adaptive'); })
-        this.buildToolbarButton('原始比例', 80, this.desktopViewMode === 'original', false, true,
-          () => { this.selectDesktopViewMode('original'); })
-        this.buildToolbarButton('自定义', 80, this.desktopViewMode === 'custom', false, true,
-          () => { this.selectDesktopViewMode('custom'); })
-      }.width('100%')
+    Column({ space: 2 }) {
+      this.buildToolbarButton('适应窗口', 80, this.desktopViewMode === 'adaptive', false, true,
+        () => { this.selectDesktopViewMode('adaptive'); })
+      this.buildToolbarButton('原始比例', 80, this.desktopViewMode === 'original', false, true,
+        () => { this.selectDesktopViewMode('original'); })
+      this.buildToolbarButton('自定义', 80, this.desktopViewMode === 'custom', false, true,
+        () => { this.selectDesktopViewMode('custom'); })
       Row() {
         Text(translate('显示比例', this.uiLanguage)).fontSize(12).fontColor(this.secondaryTextColor()).layoutWeight(1)
         Text(`${this.getDesktopDisplayedPercent()}%`).fontSize(12).fontColor(this.primaryTextColor())
-      }.width('100%')
+      }.width('100%').height(this.getControlActionHeight()).padding({ left: 12, right: 12 })
       if (this.desktopViewMode === 'custom') {
         Slider({ value: this.desktopCustomPercent, min: 25, max: 300, step: 5 })
-          .width('100%').onChange((value: number) => { this.setDesktopCustomPercent(value); })
+          .width('100%').height(this.getControlActionHeight())
+          .onChange((value: number) => { this.setDesktopCustomPercent(value); })
       }
       this.buildToolbarButton(this.desktopWindowAdjusting ? '调整中…' : '调整窗口', 120, false, false,
         !this.isFullScreen && !this.fullscreenTransitioning && !this.immersiveWindowTransitioning &&
         !this.desktopWindowAdjusting && !this.pipSurfaceOwned,
         () => { this.adjustDesktopWindow(); })
       Text(translate('按远端比例调整窗口，不拉伸画面', this.uiLanguage))
-        .fontSize(11).fontColor(this.secondaryTextColor()).maxLines(2)
-      Divider().color(this.themeBorderColor())
+        .fontSize(11).minFontSize(10).maxFontSize(11).fontColor(this.secondaryTextColor()).maxLines(2)
+        .height(this.getControlActionHeight()).width('100%').padding({ left: 12, right: 12 })
+        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+      Divider().height(1).color(this.themeBorderColor())
     }.width('100%')
   }
 
@@ -3417,17 +3591,25 @@ struct RemotePage {
   @Builder
   buildFullscreenButton(buttonWidth: number, orderKey: string = '') {
     // Read state in the Button observer, not through @Builder value parameters.
-    Button(translate(this.fullscreenTransitioning ? '切换中…' : (this.isFullScreen ? '退出全屏' : '全屏'), this.uiLanguage))
-      .width(this.adaptiveToolbarButtonWidth(buttonWidth))
-      .height(this.getRemoteToolbarButtonHeight())
-      .padding({ left: 2, right: 2 })
+    Button({ type: ButtonType.Normal }) {
+      Text(translate(this.fullscreenTransitioning ? '切换中…' : (this.isFullScreen ? '退出全屏' : '全屏'), this.uiLanguage))
+        .width('100%').fontSize(13).minFontSize(11).maxFontSize(13).maxLines(2)
+        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+        .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
+        .fontColor(this.isFullScreen ? this.controlSelectedTextColor() : this.primaryTextColor())
+    }
+      .width(this.getControlActionWidth(buttonWidth))
+      .height(this.getControlActionHeight())
+      .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(12)
       .labelStyle({ maxLines: 2, minFontSize: 10, maxFontSize: 12,
         heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(this.isFullScreen ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(this.isFullScreen ? this.controlSelectedTextColor() : this.primaryTextColor())
-      .backgroundColor(this.isFullScreen ? this.controlSelectedBackgroundColor() : this.mutedSurfaceColor())
-      .border({ width: 1, color: this.isFullScreen ? this.controlSelectedBorderColor() : this.themeBorderColor() })
+      .backgroundColor(this.isFullScreen ? this.controlSelectedBackgroundColor() :
+        (this.controlMenu ? Color.Transparent : this.mutedSurfaceColor()))
+      .border({ width: this.controlMenu && !this.isFullScreen ? 0 : 1,
+        color: this.isFullScreen ? this.controlSelectedBorderColor() : this.themeBorderColor() })
       .borderRadius(8)
       .enabled(!this.fullscreenTransitioning && !this.immersiveWindowTransitioning && !this.pipSurfaceOwned)
       .opacity(this.fullscreenTransitioning ? 0.6 : 1)
@@ -3444,10 +3626,18 @@ struct RemotePage {
   @Builder
   buildToolbarButton(label: string, buttonWidth: number, selected: boolean, danger: boolean,
     enabled: boolean, onClick: () => void, orderKey: string = '') {
-    Button(translate(label, this.uiLanguage))
-      .width(this.adaptiveToolbarButtonWidth(buttonWidth))
-      .height(this.getRemoteToolbarButtonHeight())
-      .padding({ left: 2, right: 2 })
+    Button({ type: ButtonType.Normal }) {
+      Text(translate(label, this.uiLanguage)).width('100%')
+        .fontSize(this.controlMenu ? 13 : (label === '+' || label === '-' ? 18 : 12))
+        .minFontSize(10).maxFontSize(this.controlMenu ? 13 : (label === '+' || label === '-' ? 18 : 12))
+        .maxLines(2).heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+        .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
+        .fontWeight(selected ? 600 : 500)
+        .fontColor(danger ? RustDeskTheme.ERROR : (selected ? this.controlSelectedTextColor() : this.primaryTextColor()))
+    }
+      .width(this.getControlActionWidth(buttonWidth))
+      .height(this.getControlActionHeight())
+      .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12))
       .labelStyle({ maxLines: 2, minFontSize: label === '+' || label === '-' ? 14 : 10,
         maxFontSize: label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12),
@@ -3456,9 +3646,9 @@ struct RemotePage {
       .fontColor(danger ? RustDeskTheme.ERROR :
         (selected ? this.controlSelectedTextColor() : this.primaryTextColor()))
       .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FDECEC') :
-        (selected ? this.controlSelectedBackgroundColor() : this.mutedSurfaceColor()))
+        (selected ? this.controlSelectedBackgroundColor() : (this.controlMenu ? Color.Transparent : this.mutedSurfaceColor())))
       .border({
-        width: 1,
+        width: this.controlMenu && !selected && !danger ? 0 : 1,
         color: selected ? this.controlSelectedBorderColor() :
           (danger ? (this.isDarkMode ? '#805C3B45' : '#F3C6CC') : this.themeBorderColor()),
       })
@@ -3477,18 +3667,25 @@ struct RemotePage {
 
   @Builder
   buildEdgeAutoPanButton(buttonWidth: number, orderKey: string = '') {
-    Button(translate(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随', this.uiLanguage))
-      .width(this.adaptiveToolbarButtonWidth(buttonWidth))
-      .height(this.getRemoteToolbarButtonHeight())
-      .padding({ left: 2, right: 2 })
+    Button({ type: ButtonType.Normal }) {
+      Text(translate(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随', this.uiLanguage))
+        .width('100%').fontSize(13).minFontSize(11).maxFontSize(13).maxLines(2)
+        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+        .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
+        .fontColor(this.edgeAutoPanEnabled ? this.controlSelectedTextColor() : this.primaryTextColor())
+    }
+      .width(this.getControlActionWidth(buttonWidth))
+      .height(this.getControlActionHeight())
+      .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(12)
       .labelStyle({ maxLines: 2, minFontSize: 10, maxFontSize: 12,
         heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(this.edgeAutoPanEnabled ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(this.edgeAutoPanEnabled ? this.controlSelectedTextColor() : this.primaryTextColor())
-      .backgroundColor(this.edgeAutoPanEnabled ? this.controlSelectedBackgroundColor() : this.mutedSurfaceColor())
+      .backgroundColor(this.edgeAutoPanEnabled ? this.controlSelectedBackgroundColor() :
+        (this.controlMenu ? Color.Transparent : this.mutedSurfaceColor()))
       .border({
-        width: 1,
+        width: this.controlMenu && !this.edgeAutoPanEnabled ? 0 : 1,
         color: this.edgeAutoPanEnabled ? this.controlSelectedBorderColor() : this.themeBorderColor(),
       })
       .borderRadius(8)
@@ -3527,6 +3724,9 @@ struct RemotePage {
 
   @Builder
   buildInputModeButton(buttonWidth: number, vertical: boolean, orderKey: string = '') {
+    if (this.controlMenu) {
+      this.buildControlInputModeSelector();
+    } else {
     Button() {
       if (vertical) {
         Column({ space: 1 }) {
@@ -3547,9 +3747,10 @@ struct RemotePage {
           .textAlign(TextAlign.Center)
       }
     }
-    .width(this.adaptiveToolbarButtonWidth(buttonWidth))
-    .height(vertical ? this.getRemoteToolbarButtonHeight() + 8 : this.getRemoteToolbarButtonHeight())
-    .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+    .width(this.getControlActionWidth(buttonWidth))
+    .height(this.controlMenu ? this.getControlActionHeight() :
+      (vertical ? this.getRemoteToolbarButtonHeight() + 8 : this.getRemoteToolbarButtonHeight()))
+    .padding({ left: this.controlMenu ? 12 : 4, right: this.controlMenu ? 12 : 4, top: 2, bottom: 2 })
     .backgroundColor(this.controlSelectedBackgroundColor())
     .border({ width: 1, color: this.controlSelectedBorderColor() })
     .borderRadius(8)
@@ -3560,6 +3761,58 @@ struct RemotePage {
       this.toggleInputMode();
     })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+    }
+  }
+
+  selectInputModeChoice(mode: string): void {
+    if (mode !== INPUT_MODE_MOUSE && mode !== INPUT_MODE_TOUCH) return;
+    if (this.inputMode !== mode) this.setInputMode(mode);
+  }
+
+  @Builder
+  buildControlInputModeSelector() {
+    Column() {
+      if (this.getControlMenuMetrics().inputSelectorStacked) {
+        Column({ space: 4 }) {
+          this.buildControlInputModeChoice(INPUT_MODE_MOUSE);
+          this.buildControlInputModeChoice(INPUT_MODE_TOUCH);
+        }.width('100%')
+      } else {
+        Row({ space: 4 }) {
+          this.buildControlInputModeChoice(INPUT_MODE_MOUSE);
+          this.buildControlInputModeChoice(INPUT_MODE_TOUCH);
+        }.width('100%')
+      }
+    }.width(this.getControlMenuRowWidth()).height(this.getControlMenuMetrics().inputSelectorHeight)
+  }
+
+  @Builder
+  buildControlInputModeChoice(mode: string) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 6 }) {
+        Image(mode === INPUT_MODE_MOUSE ? $r('app.media.remote_menu_input') : $r('app.media.remote_input_touch'))
+          .width(16).height(16).flexShrink(0).hitTestBehavior(HitTestMode.None)
+          .fillColor(this.inputMode === mode ? this.controlSelectedTextColor() :
+            (this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON))
+        Text(translate(mode === INPUT_MODE_MOUSE ? '鼠标' : '触摸', this.uiLanguage))
+          .fontSize(13).minFontSize(11).maxFontSize(13).maxLines(1).flexShrink(1)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontWeight(this.inputMode === mode ? 600 : 500)
+          .fontColor(this.inputMode === mode ? this.controlSelectedTextColor() : this.primaryTextColor())
+      }.width('100%').justifyContent(FlexAlign.Center).alignItems(VerticalAlign.Center)
+    }
+    .id(mode === INPUT_MODE_MOUSE ? 'remoteInputMouseChoice' : 'remoteInputTouchChoice')
+    .width(this.getControlMenuMetrics().inputSegmentWidth).height(this.getControlActionHeight())
+    .padding({ left: 8, right: 8 })
+    .backgroundColor(this.inputMode === mode ? this.controlSelectedBackgroundColor() : Color.Transparent)
+    .border({ width: this.inputMode === mode ? 1 : 0, color: this.controlSelectedBorderColor() })
+    .borderRadius(8).focusable(false)
+    .accessibilityText(`${translate(mode === INPUT_MODE_MOUSE ? '鼠标模式' : '触摸模式', this.uiLanguage)}${this.inputMode === mode ? ', ' + translate('已选中', this.uiLanguage) : ''}`)
+    .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
+      this.openToolbarOrderEditor('control', 'input');
+    }))
+    .onClick(() => { this.selectInputModeChoice(mode); })
+    .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
   }
 
   initializeVirtualMousePosition(force: boolean = false): void {
@@ -4710,7 +4963,7 @@ struct RemotePage {
       Image($r('app.media.keyboard_launcher'))
         .width(26).height(26)
         .fillColor(this.showKeyboardPanel ? this.controlSelectedTextColor() :
-          (this.isDarkMode ? '#DCE8F8' : '#4A607E'))
+          (this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON))
         .hitTestBehavior(HitTestMode.None)
     }
     .id('remoteKeyboardLauncher')
@@ -7330,10 +7583,16 @@ struct RemotePage {
     }
     this.remoteKeyboardVisibilityKnown = false;
     this.remoteKeyboardVisible = false;
+    this.controlMenuKeyboardInset = 0;
   }
 
   handleRemoteKeyboardHeightChange(height: number): void {
     if (!this.remotePageVisible || !Number.isFinite(height) || height < 0) return;
+    try {
+      this.controlMenuKeyboardInset = height > 0 ? this.getUIContext().px2vp(height) : 0;
+    } catch (_e) {
+      this.controlMenuKeyboardInset = 0; // Root area resizing remains the fallback.
+    }
     const wasVisible: boolean = this.remoteKeyboardVisible;
     const wasKnown: boolean = this.remoteKeyboardVisibilityKnown;
     this.remoteKeyboardVisibilityKnown = true;
@@ -8939,7 +9198,7 @@ struct RemotePage {
     ConnectionService.releaseModifiers();
     this.restoreFullscreenOnLeave();
     this.restoreImmersiveWindowOnLeave();
-    this.controlMenu = '';
+    this.resetControlMenuAnimation();
     if (this.statusTimer !== -1) {
       clearTimeout(this.statusTimer);
       this.statusTimer = -1;

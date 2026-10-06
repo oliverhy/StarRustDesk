@@ -138,7 +138,8 @@ assert.match(page, /getRemoteToolbarHeight\(\): number \{[\s\S]*?isHandheldLands
   'The portrait toolbar remains compact while landscape uses a downward panel');
 const inputModeBuilder = page.slice(page.indexOf('  buildInputModeButton(buttonWidth:'),
   page.indexOf('  buildGestureHelpOverlay()'));
-const horizontalInputMode = inputModeBuilder.slice(inputModeBuilder.indexOf('} else {'));
+const legacyInputMode = inputModeBuilder.slice(0, inputModeBuilder.indexOf('\n  selectInputModeChoice('));
+const horizontalInputMode = legacyInputMode.slice(legacyInputMode.lastIndexOf('} else {'));
 assert.doesNotMatch(horizontalInputMode, /buildInputModeIcon/,
   'The narrow horizontal button must use a centered text label without an offset icon');
 assert.match(horizontalInputMode, /textAlign\(TextAlign.Center\)/);

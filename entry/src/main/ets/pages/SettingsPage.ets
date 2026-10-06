@@ -21,6 +21,7 @@ import { RecordingDialog } from '../widget/RecordingDialog'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { CloudSyncResult, CloudSyncService } from '../service/CloudSyncService'
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference'
+import { ThemePreference } from '../service/ThemePreference'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
@@ -37,6 +38,7 @@ export struct SettingsPage {
   @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   @StorageLink('isDarkModeManual') isDarkModeManual: boolean = false
+  @State themePreferenceBusy: boolean = false
   @StorageLink('peerOnlineQueryEnabled') peerOnlineQueryEnabled: boolean = true
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
@@ -1295,6 +1297,19 @@ export struct SettingsPage {
     return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 18)
   }
 
+  async setDarkMode(enabled: boolean): Promise<void> {
+    if (this.themePreferenceBusy) return
+    this.themePreferenceBusy = true
+    try {
+      if (!await ThemePreference.setMode(enabled ? 'dark' : 'light')) {
+        promptAction.showToast({ message: translate('保存设置失败，请重试', this.uiLanguage) })
+      }
+    } finally {
+      // Re-render the controlled switch from the confirmed persisted state.
+      this.themePreferenceBusy = false
+    }
+  }
+
   @Builder
   buildThemeToggle() {
     Column() {
@@ -1305,11 +1320,12 @@ export struct SettingsPage {
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
         Toggle({ type: ToggleType.Switch, isOn: this.isDarkMode })
+          .id('darkModeToggle')
+          .enabled(!this.themePreferenceBusy)
           .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
           .switchPointColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : Color.White)
           .onChange((isOn: boolean) => {
-            this.isDarkModeManual = true
-            this.isDarkMode = isOn
+            this.setDarkMode(isOn)
           })
       }
       .width('100%')

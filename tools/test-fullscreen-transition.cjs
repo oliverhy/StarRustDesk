@@ -118,7 +118,8 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     assert.equal((screen.match(/buildRemoteViewportWithQualityMonitor\(\)/g) || []).length, 1);
     assert(screen.indexOf('buildRemoteViewportWithQualityMonitor()') < screen.indexOf('if ('));
     assert(!screen.includes('surfaceEpoch'));
-    assert(method('buildFullscreenButton').includes("Button(translate(this.fullscreenTransitioning ?"));
+    assert(method('buildFullscreenButton').includes("Text(translate(this.fullscreenTransitioning ?"));
+    assert(method('buildFullscreenButton').includes('.textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)'));
     assert(method('buildFullscreenButton').includes('.backgroundColor(this.isFullScreen ?'));
     assert(method('buildControlToolbarItem').includes('this.buildFullscreenButton('));
     assert(!method('buildControlToolbarItem').includes("buildToolbarButton(this.isFullScreen"));

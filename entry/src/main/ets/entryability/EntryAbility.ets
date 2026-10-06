@@ -13,6 +13,7 @@ import { RemoteDisplayPolicy } from '../service/RemoteDisplayPolicy';
 import { SystemFaultDiagnostic } from '../service/SystemFaultDiagnostic';
 import { LanguageService } from '../utils/LanguageService';
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference';
+import { ThemePreference } from '../service/ThemePreference';
 
 const DOMAIN = 0x0000;
 
@@ -31,10 +32,9 @@ export default class EntryAbility extends UIAbility {
         `market_name=${deviceInfo.marketName} os=${deviceInfo.osFullName} api=${deviceInfo.sdkApiVersion}`)
     } catch (_e) {
     }
-    PersistentStorage.persistProp('isDarkModeManual', false);
+    ThemePreference.initialize(this.context, this.isDarkColorMode(this.context.config.colorMode));
     AppStorage.setOrCreate('roundedRectButtons', RustDeskNapi.getOption('button-shape') !== 'classic');
     this.updateFontScale(this.context.config.fontSizeScale);
-    PersistentStorage.persistProp('isDarkMode', this.isDarkColorMode(this.context.config.colorMode));
     PersistentStorage.persistProp('mobileActionsOffsetX', 0);
     PersistentStorage.persistProp('mobileActionsOffsetY', 0);
     this.updateColorMode(this.context.config.colorMode);
@@ -135,9 +135,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   private updateColorMode(colorMode?: ConfigurationConstant.ColorMode): void {
-    if (AppStorage.get<boolean>('isDarkModeManual') ?? false) {
-      return;
-    }
-    AppStorage.set<boolean>('isDarkMode', this.isDarkColorMode(colorMode));
+    if (colorMode === undefined || colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET) return;
+    ThemePreference.updateSystem(this.isDarkColorMode(colorMode));
   }
 }

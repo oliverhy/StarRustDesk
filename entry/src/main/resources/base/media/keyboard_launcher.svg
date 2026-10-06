@@ -1,6 +1,2 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
-  <g fill="none" stroke="#4A607E" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="2.5" y="5.5" width="23" height="17" rx="3"/>
-    <path d="M7 10h1m5 0h1m5 0h1M7 14h1m5 0h1m5 0h1M8 18h12"/>
-  </g>
-</svg>
+<!-- Material Icons keyboard, Apache-2.0. Modified: palette and transparent padding. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="#4A607E" d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg>

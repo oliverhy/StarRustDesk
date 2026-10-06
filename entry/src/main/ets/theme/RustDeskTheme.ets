@@ -8,6 +8,9 @@ export class RustDeskTheme {
   static readonly CONTROL_SELECTED_TEXT_DARK: ResourceColor = '#A8D0FF'
   static readonly CONTROL_SELECTED_BORDER: ResourceColor = '#A9CCFF'
   static readonly CONTROL_SELECTED_BORDER_DARK: ResourceColor = '#4E78A8'
+  static readonly CONTROL_ICON: ResourceColor = '#4A607E'
+  static readonly CONTROL_ICON_DARK: ResourceColor = '#DCE8F8'
+  static readonly CONTROL_DANGER_ICON_DARK: ResourceColor = '#FF9292'
   // Home surfaces share the remote floating controls' palette without changing remote layout.
   static readonly HOME_CARD: ResourceColor = '#FFFFFF'
   static readonly HOME_CARD_DARK: ResourceColor = '#1B2638'

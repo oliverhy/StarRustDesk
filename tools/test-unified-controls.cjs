@@ -10,7 +10,8 @@ const pageSource = read('entry/src/main/ets/pages/RemotePage.ets');
 const modelSource = read('entry/src/main/ets/model/RemoteControlMenu.ets');
 const model = { exports: {} };
 vm.runInNewContext(ts.transpile(modelSource), model);
-const { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, clampControlMenuAxis } = model.exports;
+const { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, clampControlMenuAxis,
+  compactControlMenuMetrics, placeCompactControlMenu } = model.exports;
 const method = name => {
   const start = pageSource.indexOf('\n  ' + name + '(');
   assert(start >= 0, name);
@@ -66,12 +67,17 @@ function windowHarness(originalDecor = true, deviceType = 'pc') {
     assert.equal(clampControlMenuAxis(-100, 300, 800), 8);
     assert.equal(clampControlMenuAxis(900, 300, 800), 492);
     assert.equal(clampControlMenuAxis(250, 148, 180), 24);
-    const context = { exports: {}, remoteControlCategoryItems, clampControlMenuAxis };
-    vm.runInNewContext(ts.transpile('class Page {' + ['getControlMenuWidth', 'getControlMenuHeight', 'getControlMenuX', 'getControlMenuY'].map(method).join('\n') + '} exports.Page = Page;'), context);
+    const context = { exports: {}, remoteControlCategoryItems, compactControlMenuMetrics, placeCompactControlMenu };
+    const methods = ['getControlMenuWidth', 'getControlMenuHeight', 'getControlMenuX', 'getControlMenuY',
+      'getControlMenuMetrics', 'getVisibleControlMenuItems', 'getControlMenuViewportHeight', 'getControlMenuAnchor', 'isControlMenuBesideToolbar'];
+    vm.runInNewContext(ts.transpile('class Page {' + methods.map(method).join('\n') + '} exports.Page = Page;'), context);
     const page = Object.assign(new context.exports.Page(), {
       pageWidth: 360, pageHeight: 720, controlMenu: 'more', displayCount: 3, controlToolbarOrder: order,
       isFullScreen: false, immersiveWindow: false,
+      uiFontScale: 1, desktopViewMode: 'adaptive', controlMenuAnchors: [], controlMenuKeyboardInset: 0,
+      showKeyboardPanel: false, isPeerAndroid: false, canPanViewport: () => true,
       adaptiveToolbarButtonWidth: n => n, getRemoteToolbarButtonHeight: () => 40,
+      getControlMenuLabelWidth: () => 0,
       isPcDevice: () => false, isHandheldDevice: () => true, isHandheldLandscape: () => false,
       isLargeLayout: () => false, getRemoteToolbarX: () => 8, getRemoteToolbarY: () => 620,
       getSideToolbarHeight: () => 338

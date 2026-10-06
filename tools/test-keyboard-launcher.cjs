@@ -50,6 +50,6 @@ assert(!method('handleRemoteClickFallback').includes('this.showKeyboardPanel'));
 assert(method('finishThreeFingerGesture').includes('this.openRemoteKeyboard()'));
 assert(method('onBackPress').includes('this.closeRemoteKeyboard()'));
 const icon = fs.readFileSync(path.join(root, 'entry/src/main/resources/base/media/keyboard_launcher.svg'), 'utf8');
-assert(icon.includes('viewBox="0 0 28 28"'));
+assert(icon.includes('viewBox="0 0 24 24"'));
 assert(!/href=|url\(/.test(icon));
 console.log(`PASS floating keyboard launcher: ${count} bounded drag positions, independent visibility, focus and gesture guards`);

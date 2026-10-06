@@ -4,7 +4,7 @@ import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.2.22'
 export const RELEASE_NOTES_BUILD: string = '1002022'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.22（1002022）· 修订 r1：菜单与主题保持', [
+            '远控功能栏统一采用蓝灰色图标和淡蓝选中效果，深色模式同步调整图标颜色；保留原有菜单功能与自定义排序。',
+            '二级菜单更加紧凑：屏幕选择横向排列，画面和更多按文字宽度贴合；大字体、不同语言和窗口缩放自动适配，PC 比例滑块保留操作空间。',
+            '输入菜单改为鼠标与触摸双选，图标和文字居中，窄屏或大字体自动上下排列；视觉尺寸缩小，点击区域不缩小。',
+            '修正隐藏的边缘跟随占位导致的上下留白；菜单顶部对齐，展开和收回统一淡入淡出与轻微缩放，收回完成前避免误触远端。',
+            '修复深色模式重启后不保持：独立保存主题选择，启动先恢复，手动深色或浅色不被系统覆盖；补充保存失败提示与脱敏诊断。旧版本未成功保存的选择需重新设置一次。'
+          ])
           this.buildSection('1.2.22（1002022）· 远控窗口与设置优化', [
             '优化 PC 切换本机应用后的画面和输入恢复：异步处理视频解码回调和收帧任务，减少重入阻塞；通过心跳识别失效连接，不把静止画面误判为断线。',
             '新增系统画中画入口，复用远端视频画面，支持小窗观看与恢复主窗口；小窗不包含远控操作层，控制时请返回主窗口，设备和系统需支持画中画。',
