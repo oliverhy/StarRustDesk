@@ -32,7 +32,7 @@ function pageHarness(extra = {}, names = []) {
     'getDisplayLeft', 'getDisplayTop', 'applyZoomAt', 'clampViewportOffset', 'getHorizontalPanLimit',
     'getVerticalPanLimit', 'getPanLimit', 'clampHorizontalOffset', 'clampVerticalOffset', 'clampOffsetToLimit',
     'adjustZoom', 'handleDesktopWindowEvent', 'cancelPcToolbarAutoCollapse', 'schedulePcToolbarAutoCollapse',
-    'togglePcToolbarPinned', 'startDesktopWindowTracking', 'stopDesktopWindowTracking'];
+    'togglePcToolbarPinned', 'startDesktopWindowTracking', 'stopDesktopWindowTracking', 'finishRemoteToolbarDrag'];
   const context = { exports: {}, ...geometry.exports, window: windowEnums,
     RustDeskNapi: { appendDiagnosticLog: (...a) => logs.push(a), takeNativeInputEvents: () => { calls.push('queue_drain'); return []; },
       getOption: () => '', setOption: (...a) => calls.push(['option', ...a]) },
@@ -43,6 +43,7 @@ function pageHarness(extra = {}, names = []) {
   vm.runInNewContext(ts.transpile('class Page {' + [...new Set([...basic, ...names])].map(method).join('\n') + '} exports.Page = Page;'), context);
   const page = Object.assign(new context.exports.Page(), {
     remotePageVisible: true, isLeavingAfterDisconnect: false, isPcDevice: () => true,
+    peerPreferences: { get: () => '', set: (...a) => calls.push(['peer-option', ...a]), flush() {} },
     remoteWidth: 1920, remoteHeight: 1080, componentWidth: 1000, componentHeight: 600,
     desktopViewMode: 'adaptive', desktopCustomPercent: 100, desktopDensity: 1, zoomScale: 1,
     offsetX: 0, offsetY: 0, pcToolbarPinned: false, remoteToolbarCollapsed: false,
@@ -149,6 +150,13 @@ function policyHarness() {
     h.calls.length = 0; p.pointerOverRemoteViewport = false; p.pointerCaptureFocused = false;
     p.handleDesktopWindowEvent(3); p.handleDesktopWindowEvent(2); assert(!h.calls.includes('request_focus'));
   });
+  await test('losing window focus ends a toolbar drag without leaving auto-collapse permanently blocked', () => {
+    const h = pageHarness({ remoteToolbarDragging: true, remoteToolbarPositionX: 0.8, remoteToolbarPositionY: 0.2 });
+    h.page.handleDesktopWindowEvent(3);
+    assert.equal(h.page.remoteToolbarDragging, false);
+    assert(h.calls.some(call => Array.isArray(call) && call[0] === 'peer-option' && call[1] === 'remote-toolbar-position-v1'));
+    assert.equal(h.timers.size, 0, 'inactive windows must not schedule collapse');
+  });
   await test('all forwarding paths and global hardware polling refuse inactive-window input', () => {
     const names = ['syncHardwareKeyState', 'handleNativeMouseInput', 'handleNativeKeyInput', 'handleRemoteMouse',
       'handleRemoteKey', 'handleRemoteAxis', 'handleRemoteTouch', 'handleRemoteClickFallback', 'requestRemoteInputFocus'];
@@ -169,14 +177,17 @@ function policyHarness() {
     assert.equal(calls[0][0], 'on'); assert.equal(calls[1][0], 'off'); assert.equal(calls[0][2], calls[1][2]);
     assert.equal(h.page.desktopWindow, undefined);
   });
-  await test('auto-collapse works only for unpinned floating PC controls, never during drag/menus', () => {
+  await test('auto-collapse works for all unpinned PC windows, never during drag/menus', () => {
     const h = pageHarness({ pointerOverRemoteViewport: true }); h.page.schedulePcToolbarAutoCollapse(); h.fire();
     assert.equal(h.page.remoteToolbarCollapsed, true);
     for (const extra of [{ pcToolbarPinned: true }, { controlMenu: 'view' }, { pointerOverRemoteViewport: false },
-      { immersiveWindow: false, isFullScreen: false }, { isPcDevice: () => false }, { leftButtonHeld: true }]) {
+      { remoteToolbarDragging: true }, { isPcDevice: () => false }, { leftButtonHeld: true }]) {
       const h = pageHarness({ pointerOverRemoteViewport: true, ...extra }); h.page.schedulePcToolbarAutoCollapse(); h.fire();
       assert.equal(h.page.remoteToolbarCollapsed, false);
     }
+    const normal = pageHarness({ pointerOverRemoteViewport: true, immersiveWindow: false, isFullScreen: false });
+    normal.page.schedulePcToolbarAutoCollapse(); normal.fire();
+    assert.equal(normal.page.remoteToolbarCollapsed, true);
   });
   await test('manual window adjustment calls resize and move with bounded geometry', async () => {
     const h = policyHarness(); assert.equal(await h.policy.fitRemoteWindow(1920, 1080, 1080, 700, () => true), true);

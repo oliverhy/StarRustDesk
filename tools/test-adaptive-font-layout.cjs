@@ -18,7 +18,7 @@ for (const page of [remote, home, connection, settings]) {
   assert.match(page, /@StorageLink\('uiFontScale'\) uiFontScale: number = 1/)
 }
 assert.match(remote, /adaptiveToolbarButtonWidth\(baseWidth: number\)/)
-assert.match(remote, /getRemoteToolbarHeight\(\)[\s\S]*?return this\.getRemoteToolbarButtonHeight\(\) \+ 14/)
+assert.match(remote, /getRemoteToolbarHeight\(\): number \{\s*return this\.getRemoteToolbarButtonHeight\(\) \+ 22/)
 assert.match(remote, /getKeyboardToolsHeight\(\)[\s\S]*?const rows: number = 1 \+ \(this\.showKeyboardFunctionKeys \? 1 : 0\) \+ \(this\.showKeyboardMoreKeys \? 1 : 0\)/)
 assert.match(connection, /Flex\(\{ direction: FlexDirection\.Row, wrap: FlexWrap\.Wrap, alignItems: ItemAlign\.Center \}\)[\s\S]*?savedConnectionSearchExpanded/)
 assert.match(home, /\.height\(this\.tabItemHeight\(\) \+ 14\)/)

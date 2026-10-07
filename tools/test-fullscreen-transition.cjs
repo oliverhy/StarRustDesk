@@ -116,7 +116,7 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
   await test('fullscreen viewport has one stable ancestor path; toolbar is a sibling', () => {
     const screen = method('buildRemoteScreen');
     assert.equal((screen.match(/buildRemoteViewportWithQualityMonitor\(\)/g) || []).length, 1);
-    assert(screen.indexOf('buildRemoteViewportWithQualityMonitor()') < screen.indexOf('if ('));
+    assert(!screen.includes('buildSideToolbar('));
     assert(!screen.includes('surfaceEpoch'));
     assert(method('buildFullscreenButton').includes("Text(translate(this.fullscreenTransitioning ?"));
     assert(method('buildFullscreenButton').includes('.textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)'));
@@ -124,24 +124,23 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     assert(method('buildControlToolbarItem').includes('this.buildFullscreenButton('));
     assert(!method('buildControlToolbarItem').includes("buildToolbarButton(this.isFullScreen"));
   });
-  await test('PC controls float in fullscreen or opt-in borderless mode, keeping normal sidebar', () => {
+  await test('PC controls float in every window mode, keeping the separate fullscreen exit', () => {
     const screen = method('buildRemoteScreen');
     const floating = method('buildFloatingToolbar');
     const exitButton = method('buildPcFullscreenExitButton');
-    assert(source.includes('this.isHandheldDevice() || this.isFullScreen || this.immersiveWindow || !this.isLargeLayout()'));
+    assert(source.includes('if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly) {\n        this.buildFloatingToolbar()'));
     assert(source.includes('this.isFullScreen && !this.isHandheldDevice()) {\n        this.buildPcFullscreenExitButton()'));
-    assert(screen.includes('if (!this.isFullScreen && !this.immersiveWindow && this.isLargeLayout() && !this.isHandheldDevice())'));
-    assert(screen.includes('this.buildSideToolbar()'));
+    assert(!screen.includes('buildSideToolbar()'));
     assert(exitButton.includes("Button(translate(this.fullscreenTransitioning ? '切换中…' : '退出全屏', this.uiLanguage))"));
     assert(exitButton.includes('this.exitFullScreen()'));
     assert(exitButton.includes('this.pageWidth - 100'));
     assert(exitButton.includes('.zIndex(70)'));
-    assert(floating.includes('this.isHandheldLandscape() || ((this.isFullScreen || this.immersiveWindow) && !this.isHandheldDevice())'));
-    assert(method('getRemoteToolbarBaseX').includes('width - this.getRemoteToolbarCurrentWidth() - 108'));
+    assert(floating.includes('this.buildUnifiedControlItems(false)'));
+    assert(method('getRemoteToolbarBaseX').includes('(width - this.getRemoteToolbarCurrentWidth()) / 2'));
     assert(method('getRemoteToolbarBaseY').includes('return 8'));
     assert(method('buildControlToolbarItem').includes("item === 'fullscreen'"));
   });
-  await test('PC fullscreen floating controls leave an 8 px gap before fixed exit button', () => {
+  await test('PC fullscreen controls default to top center, clear of the fixed exit button', () => {
     const context = vm.createContext({});
     vm.runInContext(ts.transpile('class Layout {' + method('getRemoteToolbarBaseX') +
       '} globalThis.Layout = Layout;'), context);
@@ -149,9 +148,11 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
       pageWidth: 1920, isFullScreen: true, isHandheldDevice: () => false,
       isHandheldLandscape: () => false, getRemoteToolbarCurrentWidth: () => 56
     });
-    assert.equal(layout.getRemoteToolbarBaseX() + 56 + 8, 1820);
-    layout.getRemoteToolbarCurrentWidth = () => 104;
-    assert.equal(layout.getRemoteToolbarBaseX() + 104 + 8, 1820);
+    assert.equal(layout.getRemoteToolbarBaseX(), (1920 - 56) / 2);
+    assert(layout.getRemoteToolbarBaseX() + 56 + 8 < 1820);
+    layout.getRemoteToolbarCurrentWidth = () => 414;
+    assert.equal(layout.getRemoteToolbarBaseX(), (1920 - 414) / 2);
+    assert(layout.getRemoteToolbarBaseX() + 414 + 8 < 1820);
   });
   await test('log reproduction: 800/866 height toggles never pause or rebind 1318x741 video', () => {
     const h = pageHarness();
@@ -236,13 +237,13 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     h.page.exitFullScreen(); assert.equal(h.page.isFullScreen, false);
     h.windows[1].resolve(); await settle(); assert.equal(h.page.fullscreenTransitioning, false);
   });
-  await test('PC enters with collapsed control button and failed entry restores toolbar placement', async () => {
+  await test('PC fullscreen enter and failure preserve the chosen toolbar state and placement', async () => {
     const h = pageHarness({ remoteToolbarCollapsed: false, remoteToolbarOffsetX: 30,
       remoteToolbarOffsetY: -12 });
     h.page.enterFullScreen();
-    assert.equal(h.page.remoteToolbarCollapsed, true);
-    assert.equal(h.page.remoteToolbarOffsetX, 0);
-    assert.equal(h.page.remoteToolbarOffsetY, 0);
+    assert.equal(h.page.remoteToolbarCollapsed, false);
+    assert.equal(h.page.remoteToolbarOffsetX, 30);
+    assert.equal(h.page.remoteToolbarOffsetY, -12);
     h.windows[0].reject(Object.assign(new Error('failure'), { code: 1300003 }));
     await settle();
     assert.equal(h.page.isFullScreen, false);

@@ -1855,10 +1855,17 @@ static napi_value GetOption(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    char key[128] = {0};
     size_t keyLen = 0;
-    napi_get_value_string_utf8(env, args[0], key, sizeof(key), &keyLen);
-    std::string value = Config::instance().get(key);
+    std::string value;
+    // Per-peer keys include the encoded server and endpoint, which can exceed
+    // 127 bytes for IPv6. Use the same complete UTF-8 key as SetOption.
+    if (argc == 1 && napi_get_value_string_utf8(env, args[0], nullptr, 0, &keyLen) == napi_ok &&
+        keyLen <= 16384) {
+        std::vector<char> keyBuffer(keyLen + 1, '\0');
+        if (napi_get_value_string_utf8(env, args[0], keyBuffer.data(), keyBuffer.size(), &keyLen) == napi_ok) {
+            value = Config::instance().get(std::string(keyBuffer.data(), keyLen));
+        }
+    }
     napi_value ret;
     napi_create_string_utf8(env, value.c_str(), value.length(), &ret);
     return ret;

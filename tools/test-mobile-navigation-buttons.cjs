@@ -107,6 +107,11 @@ console.log('PASS 256 mobile direction cases: orientation, IME visibility, all m
 // Existing user order must survive the upgrade; new keys are appended only once.
 const legacy = Array.from(context.defaults).filter(key => !directions.some(d => d[0] === key)).reverse();
 options.set('remote-keyboard-more-order', legacy.join(','));
+const peerOptions = new Map();
+p.peerPreferences = {
+  get: (name, fallback) => peerOptions.get(name) || options.get(fallback) || '',
+  set: (name, value) => peerOptions.set(name, value)
+};
 p.keyboardMoreOrder = p.readToolbarOrder('remote-keyboard-more-order', context.defaults);
 assert.deepEqual(Array.from(p.keyboardMoreOrder), [...legacy, ...directions.map(d => d[0])]);
 p.moveToolbarOrderItem('keyboardMore', p.keyboardMoreOrder.indexOf('Up'), 0);
@@ -115,4 +120,6 @@ assert.equal(restored[0], 'Up');
 assert.deepEqual(Array.from(restored), Array.from(p.keyboardMoreOrder));
 assert.equal(new Set(restored).size, context.defaults.length);
 assert.equal(options.size, 1, 'Direction ordering must not overwrite other toolbar settings');
+assert.equal(options.get('remote-keyboard-more-order'), legacy.join(','), 'The original global order must remain unchanged');
+assert.equal(peerOptions.size, 1, 'Only the current peer more-key order should change');
 console.log('PASS mobile direction order upgrade, reordering and persistence');

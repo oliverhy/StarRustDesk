@@ -43,21 +43,21 @@ expect(remotePage, /item === 'input'[\s\S]*buildInputModeButton\(vertical \? 80 
   'the dynamic toolbar must preserve the compact phone input-mode button')
 expect(remotePage, /item === 'keyboard'[\s\S]*buildToolbarButton\('键盘', vertical \? 80 : 56/,
   'the dynamic toolbar must preserve the compact phone keyboard button')
-expect(remotePage, /height - this\.getRemoteToolbarHeight\(\) - 18/,
+expect(remotePage, /height - this\.getRemoteToolbarCurrentHeight\(\) - 18/,
   'floating toolbar must keep a safe gap above the system navigation area')
 expect(remotePage, /isHandheldLandscape\(\)[\s\S]*deviceInfo\.deviceType === 'phone' \|\| deviceInfo\.deviceType === 'tablet'/,
   'phone and tablet landscape layouts must be detected explicitly')
 expect(remotePage, /getKeyboardToolsBaseX\(\)[\s\S]*isHandheldLandscape\(\)\) return 8/,
   'the keyboard toolbar must default to the top-left in handheld landscape')
-expect(remotePage, /getRemoteToolbarBaseX\(\)[\s\S]*width - this\.getRemoteToolbarCurrentWidth\(\) - 8/,
-  'the control toolbar must default to the top-right in handheld landscape')
-expect(remotePage, /buildUnifiedControlItems\(true\)[\s\S]*ScrollDirection\.Vertical/,
-  'the landscape control toolbar must expand downward')
+expect(remotePage, /getRemoteToolbarBaseX\(\)[\s\S]*\(width - this\.getRemoteToolbarCurrentWidth\(\)\) \/ 2/,
+  'the expanded control toolbar must default to horizontal center')
+expect(remotePage, /buildUnifiedControlItems\(false\)[\s\S]*ScrollDirection\.Horizontal/,
+  'the control toolbar must stay horizontal in every device orientation')
 expect(remotePage, /buildKeyboardToolbarItems\(true\)[\s\S]*ScrollDirection\.Vertical/,
   'the landscape keyboard toolbar must expand downward')
 expect(remotePage, /LongPressGesture\(\{ repeat: false, duration: 550 \}\)[\s\S]*openToolbarOrderEditor/,
   'toolbar buttons must expose long-press ordering')
-expect(remotePage, /getOption\('show-virtual-mouse'\)[\s\S]*setOption\('show-virtual-mouse'/,
+expect(remotePage, /getOption\('show-virtual-mouse'\)[\s\S]*peerPreferences\?\.set\('show-virtual-mouse'/,
   'the RustDesk-style virtual mouse preference must be toggleable')
 expect(remotePage, /menu-\$\{item\}[\s\S]*showVirtualMouse \? 1 : 0/,
   'the control toolbar key must refresh when virtual mouse visibility changes')
@@ -95,8 +95,8 @@ expect(remotePage, /openRemoteKeyboard\(\)[\s\S]*?this\.snapshotRemoteKeyboardVi
   'opening the keyboard must capture the current viewport before IME resize')
 expect(remotePage, /\.align\(Alignment\.Center\)[\s\S]*?\.translate\(\{ y: this\.getKeyboardCanvasShiftY\(\) \}\)/,
   'canvas and both cursor layers must share input-anchor keyboard avoidance')
-expect(remotePage, /keyboardToolsCollapsed = !landscape;[\s\S]*?if \(landscape\) this\.remoteToolbarCollapsed = false/,
-  'entering handheld landscape must expand both toolbars')
+expect(remotePage, /keyboardToolsCollapsed = !landscape;/,
+  'entering handheld landscape retains the existing keyboard shortcut behavior')
 
 // Execute production orientation/canvas logic: IME resize is not a rotation.
 const layoutMethods = remotePage.slice(remotePage.indexOf('  isHandheldLandscape():'),
@@ -109,7 +109,7 @@ Object.assign(layout, { pageWidth: 800, pageHeight: 400, showKeyboardPanel: fals
   keyboardToolsCollapsed: true, remoteToolbarCollapsed: true, showVirtualMouse: false })
 layout.handleHandheldLayoutChange()
 require('node:assert/strict').equal(layout.keyboardToolsCollapsed, false)
-require('node:assert/strict').equal(layout.remoteToolbarCollapsed, false)
+require('node:assert/strict').equal(layout.remoteToolbarCollapsed, true)
 layout.keyboardToolsCollapsed = true // Explicit user collapse survives IME show/hide.
 Object.assign(layout, { showKeyboardPanel: true, keyboardLayoutHeight: 400,
   keyboardViewportHeight: 350, pageHeight: 170 })
@@ -122,7 +122,7 @@ Object.assign(layout, { pageWidth: 400, pageHeight: 300, keyboardLayoutHeight: 8
   keyboardViewportHeight: 0 })
 require('node:assert/strict').equal(layout.isHandheldLandscape(), false)
 require('node:assert/strict').equal(layout.getRemoteCanvasHeight(), '100%')
-console.log('PASS landscape expanded defaults and fixed-scale keyboard canvas')
+console.log('PASS landscape keyboard defaults, preserved control collapse and fixed-scale keyboard canvas')
 
 // Exercise the production reorder handler, including moves across multiple rows.
 const assert = require('node:assert/strict')
@@ -159,9 +159,15 @@ const preferences = new Function('RustDeskNapi', `return new class {${preference
   getOption(key) { return options.get(key) || '' },
   setOption(key, value) { options.set(key, value) }
 })
+const peerOptions = new Map()
+state.peerPreferences = preferences.peerPreferences = {
+  get: (key, fallback) => peerOptions.get(key) || options.get(fallback) || '',
+  set: (key, value) => peerOptions.set(key, value)
+}
 preferences.saveToolbarOrder.call(state, 'keyboardMore')
-assert.equal(options.get('remote-keyboard-more-order'), 'Ctrl+Alt+Del,Esc,Tab,Home')
-assert.equal(options.size, 1, 'More-key ordering must not overwrite either main toolbar preference')
+assert.equal(peerOptions.get('remote-keyboard-more-order'), 'Ctrl+Alt+Del,Esc,Tab,Home')
+assert.equal(peerOptions.size, 1, 'More-key ordering must not overwrite either main toolbar preference')
+assert.equal(options.size, 0, 'Peer ordering must not overwrite the global defaults')
 assert.deepEqual(preferences.readToolbarOrder('remote-keyboard-more-order',
   ['Esc', 'Tab', 'Home', 'Ctrl+Alt+Del', 'Del']), ['Ctrl+Alt+Del', 'Esc', 'Tab', 'Home', 'Del'])
 for (const [from, to] of [[0, 0], [-1, 2], [0, 4], [0, 1.5], [NaN, 1]]) {

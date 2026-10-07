@@ -68,7 +68,7 @@ assert(selector.includes('inputSelectorStacked') && selector.includes('Column({ 
 assert.equal((selector.match(/this\.buildControlInputModeChoice\(INPUT_MODE_MOUSE\)/g)||[]).length,2);
 assert.equal((selector.match(/this\.buildControlInputModeChoice\(INPUT_MODE_TOUCH\)/g)||[]).length,2);
 const old=method('setInputMode');
-for(const guard of ['this.cancelActiveTouchGesture()','this.setRelativeMouse(false)','RustDeskNapi.setOption(this.inputModeOptionKey(), mode)','this.updateSystemPointerVisibility()']) {
+for(const guard of ['this.cancelActiveTouchGesture()','this.setRelativeMouse(false)',"this.peerPreferences?.set('input-mode', mode)",'this.updateSystemPointerVisibility()']) {
   assert(old.includes(guard),'existing input cleanup and persistence remain authoritative');
 }
 const svg=read('entry/src/main/resources/base/media/remote_input_touch.svg');

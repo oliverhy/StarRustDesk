@@ -1060,6 +1060,7 @@ H264 解码无画面时自动请求关键帧，并支持切换 VP9 恢复画面�
 组合键	Shortcuts
 画面	Display
 关闭菜单	Close menu
+展开	Expand
 工具栏排序	Toolbar order
 沉浸窗口	Immersive window
 退出沉浸	Exit immersive mode
@@ -1087,3 +1088,11 @@ AV1 软件解码增加 HDR 转 SDR，完善 VP9/AV1 高位深画面转换及解�
 输入菜单改为鼠标与触摸双选，图标和文字居中，窄屏或大字体自动上下排列；视觉尺寸缩小，点击区域不缩小。	The Input menu has centered Mouse and Touch choices, stacked on narrow windows or large fonts; smaller visuals retain the original touch targets.
 修正隐藏的边缘跟随占位导致的上下留白；菜单顶部对齐，展开和收回统一淡入淡出与轻微缩放，收回完成前避免误触远端。	Removed blank space reserved for hidden auto-pan actions; menus align at the top and use matching fade/scale animations, preventing remote input leakage during dismissal.
 修复深色模式重启后不保持：独立保存主题选择，启动先恢复，手动深色或浅色不被系统覆盖；补充保存失败提示与脱敏诊断。旧版本未成功保存的选择需重新设置一次。	Theme choices are saved independently and restored at startup without overriding explicit dark/light choices; save failures and safe diagnostics are included. Choices never saved by older versions must be selected once again.
+1.2.23（1002023）· 独立远控偏好与悬浮功能栏	1.2.23 (1002023) · Per-device preferences and floating controls
+按服务器地址与远端 ID 独立记住鼠标或触摸模式、光标显示、虚拟鼠标、边缘跟随及键鼠兼容选择；不同远端互不覆盖，未单独修改的项目沿用旧默认值。	Mouse or touch mode, cursor display, virtual mouse, edge following and input compatibility are remembered separately for each server and remote ID. Remote devices do not overwrite each other; unchanged options inherit legacy defaults.
+按远端记住“控”和“键”的位置、排序、收放及更多按键顺序，保存 PC 固定状态、画面模式和缩放比例；不保存按键按住、输入内容、全屏及当前菜单等临时状态。	Control and key toolbar positions, ordering, expansion and additional key order are remembered per remote device, along with PC pinning, view mode and zoom. Held keys, input content, fullscreen and open menus are not saved.
+统一悬浮功能栏：手机和平板横竖屏均在底部横向排列，PC 普通窗口和全屏均在顶部居中；大小窗口都可收为“控”，保留固定或自动收起及独立退出全屏入口。	Floating controls are horizontal at the bottom on phones and tablets in either orientation, and top-centered in normal and fullscreen PC windows. All window sizes support collapse, pinning or auto-collapse, with a separate fullscreen exit.
+功能栏拖动位置按可用区域比例保存，窗口缩放、折叠、旋转和键盘弹出后重新限制在可见区域；二级菜单跟随按钮位置展开。	Dragged toolbar positions are saved relative to the available area and kept visible after window resizing, folding, rotation or keyboard display. Submenus follow their button positions.
+键盘旁的展开箭头改为同系列矢量图标，与键盘按钮共用淡蓝选中背景和细分隔线，展开收起增加旋转动画；点击箭头不会自动弹出软键盘。	The keyboard expansion arrow now uses a matching vector icon, shared pale-blue selection and a thin divider, with a rotation animation. Tapping the arrow does not open the software keyboard.
+偏好修改合并写入，拖动或捏合结束后保存，离开远控时刷新待保存数据；补充脱敏恢复与保存诊断，不记录密码或输入内容。	Preference updates are batched, saved after dragging or pinching, and flushed when leaving the remote session. Restore and save diagnostics are redacted and never record passwords or input content.
+修复 IPv6 或较长服务器地址下，独立远控偏好的配置键被截断、重连后无法恢复的问题；不改变网络连接协议。	Fixed truncated per-device preference keys with IPv6 or long server addresses, allowing settings to be restored after reconnecting. Network protocols are unchanged.

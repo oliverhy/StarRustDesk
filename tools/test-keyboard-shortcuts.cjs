@@ -134,8 +134,8 @@ for (const name of ['RemoteToolbar', 'KeyboardTools']) {
   assert.match(page, new RegExp(`\\.width\\(this.get${name}CurrentWidth\\(\\)\\)`),
     'A persistent outer panel must animate its width instead of swapping two backgrounds');
 }
-assert.match(page, /getRemoteToolbarHeight\(\): number \{[\s\S]*?isHandheldLandscape\(\)[\s\S]*?return 54;/,
-  'The portrait toolbar remains compact while landscape uses a downward panel');
+assert.match(page, /getRemoteToolbarHeight\(\): number \{\s*return this\.getRemoteToolbarButtonHeight\(\) \+ 22;/,
+  'The main control toolbar stays one compact horizontal row in every orientation');
 const inputModeBuilder = page.slice(page.indexOf('  buildInputModeButton(buttonWidth:'),
   page.indexOf('  buildGestureHelpOverlay()'));
 const legacyInputMode = inputModeBuilder.slice(0, inputModeBuilder.indexOf('\n  selectInputModeChoice('));

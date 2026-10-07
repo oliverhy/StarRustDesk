@@ -2,9 +2,9 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.22'
-export const RELEASE_NOTES_BUILD: string = '1002022'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
+export const RELEASE_NOTES_VERSION: string = '1.2.23'
+export const RELEASE_NOTES_BUILD: string = '1002023'
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,6 +48,15 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.23（1002023）· 独立远控偏好与悬浮功能栏', [
+            '按服务器地址与远端 ID 独立记住鼠标或触摸模式、光标显示、虚拟鼠标、边缘跟随及键鼠兼容选择；不同远端互不覆盖，未单独修改的项目沿用旧默认值。',
+            '按远端记住“控”和“键”的位置、排序、收放及更多按键顺序，保存 PC 固定状态、画面模式和缩放比例；不保存按键按住、输入内容、全屏及当前菜单等临时状态。',
+            '统一悬浮功能栏：手机和平板横竖屏均在底部横向排列，PC 普通窗口和全屏均在顶部居中；大小窗口都可收为“控”，保留固定或自动收起及独立退出全屏入口。',
+            '功能栏拖动位置按可用区域比例保存，窗口缩放、折叠、旋转和键盘弹出后重新限制在可见区域；二级菜单跟随按钮位置展开。',
+            '键盘旁的展开箭头改为同系列矢量图标，与键盘按钮共用淡蓝选中背景和细分隔线，展开收起增加旋转动画；点击箭头不会自动弹出软键盘。',
+            '偏好修改合并写入，拖动或捏合结束后保存，离开远控时刷新待保存数据；补充脱敏恢复与保存诊断，不记录密码或输入内容。',
+            '修复 IPv6 或较长服务器地址下，独立远控偏好的配置键被截断、重连后无法恢复的问题；不改变网络连接协议。'
+          ])
           this.buildSection('1.2.22（1002022）· 修订 r1：菜单与主题保持', [
             '远控功能栏统一采用蓝灰色图标和淡蓝选中效果，深色模式同步调整图标颜色；保留原有菜单功能与自定义排序。',
             '二级菜单更加紧凑：屏幕选择横向排列，画面和更多按文字宽度贴合；大字体、不同语言和窗口缩放自动适配，PC 比例滑块保留操作空间。',
