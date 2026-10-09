@@ -191,4 +191,42 @@ test('page lifecycle captures identity before loading and flushes only the old o
   assert(method('finishMultiTouchGesture').includes("peerPreferences.set('handheld-zoom'"));
   assert(method('setFloatingPanelCollapsed').includes("'keyboard-tools-collapsed' : 'remote-toolbar-collapsed'"));
 });
-console.log(`TOTAL=${checks} FAILED=0 (peer preference logic, isolated storage/timers and production restore/save paths; device acceptance pending)`);
+// Exercise the actual connect entry, with AppStorage's real set-versus-create
+// semantics. Previously set() silently failed on a fresh runtime.
+(async () => {
+  const h = harness(), storage = new Map(), routes = [];
+  const connectionPage = read('entry/src/main/ets/pages/ConnectionPage.ets');
+  const start = connectionPage.indexOf('\n  async onConnect(');
+  assert(start >= 0);
+  const connectMethod = connectionPage.slice(start, connectionPage.indexOf('\n  }', start) + 4);
+  Object.assign(h.context, {
+    AppStorage: {
+      set(key, value) { if (!storage.has(key)) return false; storage.set(key, value); return true; },
+      setOrCreate(key, value) { storage.set(key, value); }, get: key => storage.get(key)
+    },
+    ConnectionStatus: { CONNECTED: 2, CONNECTING: 1, WAITING_2FA: 4 },
+    RustDeskTheme: { WARNING: 'yellow', ERROR: 'red' }, translate: text => text,
+    ConnectionService: { async connect(peer) {
+      assert.equal(storage.get('connectedPeerId'), peer, 'identity exists before asynchronous connect');
+      return 1;
+    } }, router: { pushUrl: args => routes.push(args) }
+  });
+  vm.runInNewContext(ts.transpile('class ConnectPage {' + connectMethod + '} exports.ConnectPage = ConnectPage;'), h.context);
+  const p = Object.assign(new h.context.exports.ConnectPage(), {
+    remoteId: '123456789', normalizeRemoteId: value => value.replace(/\s/g, ''),
+    syncConnectionState: () => 0, connectionPasswordForUse: () => 'test-only',
+    savedConnections: [], autoUnlock: false, lockAfterDisconnect: false, privacyMode: false
+  });
+  assert.equal(storage.has('connectedPeerId'), false);
+  await p.onConnect();
+  const a = h.make('srv', storage.get('connectedPeerId')); a.set('keyboard-compat', '1'); a.dispose();
+  assert.equal(h.make('srv', '123456789').get('keyboard-compat'), '1');
+  p.remoteId = '987654321'; p.isConnecting = false;
+  await p.onConnect();
+  const b = h.make('srv', storage.get('connectedPeerId')); b.set('keyboard-compat', '2'); b.dispose();
+  assert.equal(h.make('srv', '123456789').get('keyboard-compat'), '1');
+  assert.equal(h.make('srv', '987654321').get('keyboard-compat'), '2');
+  assert.equal(routes.length, 2);
+  checks++; console.log('PASS fresh connection initializes peer identity and subsequent peers keep separate preferences');
+  console.log(`TOTAL=${checks} FAILED=0 (peer preference logic, isolated storage/timers and production restore/save paths; device acceptance pending)`);
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1306,6 +1306,7 @@ pub extern "C" fn rust_get_input_capabilities() -> i32 {
     let relative = platform.eq_ignore_ascii_case("windows") && !version.trim().is_empty()
         && version_at_least(&version, [1, 4, 5]);
     (kvm as i32) | ((relative as i32) << 1) | ((PEER_IS_WAYLAND.load(Ordering::SeqCst) as i32) << 2)
+        | ((input_compat::auto_map_keyboard(&platform, kvm) as i32) << 3)
 }
 
 #[no_mangle]
@@ -1345,26 +1346,10 @@ pub extern "C" fn rust_send_mouse_wheel(delta_x: f64, delta_y: f64, modifier_mas
 
 #[no_mangle]
 pub extern "C" fn rust_send_key_event(key_code: i32, action: i32, modifier_mask: i32) -> i32 {
-    let mut event = KeyEvent {
-        down: action == 0,
-        press: action == 2,
-        mode: KeyboardMode::Legacy.into(),
-        // RustDesk's sender does not repeat the modifier represented by the
-        // current key event inside the modifier list.
-        modifiers: modifier_mask_to_controls(modifier_mask & !modifier_bit_for_key_code(key_code)),
-        ..Default::default()
-    };
-    match key_code_to_control(key_code) {
-        Some(ctrl) => event.set_control_key(ctrl),
-        None => event.union = Some(key_event::Union::Chr(key_code.max(0) as u32)),
-    }
-    if INPUT_KEYBOARD_MODE.load(Ordering::SeqCst) == 1 {
-        let platform = CURRENT_PEER_PLATFORM.lock().map(|p| p.clone()).unwrap_or_default();
-        if let Some(code) = input_compat::mapped_modifier(key_code, &platform) {
-            event.mode = KeyboardMode::Map.into();
-            event.union = Some(key_event::Union::Chr(code));
-        }
-    }
+    let platform = CURRENT_PEER_PLATFORM.lock().map(|p| p.clone()).unwrap_or_default();
+    let event = input_compat::control_key_event(key_code, action, modifier_mask,
+        INPUT_KEYBOARD_MODE.load(Ordering::SeqCst), &platform,
+        PEER_IS_ONE_KVM.load(Ordering::SeqCst));
     let mut msg = PeerMessage::new();
     msg.set_key_event(event);
     queue_peer_message(msg)
@@ -1545,6 +1530,11 @@ fn usb_hid_to_macos_code(hid: u32) -> Option<u32> {
         0x04..=0x1D => LETTERS[(hid - 0x04) as usize],
         0x1E..=0x27 => DIGITS[(hid - 0x1E) as usize],
         0x28..=0x38 => PRINTABLE[(hid - 0x28) as usize],
+        // Carbon virtual keycodes, matching RustDesk's rdev macOS table.
+        0x3a..=0x45 => [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111][(hid - 0x3a) as usize],
+        0x49 => 114, 0x4a => 115, 0x4b => 116, 0x4c => 117,
+        0x4d => 119, 0x4e => 121,
+        0x4f => 124, 0x50 => 123, 0x51 => 125, 0x52 => 126,
         _ => u32::MAX,
     };
     (code != u32::MAX).then_some(code)

@@ -25,7 +25,9 @@ export class ConnectionService {
   }
 
   private static useExplicitKeyboardPath(): boolean {
-    return ConnectionService.keyboardMode !== 0 || (RustDeskNapi.getInputCapabilities() & 1) !== 0
+    // Bit 0: one-KVM legacy HID; bit 3: macOS automatic raw-key mapping.
+    // Neither target should use the Windows-only Shift printable fallback.
+    return ConnectionService.keyboardMode !== 0 || (RustDeskNapi.getInputCapabilities() & 9) !== 0
   }
 
   static sendRelativeMouseDelta(dx: number, dy: number): void {
@@ -51,6 +53,7 @@ export class ConnectionService {
   private static physicalModifierKeys: number[] = []
   private static physicalModifierBits: number[] = []
   private static physicalModifierControlCodes: number[] = []
+  private static sentModifierControlCodes: number[] = []
   private static hardwareModifierMask: number = 0
   private static heldModifierMask: number = 0
   private static capsLockEnabled: boolean = false
@@ -401,9 +404,10 @@ export class ConnectionService {
         return
       }
       ConnectionService.recomputeHeldModifierMask()
-      // Keep left/right modifiers as separate protocol events. The aggregate
-      // mask remains available for printable keys and mouse packets.
-      ConnectionService.sendRawModifierEvent(keyCode, action, 'key')
+      // Reconcile source ownership with actual wire state. A polling snapshot
+      // followed by the same physical down is one press, not two. Left/right
+      // keys and virtual latches still release independently.
+      ConnectionService.reconcileModifierEvents('key')
       return
     }
     ConnectionService.trackHeldKey(ConnectionService.heldLegacyKeys, keyCode, action)
@@ -512,10 +516,9 @@ export class ConnectionService {
   static syncNativeModifierState(mask: number): void {
     // Native and ArkUI snapshots have different reliability. A native zero
     // only releases native evidence; it must not erase an ArkUI-held key.
-    const previousMask: number = ConnectionService.heldModifierMask
     ConnectionService.nativeModifierMask = mask & 15
     ConnectionService.recomputeHeldModifierMask()
-    ConnectionService.sendModifierTransitions(previousMask, ConnectionService.heldModifierMask, 'native')
+    ConnectionService.reconcileModifierEvents('native')
   }
 
   static syncCapsLockState(enabled: boolean): void {
@@ -609,15 +612,6 @@ export class ConnectionService {
     ConnectionService.legacyShiftLetterHidCodes = []
     ConnectionService.legacyShiftLetterCodes = []
     ConnectionService.legacyShiftSymbolHidCodes = []
-    let previousMask: number = ConnectionService.heldModifierMask
-    let physicalModifierMask: number = 0
-    for (let index: number = 0; index < ConnectionService.physicalModifierControlCodes.length; index++) {
-      const keyCode: number = ConnectionService.physicalModifierControlCodes[index]
-      physicalModifierMask |= ConnectionService.physicalModifierBits[index]
-      RustDeskNapi.sendKeyEvent(keyCode, 1, ConnectionService.getKeyModifierMask())
-      hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
-        'InputTrace physical_modifier_release key=%{public}d previous=%{public}d', keyCode, previousMask)
-    }
     ConnectionService.directModifierMask = 0
     ConnectionService.pointerModifierMask = 0
     ConnectionService.nativeModifierMask = 0
@@ -626,16 +620,7 @@ export class ConnectionService {
     ConnectionService.physicalModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
-    let modifiers: number[] = [17, 16, 18, 91]
-    for (let keyCode of modifiers) {
-      let modifierBit: number = ConnectionService.getModifierBit(keyCode)
-      if ((previousMask & modifierBit) === 0 || (physicalModifierMask & modifierBit) !== 0) {
-        continue
-      }
-      RustDeskNapi.sendKeyEvent(keyCode, 1, ConnectionService.getKeyModifierMask())
-      hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
-        'InputTrace modifier_release key=%{public}d previous=%{public}d', keyCode, previousMask)
-    }
+    ConnectionService.reconcileModifierEvents('release')
     ConnectionService.capsLockKeyHeld = false
   }
 
@@ -698,6 +683,7 @@ export class ConnectionService {
     ConnectionService.physicalModifierKeys = []
     ConnectionService.physicalModifierBits = []
     ConnectionService.physicalModifierControlCodes = []
+    ConnectionService.sentModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
     ConnectionService.capsLockKeyHeld = false
@@ -731,14 +717,13 @@ export class ConnectionService {
   }
 
   private static applyModifierSnapshot(snapshot: number, pointerSource: boolean, source: string): void {
-    let previousMask: number = ConnectionService.heldModifierMask
     if (pointerSource) {
       ConnectionService.pointerModifierMask = snapshot
     } else {
       ConnectionService.hardwareModifierMask = snapshot
     }
     ConnectionService.recomputeHeldModifierMask()
-    ConnectionService.sendModifierTransitions(previousMask, ConnectionService.heldModifierMask, source)
+    ConnectionService.reconcileModifierEvents(source)
   }
 
   private static recomputeHeldModifierMask(): void {
@@ -748,25 +733,41 @@ export class ConnectionService {
       ConnectionService.hardwareModifierMask
   }
 
-  private static sendModifierTransitions(previousMask: number, nextMask: number, source: string): void {
-    if (previousMask === nextMask) {
-      return
+  private static reconcileModifierEvents(source: string): void {
+    const desired: number[] = []
+    for (const code of ConnectionService.physicalModifierControlCodes) {
+      if (!desired.includes(code)) desired.push(code)
     }
-    let keyCodes: number[] = [17, 16, 18, 91]
-    for (let keyCode of keyCodes) {
-      let bit: number = ConnectionService.getModifierBit(keyCode)
-      let wasHeld: boolean = (previousMask & bit) !== 0
-      let isHeld: boolean = (nextMask & bit) !== 0
-      if (wasHeld === isHeld) {
-        continue
+    // Snapshots have no left/right identity. Use a left-side fallback only
+    // until a real key event identifies the side; never add a phantom left
+    // modifier alongside a known right-side key.
+    for (const code of [17, 16, 18, 91]) {
+      const bit: number = ConnectionService.getModifierBit(code)
+      if ((ConnectionService.heldModifierMask & bit) !== 0 &&
+        (ConnectionService.directModifierMask & bit) === 0) {
+        desired.push(code)
       }
-      ConnectionService.sendRawModifierEvent(keyCode, isHeld ? 0 : 1, source)
+    }
+    for (const code of ConnectionService.sentModifierControlCodes.slice()) {
+      if (!desired.includes(code)) ConnectionService.sendRawModifierEvent(code, 1, source)
+    }
+    for (const code of desired) {
+      ConnectionService.sendRawModifierEvent(code, 0, source)
     }
   }
 
   private static sendRawModifierEvent(keyCode: number, action: number, source: string): void {
+    const index: number = ConnectionService.sentModifierControlCodes.indexOf(keyCode)
+    // Text injection can clear Shift remotely, so its explicit restore is the
+    // sole intentional replay; ordinary hardware/pointer/native paths dedupe.
+    if (action === 0 && index >= 0 && source !== 'shift-symbol-restore') return
+    if (action === 1 && index < 0) return
     let packetMask: number = ConnectionService.getKeyModifierMask()
     let result: number = RustDeskNapi.sendKeyEvent(keyCode, action, packetMask)
+    if (result === 0) {
+      if (action === 0 && index < 0) ConnectionService.sentModifierControlCodes.push(keyCode)
+      if (action === 1 && index >= 0) ConnectionService.sentModifierControlCodes.splice(index, 1)
+    }
     RustDeskNapi.appendDiagnosticLog('input-modifier',
       `source=${source} key=${keyCode} action=${action} mask=${packetMask} result=${result}`)
     hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',

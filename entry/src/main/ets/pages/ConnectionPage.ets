@@ -2054,7 +2054,7 @@ export struct ConnectionPage {
       this.isConnecting = true
       this.connectionStatusText = translate('Connecting...', this.uiLanguage)
       this.connectionStatusColor = RustDeskTheme.WARNING
-      AppStorage.set<string>('connectedPeerId', peerId)
+      AppStorage.setOrCreate<string>('connectedPeerId', peerId)
       this.preparingAccount = true
       let status: ConnectionStatus
       try {

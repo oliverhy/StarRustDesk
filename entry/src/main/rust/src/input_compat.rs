@@ -6,6 +6,48 @@ pub fn is_one_kvm(username: &str, displays: &[String]) -> bool {
         && displays.iter().any(|name| name.eq_ignore_ascii_case("KVM Display"))
 }
 
+pub fn auto_map_keyboard(platform: &str, one_kvm: bool) -> bool {
+    let p = platform.to_ascii_lowercase();
+    !one_kvm && (p.contains("mac") || p.contains("darwin") || p.contains("osx"))
+}
+
+pub fn control_key_event(code: i32, action: i32, modifiers: i32, mode: i32,
+    platform: &str, one_kvm: bool) -> KeyEvent {
+    let mut event = KeyEvent {
+        down: action == 0,
+        press: action == 2,
+        mode: KeyboardMode::Legacy.into(),
+        modifiers: super::modifier_mask_to_controls(modifiers & !super::modifier_bit_for_key_code(code)),
+        ..Default::default()
+    };
+    match super::key_code_to_control(code) {
+        Some(control) => event.set_control_key(control),
+        None => event.union = Some(key_event::Union::Chr(code.max(0) as u32)),
+    }
+    let mac_map = (mode == 1 || mode == 0) && auto_map_keyboard(platform, one_kvm);
+    if mode == 1 || mac_map {
+        let mapped = mapped_modifier(code, platform).or_else(|| {
+            // Physical navigation/function keys must share the modifier path on
+            // macOS. Self-contained toolbar press shortcuts remain Legacy so
+            // the receiver applies their explicit modifier list atomically.
+            if !mac_map || action == 2 { return None; }
+            let hid = match code {
+                8 => 0x2a, 9 => 0x2b, 13 => 0x28, 27 => 0x29, 32 => 0x2c,
+                33 => 0x4b, 34 => 0x4e, 35 => 0x4d, 36 => 0x4a,
+                37 => 0x50, 38 => 0x52, 39 => 0x4f, 40 => 0x51,
+                45 => 0x49, 46 => 0x4c, 112..=123 => 0x3a + (code - 112) as u32,
+                _ => return None,
+            };
+            super::map_usb_hid_to_peer_code(hid, platform)
+        });
+        if let Some(mapped) = mapped {
+            event.mode = KeyboardMode::Map.into();
+            event.union = Some(key_event::Union::Chr(mapped));
+        }
+    }
+    event
+}
+
 pub fn mapped_modifier(code: i32, platform: &str) -> Option<u32> {
     // Windows scan code, Xorg keycode, Android keycode, macOS virtual keycode.
     let codes = match code {
@@ -169,5 +211,70 @@ mod tests {
         assert_eq!(mapped_modifier(91, "Mac OS"), Some(55));
         assert_eq!(mapped_modifier(20, "Android"), Some(115));
         assert_eq!(mapped_modifier(13, "Windows"), None);
+    }
+
+    #[test]
+    fn mac_auto_modifiers_and_letter_use_the_same_map_protocol() {
+        for platform in ["Mac OS", "macOS", "Darwin", "OSX"] {
+            assert!(auto_map_keyboard(platform, false));
+            for (key, mapped, mask) in [(17, 59, 1), (163, 62, 1), (16, 56, 2),
+                (161, 60, 2), (18, 58, 4), (165, 61, 4), (91, 55, 8), (92, 54, 8)] {
+                for action in [0, 1] {
+                    let event = control_key_event(key, action, mask, 0, platform, false);
+                    assert_eq!(event.mode.enum_value().unwrap(), KeyboardMode::Map);
+                    assert_eq!(event.chr(), mapped);
+                    assert_eq!(event.down, action == 0);
+                    assert!(!event.press);
+                    assert!(event.modifiers.is_empty(), "do not echo a modifier into its own flags");
+                }
+            }
+            assert_eq!(super::super::map_usb_hid_to_peer_code(0x14, platform), Some(12));
+            assert_eq!(super::super::map_usb_hid_to_peer_code(0x04, platform), Some(0));
+        }
+    }
+
+    #[test]
+    fn mac_navigation_and_function_keys_keep_raw_modifier_context() {
+        for mode in [0, 1] {
+            for (key, mapped) in [(38, 126), (40, 125), (37, 123), (39, 124), (114, 99),
+                (33, 116), (34, 121), (36, 115), (35, 119), (13, 36), (46, 117)] {
+                for action in [0, 1] {
+                    let event = control_key_event(key, action, 3, mode, "Mac OS", false);
+                    assert_eq!(event.mode.enum_value().unwrap(), KeyboardMode::Map);
+                    assert_eq!(event.chr(), mapped);
+                    assert_eq!(event.modifiers.len(), 2);
+                    assert_eq!(event.down, action == 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mac_explicit_legacy_and_self_contained_shortcuts_remain_compatible() {
+        let legacy = control_key_event(91, 0, 8, 2, "Mac OS", false);
+        assert_eq!(legacy.mode.enum_value().unwrap(), KeyboardMode::Legacy);
+        assert_eq!(legacy.control_key(), ControlKey::Meta);
+        let shortcut = control_key_event(38, 2, 1, 0, "Mac OS", false);
+        assert_eq!(shortcut.mode.enum_value().unwrap(), KeyboardMode::Legacy);
+        assert!(shortcut.press);
+        assert_eq!(shortcut.control_key(), ControlKey::UpArrow);
+        assert_eq!(shortcut.modifiers, super::super::modifier_mask_to_controls(1));
+    }
+
+    #[test]
+    fn other_targets_and_auto_kvm_do_not_change_keyboard_policy() {
+        for platform in ["Windows", "Linux", "Android", "", "Mac OS"] {
+            let kvm = platform == "Mac OS";
+            assert!(!auto_map_keyboard(platform, kvm));
+            let event = control_key_event(17, 0, 3, 0, platform, kvm);
+            assert_eq!(event.mode.enum_value().unwrap(), KeyboardMode::Legacy);
+            assert_eq!(event.control_key(), ControlKey::Control);
+            assert_eq!(event.modifiers, super::super::modifier_mask_to_controls(2));
+        }
+        for platform in ["Windows", "Linux", "Android", "Mac OS"] {
+            let event = control_key_event(163, 0, 1, 1, platform, false);
+            assert_eq!(event.mode.enum_value().unwrap(), KeyboardMode::Map);
+            assert_eq!(event.chr(), mapped_modifier(163, platform).unwrap());
+        }
     }
 }

@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.23'
-export const RELEASE_NOTES_BUILD: string = '1002023'
+export const RELEASE_NOTES_VERSION: string = '1.2.24'
+export const RELEASE_NOTES_BUILD: string = '1002024'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.24（1002024）· Mac 组合键与远控偏好修复', [
+            '修复远控 Mac 时自动键盘模式混用发送路径的问题：Command、Ctrl、Shift、Option 与实体字母、符号、方向键及功能键统一使用 Mac 键码映射，保留传统兼容模式和中文输入。',
+            '合并实体键盘、原生事件和状态查询重复上报的修饰键按下，保留左右修饰键独立状态；实体键盘与快捷栏共同按住同一键时，不因其中一个松开而提前释放。',
+            '优化失去焦点、切换键盘模式及离开远控时的按键释放，按实际已发送状态补齐松键事件，减少远端 Ctrl、Shift 或 Command 状态残留。',
+            '修复首次连接时未创建远端 ID 存储项、导致独立操控偏好无法保存的问题；按服务器与远端分别恢复设置，不改变现有密码保护、连接协议和画质配置。'
+          ])
           this.buildSection('1.2.23（1002023）· 独立远控偏好与悬浮功能栏', [
             '按服务器地址与远端 ID 独立记住鼠标或触摸模式、光标显示、虚拟鼠标、边缘跟随及键鼠兼容选择；不同远端互不覆盖，未单独修改的项目沿用旧默认值。',
             '按远端记住“控”和“键”的位置、排序、收放及更多按键顺序，保存 PC 固定状态、画面模式和缩放比例；不保存按键按住、输入内容、全屏及当前菜单等临时状态。',
