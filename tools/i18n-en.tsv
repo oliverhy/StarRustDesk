@@ -1111,3 +1111,12 @@ AV1 软件解码增加 HDR 转 SDR，完善 VP9/AV1 高位深画面转换及解�
 分组菜单新增删除与二次确认；分组内的全部连接移到“未分组”，保留连接、保存的密码及独立操控设置。	Added group deletion with confirmation. All connections in the group move to Ungrouped, preserving connections, saved passwords and per-device control preferences.
 支持删除空分组，保留系统“未分组”；保存失败会明确提示，避免误报成功，支持安全重试，不影响其他分组和正在编辑的连接内容。	Empty groups can also be deleted, while the built-in Ungrouped section is protected. Save failures are reported clearly and can be retried safely without affecting other groups or the connection being edited.
 所有分组继续共用 ID、名称、在线状态及升降序排序，补充分组内排序一致性回归；不增加独立分组排序或改变现有排序规则。	All groups continue to share ID, name and online-status sorting with ascending or descending order. Added regression coverage for consistent in-group sorting; no separate group sorting or changes to existing rules.
+连接显示方式	Connection view
+精简列表	Compact list
+现有布局	Standard layout
+保存显示方式失败，请重试	Failed to save the view preference; please retry
+1.2.26（1002026）· 精简连接列表	1.2.26 (1002026) · Compact saved connection list
+已保存连接新增“现有布局”和“精简列表”切换，入口位于标题右侧；精简模式收掉大头像及多余留白，保留在线状态、名称、ID、连接和更多菜单。	Added Standard layout and Compact list views for saved connections, selectable beside the heading. Compact view removes large avatars and extra spacing while keeping online status, names, IDs, Connect and More.
+手机采用紧凑双行，平板和 PC 宽屏采用单行对齐；按实际可用宽度、窗口缩放、横竖屏及字体大小调整，大字体或窄窗口下操作按钮自动换行。	Phones use compact two-line entries, while wide tablet and PC windows align entries in a single row. Layout adapts to available width, window resizing, orientation and font size, with actions moving to a separate line for large fonts or narrow windows.
+在本机记住显示方式，默认保留现有布局，所有分组共用同一视图；切换不改变连接、密码、分组、排序、搜索、编辑内容或云同步数据。	The view preference is remembered locally, defaults to Standard layout and is shared by all groups. Switching views does not alter connections, passwords, groups, sorting, search, editor drafts or cloud-sync data.
+优化列表标题的大字体换行及英文连接按钮宽度，保持深浅色和按钮样式一致；保存显示方式失败时明确提示，补充不含账号密码的诊断记录。	Improved heading wrapping for large fonts and the width of the English Connect button, preserving light/dark themes and button styles. View-save failures are reported clearly, with diagnostics that contain no account credentials.

@@ -118,6 +118,8 @@ export struct ConnectionPage {
   @State savedConnectionsExpanded: boolean = true
   @State savedConnectionSort: string = 'id'
   @State savedConnectionSortAscending: boolean = true
+  @State savedConnectionViewMode: string = 'normal'
+  @State savedConnectionsContentWidth: number = 0
   @State savedConnectionSearch: string = ''
   @State savedConnectionSearchExpanded: boolean = false
   @State connectionFormExpanded: boolean = false
@@ -165,6 +167,7 @@ export struct ConnectionPage {
     this.loadConnectionFormState()
     this.loadConnectionGroups()
     this.loadSavedConnectionSort()
+    this.loadSavedConnectionView()
     this.loadSavedConnections()
     this.syncConnectionState()
     this.startStatusPolling()
@@ -877,7 +880,9 @@ export struct ConnectionPage {
           .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .maxLines(1)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
           .margin({ left: 8 })
         Text(translate(`${this.savedConnections.length}`, this.uiLanguage))
           .fontSize(12)
@@ -886,11 +891,11 @@ export struct ConnectionPage {
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
           .borderRadius(9)
           .margin({ left: 8 })
-        Blank()
+        this.buildSavedConnectionViewSelector()
       }
       .width(this.isWideDeviceLayout() ? '35%' : '100%')
       .flexShrink(0)
-      .height(Math.ceil(46 + Math.max(0, this.uiFontScale - 1) * 18))
+      .constraintSize({ minHeight: Math.ceil(46 + Math.max(0, this.uiFontScale - 1) * 18) })
 
       Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
         if (this.savedConnectionSearchExpanded) {
@@ -1082,11 +1087,57 @@ export struct ConnectionPage {
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .onAreaChange((_oldArea: Area, area: Area) => {
+      this.savedConnectionsContentWidth = Math.max(0, (area.width as number) - 28)
+    })
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
     .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .margin({ bottom: 8 })
+  }
+
+  @Builder
+  buildSavedConnectionViewSelector() {
+    Button() {
+      if (this.savedConnectionViewMode === 'compact') {
+        Column({ space: 4 }) {
+          ForEach([0, 1, 2], (_index: number) => {
+            Row({ space: 3 }) {
+              Row().width(3).height(3).borderRadius(1)
+                .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+              Row().width(13).height(2).borderRadius(1)
+                .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+            }
+          }, (index: number) => `${index}`)
+        }
+      } else {
+        Column({ space: 3 }) {
+          ForEach([0, 1], (_index: number) => {
+            Row({ space: 3 }) {
+              Row().width(7).height(7).borderRadius(2)
+                .border({ width: 1, color: this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY })
+              Row().width(7).height(7).borderRadius(2)
+                .border({ width: 1, color: this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY })
+            }
+          }, (index: number) => `${index}`)
+        }
+      }
+    }
+    .id('saved-connection-view-selector')
+    .width(44)
+    .height(Math.max(44, this.savedToolbarButtonHeight()))
+    .padding(0)
+    .margin({ right: 4 })
+    .backgroundColor(this.savedConnectionViewMode === 'compact' ?
+      (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT) : Color.Transparent)
+    .accessibilityText(translate('连接显示方式', this.uiLanguage))
+    .accessibilityDescription(translate(this.savedConnectionViewMode === 'compact' ? '精简列表' : '现有布局', this.uiLanguage))
+    .bindMenu([
+      { value: this.savedConnectionViewMenuLabel('normal'), action: () => { this.setSavedConnectionView('normal') } },
+      { value: this.savedConnectionViewMenuLabel('compact'), action: () => { this.setSavedConnectionView('compact') } }
+    ], { placement: Placement.BottomLeft, enableArrow: true })
+    .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
   }
 
   @Builder
@@ -1256,13 +1307,16 @@ export struct ConnectionPage {
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
       }
       .width('100%')
-      .height(38)
+      .height(this.savedConnectionViewMode === 'compact' ? Math.ceil(34 + Math.max(0, this.uiFontScale - 1) * 12) : 38)
       .padding({ left: 4, right: 4 })
       .alignItems(VerticalAlign.Center)
 
       if (groupId.length <= 0 ? this.ungroupedExpanded : expanded) {
         Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
           ForEach(this.connectionsForGroup(groupId), (item: SavedConnectionInfo) => {
+            if (this.savedConnectionViewMode === 'compact') {
+              this.buildCompactSavedConnectionItem(item)
+            } else {
             Row({ space: 8 }) {
             Stack() {
               Column() {
@@ -1308,68 +1362,16 @@ export struct ConnectionPage {
             }
             .layoutWeight(1)
 
-            Button(translate('连接', this.uiLanguage))
-              .width(68)
-              .height(32)
-              .fontSize(12)
-              .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-              .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-              .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-              .onClick(() => {
-                this.connectSavedConnection(item)
-              })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
-
-            Button('⋯')
-              .width(42)
-              .height(32)
-              .fontSize(15)
-              .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
-              .backgroundColor(Color.Transparent)
-              .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-              .padding(0)
-              .bindMenu([
-                { value: translate('文件传输（不打开画面）', this.uiLanguage), action: () => {
-                  this.applySavedConnection(item)
-                  this.onConnect(true)
-                } },
-                {
-                  value: translate('移动到分组', this.uiLanguage),
-                  action: () => {
-                    this.openGroupPickerForConnection(item.id)
-                  }
-                },
-                {
-                  value: translate('重命名', this.uiLanguage),
-                  action: () => {
-                    this.openRenameConnectionDialog(item.id)
-                  }
-                },
-                {
-                  value: translate('修改连接', this.uiLanguage),
-                  action: () => {
-                    this.editSavedConnection(item)
-                  }
-                },
-                {
-                  value: translate('删除连接', this.uiLanguage),
-                  action: () => {
-                    this.deleteSavedConnection(item.id)
-                  }
-                }
-              ], {
-                placement: Placement.BottomRight,
-                enableArrow: true
-              })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+            this.buildSavedConnectionConnectButton(item, false)
+            this.buildSavedConnectionMoreButton(item, false)
             }
             .width(this.savedDeviceCardWidth())
             .height(this.isWideDeviceLayout() ? 64 : 58)
             .padding({ left: 8, right: 4 })
             .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
+            }
           }, (item: SavedConnectionInfo) =>
-            `${item.id}-${this.savedConnectionsVersion}-${this.peerOnlineStatesVersion}`)
+            `${item.id}-${this.savedConnectionsVersion}-${this.peerOnlineStatesVersion}-${this.savedConnectionViewMode}`)
         }
         .width('100%')
         .transition(TransitionEffect.OPACITY
@@ -1382,6 +1384,125 @@ export struct ConnectionPage {
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(12)
+  }
+
+  @Builder
+  buildCompactSavedConnectionItem(item: SavedConnectionInfo) {
+    Column({ space: 4 }) {
+      if (this.savedCompactStackActions()) {
+        Row({ space: 8 }) {
+          this.buildCompactSavedConnectionStatus(item)
+          this.buildCompactSavedConnectionIdentity(item)
+        }
+        .width('100%')
+        Row({ space: 6 }) {
+          Blank()
+          this.buildSavedConnectionConnectButton(item, true)
+          this.buildSavedConnectionMoreButton(item, true)
+        }
+        .width('100%')
+      } else {
+        Row({ space: 6 }) {
+          this.buildCompactSavedConnectionStatus(item)
+          if (this.savedCompactSingleLine()) {
+            Text(item.name.length > 0 ? item.name : item.remoteId)
+              .fontSize(14)
+              .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+              .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+            Text(item.remoteId)
+              .fontSize(12)
+              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+              .width(this.savedCompactIdWidth())
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          } else {
+            this.buildCompactSavedConnectionIdentity(item)
+          }
+          this.buildSavedConnectionConnectButton(item, true)
+          this.buildSavedConnectionMoreButton(item, true)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+      }
+    }
+    .width('100%')
+    .constraintSize({ minHeight: this.savedCompactRowMinHeight() })
+    .justifyContent(FlexAlign.Center)
+    .padding({ left: 6, right: 4, top: 3, bottom: 3 })
+    .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
+  }
+
+  @Builder
+  buildCompactSavedConnectionStatus(item: SavedConnectionInfo) {
+    if (this.peerOnlineQueryEnabled) {
+      Row()
+        .width(8)
+        .height(8)
+        .borderRadius(4)
+        .backgroundColor(this.peerOnlineStateColor(item.remoteId))
+        .accessibilityText(this.peerOnlineStateHint(item.remoteId))
+    }
+  }
+
+  @Builder
+  buildCompactSavedConnectionIdentity(item: SavedConnectionInfo) {
+    Column({ space: 2 }) {
+      Text(item.name.length > 0 ? item.name : item.remoteId)
+        .fontSize(14)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .width('100%')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(item.remoteId)
+        .fontSize(12)
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  buildSavedConnectionConnectButton(item: SavedConnectionInfo, compact: boolean) {
+    Button(translate('连接', this.uiLanguage))
+      .width(compact ? this.savedCompactConnectWidth() : 68)
+      .height(compact ? this.savedCompactActionHeight() : 32)
+      .fontSize(12)
+      .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+      .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+      .onClick(() => { this.connectSavedConnection(item) })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+  }
+
+  @Builder
+  buildSavedConnectionMoreButton(item: SavedConnectionInfo, compact: boolean) {
+    Button('⋯')
+      .width(compact ? 44 : 42)
+      .height(compact ? this.savedCompactActionHeight() : 32)
+      .fontSize(15)
+      .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
+      .backgroundColor(Color.Transparent)
+      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+      .padding(0)
+      .bindMenu([
+        { value: translate('文件传输（不打开画面）', this.uiLanguage), action: () => {
+          this.applySavedConnection(item)
+          this.onConnect(true)
+        } },
+        { value: translate('移动到分组', this.uiLanguage), action: () => { this.openGroupPickerForConnection(item.id) } },
+        { value: translate('重命名', this.uiLanguage), action: () => { this.openRenameConnectionDialog(item.id) } },
+        { value: translate('修改连接', this.uiLanguage), action: () => { this.editSavedConnection(item) } },
+        { value: translate('删除连接', this.uiLanguage), action: () => { this.deleteSavedConnection(item.id) } }
+      ], { placement: Placement.BottomRight, enableArrow: true })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
   }
 
   @Builder
@@ -2166,6 +2287,67 @@ export struct ConnectionPage {
       cloned.push({ id: group.id, name: group.name, expanded: group.expanded })
     })
     return cloned
+  }
+
+  loadSavedConnectionView(): void {
+    try {
+      this.savedConnectionViewMode = RustDeskNapi.getOption('saved-connections-view') === 'compact' ? 'compact' : 'normal'
+    } catch (_error) {
+      this.savedConnectionViewMode = 'normal'
+    }
+  }
+
+  setSavedConnectionView(mode: string): boolean {
+    if (mode !== 'normal' && mode !== 'compact') return false
+    if (mode === this.savedConnectionViewMode) return true
+    try {
+      // Local appearance only: never rewrite connections, credentials or cloud data.
+      RustDeskNapi.setOption('saved-connections-view', mode)
+    } catch (_error) {
+      promptAction.showToast({ message: translate('保存显示方式失败，请重试', this.uiLanguage) })
+      RustDeskNapi.appendDiagnosticLog('saved-view', 'save_failed')
+      return false
+    }
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseInOut }, () => {
+      this.savedConnectionViewMode = mode
+    })
+    RustDeskNapi.appendDiagnosticLog('saved-view', `mode_changed mode=${mode}`)
+    return true
+  }
+
+  savedConnectionViewMenuLabel(mode: string): string {
+    const label: string = translate(mode === 'compact' ? '精简列表' : '现有布局', this.uiLanguage)
+    return `${mode === this.savedConnectionViewMode ? '✓ ' : ''}${label}`
+  }
+
+  savedCompactContentWidth(): number {
+    return this.savedConnectionsContentWidth > 0 ? this.savedConnectionsContentWidth : Math.max(0, this.pageWidth - 60)
+  }
+
+  savedCompactStackActions(): boolean {
+    return this.uiFontScale > 1.6 || this.savedCompactContentWidth() < 280
+  }
+
+  savedCompactSingleLine(): boolean {
+    return this.isWideDeviceLayout() && !this.savedCompactStackActions() &&
+      this.savedCompactContentWidth() >= Math.ceil(560 + Math.max(0, this.uiFontScale - 1) * 220)
+  }
+
+  savedCompactRowMinHeight(): number {
+    return Math.ceil((this.savedCompactSingleLine() ? 44 : 50) + Math.max(0, this.uiFontScale - 1) * 26)
+  }
+
+  savedCompactActionHeight(): number {
+    return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 16)
+  }
+
+  savedCompactConnectWidth(): number {
+    const longLabel: boolean = translate('连接', this.uiLanguage).length > 4
+    return Math.ceil((longLabel ? 76 : 60) + Math.max(0, this.uiFontScale - 1) * (longLabel ? 42 : 22))
+  }
+
+  savedCompactIdWidth(): number {
+    return Math.ceil(154 + Math.max(0, this.uiFontScale - 1) * 62)
   }
 
   loadSavedConnectionSort(): void {

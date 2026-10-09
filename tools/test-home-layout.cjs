@@ -54,7 +54,7 @@ assert.match(group, /Button\(translate\('连接', this\.uiLanguage\)\)[\s\S]*CON
   'saved rows should use a pale-blue connection button');
 assert.match(group, /Button\('⋯'\)[\s\S]*value: translate\('移动到分组', this\.uiLanguage\)[\s\S]*value: translate\('修改连接', this\.uiLanguage\)[\s\S]*value: translate\('删除连接', this\.uiLanguage\)/,
   'compact more menu must retain move, edit and delete');
-assert.doesNotMatch(group, /peerOnlineStateHint\(item\.remoteId\)/,
+assert.doesNotMatch(group, /\bText\([^\n]*peerOnlineStateHint\(item\.remoteId\)/,
   'saved rows should stay at two text lines');
 assert.match(group, /if \(this\.peerOnlineQueryEnabled\) \{\s*Row\(\)[\s\S]*?peerOnlineStateColor\(item\.remoteId\)/,
   'saved device status dot should appear only when online querying is enabled');

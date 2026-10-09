@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.25'
-export const RELEASE_NOTES_BUILD: string = '1002025'
+export const RELEASE_NOTES_VERSION: string = '1.2.26'
+export const RELEASE_NOTES_BUILD: string = '1002026'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.26（1002026）· 精简连接列表', [
+            '已保存连接新增“现有布局”和“精简列表”切换，入口位于标题右侧；精简模式收掉大头像及多余留白，保留在线状态、名称、ID、连接和更多菜单。',
+            '手机采用紧凑双行，平板和 PC 宽屏采用单行对齐；按实际可用宽度、窗口缩放、横竖屏及字体大小调整，大字体或窄窗口下操作按钮自动换行。',
+            '在本机记住显示方式，默认保留现有布局，所有分组共用同一视图；切换不改变连接、密码、分组、排序、搜索、编辑内容或云同步数据。',
+            '优化列表标题的大字体换行及英文连接按钮宽度，保持深浅色和按钮样式一致；保存显示方式失败时明确提示，补充不含账号密码的诊断记录。'
+          ])
           this.buildSection('1.2.25（1002025）· 分组删除与排序一致性', [
             '分组菜单新增删除与二次确认；分组内的全部连接移到“未分组”，保留连接、保存的密码及独立操控设置。',
             '支持删除空分组，保留系统“未分组”；保存失败会明确提示，避免误报成功，支持安全重试，不影响其他分组和正在编辑的连接内容。',
