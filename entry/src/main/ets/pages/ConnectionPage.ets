@@ -1227,11 +1227,15 @@ export struct ConnectionPage {
           Button('⋯')
             .width(34)
             .height(28)
+            .enabled(!this.savingConnection)
             .fontSize(14)
             .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
             .backgroundColor(Color.Transparent)
             .padding(0)
-            .bindMenu([{ value: translate('重命名分组', this.uiLanguage), action: () => { this.openRenameGroupDialog(groupId) } }],
+            .bindMenu([
+              { value: translate('重命名分组', this.uiLanguage), action: () => { this.openRenameGroupDialog(groupId) } },
+              { value: translate('删除分组', this.uiLanguage), action: () => { this.requestDeleteConnectionGroup(groupId) } }
+            ],
               { placement: Placement.BottomRight, enableArrow: true })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
         }
@@ -2147,13 +2151,13 @@ export struct ConnectionPage {
     }
   }
 
-  persistConnectionGroups(): void {
+  persistConnectionGroups(groups: SavedConnectionGroup[] = this.connectionGroups, markChanged: boolean = true): void {
     let rows: SavedConnectionGroupRow[] = []
-    this.connectionGroups.forEach((group: SavedConnectionGroup) => {
+    groups.forEach((group: SavedConnectionGroup) => {
       rows.push({ id: group.id, name: group.name, expanded: group.expanded })
     })
     RustDeskNapi.setOption('saved-connection-groups', JSON.stringify(rows))
-    CloudSyncService.markLocalChanged()
+    if (markChanged) CloudSyncService.markLocalChanged()
   }
 
   cloneConnectionGroups(groups: SavedConnectionGroup[]): SavedConnectionGroup[] {
@@ -2358,6 +2362,81 @@ export struct ConnectionPage {
     this.groupNameError = ''
     this.assignCreatedGroupToForm = assignToForm
     this.assignCreatedGroupConnectionId = connectionId
+  }
+
+  requestDeleteConnectionGroup(groupId: string): void {
+    if (!groupId || this.savingConnection) return
+    const group: SavedConnectionGroup | undefined = this.connectionGroups.find((item: SavedConnectionGroup) => item.id === groupId)
+    if (group === undefined) return
+    this.closeAllDialogs()
+    this.getUIContext().showAlertDialog({
+      title: translate('删除分组', this.uiLanguage),
+      message: `${group.name}\n\n${translate('删除后，该分组里的连接将移到“未分组”，连接和保存的密码不会删除。', this.uiLanguage)}`,
+      autoCancel: true,
+      primaryButton: { value: translate('取消', this.uiLanguage), action: () => {} },
+      secondaryButton: {
+        value: translate('删除分组', this.uiLanguage),
+        fontColor: RustDeskTheme.ERROR,
+        action: () => { this.deleteConnectionGroup(groupId) }
+      }
+    })
+  }
+
+  deleteConnectionGroup(groupId: string): boolean {
+    // Never delete the built-in ungrouped bucket. Re-read the current lists at
+    // confirmation time so cloud updates or edits cannot restore stale rows.
+    if (!groupId || this.savingConnection ||
+      !this.connectionGroups.some((group: SavedConnectionGroup) => group.id === groupId)) return false
+    const groups: SavedConnectionGroup[] = this.cloneConnectionGroups(
+      this.connectionGroups.filter((group: SavedConnectionGroup) => group.id !== groupId))
+    const list: SavedConnectionInfo[] = this.cloneSavedConnections(this.savedConnections)
+    let moved: number = 0
+    list.forEach((item: SavedConnectionInfo) => {
+      if (item.groupId === groupId) {
+        item.groupId = ''
+        moved++
+      }
+    })
+    let connectionsSaved: boolean = false
+    try {
+      // Persist membership first: a partial save leaves an existing empty group
+      // rather than connections referencing a removed group. Credentials stay
+      // in their existing secure store and are never removed or rewritten.
+      if (moved > 0) {
+        this.persistSavedConnections(list, false)
+        connectionsSaved = true
+      }
+      this.persistConnectionGroups(groups, false)
+    } catch (_error) {
+      if (connectionsSaved) {
+        this.savedConnections = list
+        if (this.selectedGroupId === groupId) this.selectedGroupId = ''
+        this.ungroupedExpanded = true
+        this.savedConnectionsVersion++
+        CloudSyncService.markLocalChanged()
+      }
+      promptAction.showToast({ message: translate(connectionsSaved ?
+        '连接已移到未分组，但删除分组失败，请重试' : '删除分组失败，请重试', this.uiLanguage) })
+      RustDeskNapi.appendDiagnosticLog('connection-group', `delete_failed connections_moved=${connectionsSaved ? moved : 0}`)
+      return false
+    }
+    this.savedConnections = list
+    this.connectionGroups = groups
+    if (this.selectedGroupId === groupId) this.selectedGroupId = ''
+    this.savedConnectionsVersion++
+    if (moved > 0) {
+      this.ungroupedExpanded = true
+      try {
+        RustDeskNapi.setOption('saved-connections-ungrouped-expanded', '1')
+      } catch (_error) {
+        RustDeskNapi.appendDiagnosticLog('connection-group', 'expanded_state_save_failed')
+      }
+    }
+    CloudSyncService.markLocalChanged()
+    promptAction.showToast({ message: translate(moved > 0 ?
+      '分组已删除，连接已移到未分组' : '分组已删除', this.uiLanguage) })
+    RustDeskNapi.appendDiagnosticLog('connection-group', `deleted connections_moved=${moved}`)
+    return true
   }
 
   openRenameGroupDialog(groupId: string): void {

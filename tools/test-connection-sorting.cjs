@@ -83,4 +83,18 @@ test('equal display name and remote ID have a deterministic final tie breaker', 
   assert(page.compareSavedConnections(item('a','123','PC'), item('b','123','pc')) < 0);
   assert.equal(page.compareSavedConnections(item('a','123','PC'), item('a','123','PC')), 0);
 });
+test('every group follows the shared sort rule and direction, including ungrouped', () => {
+  const p = Object.assign(new context.Page(), {
+    savedConnectionSort:'id', savedConnectionSortAscending:true, savedConnectionsVersion:0,
+    peerOnlineQueryEnabled:true, peerOnlineStates:{'30':1,'20':2,'10':1,'9':2,'2':1},
+    connectionGroups:[{id:'work',name:'Work'},{id:'home',name:'Home'}],
+    savedConnections:[item('a','30','Beta','work'),item('b','20','Alpha','work'),
+      item('c','10','Zulu','home'),item('d','9','Aaron','home'),item('e','2','Outside')]
+  });
+  const members=g=>Array.from(p.connectionsForGroup(g),r=>r.id);
+  p.setSavedConnectionSort('name'); assert.deepEqual(members('work'),['b','a']); assert.deepEqual(members('home'),['d','c']);
+  p.toggleSavedConnectionSortDirection(); assert.deepEqual(members('work'),['a','b']); assert.deepEqual(members('home'),['c','d']);
+  p.toggleSavedConnectionSortDirection(); p.setSavedConnectionSort('online');
+  assert.deepEqual(members('work'),['a','b']); assert.deepEqual(members('home'),['c','d']); assert.deepEqual(members(''),['e']);
+});
 console.log(`${passed} sorting checks passed`);

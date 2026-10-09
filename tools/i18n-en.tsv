@@ -1101,3 +1101,13 @@ AV1 软件解码增加 HDR 转 SDR，完善 VP9/AV1 高位深画面转换及解�
 合并实体键盘、原生事件和状态查询重复上报的修饰键按下，保留左右修饰键独立状态；实体键盘与快捷栏共同按住同一键时，不因其中一个松开而提前释放。	Coalesced duplicate modifier presses from physical keys, native events and state polling while preserving left and right keys. A modifier held by both a physical key and the shortcut bar is released only after both owners let go.
 优化失去焦点、切换键盘模式及离开远控时的按键释放，按实际已发送状态补齐松键事件，减少远端 Ctrl、Shift 或 Command 状态残留。	Improved key release on focus loss, keyboard mode changes and session exit. Release events follow the actual sent-key state to reduce stuck Ctrl, Shift or Command modifiers on the remote device.
 修复首次连接时未创建远端 ID 存储项、导致独立操控偏好无法保存的问题；按服务器与远端分别恢复设置，不改变现有密码保护、连接协议和画质配置。	Fixed missing remote-ID storage on the first connection that prevented per-device preferences from being saved. Settings are restored per server and remote device without changing password protection, network protocols or video quality settings.
+删除分组	Delete group
+删除后，该分组里的连接将移到“未分组”，连接和保存的密码不会删除。	Connections in this group will move to Ungrouped. Connections and saved passwords will not be deleted.
+删除分组失败，请重试	Failed to delete the group; please retry
+连接已移到未分组，但删除分组失败，请重试	Connections were moved to Ungrouped, but deleting the group failed; please retry
+分组已删除，连接已移到未分组	Group deleted; connections moved to Ungrouped
+分组已删除	Group deleted
+1.2.25（1002025）· 分组删除与排序一致性	1.2.25 (1002025) · Group deletion and consistent sorting
+分组菜单新增删除与二次确认；分组内的全部连接移到“未分组”，保留连接、保存的密码及独立操控设置。	Added group deletion with confirmation. All connections in the group move to Ungrouped, preserving connections, saved passwords and per-device control preferences.
+支持删除空分组，保留系统“未分组”；保存失败会明确提示，避免误报成功，支持安全重试，不影响其他分组和正在编辑的连接内容。	Empty groups can also be deleted, while the built-in Ungrouped section is protected. Save failures are reported clearly and can be retried safely without affecting other groups or the connection being edited.
+所有分组继续共用 ID、名称、在线状态及升降序排序，补充分组内排序一致性回归；不增加独立分组排序或改变现有排序规则。	All groups continue to share ID, name and online-status sorting with ascending or descending order. Added regression coverage for consistent in-group sorting; no separate group sorting or changes to existing rules.

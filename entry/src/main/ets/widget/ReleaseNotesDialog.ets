@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.24'
-export const RELEASE_NOTES_BUILD: string = '1002024'
+export const RELEASE_NOTES_VERSION: string = '1.2.25'
+export const RELEASE_NOTES_BUILD: string = '1002025'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.25（1002025）· 分组删除与排序一致性', [
+            '分组菜单新增删除与二次确认；分组内的全部连接移到“未分组”，保留连接、保存的密码及独立操控设置。',
+            '支持删除空分组，保留系统“未分组”；保存失败会明确提示，避免误报成功，支持安全重试，不影响其他分组和正在编辑的连接内容。',
+            '所有分组继续共用 ID、名称、在线状态及升降序排序，补充分组内排序一致性回归；不增加独立分组排序或改变现有排序规则。'
+          ])
           this.buildSection('1.2.24（1002024）· Mac 组合键与远控偏好修复', [
             '修复远控 Mac 时自动键盘模式混用发送路径的问题：Command、Ctrl、Shift、Option 与实体字母、符号、方向键及功能键统一使用 Mac 键码映射，保留传统兼容模式和中文输入。',
             '合并实体键盘、原生事件和状态查询重复上报的修饰键按下，保留左右修饰键独立状态；实体键盘与快捷栏共同按住同一键时，不因其中一个松开而提前释放。',
