@@ -32,6 +32,8 @@ import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
 import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition } from '../model/RemoteToolbarPlacement';
 import { RemotePeerPreferences } from '../service/RemotePeerPreferences';
+import { KeyboardMappingDialog } from '../widget/KeyboardMappingDialog';
+import { decodeKeyboardRemap } from '../model/KeyboardRemapping';
 import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
 import { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, remoteControlCategoryLabel,
   compactControlMenuMetrics, placeCompactControlMenu, remoteControlMenuWidthLabels, estimateControlMenuTextWidth,
@@ -267,6 +269,9 @@ struct RemotePage {
   @State canSendCtrlAltDel: boolean = false;
   @State inputMode: string = INPUT_MODE_MOUSE;
   @State keyboardCompatibilityMode: number = 0;
+  @State keyboardRemappingEnabled: boolean = false;
+  @State showKeyboardMappingDialog: boolean = false;
+  private keyboardMappingDialog?: CustomDialogController;
   @State relativeMouseEnabled: boolean = false;
   @State relativeMouseSupported: boolean = false;
   @State oneKvmPeer: boolean = false;
@@ -626,6 +631,9 @@ struct RemotePage {
 
   aboutToDisappear(): void {
     this.remotePageVisible = false;
+    this.keyboardMappingDialog?.close();
+    this.showKeyboardMappingDialog = false;
+    ConnectionService.configureKeyboardRemapping('');
     this.peerPreferences?.dispose();
     this.remoteToolbarDragging = false;
     this.resetControlMenuAnimation();
@@ -1356,6 +1364,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
       this.hardwareModifierTrackingActive = false;
@@ -1406,6 +1415,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (event.hover >= 0) {
       this.handleRemoteHover(event.hover === 1);
@@ -1499,6 +1509,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
@@ -1522,7 +1533,7 @@ struct RemotePage {
       return;
     }
     if (controlCode > 0) {
-      ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
+      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'native');
       return;
     }
     if (event.modifierValid) {
@@ -4444,6 +4455,8 @@ struct RemotePage {
           '连接后默认显示折叠的“键”按钮，点击展开；“键”和“控”及其拖动柄均可移动到屏幕任意位置。\n横屏时“键”默认位于左上角，“控”默认位于右上角，两个面板都向下展开。长按任意功能按钮可调整排序。\nCtrl、Alt、Shift、Win/Cmd：点一下选中，相当于按住；再点一下释放，不需要手指一直按着。可以同时选中多个。\n例如 Ctrl+C：点亮 Ctrl，再输入 C，最后再次点击 Ctrl 取消选中。Mac 常用 Cmd+C。Ctrl/Shift 也可配合鼠标多选文件，用完记得释放。\nCtrl+Shift+Esc 等完整组合键按钮：点一次发送整组按键，不会自动弹出本地键盘。\n打开软键盘时保留画面当前比例，按可见区域上移，不会整体缩小。')
         this.buildGestureHelpSection('连续输入与键盘悬浮按钮',
           '手机和平板连接后显示独立键盘悬浮按钮，不用展开“控”；可拖到顺手的位置。点一下打开本地键盘，再点一下收起。\n键盘开启后可继续点击远端其他输入框，输入仍直接传给远端，不因点按画面而收起；点击收起按钮、系统返回或输入法收起即可结束。\n全屏三指上滑仍可打开键盘。实体键盘和完整组合键不会自动唤起软键盘。远端输入框没有可靠的焦点通知，需要用户主动打开键盘。')
+        this.buildGestureHelpSection('自定义实体键盘映射',
+          '在本页键鼠兼容选项中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。')
         this.buildGestureHelpSection('悬浮功能栏与移动画面',
           '竖屏时“控”保持底部横向工具栏；横屏时默认移动到右上角并向下展开。点击收起后保留“控”按钮。\n未开启虚拟鼠标时，画面放大后可使用“移动画面”模式；开启虚拟鼠标后，直接单指拖动画面空白区域即可平移，鼠标本体专门控制远端指针。\n全屏三指上滑用于打开本地键盘，不是滚动手势；滚动请使用双指平行滑动。')
           }
@@ -5513,6 +5526,9 @@ struct RemotePage {
   }
 
   loadInputCompatibility(): void {
+    const remap: string = this.peerPreferences?.get('keyboard-remap-v1') ?? '';
+    this.keyboardRemappingEnabled = decodeKeyboardRemap(remap).enabled;
+    ConnectionService.configureKeyboardRemapping(remap);
     const capabilities: number = RustDeskNapi.getInputCapabilities();
     this.oneKvmPeer = (capabilities & 1) !== 0;
     this.relativeMouseSupported = (capabilities & 2) !== 0;
@@ -5570,6 +5586,11 @@ struct RemotePage {
     }.width('100%')
     Text(translate('自动：One-KVM 使用传统键盘，其他设备保持原有输入方式；输入法文字仍由本地输入法提交。', this.uiLanguage))
       .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
+    Button(translate(this.keyboardRemappingEnabled ? '自定义键盘映射：已开启' : '自定义键盘映射：关闭', this.uiLanguage))
+      .width('100%').constraintSize({ minHeight: 44 }).fontSize(13)
+      .fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor())
+      .onClick(() => { this.openKeyboardMappingDialog(); })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
     Row() {
       Text(translate('相对鼠标', this.uiLanguage)).fontSize(14).fontColor(this.primaryTextColor()).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: this.relativeMouseEnabled })
@@ -5593,6 +5614,47 @@ struct RemotePage {
     }.width('100%')
     Text(translate('自动识别 One-KVM 的画面内嵌光标；若出现双鼠标可选择“画面内嵌”，停止额外绘制。相对模式始终隐藏本地指针。', this.uiLanguage))
       .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
+  }
+
+  openKeyboardMappingDialog(): void {
+    const preferences = this.peerPreferences;
+    if (!preferences || this.showKeyboardMappingDialog || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    this.releaseHeldMouseButtons('mapping_editor');
+    this.stopEdgeAutoPan();
+    this.releaseRemoteNavigationKeys('mapping_editor');
+    this.releaseVirtualModifiers();
+    ConnectionService.releaseModifiers();
+    if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+    this.setControlMenu('');
+    this.showKeyboardMappingDialog = true;
+    try {
+    this.keyboardMappingDialog = new CustomDialogController({
+      builder: KeyboardMappingDialog({ initial: preferences.get('keyboard-remap-v1'),
+        onClose: () => { this.showKeyboardMappingDialog = false; },
+        onSave: (value: string): boolean => {
+          if (!this.remotePageVisible || this.peerPreferences !== preferences ||
+            this.connectionStatus !== ConnectionStatus.CONNECTED) return false;
+          const previous: string = preferences.get('keyboard-remap-v1') || JSON.stringify(decodeKeyboardRemap(''));
+          if (!preferences.set('keyboard-remap-v1', value)) return false;
+          if (!preferences.flush()) {
+            preferences.set('keyboard-remap-v1', previous);
+            return false;
+          }
+          this.releaseRemoteNavigationKeys('mapping_change');
+          this.releaseVirtualModifiers();
+          ConnectionService.configureKeyboardRemapping(value);
+          this.keyboardRemappingEnabled = decodeKeyboardRemap(value).enabled;
+          return true;
+        } }),
+      customStyle: true, autoCancel: false,
+      cancel: () => { this.showKeyboardMappingDialog = false; }
+    });
+    this.keyboardMappingDialog.open();
+    } catch (_error) {
+      this.showKeyboardMappingDialog = false;
+      RustDeskNapi.appendDiagnosticLog('input-remap', 'editor_open_failed');
+      this.showFileToast('无法打开键盘映射设置，请重试');
+    }
   }
 
   loadVirtualMousePreference(): void {
@@ -5704,6 +5766,7 @@ struct RemotePage {
   }
 
   handleRemoteHover(isHovering: boolean): void {
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
     if (isHovering) {
@@ -5808,6 +5871,7 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.controlMenu) return;
     if (this.pipSurfaceOwned) return;
@@ -6293,6 +6357,7 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     let now: number = Date.now();
@@ -6320,6 +6385,7 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6414,6 +6480,7 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
+    if (this.showKeyboardMappingDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6671,6 +6738,7 @@ struct RemotePage {
   handleRemoteKey(event: KeyEvent): boolean {
     if (this.pipSurfaceOwned) return false;
     if (this.showCommunicationPanel) return false;
+    if (this.showKeyboardMappingDialog) return false;
     if (this.desktopWindowActive === false) return false;
     if (this.controlMenu) {
       if (event.type === KeyType.Down && this.mapControlKeyCode(event.keyCode) === 27) this.setControlMenu('');
@@ -6699,13 +6767,13 @@ struct RemotePage {
     }
     if (this.showKeyboardPanel) {
       if (this.isModifierControlCode(controlCode)) {
-        ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
+        ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark');
         return true;
       }
       return false;
     }
     if (controlCode > 0) {
-      ConnectionService.sendKeyEvent(controlCode, action, event.keyCode);
+      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark');
       return true;
     }
 
@@ -6737,7 +6805,7 @@ struct RemotePage {
     const composing: boolean = this.showKeyboardPanel && this.keyboardComposing;
     const action: number = this.navigationKeys.route(controlCode, down, source, composing);
     if (action >= 0) {
-      ConnectionService.sendKeyEvent(controlCode, action);
+      ConnectionService.sendHardwareControlKey(controlCode, action, controlCode, source);
     }
     // Navigation names contain no typed text, passwords or candidate contents.
     RustDeskNapi.appendDiagnosticLog('input-navigation',
@@ -6748,7 +6816,7 @@ struct RemotePage {
 
   releaseRemoteNavigationKeys(reason: string): void {
     const held: number[] = this.navigationKeys.reset();
-    for (const code of held) ConnectionService.sendKeyEvent(code, 1);
+    for (const code of held) ConnectionService.sendHardwareControlKey(code, 1, code);
     if (held.length > 0) {
       RustDeskNapi.appendDiagnosticLog('input-navigation', `release reason=${reason} count=${held.length}`);
     }

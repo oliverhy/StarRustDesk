@@ -26,7 +26,7 @@ function pageHarness(overrides = {}) {
   let timerId = 0;
   const context = vm.createContext({
     ConnectionStatus: { CONNECTED: 2 },
-    ConnectionService: { sendKeyEvent: (...args) => navigationPackets.push(args) },
+    ConnectionService: { sendHardwareControlKey: (code, action) => navigationPackets.push([code, action]) },
     KEYBOARD_CAPTURE_SENTINEL: '1'.repeat(60),
     RustDeskNapi: {
       appendDiagnosticLog: (category, message) => logs.push([category, message]),

@@ -13,6 +13,7 @@ const packets = [], texts = [], logs = [];
 let modifierMask = 0;
 const service = {
   sendKeyEvent(code, action) { packets.push([code, action, modifierMask]); },
+  sendHardwareControlKey(code, action) { packets.push([code, action, modifierMask]); },
   syncNativeModifierState(mask) { modifierMask = mask; },
   syncCapsLockState() {}, sendCapsLockEvent() {},
 };

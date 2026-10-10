@@ -1120,3 +1120,33 @@ AV1 软件解码增加 HDR 转 SDR，完善 VP9/AV1 高位深画面转换及解�
 手机采用紧凑双行，平板和 PC 宽屏采用单行对齐；按实际可用宽度、窗口缩放、横竖屏及字体大小调整，大字体或窄窗口下操作按钮自动换行。	Phones use compact two-line entries, while wide tablet and PC windows align entries in a single row. Layout adapts to available width, window resizing, orientation and font size, with actions moving to a separate line for large fonts or narrow windows.
 在本机记住显示方式，默认保留现有布局，所有分组共用同一视图；切换不改变连接、密码、分组、排序、搜索、编辑内容或云同步数据。	The view preference is remembered locally, defaults to Standard layout and is shared by all groups. Switching views does not alter connections, passwords, groups, sorting, search, editor drafts or cloud-sync data.
 优化列表标题的大字体换行及英文连接按钮宽度，保持深浅色和按钮样式一致；保存显示方式失败时明确提示，补充不含账号密码的诊断记录。	Improved heading wrapping for large fonts and the width of the English Connect button, preserving light/dark themes and button styles. View-save failures are reported clearly, with diagnostics that contain no account credentials.
+自定义键盘映射	Custom keyboard mapping
+启用实体键盘映射	Enable physical keyboard mapping
+仅当前远端生效；中文输入、粘贴及快捷栏按标注发送，不做文本替换。	Applies only to this remote device. Chinese text, pasted content and shortcut-bar buttons keep their original meaning; text is not replaced.
+Mac 常用预设	Mac presets
+Ctrl → Command（保留左右键）	Ctrl to Command (preserve left/right keys)
+Ctrl 与 Win/Cmd 互换	Swap Ctrl and Win/Cmd
+F3 → Ctrl+↑	F3 to Ctrl+Up
+预设会替换当前规则，但不会自动启用；组合键效果取决于远端系统设置。	A preset replaces the current draft rules but does not enable mapping automatically. Shortcut behavior depends on the remote system settings.
+源按键	Source key
+目标按键	Target key
+请按一个源按键…	Press a source key...
+录入实体按键	Capture a physical key
+首版仅支持修饰键、F1–F12、方向及编辑键	This version supports modifier, F1-F12, navigation and editing keys only.
+选中修饰键后，一次按下源键发送一次完整组合键，不随长按反复触发。	With modifiers selected, each source-key press sends one complete shortcut. Holding the key does not repeat the shortcut.
+添加或替换规则	Add or replace rule
+恢复默认（关闭并清空）	Reset to default (disable and clear)
+映射规则无效或数量过多	Invalid mapping rules or too many rules
+保存键盘映射失败，请重试	Failed to save keyboard mapping; please retry
+自定义键盘映射：已开启	Custom keyboard mapping: on
+自定义键盘映射：关闭	Custom keyboard mapping: off
+修改	Edit
+自定义实体键盘映射	Custom physical keyboard mapping
+无法打开键盘映射设置，请重试	Unable to open keyboard mapping settings; please retry
+1.2.27（1002027）· 自定义实体键盘映射	1.2.27 (1002027) · Custom physical keyboard mapping
+新增自定义实体键盘映射，默认关闭；入口在远控“控 → 输入 → 手势说明”的键鼠兼容选项中，支持录入或选择源键、编辑目标键、逐条启停及删除规则。	Added custom physical keyboard mapping, off by default, under Control > Input > Gesture help in the keyboard/mouse compatibility options. Capture or select a source key, edit its target, and enable, disable or delete individual rules.
+首版支持左右 Ctrl、Shift、Alt/Option、Win/Command、F1–F12、方向及编辑键；普通功能键可发送一次完整组合键，长按不重复触发，不改写字母、数字或输入文字。	This version supports left/right Ctrl, Shift, Alt/Option, Win/Command, F1-F12, navigation and editing keys. A non-modifier control key can send one complete shortcut without repeating while held. Letters, numbers and typed text are not rewritten.
+新增 Mac 常用预设：Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑；选择预设只替换草稿规则，不自动启用，保存后生效，取消不改变原配置。	Added common Mac presets: Ctrl to Command, swapping Ctrl and Win/Cmd, and F3 to Ctrl+Up. Presets replace draft rules without enabling mapping automatically. Save applies changes; Cancel keeps the original configuration.
+按服务器与远端设备独立保存和恢复映射；保存失败保留原配置并提示，切换远端后旧弹窗不能覆盖新设备设置。恢复默认会关闭并清空规则。	Mappings are saved and restored independently for each server and remote device. Failed saves preserve the original configuration and show an error. A stale dialog cannot overwrite another remote device's settings. Reset disables mapping and clears its rules.
+中文输入、粘贴、快捷栏及现有完整组合键保持原路径；优化实体修饰键与鼠标多选配合、左右键独立状态、重复事件去重及失焦松键，补充不记录输入内容的诊断日志。	Chinese text input, paste, shortcut-bar buttons and existing complete shortcuts keep their original paths. Improved physical modifier and mouse multi-selection handling, independent left/right key state, duplicate event suppression and key release on focus loss. Added diagnostics that do not record typed content.
+在本页键鼠兼容选项中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。	Open Custom keyboard mapping in the keyboard/mouse compatibility options on this page. It is off by default and saved separately for each server and remote device.\nChoose or capture a source key, then choose a target key. This version supports modifiers, F1-F12, navigation and editing keys. Selecting modifiers makes a non-modifier source key send one complete shortcut, without repeating it while held.\nMac presets include Ctrl to Command, swapping Ctrl and Win/Cmd, and F3 to Ctrl+Up. Presets replace draft rules without enabling mapping automatically. Save applies changes; Cancel keeps existing settings.\nOnly physical keys forwarded to the remote device are mapped. Chinese text, pasted content and shortcut-bar buttons are unchanged. Keys such as Fn may be handled by the system or keyboard hardware and may not be capturable.

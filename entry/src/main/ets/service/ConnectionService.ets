@@ -5,9 +5,21 @@ import { RemoteSessionBackgroundTask } from './RemoteSessionBackgroundTask'
 import { hilog } from '@kit.PerformanceAnalysisKit'
 import { connection } from '@kit.NetworkKit'
 import { BusinessError } from '@kit.BasicServicesKit'
+import { KeyboardRemapConfig, decodeKeyboardRemap, keyboardModifierBit, keyboardRemapRule } from '../model/KeyboardRemapping'
 import { RemoteSecurityOptions } from './RustDeskNapi'
 
+interface MappedHardwarePress {
+  identity: number
+  source: number
+  target: number
+  modifiers: number
+  route: string
+}
+
 export class ConnectionService {
+  private static keyboardRemap: KeyboardRemapConfig = { version: 1, enabled: false, rules: [] }
+  private static mappedHardwarePresses: MappedHardwarePress[] = []
+  private static physicalModifierSourceCodes: number[] = []
   private static keyboardMode: number = 0
   private static relativeMouse: boolean = false
   private static relativeRemainderX: number = 0
@@ -368,7 +380,55 @@ export class ConnectionService {
     return result === 0
   }
 
-  static sendKeyEvent(keyCode: number, action: number, physicalKeyCode?: number): void {
+  static configureKeyboardRemapping(value: string): void {
+    ConnectionService.releaseModifiers()
+    ConnectionService.keyboardRemap = decodeKeyboardRemap(value)
+    RustDeskNapi.appendDiagnosticLog('input-remap',
+      `configured enabled=${ConnectionService.keyboardRemap.enabled ? 1 : 0} rules=${ConnectionService.keyboardRemap.rules.length}`)
+  }
+
+  static sendHardwareControlKey(source: number, action: number, physicalKeyCode?: number, route: string = 'hardware'): void {
+    if (!ConnectionService.keyboardRemap.enabled || source === 20) {
+      ConnectionService.sendKeyEvent(source, action, physicalKeyCode)
+      return
+    }
+    const identity: number = physicalKeyCode ?? source
+    const rule = keyboardRemapRule(ConnectionService.keyboardRemap, source)
+    if (ConnectionService.getModifierBit(source) !== 0) {
+      const heldIndex: number = ConnectionService.physicalModifierKeys.indexOf(identity)
+      const target: number = action === 1 && heldIndex >= 0 ? ConnectionService.physicalModifierControlCodes[heldIndex] :
+        (rule?.target ?? source)
+      ConnectionService.sendKeyEvent(target, action, identity, source)
+      return
+    }
+    const index: number = ConnectionService.mappedHardwarePresses.findIndex((press: MappedHardwarePress) => press.identity === identity)
+    let press: MappedHardwarePress | undefined = index >= 0 ? ConnectionService.mappedHardwarePresses[index] : undefined
+    if (action === 1) {
+      if (press === undefined) return
+      ConnectionService.mappedHardwarePresses.splice(index, 1)
+      if (press.modifiers === 0 && !ConnectionService.mappedHardwarePresses.some((item: MappedHardwarePress) =>
+        item.modifiers === 0 && item.target === press?.target)) ConnectionService.sendKeyEvent(press.target, 1)
+      return
+    }
+    if (action !== 0 && action !== 2) return
+    if (press === undefined) {
+      press = { identity, source, target: rule?.target ?? source, modifiers: rule?.modifiers ?? 0, route }
+      if (action === 0) ConnectionService.mappedHardwarePresses.push(press)
+      if (press.modifiers !== 0) {
+        ConnectionService.sendShortcutKey(press.target, press.modifiers | ConnectionService.getKeyModifierMask())
+        RustDeskNapi.appendDiagnosticLog('input-remap', 'shortcut_triggered')
+        return
+      }
+      if (ConnectionService.mappedHardwarePresses.some((item: MappedHardwarePress) =>
+        item !== press && item.modifiers === 0 && item.target === press?.target)) return
+    } else if (press.modifiers !== 0 || (action === 0 && press.route !== route)) {
+      // One physical shortcut fires once; mirrored ArkUI/native reports cannot repeat it.
+      return
+    }
+    ConnectionService.sendKeyEvent(press.target, action)
+  }
+
+  static sendKeyEvent(keyCode: number, action: number, physicalKeyCode?: number, originalSourceCode?: number): void {
     if (keyCode === 20) {
       ConnectionService.sendCapsLockEvent(action)
       return
@@ -384,6 +444,7 @@ export class ConnectionService {
         ConnectionService.physicalModifierKeys.push(identity)
         ConnectionService.physicalModifierBits.push(modifierBit)
         ConnectionService.physicalModifierControlCodes.push(keyCode)
+        ConnectionService.physicalModifierSourceCodes.push(originalSourceCode ?? keyCode)
         ConnectionService.directModifierMask |= modifierBit
       } else if (action === 1) {
         if (index < 0) {
@@ -392,13 +453,25 @@ export class ConnectionService {
         ConnectionService.physicalModifierKeys.splice(index, 1)
         ConnectionService.physicalModifierBits.splice(index, 1)
         ConnectionService.physicalModifierControlCodes.splice(index, 1)
+        const original: number = ConnectionService.physicalModifierSourceCodes[index] ?? keyCode
+        ConnectionService.physicalModifierSourceCodes.splice(index, 1)
         if (!ConnectionService.physicalModifierBits.includes(modifierBit)) {
           // A real key-up is authoritative. Clear stale snapshots from pointer
           // and polling sources as well so a modifier cannot remain stuck.
           ConnectionService.directModifierMask &= ~modifierBit
-          ConnectionService.pointerModifierMask &= ~modifierBit
-          ConnectionService.nativeModifierMask &= ~modifierBit
-          ConnectionService.hardwareModifierMask &= ~modifierBit
+          if (!ConnectionService.keyboardRemap.enabled) {
+            ConnectionService.pointerModifierMask &= ~modifierBit
+            ConnectionService.nativeModifierMask &= ~modifierBit
+            ConnectionService.hardwareModifierMask &= ~modifierBit
+          }
+        }
+        if (ConnectionService.keyboardRemap.enabled && identity < 10000 &&
+          !ConnectionService.physicalModifierSourceCodes.some((code: number, i: number) =>
+            ConnectionService.physicalModifierKeys[i] < 10000 && keyboardModifierBit(code) === keyboardModifierBit(original))) {
+          const sourceBit: number = keyboardModifierBit(original)
+          ConnectionService.pointerModifierMask &= ~sourceBit
+          ConnectionService.nativeModifierMask &= ~sourceBit
+          ConnectionService.hardwareModifierMask &= ~sourceBit
         }
       } else {
         return
@@ -414,8 +487,8 @@ export class ConnectionService {
     RustDeskNapi.sendKeyEvent(keyCode, action, ConnectionService.getKeyModifierMask())
   }
 
-  static sendPhysicalKeyEvent(hidCode: number, action: number, eventModifierMask?: number): void {
-    let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask)
+  static sendPhysicalKeyEvent(hidCode: number, action: number, eventModifierMask?: number, maskAlreadyMapped: boolean = false): void {
+    let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask, maskAlreadyMapped)
     if (ConnectionService.useExplicitKeyboardPath()) {
       ConnectionService.trackHeldKey(ConnectionService.heldHidCodes, hidCode, action)
       RustDeskNapi.sendPhysicalKeyEvent(hidCode, action, modifierMask)
@@ -479,7 +552,7 @@ export class ConnectionService {
       }
     }
     if (!useLegacyCharacter) {
-      ConnectionService.sendPhysicalKeyEvent(hidCode, action, modifierMask)
+      ConnectionService.sendPhysicalKeyEvent(hidCode, action, modifierMask, true)
       return
     }
     let lower: string = letter.toLowerCase()
@@ -618,6 +691,8 @@ export class ConnectionService {
     ConnectionService.physicalModifierKeys = []
     ConnectionService.physicalModifierBits = []
     ConnectionService.physicalModifierControlCodes = []
+    ConnectionService.physicalModifierSourceCodes = []
+    ConnectionService.mappedHardwarePresses = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
     ConnectionService.reconcileModifierEvents('release')
@@ -664,12 +739,12 @@ export class ConnectionService {
       (ConnectionService.capsLockEnabled ? ConnectionService.MODIFIER_CAPS_LOCK : 0)
   }
 
-  private static getEffectiveKeyModifierMask(eventModifierMask?: number): number {
+  private static getEffectiveKeyModifierMask(eventModifierMask?: number, maskAlreadyMapped: boolean = false): number {
     let modifierMask: number = ConnectionService.getKeyModifierMask()
     if (eventModifierMask !== undefined) {
       // Keep the modifier snapshot captured with this key event. It closes the
       // race where polling observes Shift slightly before/after the letter.
-      modifierMask |= eventModifierMask &
+      modifierMask |= (maskAlreadyMapped ? eventModifierMask : ConnectionService.mapHardwareModifierMask(eventModifierMask)) &
         (ConnectionService.MODIFIER_CONTROL | ConnectionService.MODIFIER_SHIFT |
           ConnectionService.MODIFIER_ALT | ConnectionService.MODIFIER_META)
     }
@@ -677,12 +752,15 @@ export class ConnectionService {
   }
 
   private static resetTransientInputState(): void {
+    ConnectionService.keyboardRemap = { version: 1, enabled: false, rules: [] }
+    ConnectionService.mappedHardwarePresses = []
     ConnectionService.directModifierMask = 0
     ConnectionService.pointerModifierMask = 0
     ConnectionService.nativeModifierMask = 0
     ConnectionService.physicalModifierKeys = []
     ConnectionService.physicalModifierBits = []
     ConnectionService.physicalModifierControlCodes = []
+    ConnectionService.physicalModifierSourceCodes = []
     ConnectionService.sentModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
@@ -728,9 +806,26 @@ export class ConnectionService {
 
   private static recomputeHeldModifierMask(): void {
     ConnectionService.heldModifierMask = ConnectionService.directModifierMask |
-      ConnectionService.pointerModifierMask |
-      ConnectionService.nativeModifierMask |
-      ConnectionService.hardwareModifierMask
+      ConnectionService.mapHardwareModifierMask(ConnectionService.pointerModifierMask |
+        ConnectionService.nativeModifierMask | ConnectionService.hardwareModifierMask)
+  }
+
+  private static mapHardwareModifierMask(mask: number): number {
+    if (!ConnectionService.keyboardRemap.enabled) return mask
+    let result: number = mask & ~15
+    for (const source of [17, 16, 18, 91]) {
+      const bit: number = keyboardModifierBit(source)
+      if ((mask & bit) === 0) continue
+      let identified: boolean = false
+      ConnectionService.physicalModifierSourceCodes.forEach((code: number, index: number) => {
+        if (ConnectionService.physicalModifierKeys[index] < 10000 && keyboardModifierBit(code) === bit) {
+          result |= keyboardModifierBit(ConnectionService.physicalModifierControlCodes[index])
+          identified = true
+        }
+      })
+      if (!identified) result |= keyboardModifierBit(keyboardRemapRule(ConnectionService.keyboardRemap, source)?.target ?? source)
+    }
+    return result
   }
 
   private static reconcileModifierEvents(source: string): void {

@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.26'
-export const RELEASE_NOTES_BUILD: string = '1002026'
+export const RELEASE_NOTES_VERSION: string = '1.2.27'
+export const RELEASE_NOTES_BUILD: string = '1002027'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.27（1002027）· 自定义实体键盘映射', [
+            '新增自定义实体键盘映射，默认关闭；入口在远控“控 → 输入 → 手势说明”的键鼠兼容选项中，支持录入或选择源键、编辑目标键、逐条启停及删除规则。',
+            '首版支持左右 Ctrl、Shift、Alt/Option、Win/Command、F1–F12、方向及编辑键；普通功能键可发送一次完整组合键，长按不重复触发，不改写字母、数字或输入文字。',
+            '新增 Mac 常用预设：Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑；选择预设只替换草稿规则，不自动启用，保存后生效，取消不改变原配置。',
+            '按服务器与远端设备独立保存和恢复映射；保存失败保留原配置并提示，切换远端后旧弹窗不能覆盖新设备设置。恢复默认会关闭并清空规则。',
+            '中文输入、粘贴、快捷栏及现有完整组合键保持原路径；优化实体修饰键与鼠标多选配合、左右键独立状态、重复事件去重及失焦松键，补充不记录输入内容的诊断日志。'
+          ])
           this.buildSection('1.2.26（1002026）· 精简连接列表', [
             '已保存连接新增“现有布局”和“精简列表”切换，入口位于标题右侧；精简模式收掉大头像及多余留白，保留在线状态、名称、ID、连接和更多菜单。',
             '手机采用紧凑双行，平板和 PC 宽屏采用单行对齐；按实际可用宽度、窗口缩放、横竖屏及字体大小调整，大字体或窄窗口下操作按钮自动换行。',

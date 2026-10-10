@@ -9,13 +9,13 @@ const read = name => fs.readFileSync(path.join(root, name), 'utf8').replace(/\r\
 function harness(disk = new Map()) {
   const timers = new Map(), writes = [], logs = [];
   let next = 0, failRead = false, failWrite = false;
-  const context = { exports: {}, RustDeskNapi: {
+  const context = { exports: {}, ConnectionService: { configureKeyboardRemapping() {} }, RustDeskNapi: {
     getOption(key) { if (failRead) throw Error('read'); return disk.get(key) || ''; },
     setOption(key, value) { if (failWrite) throw Error('write'); writes.push([key, value]); disk.set(key, value); return 0; },
     appendDiagnosticLog: (...args) => logs.push(args), getInputCapabilities: () => 2
   }, setTimeout(fn, ms) { const id = ++next; timers.set(id, { fn, ms }); return id; },
     clearTimeout: id => timers.delete(id) };
-  for (const file of ['model/RemoteToolbarPlacement', 'model/RemotePeerOptions', 'model/InputCompatibility',
+  for (const file of ['model/KeyboardRemapping', 'model/RemoteToolbarPlacement', 'model/RemotePeerOptions', 'model/InputCompatibility',
     'service/RemotePeerPreferences']) {
     const code = read('entry/src/main/ets/' + file + '.ets').replace(/^import .*\n/gm, '');
     vm.runInNewContext(ts.transpile(code), context);
