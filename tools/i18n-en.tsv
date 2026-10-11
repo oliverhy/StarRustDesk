@@ -1126,6 +1126,35 @@ AV1 软件解码增加 HDR 转 SDR，完善 VP9/AV1 高位深画面转换及解�
 Mac 常用预设	Mac presets
 Ctrl → Command（保留左右键）	Ctrl to Command (preserve left/right keys)
 Ctrl 与 Win/Cmd 互换	Swap Ctrl and Win/Cmd
+无法读取云备份列表，请稍后重试	Unable to read cloud backups; please retry later
+无法预览云备份，请稍后重试	Unable to preview the cloud backup; please retry later
+{0} 个连接 · {1} 个分组	{0} connections · {1} groups
+包含服务器配置	Includes server configuration
+不包含自建服务器地址	No custom server addresses
+此备份没有连接，恢复后本机连接列表将为空。可取消并选择更早的备份。	This backup has no connections. Restoring it will empty the local connection list. Cancel to choose an earlier backup.
+确认恢复此备份	Confirm restoring this backup
+云端历史备份	Cloud backup history
+按时间降序排列。选择后先预览，不会立即覆盖本机；历史文件不会删除。	Newest first. Selecting a backup opens a preview without replacing local data. Historical backups are retained.
+预览并恢复	Preview and restore
+加载中…	Loading...
+显示更早备份	Show earlier backups
+备份不完整或无法读取，不能恢复	Backup incomplete or unreadable; cannot restore
+已加密，输入备份密码后查看数量	Encrypted; enter the backup password to view counts
+空连接备份 · {0} 个分组	No connections · {0} groups
+正在确认云备份，请先完成或取消恢复	Confirm or cancel the backup restoration first
+恢复预览已过期或本机已修改，请重新选择备份	The preview expired or local data changed; select the backup again
+备份已更新或恢复已取消，请重新预览	The backup changed or restoration was cancelled; preview it again
+本机暂无数据，已暂停上传空备份；请稍后重试或查看历史备份	No local data. Empty-backup upload paused; retry later or check backup history
+首次同步存在本机和云端数据，请从云端恢复确认，避免覆盖	Local and cloud data both exist on first sync. Review Restore from cloud to avoid overwriting data
+请选择要恢复的云备份	Choose a cloud backup to restore
+所选云备份不可用，请刷新列表后重试	The selected cloud backup is unavailable; refresh the list and retry
+请核对备份内容后确认恢复	Review the backup contents before confirming restoration
+最新云备份没有连接，未自动恢复；请查看历史备份	The latest cloud backup has no connections and was not restored automatically; check backup history
+恢复数据写入校验失败，未确认恢复成功，请重试	Restored data verification failed. Restoration is not confirmed; please retry
+已恢复空连接备份（0 个连接、{0} 个分组）	Restored an empty connection backup (0 connections, {0} groups)
+已恢复 {0} 个连接、{1} 个分组	Restored {0} connections and {1} groups
+本机连接数据无法读取，已暂停同步，避免上传空备份	Local connections are unreadable. Sync paused to avoid uploading an empty backup
+本机分组数据无法读取，已暂停同步，避免上传空备份	Local groups are unreadable. Sync paused to avoid uploading an empty backup
 F3 → Ctrl+↑	F3 to Ctrl+Up
 预设会替换当前规则，但不会自动启用；组合键效果取决于远端系统设置。	A preset replaces the current draft rules but does not enable mapping automatically. Shortcut behavior depends on the remote system settings.
 源按键	Source key
@@ -1143,6 +1172,12 @@ F3 → Ctrl+↑	F3 to Ctrl+Up
 修改	Edit
 自定义实体键盘映射	Custom physical keyboard mapping
 无法打开键盘映射设置，请重试	Unable to open keyboard mapping settings; please retry
+1.2.28（1002028）· 云同步恢复与诊断完善	1.2.28 (1002028) · Cloud restore and diagnostics improvements
+加强重装后的云同步保护：新设备尚未建立同步基线且本机没有连接数据时，暂停上传空备份；首次同步存在本机与云端数据时先确认，避免误覆盖。	Improved cloud sync protection after reinstalling: a new device with no sync baseline or local connections pauses empty-backup uploads. When both local and cloud data exist on first sync, confirmation is required to prevent accidental overwriting.
+“从云端恢复”新增历史备份列表，按时间降序排列，支持加载更早备份；恢复前预览连接、分组数量和服务器配置，加密备份需输入密码后查看。	Restore from cloud now lists historical backups, newest first, with an option to load earlier backups. Preview connection and group counts and server configuration before restoring. Encrypted backups require the backup password before previewing.
+恢复空连接备份时明确警告，恢复后显示实际数量；校验写入结果，保护取消、过期预览及恢复期间的新修改，历史备份不删除、不覆盖。	Empty connection backups show a clear warning, and restoration reports actual counts. Written data is verified, with safeguards for cancellation, expired previews and edits made during restoration. Historical backups are not deleted or overwritten.
+修复恢复完成后首页旧加载任务可能覆盖新连接的问题；选择历史备份后作为新的本机修改同步，避免再次被较新的空备份覆盖。	Fixed stale home-page loading tasks potentially overwriting restored connections. Restoring a historical backup creates a new local change for sync, preventing a newer empty backup from replacing it again.
+完善云同步、备份列表、加解密、系统同步、恢复校验及首页刷新诊断；仅在用户开启诊断后记录，不记录密码、密钥、服务器地址或备份内容。	Expanded diagnostics for cloud sync, backup lists, encryption and decryption, system sync, restoration verification and home-page refresh. Logs are recorded only when diagnostics are enabled and exclude passwords, cryptographic keys, server addresses and backup contents.
 1.2.27（1002027）· 自定义实体键盘映射	1.2.27 (1002027) · Custom physical keyboard mapping
 新增自定义实体键盘映射，默认关闭；入口在远控“控 → 输入 → 手势说明”的键鼠兼容选项中，支持录入或选择源键、编辑目标键、逐条启停及删除规则。	Added custom physical keyboard mapping, off by default, under Control > Input > Gesture help in the keyboard/mouse compatibility options. Capture or select a source key, edit its target, and enable, disable or delete individual rules.
 首版支持左右 Ctrl、Shift、Alt/Option、Win/Command、F1–F12、方向及编辑键；普通功能键可发送一次完整组合键，长按不重复触发，不改写字母、数字或输入文字。	This version supports left/right Ctrl, Shift, Alt/Option, Win/Command, F1-F12, navigation and editing keys. A non-modifier control key can send one complete shortcut without repeating while held. Letters, numbers and typed text are not rewritten.

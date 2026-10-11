@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.27'
-export const RELEASE_NOTES_BUILD: string = '1002027'
+export const RELEASE_NOTES_VERSION: string = '1.2.28'
+export const RELEASE_NOTES_BUILD: string = '1002028'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.28（1002028）· 云同步恢复与诊断完善', [
+            '加强重装后的云同步保护：新设备尚未建立同步基线且本机没有连接数据时，暂停上传空备份；首次同步存在本机与云端数据时先确认，避免误覆盖。',
+            '“从云端恢复”新增历史备份列表，按时间降序排列，支持加载更早备份；恢复前预览连接、分组数量和服务器配置，加密备份需输入密码后查看。',
+            '恢复空连接备份时明确警告，恢复后显示实际数量；校验写入结果，保护取消、过期预览及恢复期间的新修改，历史备份不删除、不覆盖。',
+            '修复恢复完成后首页旧加载任务可能覆盖新连接的问题；选择历史备份后作为新的本机修改同步，避免再次被较新的空备份覆盖。',
+            '完善云同步、备份列表、加解密、系统同步、恢复校验及首页刷新诊断；仅在用户开启诊断后记录，不记录密码、密钥、服务器地址或备份内容。'
+          ])
           this.buildSection('1.2.27（1002027）· 自定义实体键盘映射', [
             '新增自定义实体键盘映射，默认关闭；入口在远控“控 → 输入 → 手势说明”的键鼠兼容选项中，支持录入或选择源键、编辑目标键、逐条启停及删除规则。',
             '首版支持左右 Ctrl、Shift、Alt/Option、Win/Command、F1–F12、方向及编辑键；普通功能键可发送一次完整组合键，长按不重复触发，不改写字母、数字或输入文字。',

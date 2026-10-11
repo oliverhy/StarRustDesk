@@ -51,16 +51,120 @@ STAGES.push('cloud_list', 'cloud_validate', 'cloud_digest', 'cloud_allocate', 'c
   'cloud_close', 'cloud_verify_content', 'cloud_publish', 'cleanup_close', 'cleanup_pending',
   'cloud_read_open', 'cloud_read_stat', 'cloud_read_bytes', 'cloud_read_close',
   'cloud_verify_open', 'cloud_verify_stat', 'cloud_verify_bytes', 'cloud_verify_close')
+STAGES.push('empty_upload_blocked', 'empty_restore_blocked', 'history_entry_invalid', 'restore_preview',
+  'restore_verify', 'restore_verified')
+STAGES.push('request_state', 'request_disabled', 'request_waiting_confirmation', 'request_joined', 'result',
+  'decision_no_cloud', 'decision_restore_fresh', 'decision_initial_conflict', 'decision_restore_cloud_newer',
+  'decision_upload_local_newer', 'decision_no_change', 'inventory', 'selection_latest_v1', 'selection_latest_v2',
+  'selection_history', 'snapshot_format_invalid', 'snapshot_digest_invalid', 'snapshot_valid',
+  'read_size', 'read_result', 'write_size', 'write_result', 'backup_summary', 'encrypted_backup_detected',
+  'password_missing', 'password_or_backup_invalid', 'decrypt_complete', 'encrypt_complete',
+  'history_page', 'history_entry_error', 'restore_verify_info', 'preview_expired', 'preview_changed',
+  'system_baseline_info', 'system_request_info', 'system_wait_failed', 'system_completed_progress',
+  'system_completed_timestamp', 'history_open', 'history_close', 'restore_confirmed', 'restore_cancelled',
+  'password_save_requested', 'password_save_verified', 'password_save_failed', 'local_changed',
+  'home_reload_start', 'home_reload_empty', 'home_reload_complete', 'home_reload_stale', 'home_reload_failed')
+
+// Only fixed numeric/boolean metadata can cross this boundary. Neither strings
+// nor arbitrary dictionaries are accepted, including filenames, tickets or hashes.
+export interface CloudSyncTraceDetails {
+  enabled?: boolean
+  baselineReady?: boolean
+  encrypted?: boolean
+  serverConfigured?: boolean
+  hasPassword?: boolean
+  localChangedAt?: number
+  lastAppliedAt?: number
+  localRevision?: number
+  cloudTime?: number
+  connections?: number
+  groups?: number
+  backupCount?: number
+  ignoredCount?: number
+  legacyPresent?: boolean
+  selectedIndex?: number
+  snapshotVersion?: number
+  expectedBytes?: number
+  actualBytes?: number
+  verified?: boolean
+  expectedConnections?: number
+  actualConnections?: number
+  expectedGroups?: number
+  actualGroups?: number
+  success?: boolean
+  restored?: boolean
+  uploaded?: boolean
+  needsPassword?: boolean
+  pending?: boolean
+  offset?: number
+  pageCount?: number
+  hasMore?: boolean
+  lastSyncTime?: number
+  requestedAt?: number
+  activeSeen?: boolean
+  systemState?: number
+  loadGeneration?: number
+  cloudRevision?: number
+  parentOpId?: number
+}
+
+interface SafeTraceField {
+  key: string
+  value: number | boolean | undefined
+}
 
 export class CloudSyncTrace {
   private static sequence: number = 0
   readonly id: number = ++CloudSyncTrace.sequence
   private started: number = Date.now()
   stage: string = 'begin'
-  private action: 'sync' | 'upload' | 'restore'
-  constructor(action: 'sync' | 'upload' | 'restore') {
+  private action: 'sync' | 'upload' | 'restore' | 'history' | 'preview' | 'ui'
+  constructor(action: 'sync' | 'upload' | 'restore' | 'history' | 'preview' | 'ui', begin: boolean = true) {
     this.action = action
-    this.event('begin')
+    if (begin) this.event('begin')
+  }
+  detail(stage: string, details: CloudSyncTraceDetails, code: number = 0): void {
+    if (!STAGES.includes(stage)) return
+    // Detail records do not replace the failing operation's stage.
+    try {
+      if (RustDeskNapi.getOption('diagnostic-log-enabled') !== '1') return
+      const fields: SafeTraceField[] = [
+        { key: 'enabled', value: details.enabled }, { key: 'baseline_ready', value: details.baselineReady },
+        { key: 'encrypted', value: details.encrypted }, { key: 'server_configured', value: details.serverConfigured },
+        { key: 'has_password', value: details.hasPassword }, { key: 'local_changed_at', value: details.localChangedAt },
+        { key: 'last_applied_at', value: details.lastAppliedAt }, { key: 'local_revision', value: details.localRevision },
+        { key: 'cloud_time', value: details.cloudTime }, { key: 'connections', value: details.connections },
+        { key: 'groups', value: details.groups }, { key: 'backup_count', value: details.backupCount },
+        { key: 'ignored_count', value: details.ignoredCount }, { key: 'legacy_present', value: details.legacyPresent },
+        { key: 'selected_index', value: details.selectedIndex }, { key: 'snapshot_version', value: details.snapshotVersion },
+        { key: 'expected_bytes', value: details.expectedBytes }, { key: 'actual_bytes', value: details.actualBytes },
+        { key: 'verified', value: details.verified }, { key: 'expected_connections', value: details.expectedConnections },
+        { key: 'actual_connections', value: details.actualConnections }, { key: 'expected_groups', value: details.expectedGroups },
+        { key: 'actual_groups', value: details.actualGroups }, { key: 'success', value: details.success },
+        { key: 'restored', value: details.restored }, { key: 'uploaded', value: details.uploaded },
+        { key: 'needs_password', value: details.needsPassword }, { key: 'pending', value: details.pending },
+        { key: 'offset', value: details.offset }, { key: 'page_count', value: details.pageCount },
+        { key: 'has_more', value: details.hasMore }, { key: 'last_sync_time', value: details.lastSyncTime },
+        { key: 'requested_at', value: details.requestedAt }, { key: 'active_seen', value: details.activeSeen },
+        { key: 'last_state', value: details.systemState }, { key: 'load_generation', value: details.loadGeneration },
+        { key: 'cloud_revision', value: details.cloudRevision }, { key: 'parent_op_id', value: details.parentOpId }
+      ]
+      let suffix = ''
+      for (const field of fields) {
+        if (typeof field.value === 'boolean') suffix += ` ${field.key}=${field.value ? 1 : 0}`
+        else if (typeof field.value === 'number' && Number.isFinite(field.value)) suffix += ` ${field.key}=${Math.trunc(field.value)}`
+      }
+      RustDeskNapi.appendDiagnosticLog('cloud-sync',
+        `op_id=${this.id} action=${this.action} stage=${stage} operation_stage=${this.stage} code=${Number.isFinite(code) ? Math.trunc(code) : 0} elapsed_ms=${Math.max(0, Date.now() - this.started)}${suffix}`)
+    } catch (_e) {}
+  }
+  counts(stage: 'restore_preview' | 'restore_verified', connections: number, groups: number): void {
+    this.event(stage)
+    try {
+      if (RustDeskNapi.getOption('diagnostic-log-enabled') !== '1') return
+      RustDeskNapi.appendDiagnosticLog('cloud-sync',
+        `op_id=${this.id} stage=${stage} connections=${Math.max(0, Math.floor(connections))} groups=${Math.max(0, Math.floor(groups))}`)
+    } catch (_e) {}
   }
   event(stage: string, code: number = 0, state: number = -1): void {
     if (!STAGES.includes(stage)) return
@@ -101,7 +205,11 @@ export class CloudSyncTask {
           try { sync.off('progress', progress); trace.event('system_unlisten') }
           catch (error) { trace.event('system_unlisten', OperationDiagnostic.errorCode(error as Object)) }
         }
-        if (failure) reject(failure)
+        if (failure) {
+          trace.detail('system_wait_failed', { lastSyncTime: baseline, requestedAt: sentAt, activeSeen: activeSeen,
+            systemState: state }, failure.code)
+          reject(failure)
+        }
         else { trace.event('system_completed'); resolve() }
       }
       const check = async (): Promise<void> => {
@@ -114,7 +222,9 @@ export class CloudSyncTask {
         if (state === cloudSync.SyncState.STOPPED) {
           finish(new CloudSyncFailure(-1003, 'stopped', '系统已暂停云同步，请稍后重试')); return
         }
-        if (activeSeen && state === cloudSync.SyncState.COMPLETED) { finish(); return }
+        if (activeSeen && state === cloudSync.SyncState.COMPLETED) {
+          trace.detail('system_completed_progress', { activeSeen: true, systemState: state }); finish(); return
+        }
         // Registration can deliver COMPLETED from a previous task, even after
         // start() resolves. Require fresh activity or a newly advanced timestamp.
         if (checkingTime || state === cloudSync.SyncState.UPLOADING || state === cloudSync.SyncState.DOWNLOADING) return
@@ -122,7 +232,10 @@ export class CloudSyncTask {
         try {
           const time = await sync.getLastSyncTime()
           if (!finished && !cancelled() && baseline >= 0 && time > baseline && time >= sentAt &&
-            (state === -1 || state === cloudSync.SyncState.COMPLETED)) finish()
+            (state === -1 || state === cloudSync.SyncState.COMPLETED)) {
+            trace.detail('system_completed_timestamp', { lastSyncTime: time, requestedAt: sentAt, systemState: state })
+            finish()
+          }
         } catch (error) {
           if (!finished && !timeWarningLogged) {
             timeWarningLogged = true
@@ -152,6 +265,7 @@ export class CloudSyncTask {
         try {
           trace.event('system_baseline')
           baseline = await sync.getLastSyncTime()
+          trace.detail('system_baseline_info', { lastSyncTime: baseline })
         } catch (error) {
           trace.event('system_time_unavailable', OperationDiagnostic.errorCode(error as Object))
         }
@@ -160,6 +274,7 @@ export class CloudSyncTask {
         registered = true
         sync.on('progress', progress)
         sentAt = Date.now()
+        trace.detail('system_request_info', { requestedAt: sentAt })
         trace.event('system_start')
         await sync.start()
         if (finished) return

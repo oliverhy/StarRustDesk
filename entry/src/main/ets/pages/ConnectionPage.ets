@@ -110,6 +110,7 @@ export struct ConnectionPage {
   private saveTipGeneration: number = 0
   private savePageActive: boolean = false
   @State savedConnections: SavedConnectionInfo[] = []
+  private savedConnectionsLoadGeneration: number = 0
   @State selectedConnectionId: string = ''
   @State selectedGroupId: string = ''
   @State savedConnectionsVersion: number = 0
@@ -3123,10 +3124,16 @@ export struct ConnectionPage {
   }
 
   async loadSavedConnections(): Promise<void> {
+    const generation = ++this.savedConnectionsLoadGeneration
+    const cloudRevision = this.savedConnectionsCloudRevision
+    const parentOpId = CloudSyncService.getLastRestoreOperationId()
+    CloudSyncService.recordUi('home_reload_start', { loadGeneration: generation, cloudRevision: cloudRevision, parentOpId: parentOpId })
     let raw: string = RustDeskNapi.getOption('saved-connections')
     if (raw.length <= 0) {
       this.savedConnections = []
       this.savedConnectionsVersion++
+      CloudSyncService.recordUi('home_reload_empty', { loadGeneration: generation, cloudRevision: cloudRevision,
+        parentOpId: parentOpId, connections: 0 })
       return
     }
     try {
@@ -3137,6 +3144,10 @@ export struct ConnectionPage {
         if (remoteId.length > 0) {
           let id: string = row['id'] ?? this.makeConnectionId(remoteId)
           let savedPassword: string = await CredentialStore.load(id)
+          if (generation !== this.savedConnectionsLoadGeneration || raw !== RustDeskNapi.getOption('saved-connections')) {
+            CloudSyncService.recordUi('home_reload_stale', { loadGeneration: generation, cloudRevision: cloudRevision, parentOpId: parentOpId })
+            return
+          }
           let legacyPassword: string = row['passwordEnc'] ?? row['password'] ?? ''
           if (savedPassword.length === 0 && legacyPassword.length > 0) {
             savedPassword = legacyPassword
@@ -3152,13 +3163,25 @@ export struct ConnectionPage {
           })
         }
       }
+      if (generation !== this.savedConnectionsLoadGeneration || raw !== RustDeskNapi.getOption('saved-connections')) {
+        CloudSyncService.recordUi('home_reload_stale', { loadGeneration: generation, cloudRevision: cloudRevision, parentOpId: parentOpId })
+        return
+      }
       this.savedConnections = this.cloneSavedConnections(list)
       this.savedConnectionsVersion++
       this.persistSavedConnections(list, false)
+      CloudSyncService.recordUi('home_reload_complete', { loadGeneration: generation, cloudRevision: cloudRevision,
+        parentOpId: parentOpId, connections: list.length })
       RustDeskNapi.setOption('password', '')
       this.nextPeerOnlineRefreshAt = 0
       this.refreshSavedConnectionOnlineStates(true)
     } catch (_e) {
+      if (generation !== this.savedConnectionsLoadGeneration || raw !== RustDeskNapi.getOption('saved-connections')) {
+        CloudSyncService.recordUi('home_reload_stale', { loadGeneration: generation, cloudRevision: cloudRevision, parentOpId: parentOpId })
+        return
+      }
+      CloudSyncService.recordUi('home_reload_failed', { loadGeneration: generation, cloudRevision: cloudRevision,
+        parentOpId: parentOpId }, _e as Object)
       this.savedConnections = []
       this.savedConnectionsVersion++
     }

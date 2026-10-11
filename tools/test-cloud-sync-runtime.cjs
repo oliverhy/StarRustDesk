@@ -17,7 +17,11 @@ function environment(config = {}) {
     return id
   }
   const logs = [], drivers = [], files = new Map(), directories = new Set(['/cloud', '/local']), handles = new Map()
-  const options = new Map(Object.entries({ 'cloud-sync-enabled': '1', 'diagnostic-log-enabled': '1', ...config.options }))
+  // Existing-device scenarios have reconciled before. Fresh/reinstalled cases
+  // below explicitly remove the baseline; do not model reinstall as deletion.
+  const options = new Map(Object.entries({ 'cloud-sync-enabled': '1', 'diagnostic-log-enabled': '1',
+    'cloud-sync-baseline-established': '1', ...config.options }))
+  const credentials = new Map()
   let fd = 0, uuid = 0, lastSync = clock.now - 10000, cloudWrites = 0, starts = 0
   const operations = []
   const states = { UPLOADING: 0, UPLOAD_FAILED: 1, DOWNLOADING: 2, DOWNLOAD_FAILED: 3, COMPLETED: 4, STOPPED: 5 }
@@ -96,9 +100,12 @@ function environment(config = {}) {
       TextEncoder: class { encodeInto(text) { return new TextEncoder().encode(text) } },
       TextDecoder: { create: () => ({ decodeToString: data => new TextDecoder().decode(data) }) } },
     OperationDiagnostic: { errorCode: e => Number.isFinite(Number(e?.code)) ? Number(e.code) : 0 },
-    RustDeskNapi: { getOption: key => options.get(key) ?? '', setOption: (key, value) => options.set(key, value),
+    RustDeskNapi: { getOption: key => options.get(key) ?? '', setOption: (key, value) => {
+      if (config.ignoreWriteKey !== key) options.set(key, value)
+    },
       appendDiagnosticLog: (_, value) => { if (config.logError) throw new Error('logger'); logs.push(value) } },
-    CredentialStore: { load: async () => { if (config.credentialError) throw { code: 201 }; return config.password ?? 'TEST_PASSWORD' }, save: async () => {}, remove: async () => {} },
+    CredentialStore: { load: async id => { if (config.credentialError) throw { code: 201 }; return credentials.has(id) ? credentials.get(id) : config.password ?? 'TEST_PASSWORD' },
+      save: async (id, value) => { if (!config.credentialSaveFailure) credentials.set(id, value) }, remove: async id => credentials.delete(id) },
     ConnectionBackupService: {
       createPayload: (groups, connections, includesPasswords, serverConfig) => ({ groups, connections, includesPasswords, serverConfig, exportedAt: new Date(clock.now).toISOString() }),
       createPlainText: JSON.stringify, parsePlainText: JSON.parse, isEncrypted: () => config.encrypted === true,
@@ -141,6 +148,15 @@ function environment(config = {}) {
 
 let passed = 0
 async function test(name, fn) { await fn(); console.log(`PASS ${name}`); passed++ }
+async function confirmLatest(e) {
+  const previewTask = e.service.restore(e.context)
+  await e.tick(100)
+  const result = await previewTask
+  if (!result.preview) return result
+  const restoreTask = e.service.restore(e.context, result.preview.ticket)
+  await e.tick(100)
+  return await restoreTask
+}
 ;(async () => {
   await test('start acknowledgement and registration snapshot never report success', async () => {
     for (const asyncSnapshot of [false, true]) {
@@ -372,12 +388,12 @@ async function test(name, fn) { await fn(); console.log(`PASS ${name}`); passed+
     for (const name of writer.cloudSnapshots()) reader.files.set(name, writer.files.get(name))
     reader.files.set(reader.cloudPath, Buffer.from(JSON.stringify({ exportedAt: new Date(writer.clock.now - 1000).toISOString(), groups: [], connections: [] })))
     reader.files.set('/cloud/StarRustDesk/cloud-sync-v2-9999999999999-00000000-0000-4000-8000-000000000000.srdsync.pending', Buffer.from('PARTIAL'))
-    const p = reader.service.restore(reader.context); await reader.tick(100)
+    const p = confirmLatest(reader); await reader.tick(100)
     assert.equal((await p).restored, true)
     assert.equal(JSON.parse(reader.options.get('saved-connections'))[0].id, 'device1')
     // A newer valid legacy snapshot is still read, never overwritten in place.
     reader.files.set(reader.cloudPath, Buffer.from(JSON.stringify({ exportedAt: new Date(writer.clock.now + 1000).toISOString(), groups: [], connections: [] })))
-    const q = reader.service.restore(reader.context); await reader.tick(100)
+    const q = confirmLatest(reader); await reader.tick(100)
     assert.equal((await q).restored, true)
     assert.equal(JSON.parse(reader.options.get('saved-connections')).length, 0)
   })
@@ -477,6 +493,294 @@ async function test(name, fn) { await fn(); console.log(`PASS ${name}`); passed+
     e.service.syncNow = async () => { ui.cloudSyncEnabled = false; return { success: true } }
     await ui.syncCloudNow(false, false)
     assert.equal(ui.cloudSyncStatus, '未开启'); assert.equal(ui.cloudSyncBusy, false)
+  })
+  const payload = (time, rows = []) => ({ exportedAt: new Date(time).toISOString(),
+    groups: rows.length ? [{ id: 'group', name: 'Test group' }] : [],
+    connections: rows.map(id => ({ id, name: 'PRIVATE_NAME', remoteId: '123456789', password: '',
+      performancePreset: 'smooth', groupId: 'group' })), includesPasswords: false,
+    serverConfig: { idServer: 'PRIVATE_SERVER', relayServer: '', apiServer: '', serverKey: '' } })
+  const fresh = extra => environment({ ...extra, options: { 'cloud-sync-baseline-established': '0', ...extra?.options } })
+  const complete = async (e, p) => { await e.tick(100); return await p }
+  await test('reinstall never publishes empty data, even after password/privacy preference edits', async () => {
+    for (const changed of [false, true]) {
+      const e = fresh()
+      if (changed) e.service.markLocalChanged()
+      e.service.setEnabled(true)
+      for (const operation of [() => e.service.syncNow(e.context), () => e.service.upload(e.context)]) {
+        const result = await complete(e, operation())
+        assert.equal(result.success, false); assert.equal(result.pending, true)
+        assert.equal(e.cloudSnapshots().length, 0)
+        assert.equal(e.options.has('cloud-sync-last-applied-at'), false)
+        assert.ok(e.logs.some(l => l.includes('empty_upload_blocked')))
+      }
+    }
+  })
+  await test('a late old cloud backup is restored after a protected empty first sync', async () => {
+    const e = fresh()
+    await complete(e, e.service.syncNow(e.context))
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 10000, ['old-peer']))))
+    e.service.markLocalChanged() // Password/privacy edits must not win over the populated backup.
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.restored, true); assert.equal(result.connectionCount, 1); assert.equal(result.groupCount, 1)
+    assert.equal(e.cloudSnapshots().length, 0)
+    assert.equal(JSON.parse(e.options.get('saved-connections'))[0].id, 'old-peer')
+    assert.ok(result.message.includes('1'))
+  })
+  await test('existing empty latest backup is not falsely restored on a reinstalled device', async () => {
+    const e = fresh()
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000))))
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.success, false); assert.equal(result.restored, false)
+    assert.equal(e.options.has('saved-connections'), false)
+    assert.equal(e.options.has('cloud-sync-last-applied-at'), false)
+  })
+  await test('history preview is read-only, cancel preserves data, explicit older restore survives next sync', async () => {
+    const e = fresh()
+    const old = JSON.stringify(payload(e.clock.now - 10000, ['old-peer']))
+    e.files.set(e.cloudPath, Buffer.from(old))
+    const trace = new e.sandbox.CloudSyncTrace('upload')
+    await e.sandbox.CloudSyncSnapshotStore.publish('/cloud/StarRustDesk', JSON.stringify(payload(e.clock.now - 1000)), e.clock.now - 1000, trace, () => {})
+    const snapshotCount = e.cloudSnapshots().length
+    const history = await complete(e, e.service.listBackups(e.context))
+    assert.deepEqual(Array.from(history.backups, b => b.connectionCount), [0, 1])
+    let preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(preview.preview.connectionCount, 1); assert.equal(e.options.has('saved-connections'), false)
+    const paused = await e.service.upload(e.context)
+    assert.equal(paused.pending, true); assert.equal(e.cloudSnapshots().length, snapshotCount)
+    e.service.cancelRestorePreview()
+    const cancelled = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    assert.equal(cancelled.success, false); assert.equal(e.options.has('saved-connections'), false)
+    preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    const restored = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    assert.equal(restored.restored, true); assert.equal(restored.connectionCount, 1)
+    assert.equal(e.files.get(e.cloudPath).toString(), old, 'historical snapshot retained byte-for-byte')
+    assert.equal(e.cloudSnapshots().length, snapshotCount)
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_') && !l.includes('old-peer') && !l.includes('/cloud/')))
+    assert.ok(e.logs.some(l => l.includes('restore_verified') && l.includes('connections=1')))
+    const next = await complete(e, e.service.syncNow(e.context))
+    assert.equal(next.uploaded, true)
+    assert.equal(e.latestContent().connections.length, 1, 'history restore must not be undone by the empty latest cloud version')
+  })
+  await test('confirmed empty backup explicitly reports zero; intentional deletion continues to sync', async () => {
+    const e = fresh()
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000))))
+    const preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(preview.preview.connectionCount, 0)
+    const restored = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    assert.equal(restored.restored, true); assert.equal(restored.connectionCount, 0)
+    assert.ok(restored.message.includes('0'))
+    assert.notEqual(restored.message, '已从华为云空间恢复')
+    e.service.markLocalChanged()
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.uploaded, true); assert.equal(e.latestContent().connections.length, 0)
+  })
+  await test('new local populated backup is allowed, first-sync conflicts require confirmation', async () => {
+    const e = fresh()
+    e.options.set('saved-connections', JSON.stringify(payload(e.clock.now, ['local']).connections))
+    e.service.markLocalChanged()
+    assert.equal((await complete(e, e.service.syncNow(e.context))).uploaded, true)
+    assert.equal(e.options.get('cloud-sync-baseline-established'), '1')
+    const f = fresh()
+    const local = JSON.stringify(payload(f.clock.now, ['local']).connections)
+    f.options.set('saved-connections', local); f.service.markLocalChanged()
+    f.files.set(f.cloudPath, Buffer.from(JSON.stringify(payload(f.clock.now - 1000, ['remote']))))
+    const result = await complete(f, f.service.syncNow(f.context))
+    assert.equal(result.pending, true); assert.equal(f.options.get('saved-connections'), local)
+    assert.equal(f.cloudSnapshots().length, 0)
+  })
+  await test('encrypted historical preview retains selection through password re-entry without dirtying data', async () => {
+    const e = fresh({ encrypted: true, password: '' })
+    const sealed = payload(e.clock.now - 1000, ['encrypted-peer']); sealed.includesPasswords = true
+    sealed.connections[0].password = 'PRIVATE_PASSWORD'
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(sealed)))
+    const history = await complete(e, e.service.listBackups(e.context))
+    assert.equal(history.backups[0].encrypted, true); assert.equal(history.backups[0].connectionCount, -1)
+    const required = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(required.needsPassword, true); assert.equal(required.passwordAction, 'restore')
+    await e.service.saveCloudPassword('TEST_PASSWORD')
+    assert.equal(e.options.has('cloud-sync-local-changed-at'), false)
+    const preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(preview.preview.connectionCount, 1)
+    const result = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    assert.equal(result.restored, true)
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_') && !l.includes('TEST_PASSWORD')))
+  })
+  await test('stale/cancelled previews, modified legacy data and refused writes never report restored', async () => {
+    for (const mutation of ['local', 'cloud', 'disable', 'write']) {
+      const e = fresh()
+      e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
+      const preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+      if (mutation === 'local') e.service.markLocalChanged()
+      if (mutation === 'cloud') e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now, ['new']))))
+      if (mutation === 'disable') e.service.setEnabled(false)
+      if (mutation === 'write') e.config.ignoreWriteKey = 'saved-connections'
+      const result = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+      assert.equal(result.restored, false, mutation); assert.equal(result.success, false, mutation)
+      assert.equal(e.options.has('cloud-sync-last-success-at'), false, mutation)
+      assert.equal(e.options.has('cloud-sync-last-applied-at'), false, mutation)
+      e.service.cancelRestorePreview()
+    }
+    const e = fresh({ credentialSaveFailure: true, password: '' })
+    await assert.rejects(() => e.service.saveCloudPassword('TEST_PASSWORD'))
+  })
+  await test('history is paginated; corrupt newest stays visible while explicit older selection is allowed', async () => {
+    const e = fresh(), trace = new e.sandbox.CloudSyncTrace('history')
+    for (let i = 0; i < 31; i++) {
+      const time = e.clock.now - 1000 - i
+      await e.sandbox.CloudSyncSnapshotStore.publish('/cloud/StarRustDesk', JSON.stringify(payload(time, ['old'])), time, trace, () => {})
+    }
+    const latest = e.cloudSnapshots().at(-1)
+    e.files.set(latest, Buffer.from('{'))
+    const a = await complete(e, e.service.listBackups(e.context))
+    assert.equal(a.backups.length, 30); assert.equal(a.hasMore, true)
+    assert.equal(a.backups[0].readable, false); assert.equal(a.backups[1].readable, true)
+    const b = await complete(e, e.service.listBackups(e.context, a.nextOffset))
+    assert.equal(b.backups.length, 1); assert.equal(b.hasMore, false)
+    const automatic = await complete(e, e.service.syncNow(e.context))
+    assert.equal(automatic.success, false, 'no silent rollback past damaged latest snapshot')
+    const preview = await complete(e, e.service.previewRestore(e.context, a.backups[1].id))
+    assert.equal(preview.preview.connectionCount, 1)
+    e.service.cancelRestorePreview()
+    const error = await e.sandbox.CloudSyncSnapshotStore.readSelected('/cloud/StarRustDesk', e.cloudPath, '../outside', trace, () => 1).catch(x => x)
+    assert.equal(error.code, -1005)
+    assert.equal(e.cloudSnapshots().length, 31)
+  })
+  await test('malformed local connection/group data never becomes an uploaded empty backup', async () => {
+    for (const key of ['saved-connections', 'saved-connection-groups']) {
+      const e = environment(); e.options.set(key, '{')
+      const result = await complete(e, e.service.syncNow(e.context))
+      assert.equal(result.success, false); assert.equal(result.code, -1008)
+      assert.equal(e.cloudSnapshots().length, 0)
+    }
+  })
+  await test('late homepage loads cannot erase restored rows or clear them after an old error', async () => {
+    for (const rejectOld of [false, true]) {
+      const e = fresh()
+      const page = source('pages/ConnectionPage.ets')
+      const method = page.slice(page.indexOf('  async loadSavedConnections():'), page.indexOf('  persistSavedConnections('))
+      const { Page } = e.load(`export class Page { ${method} }`, 'CloudHomepageLoad')
+      e.sandbox.PerformanceSettings = { normalize: x => x }
+      let resolveOld, reject
+      const oldPassword = new Promise((ok, fail) => { resolveOld = ok; reject = fail })
+      e.sandbox.CredentialStore.load = id => id === 'old' ? oldPassword : Promise.resolve('')
+      const ui = new Page()
+      Object.assign(ui, { savedConnectionsLoadGeneration: 0, savedConnectionsVersion: 0, normalizeRemoteId: x => x,
+        cloneSavedConnections: x => x, validGroupId: x => x, refreshSavedConnectionOnlineStates() {},
+        persistSavedConnections: rows => e.options.set('saved-connections', JSON.stringify(rows)) })
+      e.options.set('saved-connections', JSON.stringify(payload(e.clock.now, ['old']).connections))
+      const first = ui.loadSavedConnections()
+      e.options.set('saved-connections', JSON.stringify(payload(e.clock.now, ['restored']).connections))
+      await ui.loadSavedConnections()
+      if (rejectOld) reject(new Error('old load failed')); else resolveOld('')
+      await first
+      assert.equal(ui.savedConnections[0].id, 'restored')
+      assert.equal(JSON.parse(e.options.get('saved-connections'))[0].id, 'restored')
+    }
+  })
+  await test('restore UI requires preview ticket and preserves the selected encrypted history ID', async () => {
+    const settings = source('pages/SettingsPage.ets')
+    assert.ok(settings.includes('this.loadCloudHistory(false)'))
+    assert.ok(settings.includes('await this.previewCloudRestore(this.cloudRestoreSnapshotId)'))
+    assert.ok(settings.includes('common.UIAbilityContext, this.cloudRestoreTicket)'))
+    assert.ok(settings.includes('preview.connectionCount === 0'))
+    assert.ok(settings.includes('CloudSyncService.cancelRestorePreview()'))
+    assert.ok(settings.includes('!lastResult.success || lastResult.restored'))
+  })
+  await test('manual restore without confirmation ticket can only preview and never replaces local rows', async () => {
+    const e = fresh()
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
+    const result = await complete(e, e.service.restore(e.context))
+    assert.equal(result.preview.connectionCount, 1); assert.equal(result.restored, false)
+    assert.equal(e.options.has('saved-connections'), false)
+    assert.equal(e.options.has('cloud-sync-last-success-at'), false)
+    e.service.cancelRestorePreview()
+  })
+  await test('diagnostic fields are fixed numeric/boolean metadata; strings, unknown stages and non-finite values are dropped', async () => {
+    const e = environment(), trace = new e.sandbox.CloudSyncTrace('sync')
+    trace.event('cloud_open')
+    trace.detail('result', { connections: 3, groups: 1, success: true, cloudTime: NaN, localRevision: Infinity,
+      parentOpId: 'PRIVATE_TICKET', password: 'PRIVATE_PASSWORD', serverAddress: 'PRIVATE_SERVER',
+      filename: '/PRIVATE_PATH', raw: 'PRIVATE_BACKUP', encrypted: 'PRIVATE_STRING' })
+    trace.detail('PRIVATE_STAGE', { connections: 99 })
+    assert.equal(trace.stage, 'cloud_open', 'details must not obscure the failure stage')
+    const line = e.logs.find(l => l.includes('stage=result'))
+    assert.ok(line.includes('connections=3') && line.includes('groups=1') && line.includes('success=1'))
+    assert.ok(line.includes('operation_stage=cloud_open'))
+    assert.ok(e.logs.every(l => !/PRIVATE_|NaN|Infinity/.test(l)))
+  })
+  await test('restore diagnostics identify decision, contents, readback counts, final result and homepage parent operation', async () => {
+    const e = fresh()
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.restored, true)
+    for (const stage of ['request_state', 'inventory', 'selection_latest_v1', 'decision_restore_fresh',
+      'backup_summary', 'restore_verify_info', 'restore_verified', 'result']) {
+      assert.ok(e.logs.some(l => l.includes(`stage=${stage} `)), stage)
+    }
+    assert.ok(e.logs.some(l => /expected_connections=1 actual_connections=1/.test(l) && l.includes('verified=1')))
+    assert.ok(e.logs.some(l => l.includes('stage=result ') && l.includes('restored=1') && l.includes('needs_password=0')))
+    const parent = e.service.getLastRestoreOperationId()
+    assert.ok(parent > 0)
+    e.service.recordUi('home_reload_complete', { connections: 1, cloudRevision: 1, parentOpId: parent })
+    assert.ok(e.logs.some(l => l.includes('stage=home_reload_complete ') && l.includes(`parent_op_id=${parent}`)))
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_') && !l.includes('old') && !l.includes('/cloud/')))
+  })
+  await test('history diagnostics keep individual file failure codes and system completion evidence', async () => {
+    const e = fresh(), trace = new e.sandbox.CloudSyncTrace('upload')
+    const time = e.clock.now - 1000
+    await e.sandbox.CloudSyncSnapshotStore.publish('/cloud/StarRustDesk', JSON.stringify(payload(time, ['old'])), time, trace, () => {})
+    e.files.set(e.cloudSnapshots()[0], Buffer.from('{'))
+    const result = await complete(e, e.service.listBackups(e.context))
+    assert.equal(result.success, true); assert.equal(result.backups[0].readable, false)
+    assert.ok(e.logs.some(l => l.includes('stage=history_entry_error ') && l.includes('code=-1005')))
+    assert.ok(e.logs.some(l => l.includes('stage=snapshot_format_invalid ') && l.includes('verified=0')))
+    assert.ok(e.logs.some(l => l.includes('stage=history_page ') && l.includes('page_count=1')))
+    assert.ok(e.logs.some(l => l.includes('stage=system_completed_progress ') && l.includes('active_seen=1')))
+    assert.ok(e.logs.some(l => l.includes('stage=read_result ') && l.includes('expected_bytes=1') && l.includes('actual_bytes=1')))
+  })
+  await test('password/decryption failure logs code and password-required outcome, never raw exception or secrets', async () => {
+    const e = fresh({ encrypted: true })
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
+    e.sandbox.ConnectionBackupService.decrypt = async () => { throw { code: 17630001, message: 'PRIVATE_PASSWORD PRIVATE_TOKEN' } }
+    const result = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(result.needsPassword, true)
+    assert.ok(e.logs.some(l => l.includes('stage=password_or_backup_invalid ') && l.includes('code=17630001')))
+    assert.ok(e.logs.some(l => l.includes('stage=result ') && l.includes('needs_password=1')))
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_') && !l.includes('TEST_PASSWORD')))
+  })
+  await test('diagnostic-off and logger exceptions cannot alter metadata-heavy restore or UI callbacks', async () => {
+    for (const config of [{ options: { 'diagnostic-log-enabled': '0' } }, { logError: true }]) {
+      const e = fresh(config)
+      e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
+      const result = await complete(e, e.service.syncNow(e.context))
+      e.service.recordUi('restore_confirmed', { connections: 1 })
+      e.service.recordUi('home_reload_complete', { connections: 1 })
+      assert.equal(result.restored, true); assert.equal(e.logs.length, 0)
+    }
+  })
+  await test('joined requests and refused readback writes have actionable operation and mismatch diagnostics', async () => {
+    const e = environment()
+    const a = e.service.syncNow(e.context), b = e.service.upload(e.context)
+    assert.equal(a, b); await complete(e, a)
+    assert.ok(e.logs.some(l => l.includes('stage=request_joined ') && /parent_op_id=[1-9]/.test(l)))
+    const f = fresh({ ignoreWriteKey: 'saved-connections' })
+    f.files.set(f.cloudPath, Buffer.from(JSON.stringify(payload(f.clock.now - 1000, ['old']))))
+    const result = await complete(f, f.service.syncNow(f.context))
+    assert.equal(result.success, false); assert.equal(result.code, -1008)
+    assert.ok(f.logs.some(l => l.includes('stage=restore_verify_info ') && l.includes('expected_connections=1') &&
+      l.includes('actual_connections=-1') && l.includes('verified=0')))
+  })
+  await test('successful restore cleanup is not misreported as a user cancellation', async () => {
+    const e = environment(), settings = source('pages/SettingsPage.ets')
+    const method = settings.slice(settings.indexOf('  cancelCloudRestore('), settings.indexOf('  async loadCloudHistory('))
+    const { Page } = e.load(`export class Page { ${method} }`, 'CloudRestoreCleanup')
+    const ui = new Page()
+    ui.cloudRestoreTicket = 'PRIVATE_TICKET'; ui.cloudRestoreSnapshotId = 'PRIVATE_SNAPSHOT'
+    ui.cancelCloudRestore(false)
+    assert.ok(!e.logs.some(l => l.includes('stage=restore_cancelled')))
+    ui.cloudRestoreTicket = 'PRIVATE_TICKET'; ui.cancelCloudRestore()
+    assert.ok(e.logs.some(l => l.includes('stage=restore_cancelled')))
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_')))
   })
   console.log(`cloud-sync runtime: ${passed} scenario groups passed`)
 })().catch(error => { console.error(error); process.exitCode = 1 })

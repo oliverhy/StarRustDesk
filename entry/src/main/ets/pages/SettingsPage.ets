@@ -19,7 +19,8 @@ import { fileIo, picker } from '@kit.CoreFileKit'
 import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog'
 import { RecordingDialog } from '../widget/RecordingDialog'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
-import { CloudSyncResult, CloudSyncService } from '../service/CloudSyncService'
+import { CloudBackupSummary, CloudRestorePreview, CloudSyncResult, CloudSyncService } from '../service/CloudSyncService'
+import { CloudBackupHistoryDialog } from '../widget/CloudBackupHistoryDialog'
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference'
 import { ThemePreference } from '../service/ThemePreference'
 
@@ -53,6 +54,31 @@ export struct SettingsPage {
   @State cloudSyncBusy: boolean = false
   @State cloudSyncStatus: string = '未开启'
   private cloudPasswordAction: string = ''
+  @State cloudBackups: CloudBackupSummary[] = []
+  @State cloudHistoryHasMore: boolean = false
+  private cloudHistoryOffset: number = 0
+  private cloudRestoreSnapshotId: string = ''
+  private cloudRestoreTicket: string = ''
+  private cloudUiGeneration: number = 0
+  private cloudHistoryDialogController: CustomDialogController = new CustomDialogController({
+    builder: CloudBackupHistoryDialog({
+      backups: this.cloudBackups,
+      hasMore: this.cloudHistoryHasMore,
+      busy: this.cloudSyncBusy,
+      onSelect: (id: string) => {
+        this.cloudHistoryDialogController.close()
+        this.previewCloudRestore(id)
+      },
+      onMore: () => { this.loadCloudHistory(true) },
+      onClose: () => {
+        CloudSyncService.recordUi('history_close')
+        this.cloudHistoryDialogController.close()
+        this.cancelCloudRestore()
+      }
+    }),
+    autoCancel: false,
+    customStyle: true,
+  })
   @State pageWidth: number = 0
   private apiAccountDialogController: CustomDialogController = new CustomDialogController({
     builder: ApiAccountDialog(),
@@ -92,6 +118,7 @@ export struct SettingsPage {
         this.saveCloudPassword(password)
       },
       onCancel: () => {
+        if (this.cloudPasswordAction === 'restore') this.cancelCloudRestore()
         this.cloudPasswordAction = ''
         this.cloudPasswordDialogController.close()
       }
@@ -102,6 +129,7 @@ export struct SettingsPage {
   })
 
   aboutToAppear(): void {
+    this.cloudUiGeneration++
     let savedRes: string = RustDeskNapi.getOption('resolution')
     if (savedRes.length > 0) {
       this.resolution = savedRes
@@ -122,6 +150,14 @@ export struct SettingsPage {
     if (this.cloudSyncEnabled) {
       this.syncCloudNow(false, true)
     }
+  }
+
+  aboutToDisappear(): void {
+    this.cloudUiGeneration++
+    this.cloudSyncBusy = false
+    this.cloudHistoryDialogController.close()
+    if (this.cloudPasswordAction === 'restore') this.cloudPasswordDialogController.close()
+    this.cancelCloudRestore()
   }
 
   build() {
@@ -667,6 +703,8 @@ export struct SettingsPage {
     this.cloudSyncEnabled = enabled
     CloudSyncService.setEnabled(enabled)
     if (!enabled) {
+      this.cloudHistoryDialogController.close()
+      this.cancelCloudRestore()
       this.cloudSyncStatus = '已关闭'
       return
     }
@@ -707,7 +745,7 @@ export struct SettingsPage {
         CloudSyncService.setIncludesSecrets(true)
         await this.syncCloudNow(false, false)
       } else if (action === 'restore') {
-        await this.syncCloudNow(true, false)
+        await this.previewCloudRestore(this.cloudRestoreSnapshotId)
       } else if (action === 'sync') {
         await this.syncCloudNow(false, false)
       }
@@ -717,20 +755,27 @@ export struct SettingsPage {
   }
 
   async syncCloudNow(restoreOnly: boolean, quiet: boolean): Promise<void> {
+    if (restoreOnly && this.cloudRestoreTicket.length === 0) {
+      await this.previewCloudRestore(this.cloudRestoreSnapshotId)
+      return
+    }
     if (this.cloudSyncBusy || !this.cloudSyncEnabled) {
       return
     }
     this.cloudSyncBusy = true
+    const generation = this.cloudUiGeneration
     this.cloudSyncStatus = restoreOnly ? '正在从云端恢复…' : '正在同步…'
     try {
       let result: CloudSyncResult = restoreOnly ?
-        await CloudSyncService.restore(getContext(this) as common.UIAbilityContext) :
+        await CloudSyncService.restore(getContext(this) as common.UIAbilityContext, this.cloudRestoreTicket) :
         await CloudSyncService.syncNow(getContext(this) as common.UIAbilityContext)
+      if (generation !== this.cloudUiGeneration) return
       if (!this.cloudSyncEnabled || result.code === -1002) {
         this.updateCloudSyncStatus()
         return
       }
       if (result.needsPassword) {
+        if (!restoreOnly) this.cloudRestoreSnapshotId = ''
         this.cloudPasswordAction = result.passwordAction ?? (restoreOnly ? 'restore' : 'sync')
         this.cloudPasswordDialogController.open()
         this.cloudSyncStatus = '需要云备份密码'
@@ -743,31 +788,110 @@ export struct SettingsPage {
       if (!quiet || !result.success) {
         promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
       }
+      if (restoreOnly) this.cancelCloudRestore(false)
     } catch (_error) {
+      if (generation !== this.cloudUiGeneration) return
+      if (restoreOnly) this.cancelCloudRestore(false)
       if (this.cloudSyncEnabled) {
         this.cloudSyncStatus = '云同步未完成，请开启诊断日志后重试'
         if (!quiet) promptAction.showToast({ message: translate(this.cloudSyncStatus, this.uiLanguage) })
       }
     } finally {
-      this.cloudSyncBusy = false
+      if (generation === this.cloudUiGeneration) this.cloudSyncBusy = false
     }
   }
 
   confirmCloudRestore(): void {
+    CloudSyncService.recordUi('history_open')
+    this.loadCloudHistory(false)
+  }
+
+  cancelCloudRestore(logCancellation: boolean = true): void {
+    if (logCancellation && (this.cloudRestoreTicket.length > 0 || this.cloudRestoreSnapshotId.length > 0)) {
+      CloudSyncService.recordUi('restore_cancelled')
+    }
+    this.cloudRestoreTicket = ''
+    this.cloudRestoreSnapshotId = ''
+    CloudSyncService.cancelRestorePreview()
+  }
+
+  async loadCloudHistory(more: boolean): Promise<void> {
+    if (this.cloudSyncBusy || !this.cloudSyncEnabled) return
+    this.cloudSyncBusy = true
+    const generation = this.cloudUiGeneration
+    try {
+      const result = await CloudSyncService.listBackups(getContext(this) as common.UIAbilityContext, more ? this.cloudHistoryOffset : 0)
+      if (!this.cloudSyncEnabled || generation !== this.cloudUiGeneration) return
+      if (!result.success || result.backups === undefined || result.backups.length === 0) {
+        this.cloudSyncStatus = result.message
+        promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
+        return
+      }
+      const incoming = result.backups
+      this.cloudBackups = more ? this.cloudBackups.concat(incoming.filter((item: CloudBackupSummary) =>
+        !this.cloudBackups.some((existing: CloudBackupSummary) => existing.id === item.id))) : incoming
+      this.cloudHistoryOffset = result.nextOffset ?? 0
+      this.cloudHistoryHasMore = result.hasMore ?? false
+      if (!more) this.cloudHistoryDialogController.open()
+    } catch (_error) {
+      if (generation !== this.cloudUiGeneration) return
+      promptAction.showToast({ message: translate('无法读取云备份列表，请稍后重试', this.uiLanguage) })
+    } finally { if (generation === this.cloudUiGeneration) this.cloudSyncBusy = false }
+  }
+
+  async previewCloudRestore(snapshotId: string): Promise<void> {
+    if (this.cloudSyncBusy || !this.cloudSyncEnabled) return
+    this.cloudRestoreSnapshotId = snapshotId
+    this.cloudSyncBusy = true
+    const generation = this.cloudUiGeneration
+    try {
+      const result = await CloudSyncService.previewRestore(getContext(this) as common.UIAbilityContext, snapshotId)
+      if (generation !== this.cloudUiGeneration) { CloudSyncService.cancelRestorePreview(); return }
+      if (!this.cloudSyncEnabled) { this.cancelCloudRestore(); return }
+      if (result.needsPassword) {
+        this.cloudPasswordAction = 'restore'
+        this.cloudSyncStatus = '需要云备份密码'
+        this.cloudPasswordDialogController.open()
+        promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
+        return
+      }
+      if (!result.success || result.preview === undefined) {
+        this.cloudSyncStatus = result.message
+        promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
+        this.cancelCloudRestore(false)
+        return
+      }
+      this.cloudRestoreTicket = result.preview.ticket
+      this.showCloudRestorePreview(result.preview)
+    } catch (_error) {
+      if (generation !== this.cloudUiGeneration) return
+      this.cancelCloudRestore(false)
+      promptAction.showToast({ message: translate('无法预览云备份，请稍后重试', this.uiLanguage) })
+    } finally { if (generation === this.cloudUiGeneration) this.cloudSyncBusy = false }
+  }
+
+  showCloudRestorePreview(preview: CloudRestorePreview): void {
+    const details = `${new Date(preview.time).toLocaleString()}\n` +
+      translate(`${preview.connectionCount} 个连接 · ${preview.groupCount} 个分组`, this.uiLanguage) + '\n' +
+      translate(preview.serverConfigured ? '包含服务器配置' : '不包含自建服务器地址', this.uiLanguage) + '\n\n' +
+      (preview.connectionCount === 0 ? translate('此备份没有连接，恢复后本机连接列表将为空。可取消并选择更早的备份。', this.uiLanguage) + '\n\n' : '') +
+      translate('云端的连接、分组和服务器配置将覆盖本机对应内容。未加密备份不会覆盖本机已有密码与服务器密钥。', this.uiLanguage)
     AlertDialog.show({
-      title: translate('从云端恢复', this.uiLanguage),
-      message: translate('云端的连接、分组和服务器配置将覆盖本机对应内容。未加密备份不会覆盖本机已有密码与服务器密钥。', this.uiLanguage),
-      autoCancel: true,
+      title: translate('确认恢复此备份', this.uiLanguage),
+      message: details,
+      autoCancel: false,
+      cancel: () => { this.cancelCloudRestore() },
       alignment: DialogAlignment.Center,
       primaryButton: {
         value: translate('取消', this.uiLanguage),
-        action: () => {
-        },
+        action: () => { this.cancelCloudRestore() },
       },
       secondaryButton: {
         value: translate('恢复', this.uiLanguage),
         fontColor: RustDeskTheme.ACCENT,
         action: () => {
+          CloudSyncService.recordUi('restore_confirmed', { cloudTime: preview.time, connections: preview.connectionCount,
+            groups: preview.groupCount, encrypted: preview.encrypted, serverConfigured: preview.serverConfigured })
           this.syncCloudNow(true, false)
         },
       },
@@ -780,7 +904,7 @@ export struct SettingsPage {
       return
     }
     const lastResult = CloudSyncService.getLastResult()
-    if (lastResult !== undefined && !lastResult.success) {
+    if (lastResult !== undefined && (!lastResult.success || lastResult.restored)) {
       this.cloudSyncStatus = lastResult.message
       return
     }
