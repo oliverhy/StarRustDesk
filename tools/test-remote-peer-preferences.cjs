@@ -142,7 +142,7 @@ function pageHarness(h, server, id, pc = false) {
     peerPreferences: h.make(server, id), peerPreferenceServer: server, connectedPeerId: id,
     isPcDevice: () => pc, isHandheldLandscape: () => false, inputMode: 'mouse', relativeMouseEnabled: false,
     cancelActiveTouchGesture() {}, stopEdgeAutoPan() {}, ensurePointerInitialized() {}, updateSystemPointerVisibility() {},
-    applyInputCompatibility() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
+    applyInputCompatibility() {}, startKeyboardLayout() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
     physicalMouseDeduplicator: { clear() {} }, resetPointerDiagnostics() {},
     virtualCtrlSelected: false, virtualShiftSelected: false
   });

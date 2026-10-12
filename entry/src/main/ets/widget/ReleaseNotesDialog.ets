@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.29'
-export const RELEASE_NOTES_BUILD: string = '1002029'
+export const RELEASE_NOTES_VERSION: string = '1.2.30'
+export const RELEASE_NOTES_BUILD: string = '1002030'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.30（1002030）· 实体键盘布局与校准', [
+            '远控“控 → 输入”新增独立的“键盘设置”和“鼠标设置”；键盘模式、布局、自定义映射集中管理，手势说明保留操作教程并更新新入口。',
+            '新增实体键盘布局选择：自动、系统原样、苹果布局修正。按服务器与远端独立保存；自动只恢复已确认的校准，不根据品牌盲目交换按键。',
+            '苹果布局修正新增 Command / Option 校准：依次按下并松开键帽上的左 Command、左 Option，再保存；同步修正左右实体修饰键及组合键状态。',
+            '可靠识别的键盘记住校准；无法稳定识别时只用于本次会话，多键盘或读取失败时保持系统原样。键盘拔插、查询超时和过期校准不会误套用旧结果。',
+            '自定义映射中明确设置的对应键优先，避免重复映射；中文输入、粘贴及快捷栏保持原路径。完善松键、取消、失败回滚及诊断，不记录校准文字或键盘原始标识。'
+          ])
           this.buildSection('1.2.29（1002029）· 连接保存与紧凑界面优化', [
             '首页快捷连接与保存连接分离：通过已保存连接右侧“＋”新增，通过设备“更多 → 修改”编辑；编辑时固定远端 ID，重复连接明确提示，不再误覆盖原记录。',
             '新增和修改使用独立弹窗，取消不影响首页输入；完善保存校验、失败回滚及服务器切换保护，避免新设备沿用旧设备密码和安全设置，备份与云同步保留连接所属网络信息。',

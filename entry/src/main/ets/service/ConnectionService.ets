@@ -18,6 +18,7 @@ interface MappedHardwarePress {
 
 export class ConnectionService {
   private static keyboardRemap: KeyboardRemapConfig = { version: 1, enabled: false, rules: [] }
+  private static hardwareKeyboardLayoutSwap: boolean = false
   private static mappedHardwarePresses: MappedHardwarePress[] = []
   private static physicalModifierSourceCodes: number[] = []
   private static keyboardMode: number = 0
@@ -387,8 +388,30 @@ export class ConnectionService {
       `configured enabled=${ConnectionService.keyboardRemap.enabled ? 1 : 0} rules=${ConnectionService.keyboardRemap.rules.length}`)
   }
 
+  static configureHardwareKeyboardLayout(swap: boolean): void {
+    if (ConnectionService.hardwareKeyboardLayoutSwap === swap) return
+    ConnectionService.releaseModifiers()
+    ConnectionService.hardwareKeyboardLayoutSwap = swap
+    RustDeskNapi.appendDiagnosticLog('input-layout', `applied swap=${swap ? 1 : 0}`)
+  }
+
+  private static hardwareControlTarget(source: number): number {
+    // Explicit raw-source rules win. Never remap a calibrated target again:
+    // Ctrl->Command and existing Alt<->Command workarounds remain single-pass.
+    const rule = keyboardRemapRule(ConnectionService.keyboardRemap, source)
+    if (rule !== undefined) return rule.target
+    if (!ConnectionService.hardwareKeyboardLayoutSwap) return source
+    switch (source) {
+      case 18: return 91
+      case 165: return 92
+      case 91: return 18
+      case 92: return 165
+      default: return source
+    }
+  }
+
   static sendHardwareControlKey(source: number, action: number, physicalKeyCode?: number, route: string = 'hardware'): void {
-    if (!ConnectionService.keyboardRemap.enabled || source === 20) {
+    if ((!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) || source === 20) {
       ConnectionService.sendKeyEvent(source, action, physicalKeyCode)
       return
     }
@@ -397,8 +420,12 @@ export class ConnectionService {
     if (ConnectionService.getModifierBit(source) !== 0) {
       const heldIndex: number = ConnectionService.physicalModifierKeys.indexOf(identity)
       const target: number = action === 1 && heldIndex >= 0 ? ConnectionService.physicalModifierControlCodes[heldIndex] :
-        (rule?.target ?? source)
+        ConnectionService.hardwareControlTarget(source)
       ConnectionService.sendKeyEvent(target, action, identity, source)
+      return
+    }
+    if (!ConnectionService.keyboardRemap.enabled) {
+      ConnectionService.sendKeyEvent(source, action, physicalKeyCode)
       return
     }
     const index: number = ConnectionService.mappedHardwarePresses.findIndex((press: MappedHardwarePress) => press.identity === identity)
@@ -459,13 +486,13 @@ export class ConnectionService {
           // A real key-up is authoritative. Clear stale snapshots from pointer
           // and polling sources as well so a modifier cannot remain stuck.
           ConnectionService.directModifierMask &= ~modifierBit
-          if (!ConnectionService.keyboardRemap.enabled) {
+          if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) {
             ConnectionService.pointerModifierMask &= ~modifierBit
             ConnectionService.nativeModifierMask &= ~modifierBit
             ConnectionService.hardwareModifierMask &= ~modifierBit
           }
         }
-        if (ConnectionService.keyboardRemap.enabled && identity < 10000 &&
+        if ((ConnectionService.keyboardRemap.enabled || ConnectionService.hardwareKeyboardLayoutSwap) && identity < 10000 &&
           !ConnectionService.physicalModifierSourceCodes.some((code: number, i: number) =>
             ConnectionService.physicalModifierKeys[i] < 10000 && keyboardModifierBit(code) === keyboardModifierBit(original))) {
           const sourceBit: number = keyboardModifierBit(original)
@@ -752,6 +779,7 @@ export class ConnectionService {
   }
 
   private static resetTransientInputState(): void {
+    ConnectionService.hardwareKeyboardLayoutSwap = false
     ConnectionService.keyboardRemap = { version: 1, enabled: false, rules: [] }
     ConnectionService.mappedHardwarePresses = []
     ConnectionService.directModifierMask = 0
@@ -811,7 +839,7 @@ export class ConnectionService {
   }
 
   private static mapHardwareModifierMask(mask: number): number {
-    if (!ConnectionService.keyboardRemap.enabled) return mask
+    if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) return mask
     let result: number = mask & ~15
     for (const source of [17, 16, 18, 91]) {
       const bit: number = keyboardModifierBit(source)
@@ -823,7 +851,7 @@ export class ConnectionService {
           identified = true
         }
       })
-      if (!identified) result |= keyboardModifierBit(keyboardRemapRule(ConnectionService.keyboardRemap, source)?.target ?? source)
+      if (!identified) result |= keyboardModifierBit(ConnectionService.hardwareControlTarget(source))
     }
     return result
   }

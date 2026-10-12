@@ -1184,7 +1184,7 @@ F3 → Ctrl+↑	F3 to Ctrl+Up
 新增 Mac 常用预设：Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑；选择预设只替换草稿规则，不自动启用，保存后生效，取消不改变原配置。	Added common Mac presets: Ctrl to Command, swapping Ctrl and Win/Cmd, and F3 to Ctrl+Up. Presets replace draft rules without enabling mapping automatically. Save applies changes; Cancel keeps the original configuration.
 按服务器与远端设备独立保存和恢复映射；保存失败保留原配置并提示，切换远端后旧弹窗不能覆盖新设备设置。恢复默认会关闭并清空规则。	Mappings are saved and restored independently for each server and remote device. Failed saves preserve the original configuration and show an error. A stale dialog cannot overwrite another remote device's settings. Reset disables mapping and clears its rules.
 中文输入、粘贴、快捷栏及现有完整组合键保持原路径；优化实体修饰键与鼠标多选配合、左右键独立状态、重复事件去重及失焦松键，补充不记录输入内容的诊断日志。	Chinese text input, paste, shortcut-bar buttons and existing complete shortcuts keep their original paths. Improved physical modifier and mouse multi-selection handling, independent left/right key state, duplicate event suppression and key release on focus loss. Added diagnostics that do not record typed content.
-在本页键鼠兼容选项中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。	Open Custom keyboard mapping in the keyboard/mouse compatibility options on this page. It is off by default and saved separately for each server and remote device.\nChoose or capture a source key, then choose a target key. This version supports modifiers, F1-F12, navigation and editing keys. Selecting modifiers makes a non-modifier source key send one complete shortcut, without repeating it while held.\nMac presets include Ctrl to Command, swapping Ctrl and Win/Cmd, and F3 to Ctrl+Up. Presets replace draft rules without enabling mapping automatically. Save applies changes; Cancel keeps existing settings.\nOnly physical keys forwarded to the remote device are mapped. Chinese text, pasted content and shortcut-bar buttons are unchanged. Keys such as Fn may be handled by the system or keyboard hardware and may not be capturable.
+在“控 → 输入 → 键盘设置”中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。	Open Custom keyboard mapping under Controls > Input > Keyboard settings. It is off by default and saved separately for each server and remote device.\nChoose or capture a source key, then choose a target key. This version supports modifiers, F1-F12, navigation and editing keys. Selecting modifiers makes a non-modifier source key send one complete shortcut, without repeating it while held.\nMac presets include Ctrl to Command, swapping Ctrl and Win/Cmd, and F3 to Ctrl+Up. Presets replace draft rules without enabling mapping automatically. Save applies changes; Cancel keeps existing settings.\nOnly physical keys forwarded to the remote device are mapped. Chinese text, pasted content and shortcut-bar buttons are unchanged. Keys such as Fn may be handled by the system or keyboard hardware and may not be capturable.
 保存新连接	Save new connection
 此连接已保存	This connection is already saved
 不会覆盖已有记录。请选择直接连接，或修改已有连接。	The existing record will not be overwritten. Connect directly or edit the saved connection.
@@ -1220,6 +1220,49 @@ F3 → Ctrl+↑	F3 to Ctrl+Up
 新增连接	Add connection
 远端 ID 不能修改，请新增连接	The remote ID cannot be changed. Add a new connection instead.
 远端 ID	Remote ID
+键盘设置	Keyboard settings
+1.2.30（1002030）· 实体键盘布局与校准	1.2.30 (1002030) · Physical keyboard layout and calibration
+远控“控 → 输入”新增独立的“键盘设置”和“鼠标设置”；键盘模式、布局、自定义映射集中管理，手势说明保留操作教程并更新新入口。	Added separate Keyboard settings and Mouse settings under Controls > Input. Keyboard mode, layout and custom mappings are managed together. Gesture help retains instructions and points to the new settings.
+新增实体键盘布局选择：自动、系统原样、苹果布局修正。按服务器与远端独立保存；自动只恢复已确认的校准，不根据品牌盲目交换按键。	Added physical keyboard layouts: Auto, System layout and Apple layout correction. The selection is saved separately for each server and remote device. Auto restores only confirmed calibrations, never swaps keys based on brand.
+苹果布局修正新增 Command / Option 校准：依次按下并松开键帽上的左 Command、左 Option，再保存；同步修正左右实体修饰键及组合键状态。	Apple layout correction adds Command / Option calibration. Press and release the keys labeled left Command and left Option in order, then save. Correction applies consistently to both physical modifier sides and shortcut state.
+可靠识别的键盘记住校准；无法稳定识别时只用于本次会话，多键盘或读取失败时保持系统原样。键盘拔插、查询超时和过期校准不会误套用旧结果。	Reliably identified keyboards remember calibration. Unidentified keyboards use it for this session only. Multiple keyboards or failed discovery keep the system layout. Hotplug changes, query timeouts and stale calibration dialogs cannot apply an old result to another device.
+自定义映射中明确设置的对应键优先，避免重复映射；中文输入、粘贴及快捷栏保持原路径。完善松键、取消、失败回滚及诊断，不记录校准文字或键盘原始标识。	Explicit custom mapping rules take priority to prevent double mapping. Chinese text, paste and shortcut-bar input keep their existing paths. Improved key release, cancellation, failure rollback and diagnostics without recording calibration text or raw keyboard identities.
+实体键盘布局与校准	Physical keyboard layout and calibration
+在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘同时连接时暂停布局修正。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。	Choose a keyboard layout under Controls > Input > Keyboard settings. Auto restores only confirmed calibrations; System layout ignores layout calibration.\nIf the Apple keyboard's Command and Option keys are swapped, select Apple layout correction > Calibrate Command / Option. Press and release each left modifier as instructed, then save.\nReliably identified keyboards remember calibration; unidentified keyboards use it for this session only. Correction pauses when multiple keyboards are connected. Recalibrate after changing the keyboard's hardware Mac/PC mode.\nOnly physical modifiers are corrected. Explicit custom rules take priority. Chinese text, pasted content and shortcut-bar buttons are unchanged.
+鼠标设置	Mouse settings
+无法可靠读取键盘信息，保持系统原样	Keyboard information is unavailable. Keep the system layout.
+检测到多个键盘，请只连接待校准的键盘；暂不自动修正	Multiple keyboards detected. Connect only the keyboard you want to calibrate. Automatic correction is paused.
+连接实体键盘后可校准 Command / Option	Connect a physical keyboard to calibrate Command / Option.
+当前按系统原样发送，不应用布局校准	Keys follow the system layout. Layout calibration is not applied.
+尚未校准，保持原样；键位不对时请选择苹果布局修正	No calibration yet. Keys remain unchanged. Choose Apple layout correction if the modifiers are swapped.
+此键盘无法稳定识别，校准只用于本次会话	This keyboard cannot be identified reliably. Calibration applies only to this session.
+已恢复校准：Command / Option 互换	Calibration restored: Command / Option swapped.
+已恢复校准：Command / Option 原样	Calibration restored: Command / Option unchanged.
+保存键盘布局失败，请重试	Failed to save the keyboard layout. Please retry.
+无法打开键盘校准，请重试	Unable to open keyboard calibration. Please retry.
+键盘布局	Keyboard layout
+系统原样	System layout
+苹果布局修正	Apple layout correction
+自动只恢复已校准的键盘，不按品牌强制交换；系统原样忽略布局校准。	Auto restores only confirmed keyboard calibrations, never swaps keys based on brand. System layout ignores calibration.
+未检测到唯一的实体键盘	No single physical keyboard detected
+键盘信息暂不可用	Keyboard information unavailable
+校准 Command / Option	Calibrate Command / Option
+自定义映射的对应键规则优先；布局校准不会修改或重复套用已有规则。	Matching custom mapping rules take priority. Layout calibration does not change or apply existing rules twice.
+鼠标兼容（仅当前设备）	Mouse compatibility (current device only)
+请使用正在校准的同一把键盘	Use the same keyboard throughout calibration.
+请按左侧 Command 或 Option，不要按字母键	Press left Command or Option, not a letter key.
+两个按键被识别为同一个键，请检查键盘模式后重试	Both keys were reported as the same key. Check the keyboard mode and retry.
+请按键帽上的左 Command 键	Press the key labeled left Command.
+请松开按键	Release the key.
+请按键帽上的左 Option 键	Press the key labeled left Option.
+需要互换 Command / Option	Command / Option need to be swapped.
+键位已正确，无需互换	The modifiers are correct. No swap is needed.
+点击开始，依次按下并松开左 Command、左 Option。	Start, then press and release left Command and left Option in order.
+保存校准失败或键盘已改变，请重新校准	Calibration could not be saved or the keyboard changed. Please recalibrate.
+只识别两个修饰键，不记录文字，也不会将校准按键发送到远端。取消不改变设置。	Only the two modifiers are sampled. Typed text is not recorded and calibration keys are not sent to the remote device. Cancel leaves settings unchanged.
+开始校准	Start calibration
+重新校准	Recalibrate
+保存校准	Save calibration
 在线优先	Online first
 类型（扩展名）	Type (extension)
 1.2.29（1002029）· 连接保存与紧凑界面优化	1.2.29 (1002029) · Safer saved connections and compact interface

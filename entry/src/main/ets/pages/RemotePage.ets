@@ -33,6 +33,9 @@ import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePicture
 import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition } from '../model/RemoteToolbarPlacement';
 import { RemotePeerPreferences } from '../service/RemotePeerPreferences';
 import { KeyboardMappingDialog } from '../widget/KeyboardMappingDialog';
+import { KeyboardLayoutCalibrationDialog } from '../widget/KeyboardLayoutCalibrationDialog';
+import { KeyboardLayoutSnapshot } from '../model/PhysicalKeyboardLayout';
+import { PhysicalKeyboardLayoutService } from '../service/PhysicalKeyboardLayoutService';
 import { decodeKeyboardRemap } from '../model/KeyboardRemapping';
 import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
 import { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, remoteControlCategoryLabel,
@@ -286,6 +289,14 @@ struct RemotePage {
   private relativePointerX: number = 0;
   private relativePointerY: number = 0;
   @State showGestureHelp: boolean = false;
+  @State showKeyboardSettings: boolean = false;
+  @State showMouseSettings: boolean = false;
+  @State showKeyboardCalibration: boolean = false;
+  @State keyboardLayoutMode: string = 'auto';
+  @State keyboardLayoutState: KeyboardLayoutSnapshot = { revision: 0, ready: false, count: 0,
+    deviceId: -1, deviceName: '', fingerprint: '', calibrated: false, swap: false };
+  private keyboardLayoutService: PhysicalKeyboardLayoutService | undefined = undefined;
+  private keyboardCalibrationDialog: CustomDialogController | undefined = undefined;
   @State showMobileActions: boolean = false;
   @State isPeerAndroid: boolean = false;
   @State privacyModeState: number = 0;
@@ -631,6 +642,11 @@ struct RemotePage {
 
   aboutToDisappear(): void {
     this.remotePageVisible = false;
+    this.keyboardLayoutService?.stop();
+    this.keyboardLayoutService = undefined;
+    ConnectionService.configureHardwareKeyboardLayout(false);
+    this.keyboardCalibrationDialog?.close();
+    this.showKeyboardCalibration = this.showKeyboardSettings = this.showMouseSettings = false;
     this.keyboardMappingDialog?.close();
     this.showKeyboardMappingDialog = false;
     ConnectionService.configureKeyboardRemapping('');
@@ -687,6 +703,10 @@ struct RemotePage {
 
   onBackPress(): boolean {
     if (this.fullscreenTransitioning) return true;
+    if (this.showKeyboardSettings || this.showMouseSettings) {
+      this.closeInputSettings();
+      return true;
+    }
     if (this.controlMenu.length > 0) {
       this.setControlMenu('');
       return true;
@@ -1364,7 +1384,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
       this.hardwareModifierTrackingActive = false;
@@ -1415,7 +1435,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (event.hover >= 0) {
       this.handleRemoteHover(event.hover === 1);
@@ -1509,7 +1529,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
@@ -1677,6 +1697,12 @@ struct RemotePage {
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildGestureHelpOverlay();
       }
+      if (this.showMouseSettings && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        this.buildGestureHelpOverlay(true);
+      }
+      if (this.showKeyboardSettings && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        this.buildKeyboardSettingsOverlay();
+      }
       if (this.showMobileActions && this.connectionStatus === ConnectionStatus.CONNECTED && this.isPeerAndroid) {
         this.buildMobileActionsOverlay();
       }
@@ -1687,7 +1713,8 @@ struct RemotePage {
         this.buildFloatingToolbar();
       }
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() && this.remoteToolbarCollapsed &&
-        !this.showGestureHelp && !this.showRemoteFileBrowser && !this.showMobileActions &&
+        !this.showGestureHelp && !this.showKeyboardSettings && !this.showMouseSettings && !this.showKeyboardCalibration &&
+        !this.showRemoteFileBrowser && !this.showMobileActions &&
         !this.showToolbarOrderEditor && !this.showCommunicationPanel) {
         this.buildKeyboardLauncher();
       }
@@ -3015,7 +3042,8 @@ struct RemotePage {
 
   getControlMenuMetrics(): RemoteMenuMetrics {
     const desktopView = this.controlMenu === 'view' && this.isPcDevice();
-    const items = this.getVisibleControlMenuItems().length + (this.controlMenu === 'more' ? 2 : desktopView ? 1 : 0);
+    const items = this.getVisibleControlMenuItems().length +
+      (this.controlMenu === 'more' || this.controlMenu === 'input' ? 2 : desktopView ? 1 : 0);
     return compactControlMenuMetrics(this.controlMenu, this.pageWidth, this.getControlMenuViewportHeight(),
       this.uiFontScale, this.displayCount, items, this.isHandheldDevice(), desktopView, this.desktopViewMode === 'custom',
       this.getControlMenuLabelWidth());
@@ -3123,6 +3151,14 @@ struct RemotePage {
                   this.buildControlToolbarItem(item, true)
                 }.width('100%')
               }, (item: string) => `menu-${item}-${this.currentDisplay}-${this.displayCount}-${this.showVirtualMouse ? 1 : 0}`)
+              if (this.controlMenu === 'input') {
+                Column() {
+                  this.buildToolbarButton('键盘设置', 92, false, false, true, () => { this.openKeyboardSettings(); })
+                }.width('100%')
+                Column() {
+                  this.buildToolbarButton('鼠标设置', 92, false, false, true, () => { this.openMouseSettings(); })
+                }.width('100%')
+              }
               if (this.controlMenu === 'view' && this.isPcDevice()) {
                 Column() {
                   this.buildToolbarButton(this.immersiveWindow ? '退出沉浸' : '沉浸窗口', 92, this.immersiveWindow,
@@ -4343,10 +4379,10 @@ struct RemotePage {
   }
 
   @Builder
-  buildGestureHelpOverlay() {
+  buildGestureHelpOverlay(mouseSettings: boolean = false) {
     Stack({ alignContent: Alignment.Center }) {
       Column({ space: 14 }) {
-        Text(translate('触屏操作方式', this.uiLanguage))
+        Text(translate(mouseSettings ? '鼠标设置' : '触屏操作方式', this.uiLanguage))
           .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
           .fontColor(this.primaryTextColor())
@@ -4354,6 +4390,7 @@ struct RemotePage {
 
         Scroll() {
           Column({ space: 14 }) {
+        if (mouseSettings) {
         Row({ space: 10 }) {
           this.buildInputModeChoice(INPUT_MODE_MOUSE, '鼠标模式')
           this.buildInputModeChoice(INPUT_MODE_TOUCH, '触摸模式')
@@ -4433,6 +4470,7 @@ struct RemotePage {
         .width('100%')
         .padding({ left: 2, right: 2, top: 2, bottom: 2 })
 
+        } else {
         if (this.inputMode === INPUT_MODE_MOUSE) {
           Text(translate('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 轻点一次，第二次按住并移动：拖拽，松手结束\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 虚拟鼠标：左右键、中键和滚轮与实体鼠标一致，按住鼠标拖动区即可移动远端指针\n• 虚拟鼠标开启且画面放大后：单指拖动画面其他区域直接平移视野\n• 边缘跟随开启后：手机/平板放大画面，手指移动鼠标到可视区域中心附近，视野立即跟随；停手即停，抬手再滑无需等待\n• 虚拟鼠标拖动区同样支持中心跟随；到达远端桌面边界后，鼠标继续移动\n• 实体鼠标：靠近画面边缘并短暂停留后自动平移，越靠边越快\n• 全屏三指上滑：调出系统键盘，输入直达远端', this.uiLanguage))
             .fontSize(14)
@@ -4456,9 +4494,12 @@ struct RemotePage {
         this.buildGestureHelpSection('连续输入与键盘悬浮按钮',
           '手机和平板连接后显示独立键盘悬浮按钮，不用展开“控”；可拖到顺手的位置。点一下打开本地键盘，再点一下收起。\n键盘开启后可继续点击远端其他输入框，输入仍直接传给远端，不因点按画面而收起；点击收起按钮、系统返回或输入法收起即可结束。\n全屏三指上滑仍可打开键盘。实体键盘和完整组合键不会自动唤起软键盘。远端输入框没有可靠的焦点通知，需要用户主动打开键盘。')
         this.buildGestureHelpSection('自定义实体键盘映射',
-          '在本页键鼠兼容选项中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。')
+          '在“控 → 输入 → 键盘设置”中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。')
+        this.buildGestureHelpSection('实体键盘布局与校准',
+          '在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘同时连接时暂停布局修正。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。')
         this.buildGestureHelpSection('悬浮功能栏与移动画面',
           '竖屏时“控”保持底部横向工具栏；横屏时默认移动到右上角并向下展开。点击收起后保留“控”按钮。\n未开启虚拟鼠标时，画面放大后可使用“移动画面”模式；开启虚拟鼠标后，直接单指拖动画面空白区域即可平移，鼠标本体专门控制远端指针。\n全屏三指上滑用于打开本地键盘，不是滚动手势；滚动请使用双指平行滑动。')
+        }
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)
@@ -4468,14 +4509,15 @@ struct RemotePage {
         .scrollBar(BarState.Auto)
         .edgeEffect(EdgeEffect.Spring)
 
-        Button(translate('知道了', this.uiLanguage))
+        Button(translate(mouseSettings ? '关闭' : '知道了', this.uiLanguage))
           .width('100%')
           .height(42)
           .fontColor(Color.White)
           .backgroundColor(RustDeskTheme.ACCENT)
           .borderRadius(8)
           .onClick(() => {
-            this.dismissGestureHelp();
+            if (mouseSettings) this.closeInputSettings();
+            else this.dismissGestureHelp();
           })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
@@ -4490,6 +4532,8 @@ struct RemotePage {
     .width('100%')
     .height('100%')
     .backgroundColor('#99000000')
+    .zIndex(100)
+    .onClick(() => {})
     .onHover((isHovering: boolean) => {
       this.handleNonRemoteHover(isHovering);
     })
@@ -5525,10 +5569,138 @@ struct RemotePage {
       RustDeskNapi.getOption('custom-rendezvous-server'), this.connectedPeerId, name);
   }
 
+  startKeyboardLayout(): void {
+    const preferences = this.peerPreferences;
+    if (!preferences || this.fileOnly) return;
+    const stored: string = preferences.get('keyboard-layout-mode');
+    this.keyboardLayoutMode = stored === 'system' || stored === 'apple' ? stored : 'auto';
+    if (!this.keyboardLayoutService) {
+      this.keyboardLayoutService = new PhysicalKeyboardLayoutService((state: KeyboardLayoutSnapshot) => {
+        if (this.remotePageVisible && this.peerPreferences === preferences) this.keyboardLayoutState = state;
+      }, (swap: boolean) => {
+        if (this.remotePageVisible && this.peerPreferences === preferences)
+          ConnectionService.configureHardwareKeyboardLayout(swap);
+      });
+    }
+    this.keyboardLayoutService.start(this.keyboardLayoutMode);
+  }
+
+  keyboardLayoutStatus(): string {
+    const state = this.keyboardLayoutState;
+    if (!state.ready) return '无法可靠读取键盘信息，保持系统原样';
+    if (state.count > 1) return '检测到多个键盘，请只连接待校准的键盘；暂不自动修正';
+    if (state.count === 0) return '连接实体键盘后可校准 Command / Option';
+    if (this.keyboardLayoutMode === 'system') return '当前按系统原样发送，不应用布局校准';
+    if (!state.calibrated) return '尚未校准，保持原样；键位不对时请选择苹果布局修正';
+    if (!state.fingerprint) return '此键盘无法稳定识别，校准只用于本次会话';
+    return state.swap ? '已恢复校准：Command / Option 互换' : '已恢复校准：Command / Option 原样';
+  }
+
+  setKeyboardLayoutMode(mode: string): void {
+    const preferences = this.peerPreferences;
+    if (!preferences || !['auto', 'system', 'apple'].includes(mode) ||
+      !this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    const previous: string = preferences.get('keyboard-layout-mode') || 'auto';
+    if (!preferences.set('keyboard-layout-mode', mode)) return;
+    if (!preferences.flush()) {
+      preferences.set('keyboard-layout-mode', previous);
+      this.showFileToast('保存键盘布局失败，请重试'); return;
+    }
+    this.releaseRemoteNavigationKeys('layout_mode'); this.releaseVirtualModifiers();
+    ConnectionService.releaseModifiers();
+    this.keyboardLayoutMode = mode;
+    this.keyboardLayoutService?.setMode(mode);
+    RustDeskNapi.appendDiagnosticLog('input-layout', `mode_changed mode=${mode}`);
+  }
+
+  openKeyboardSettings(): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    this.releaseHeldMouseButtons('keyboard_settings'); this.stopEdgeAutoPan();
+    this.releaseRemoteNavigationKeys('keyboard_settings'); this.releaseVirtualModifiers();
+    ConnectionService.releaseModifiers();
+    if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+    this.setControlMenu(''); this.showGestureHelp = this.showMouseSettings = false;
+    this.showKeyboardSettings = true;
+  }
+
+  openMouseSettings(): void {
+    this.openKeyboardSettings();
+    if (this.showKeyboardSettings) { this.showKeyboardSettings = false; this.showMouseSettings = true; }
+  }
+
+  closeInputSettings(): void {
+    // Discard events queued while the modal owned keyboard focus before opening
+    // remote input again. A fast Save/Close must not replay calibration keys.
+    try { RustDeskNapi.takeNativeInputEvents(); }
+    catch (_error) { RustDeskNapi.appendDiagnosticLog('input-layout', 'modal_queue_discard_failed'); }
+    this.hardwareModifierTrackingActive = false;
+    ConnectionService.releaseModifiers();
+    this.showKeyboardSettings = this.showMouseSettings = false;
+  }
+
+  openKeyboardLayoutCalibration(): void {
+    const preferences = this.peerPreferences;
+    const service = this.keyboardLayoutService;
+    if (!preferences || !service || this.showKeyboardCalibration ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED || this.keyboardLayoutMode !== 'apple') return;
+    const captured: KeyboardLayoutSnapshot = service.snapshot();
+    if (!captured.ready || captured.count !== 1 || captured.deviceId < 0) return;
+    this.releaseRemoteNavigationKeys('layout_calibration'); this.releaseVirtualModifiers();
+    ConnectionService.releaseModifiers(); this.setControlMenu('');
+    this.showKeyboardSettings = false; this.showKeyboardCalibration = true;
+    try {
+      this.keyboardCalibrationDialog = new CustomDialogController({
+        builder: KeyboardLayoutCalibrationDialog({ deviceId: captured.deviceId, deviceName: captured.deviceName,
+          onSave: (swap: boolean): boolean => {
+            if (!this.remotePageVisible || this.peerPreferences !== preferences ||
+              this.keyboardLayoutService !== service || this.connectionStatus !== ConnectionStatus.CONNECTED) return false;
+            return service.saveCalibration(captured, swap);
+          },
+          onClose: () => {
+            this.showKeyboardCalibration = false;
+            ConnectionService.releaseModifiers();
+            this.showKeyboardSettings = this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED;
+          } }),
+        customStyle: true, autoCancel: false,
+        cancel: () => {
+          this.showKeyboardCalibration = false;
+          ConnectionService.releaseModifiers();
+          this.showKeyboardSettings = this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED;
+        }
+      });
+      this.keyboardCalibrationDialog.open();
+    } catch (_error) {
+      this.showKeyboardCalibration = false; this.showKeyboardSettings = true;
+      RustDeskNapi.appendDiagnosticLog('input-layout', 'calibration_open_failed');
+      this.showFileToast('无法打开键盘校准，请重试');
+    }
+  }
+
+  @Builder
+  buildKeyboardSettingsOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column({ space: 12 }) {
+        Text(translate('键盘设置', this.uiLanguage)).fontSize(20).fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryTextColor()).width('100%')
+        Scroll() {
+          Column({ space: 12 }) { this.buildKeyboardSettingsOptions(); }
+            .width('100%').alignItems(HorizontalAlign.Start)
+        }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+        Button(translate('关闭', this.uiLanguage)).width('100%').fontSize(14)
+          .constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
+          .onClick(() => { this.closeInputSettings(); })
+          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+      }.width(Math.min(520, Math.max(1, this.pageWidth - 32))).height('80%').padding(20).borderRadius(20)
+        .backgroundColor(this.isDarkMode ? '#1E2A3A' : '#FFFFFF')
+        .onClick(() => {})
+    }.width('100%').height('100%').backgroundColor('#66000000').zIndex(100).onClick(() => {})
+  }
+
   loadInputCompatibility(): void {
     const remap: string = this.peerPreferences?.get('keyboard-remap-v1') ?? '';
     this.keyboardRemappingEnabled = decodeKeyboardRemap(remap).enabled;
     ConnectionService.configureKeyboardRemapping(remap);
+    this.startKeyboardLayout();
     const capabilities: number = RustDeskNapi.getInputCapabilities();
     this.oneKvmPeer = (capabilities & 1) !== 0;
     this.relativeMouseSupported = (capabilities & 2) !== 0;
@@ -5568,14 +5740,13 @@ struct RemotePage {
   }
 
   @Builder
-  buildInputCompatibilityOptions() {
-    Text(translate(this.oneKvmPeer ? 'One-KVM 键鼠兼容' : '键鼠兼容（仅当前设备）', this.uiLanguage))
-      .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.primaryTextColor()).width('100%')
+  buildKeyboardSettingsOptions() {
     Row() {
       Text(translate('键盘模式', this.uiLanguage)).fontSize(14).fontColor(this.primaryTextColor()).layoutWeight(1)
       Select([{ value: translate('自动', this.uiLanguage) }, { value: translate('1:1 映射', this.uiLanguage) }, { value: translate('传统', this.uiLanguage) }])
         .selected(this.keyboardCompatibilityMode)
-        .value(this.keyboardCompatibilityMode === 1 ? '1:1 映射' : (this.keyboardCompatibilityMode === 2 ? '传统' : '自动'))
+        .value(translate(this.keyboardCompatibilityMode === 1 ? '1:1 映射' :
+          this.keyboardCompatibilityMode === 2 ? '传统' : '自动', this.uiLanguage))
         .onSelect((index: number) => {
           this.releaseRemoteNavigationKeys('keyboard_mode');
           ConnectionService.releaseModifiers();
@@ -5586,11 +5757,44 @@ struct RemotePage {
     }.width('100%')
     Text(translate('自动：One-KVM 使用传统键盘，其他设备保持原有输入方式；输入法文字仍由本地输入法提交。', this.uiLanguage))
       .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
+    Row() {
+      Text(translate('键盘布局', this.uiLanguage)).fontSize(14).fontColor(this.primaryTextColor()).layoutWeight(1)
+      Select([{ value: translate('自动', this.uiLanguage) }, { value: translate('系统原样', this.uiLanguage) },
+        { value: translate('苹果布局修正', this.uiLanguage) }])
+        .selected(this.keyboardLayoutMode === 'system' ? 1 : this.keyboardLayoutMode === 'apple' ? 2 : 0)
+        .value(translate(this.keyboardLayoutMode === 'system' ? '系统原样' :
+          this.keyboardLayoutMode === 'apple' ? '苹果布局修正' : '自动', this.uiLanguage))
+        .onSelect((index: number) => { this.setKeyboardLayoutMode(index === 1 ? 'system' : index === 2 ? 'apple' : 'auto'); })
+    }.width('100%')
+    Text(translate('自动只恢复已校准的键盘，不按品牌强制交换；系统原样忽略布局校准。', this.uiLanguage))
+      .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
+    Text(this.keyboardLayoutState.deviceName || translate(this.keyboardLayoutState.ready ?
+      '未检测到唯一的实体键盘' : '键盘信息暂不可用', this.uiLanguage))
+      .fontSize(12).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      .fontColor(this.secondaryTextColor()).width('100%')
+    Text(translate(this.keyboardLayoutStatus(), this.uiLanguage)).fontSize(12)
+      .fontColor(this.secondaryTextColor()).width('100%')
+    if (this.keyboardLayoutMode === 'apple') {
+      Button(translate('校准 Command / Option', this.uiLanguage))
+        .width('100%').constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 }).fontSize(13)
+        .enabled(this.keyboardLayoutState.ready && this.keyboardLayoutState.count === 1 &&
+          this.keyboardLayoutState.deviceId >= 0)
+        .onClick(() => { this.openKeyboardLayoutCalibration(); })
+        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+    }
     Button(translate(this.keyboardRemappingEnabled ? '自定义键盘映射：已开启' : '自定义键盘映射：关闭', this.uiLanguage))
       .width('100%').constraintSize({ minHeight: 44 }).fontSize(13)
       .fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor())
       .onClick(() => { this.openKeyboardMappingDialog(); })
       .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+    Text(translate('自定义映射的对应键规则优先；布局校准不会修改或重复套用已有规则。', this.uiLanguage))
+      .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
+  }
+
+  @Builder
+  buildInputCompatibilityOptions() {
+    Text(translate('鼠标兼容（仅当前设备）', this.uiLanguage))
+      .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.primaryTextColor()).width('100%')
     Row() {
       Text(translate('相对鼠标', this.uiLanguage)).fontSize(14).fontColor(this.primaryTextColor()).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: this.relativeMouseEnabled })
@@ -5627,10 +5831,14 @@ struct RemotePage {
     if (this.showKeyboardPanel) this.closeRemoteKeyboard();
     this.setControlMenu('');
     this.showKeyboardMappingDialog = true;
+    this.showKeyboardSettings = false;
     try {
     this.keyboardMappingDialog = new CustomDialogController({
       builder: KeyboardMappingDialog({ initial: preferences.get('keyboard-remap-v1'),
-        onClose: () => { this.showKeyboardMappingDialog = false; },
+        onClose: () => {
+          this.showKeyboardMappingDialog = false;
+          this.showKeyboardSettings = this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED;
+        },
         onSave: (value: string): boolean => {
           if (!this.remotePageVisible || this.peerPreferences !== preferences ||
             this.connectionStatus !== ConnectionStatus.CONNECTED) return false;
@@ -5647,11 +5855,15 @@ struct RemotePage {
           return true;
         } }),
       customStyle: true, autoCancel: false,
-      cancel: () => { this.showKeyboardMappingDialog = false; }
+      cancel: () => {
+        this.showKeyboardMappingDialog = false;
+        this.showKeyboardSettings = this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED;
+      }
     });
     this.keyboardMappingDialog.open();
     } catch (_error) {
       this.showKeyboardMappingDialog = false;
+      this.showKeyboardSettings = this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED;
       RustDeskNapi.appendDiagnosticLog('input-remap', 'editor_open_failed');
       this.showFileToast('无法打开键盘映射设置，请重试');
     }
@@ -5766,7 +5978,7 @@ struct RemotePage {
   }
 
   handleRemoteHover(isHovering: boolean): void {
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
     if (isHovering) {
@@ -5871,7 +6083,7 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.controlMenu) return;
     if (this.pipSurfaceOwned) return;
@@ -6357,7 +6569,7 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     let now: number = Date.now();
@@ -6385,7 +6597,7 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6480,7 +6692,7 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
-    if (this.showKeyboardMappingDialog) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6738,7 +6950,7 @@ struct RemotePage {
   handleRemoteKey(event: KeyEvent): boolean {
     if (this.pipSurfaceOwned) return false;
     if (this.showCommunicationPanel) return false;
-    if (this.showKeyboardMappingDialog) return false;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return false;
     if (this.desktopWindowActive === false) return false;
     if (this.controlMenu) {
       if (event.type === KeyType.Down && this.mapControlKeyCode(event.keyCode) === 27) this.setControlMenu('');

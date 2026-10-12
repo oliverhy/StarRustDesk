@@ -6,7 +6,8 @@ export const REMOTE_PEER_OPTION_NAMES: string[] = [
   'keyboard-compat', 'relative-mouse', 'cursor-compat', 'remote-control-toolbar-order',
   'remote-keyboard-toolbar-order', 'remote-keyboard-more-order', 'remote-toolbar-position-v1',
   'keyboard-toolbar-position-v1', 'remote-toolbar-collapsed', 'keyboard-tools-collapsed',
-  'pc-toolbar-pinned', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1'
+  'pc-toolbar-pinned', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1',
+  'keyboard-layout-mode'
 ];
 
 export function remotePeerPreferenceKey(server: string, peer: string): string {
@@ -24,6 +25,7 @@ export function validRemotePeerOption(name: string, value: string): boolean {
   if (name === 'input-mode') return value === 'mouse' || value === 'touch';
   if (name === 'keyboard-compat') return value === '0' || value === '1' || value === '2';
   if (name === 'keyboard-remap-v1') return validKeyboardRemapValue(value);
+  if (name === 'keyboard-layout-mode') return value === 'auto' || value === 'system' || value === 'apple';
   if (name === 'cursor-compat') return value === 'auto' || value === 'embedded' || value === 'separate';
   if (name === 'desktop-view-mode') return value === 'adaptive' || value === 'original' || value === 'custom';
   if (name === 'desktop-custom-percent' || name === 'handheld-zoom') {
