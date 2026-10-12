@@ -50,13 +50,13 @@ for (const locale of ['zh-Hans', 'zh-Hant', 'en']) {
   selector.setButtonShape(true);
   assert.equal(selector.roundedRectButtons, true);
   assert.equal(selector.buttonShapeLabel(), `${locale}:圆角长方形`);
-  assert.equal(selector.buttonShapeMenuLabel(true), `✓ ${locale}:圆角长方形`);
+  assert.equal(selector.buttonShapeMenuLabel(true), `${locale}:圆角长方形  ✓`);
   assert.equal(selector.buttonShapeMenuLabel(false), `${locale}:经典圆润`);
   assert.deepEqual(writes.at(-1), ['button-shape', 'rectangle']);
   selector.setButtonShape(false);
   assert.equal(selector.roundedRectButtons, false);
   assert.equal(selector.buttonShapeLabel(), `${locale}:经典圆润`);
-  assert.equal(selector.buttonShapeMenuLabel(false), `✓ ${locale}:经典圆润`);
+  assert.equal(selector.buttonShapeMenuLabel(false), `${locale}:经典圆润  ✓`);
   assert.equal(selector.buttonShapeMenuLabel(true), `${locale}:圆角长方形`);
   assert.deepEqual(writes.at(-1), ['button-shape', 'classic']);
 }

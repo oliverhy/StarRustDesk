@@ -19,6 +19,7 @@ export interface ConnectionBackupItem {
   password: string
   performancePreset: string
   groupId: string
+  serverScope?: string
 }
 
 export interface ConnectionBackupServerConfig {

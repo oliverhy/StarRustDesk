@@ -90,12 +90,13 @@ test('missing connection password opens an input dialog', () => {
   assert.match(connectionPage, /@State showConnectionPasswordDialog: boolean = false/);
   assert.match(connectionPage, /TextInput\(\{ placeholder: translate\('连接密码', this\.uiLanguage\)/);
   assert.match(connectionPage, /Toggle\(\{ type: ToggleType\.Checkbox, isOn: this\.rememberConnectionPassword \}\)/);
-  assert.match(connectionPage, /if \(password\.length <= 0\) \{\s*this\.pendingFileOnly = fileOnly;?\s*this\.openConnectionPasswordDialog\(\)/);
+  assert.match(connectionPage, /if \(password\.length <= 0\) \{\s*this\.pendingFileOnly = fileOnly;?\s*this\.pendingConnectionRequest = request\s*this\.openConnectionPasswordDialog\(\)/);
 });
 
 test('remember password is opt-in and saved before connect', () => {
   assert.match(connectionPage, /this\.rememberConnectionPassword = false/);
-  assert.match(connectionPage, /if \(remember\) \{\s*await this\.saveCurrentConnection\(\)\s*\}\s*this\.onConnect\(this\.pendingFileOnly\)/);
+  assert.match(connectionPage, /if \(remember\) \{[\s\S]*?await this\.saveConnectionDraft\(savedDraft/);
+  assert.match(connectionPage, /this\.onConnect\(this\.pendingFileOnly, request\)/);
 });
 
 console.log(`${passed} server/password regression checks passed`);

@@ -31,9 +31,15 @@ const form = between('  buildConnectionForm() {', '  @Builder\n  buildUpdateBann
 assert.match(page, /@State connectionFormExpanded: boolean = false/,
   'advanced connection fields should start collapsed');
 assert(form.indexOf('this.buildRemoteIdInput()') < form.indexOf('if (this.connectionFormExpanded)'),
-  'remote ID/IP must remain visible while advanced options are collapsed');
-assert.match(form, /this\.connectionFormExpanded \? '收起选项⌃' : '更多选项›'/,
-  'compact form needs a clear advanced-options action');
+  'the ID input must stay visible while options underneath are collapsed');
+assert(form.includes('this.buildQuickConnectionToggle()'), 'module needs an explicit expand action');
+assert.match(form, /this\.buildQuickConnectionMenu\(\)/,
+  'quick connect uses a compact menu, separate from saved device management');
+for (const builder of ['buildConnectionNameInput', 'buildConnectionGroupSelector', 'buildConnectionEditActions']) {
+  assert(!form.includes(`this.${builder}()`), 'quick connect cannot contain saved-record editing fields');
+}
+assert.match(page, /accessibilityText\(translate\('新增连接'[\s\S]*openNewSavedConnection\(\)/,
+  'saved devices need an independent add action');
 assert.match(form, /TransitionEffect\.OPACITY[\s\S]*TransitionEffect\.translate\(\{ y: -8 \}\)[\s\S]*duration: 220/,
   'advanced connection fields should animate while expanding and collapsing');
 assert.match(page, /placeholder: translate\('远端 ID \/ IP', this\.uiLanguage\)/,

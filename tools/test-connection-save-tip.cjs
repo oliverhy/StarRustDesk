@@ -9,7 +9,7 @@ let nextId = 0;
 const timers = new Map();
 const failures = [];
 const animations = [];
-const page = new Function('setTimeout', 'clearTimeout', 'Curve', 'promptAction', 'translate', `return new class {${methods}}`)(
+const page = new Function('setTimeout', 'clearTimeout', 'Curve', 'promptAction', 'translate', `class ConnectionSaveConflict extends Error {} return new class {${methods}}`)(
   (fn, ms) => { timers.set(++nextId, { fn, ms }); return nextId; },
   id => timers.delete(id), { EaseOut: 'easeOut' }, { showToast: x => failures.push(x.message) }, key => key);
 Object.assign(page, { savePageActive: true, saveTipGeneration: 0, saveTipTimer: -1,
@@ -25,7 +25,7 @@ const fire = id => { const timer = timers.get(id); timers.delete(id); timer.fn()
   assert.equal(page.saveTipVisible, false, 'no success tip before save completes');
   await page.saveConnectionWithTip();
   assert.equal(calls, 1, 'duplicate save clicks are guarded');
-  finish(); await saving;
+  finish(true); await saving;
   assert.equal(page.saveTipVisible, true);
   assert.equal(timers.get(page.saveTipTimer).ms, 1200);
   fire(page.saveTipTimer);

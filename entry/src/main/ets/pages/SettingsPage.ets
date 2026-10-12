@@ -26,11 +26,6 @@ import { ThemePreference } from '../service/ThemePreference'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
-interface SettingItem {
-  label: string
-  value: string
-}
-
 @Component
 export struct SettingsPage {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
@@ -184,9 +179,6 @@ export struct SettingsPage {
         Column({ space: 16 }) {
           this.buildLanguageCard()
           this.buildButtonShapeCard()
-          this.buildSectionCard(translate('Account', this.uiLanguage), [
-            { label: translate('Device Name', this.uiLanguage), value: RustDeskNapi.getDeviceName() },
-          ])
           this.buildDisplayCard()
           this.buildInputCard()
           this.buildAudioCard()
@@ -287,7 +279,7 @@ export struct SettingsPage {
   languageMenuLabel(value: string, label: string): string {
     // Keep language self-names recognizable even when the current UI language changes.
     const text: string = value === 'system' ? translate('跟随系统', this.uiLanguage) : label
-    return (this.uiLanguagePreference === value ? '✓ ' : '') + text
+    return text + (this.uiLanguagePreference === value ? '  ✓' : '')
   }
 
   @Builder
@@ -438,40 +430,6 @@ export struct SettingsPage {
         (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
       .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
       .onClick(() => { onClick() })
-  }
-
-  @Builder
-  buildSectionCard(title: string, items: SettingItem[]) {
-    Column() {
-      Text(translate(title, this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 8 })
-
-      ForEach(items, (item: SettingItem) => {
-        Row() {
-          Text(translate(item.label, this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          Blank()
-          if (item.value.length > 0) {
-            Text(translate(item.value, this.uiLanguage))
-              .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          }
-        }
-        .width('100%')
-        .padding({ top: 8, bottom: 8 })
-      }, (item: SettingItem) => item.label)
-    }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
   }
 
   @Builder
@@ -1408,8 +1366,8 @@ export struct SettingsPage {
   }
 
   buttonShapeMenuLabel(rectangular: boolean): string {
-    return (this.roundedRectButtons === rectangular ? '✓ ' : '') +
-      translate(rectangular ? '圆角长方形' : '经典圆润', this.uiLanguage)
+    return translate(rectangular ? '圆角长方形' : '经典圆润', this.uiLanguage) +
+      (this.roundedRectButtons === rectangular ? '  ✓' : '')
   }
 
   setButtonShape(rectangular: boolean): void {

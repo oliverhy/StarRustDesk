@@ -33,4 +33,16 @@ for (const kind of [0, 2, 3]) {
 }
 assert.deepEqual(sort([file('.hidden', 0, 0), file('x.TXT', 0, 0), file('x.jpg', 0, 0)], 'type', false)
   .map(x => x.name), ['.hidden', 'x.jpg', 'x.TXT']);
-console.log('PASS remote file sorting: four fields, both directions, folders first, natural names, non-mutation');
+const page = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
+const menuValues = Array.from(page.matchAll(/value: (translate\('[^']+', this\.uiLanguage\) \+ \(this\.remoteFileSortField === '[^']+' \? '  ✓' : ''\))/g), match => match[1]);
+assert.equal(menuValues.length, 4);
+for (const language of ['zh-Hans', 'zh-Hant', 'en']) {
+  for (const field of ['name', 'type', 'size', 'modified']) {
+    const labels = menuValues.map(value => new Function('translate', `return ${value};`).call({
+      uiLanguage: language, remoteFileSortField: field
+    }, (label, locale) => `${locale}:${label}`));
+    assert.equal(labels.filter(label => label.endsWith('  ✓')).length, 1);
+    assert(labels.every(label => label.startsWith(language + ':')));
+  }
+}
+console.log('PASS remote file sorting: four fields, both directions, folders first, natural names, non-mutation and trailing selection marks');

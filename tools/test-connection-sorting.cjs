@@ -97,4 +97,18 @@ test('every group follows the shared sort rule and direction, including ungroupe
   p.toggleSavedConnectionSortDirection(); p.setSavedConnectionSort('online');
   assert.deepEqual(members('work'),['a','b']); assert.deepEqual(members('home'),['c','d']); assert.deepEqual(members(''),['e']);
 });
+test('sort menu translates plain labels and marks selected choices after the text', () => {
+  const menu = source.slice(source.indexOf("Button(translate(`排序："), source.indexOf('  buildSavedConnectionViewSelector()'));
+  const values = Array.from(menu.matchAll(/value: (translate\('[^']+', this\.uiLanguage\) \+ \(this\.savedConnectionSort === '[^']+' \? '  ✓' : ''\))/g), match => match[1]);
+  assert.equal(values.length, 3);
+  for (const locale of ['zh-Hans', 'zh-Hant', 'en']) {
+    for (const mode of ['id', 'name', 'online']) {
+      const p = { savedConnectionSort: mode, uiLanguage: locale };
+      const labels = values.map(value => new Function('translate', `return ${value};`).call(p, (label, language) => `${language}:${label}`));
+      assert.equal(labels.filter(label => label.endsWith('  ✓')).length, 1);
+      assert(labels.every(label => label.startsWith(locale + ':')));
+      assert(labels.every(label => !label.startsWith('✓')));
+    }
+  }
+});
 console.log(`${passed} sorting checks passed`);

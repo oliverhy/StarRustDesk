@@ -14,6 +14,9 @@ import { PeerOnlineResult, PeerOnlineState, RemoteSecurityOptions, RustDeskNapi 
 import { CredentialStore } from '../service/CredentialStore'
 import { RemoteSecurityStore } from '../service/RemoteSecurityStore'
 import { CloudSyncService } from '../service/CloudSyncService'
+import { ConnectionEditorGroup, ConnectionEditResult, SavedConnectionDraft, SavedConnectionEditing } from '../model/SavedConnectionEditing'
+import { SavedConnectionEditorDialog } from '../widget/SavedConnectionEditorDialog'
+import { CompactConnectionModeMenu } from '../widget/CompactConnectionModeMenu'
 import {
   ConnectionBackupGroup,
   ConnectionBackupItem,
@@ -28,6 +31,7 @@ interface SavedConnectionInfo {
   password: string
   performancePreset: string
   groupId: string
+  serverScope?: string
 }
 
 interface SavedConnectionRow {
@@ -37,6 +41,13 @@ interface SavedConnectionRow {
   credentialAlias: string
   performancePreset: string
   groupId: string
+  serverScope?: string
+}
+
+interface SavedConnectionRequest {
+  draft: SavedConnectionDraft
+  savedId: string
+  serverScope: string
 }
 
 interface SavedConnectionGroup {
@@ -63,6 +74,8 @@ const PEER_STATE_OFFLINE: number = 2
 const PEER_STATE_UNKNOWN: number = 3
 const PEER_STATE_REFRESH_MS: number = 30000
 const PEER_STATE_QUERY_TIMEOUT_MS: number = 12000
+
+class ConnectionSaveConflict extends Error {}
 
 @Component
 export struct ConnectionPage {
@@ -112,6 +125,35 @@ export struct ConnectionPage {
   @State savedConnections: SavedConnectionInfo[] = []
   private savedConnectionsLoadGeneration: number = 0
   @State selectedConnectionId: string = ''
+  @State connectionEditorDraft: SavedConnectionDraft = SavedConnectionEditing.empty()
+  @State connectionEditorGroups: ConnectionEditorGroup[] = []
+  @State creatingSavedConnection: boolean = false
+  private lastSavedHomepageId: string = ''
+  private editingConnectionId: string = ''
+  private editingConnectionGeneration: number = 0
+  private editingConnectionOriginal: SavedConnectionInfo | undefined = undefined
+  private editingConnectionScope: string = ''
+  private pendingConnectionRequest: SavedConnectionRequest | undefined = undefined
+  private connectionEditorController: CustomDialogController = new CustomDialogController({
+    builder: SavedConnectionEditorDialog({
+      initial: this.connectionEditorDraft,
+      groups: this.connectionEditorGroups,
+      createNew: this.creatingSavedConnection,
+      onSave: (draft: SavedConnectionDraft, action: string): Promise<ConnectionEditResult> => {
+        return this.saveEditedConnection(draft, action)
+      },
+      onClose: () => { this.closeConnectionEditor() }
+    }),
+    autoCancel: false,
+    cancel: () => {
+      this.editingConnectionGeneration++
+      this.editingConnectionId = ''
+      this.editingConnectionOriginal = undefined
+      this.creatingSavedConnection = false
+      this.connectionEditorDraft = SavedConnectionEditing.empty()
+    },
+    customStyle: true
+  })
   @State selectedGroupId: string = ''
   @State savedConnectionsVersion: number = 0
   @State peerOnlineStatesVersion: number = 0
@@ -177,6 +219,7 @@ export struct ConnectionPage {
   aboutToDisappear(): void {
     this.savePageActive = false
     this.clearSaveTip()
+    this.closeConnectionEditor()
     if (this.preparingAccount) {
       ConnectionService.cancelPendingConnection()
       this.preparingAccount = false
@@ -203,6 +246,9 @@ export struct ConnectionPage {
   }
 
   onServerConfigVersionChanged(): void {
+    this.closeConnectionEditor()
+    this.pendingConnectionRequest = undefined
+    this.selectedConnectionId = ''
     this.checkServerConfig()
     this.markAllPeerStatesUnknown()
     this.nextPeerOnlineRefreshAt = 0
@@ -220,6 +266,7 @@ export struct ConnectionPage {
   }
 
   onCloudConnectionsChanged(): void {
+    this.closeConnectionEditor()
     this.loadConnectionGroups()
     this.loadSavedConnections()
   }
@@ -455,22 +502,25 @@ export struct ConnectionPage {
 
   @Builder
   buildWideQuickConnect() {
-    Row({ space: 20 }) {
-      Text(translate(this.selectedConnectionId.length > 0 ? '编辑连接' : '新建连接', this.uiLanguage))
-        .fontSize(20)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-      Column() {
-        this.buildRemoteIdInput()
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Text(translate('连接远端', this.uiLanguage))
+          .fontSize(20)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        Blank()
+        this.buildQuickConnectionMenu()
       }
-      .layoutWeight(1)
-      Button(translate('更多选项 ›', this.uiLanguage))
-        .height(44)
-        .fontSize(14)
-        .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-        .backgroundColor(Color.Transparent)
-        .onClick(() => { this.setTabletEditorVisible(true) })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+      .width('100%')
+      .constraintSize({ minHeight: 38 })
+      this.buildRemoteIdInput()
+      this.buildQuickConnectionToggle()
+      if (this.connectionFormExpanded) {
+        Column() { this.buildPerformancePresetSelector() }
+          .width(Math.min(360, this.pageWidth * 0.45)).align(Alignment.Start)
+          .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -8 }))
+            .animation({ duration: 220, curve: Curve.EaseInOut }))
+      }
     }
     .width('100%')
     .padding(16)
@@ -521,40 +571,31 @@ export struct ConnectionPage {
   buildConnectionForm() {
     Column({ space: 10 }) {
       Row() {
-        Text(translate(this.selectedConnectionId.length > 0 ? '编辑连接' : '新建连接', this.uiLanguage))
+        Text(translate('连接远端', this.uiLanguage))
           .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         Blank()
-        Button(translate(this.isWideDeviceLayout() ? '关闭 ×' :
-          (this.connectionFormExpanded ? '收起选项⌃' : '更多选项›'), this.uiLanguage))
-          .height(34)
-          .fontSize(14)
-          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          .backgroundColor(Color.Transparent)
-          .padding({ left: 8, right: 4 })
-          .onClick(() => {
-            if (this.isWideDeviceLayout()) {
-              this.setTabletEditorVisible(false)
-            } else {
-              this.setConnectionFormExpanded(!this.connectionFormExpanded)
-            }
-          })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+        if (this.isWideDeviceLayout()) {
+          Button(translate('关闭 ×', this.uiLanguage))
+            .height(34).fontSize(14).backgroundColor(Color.Transparent)
+            .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+            .onClick(() => { this.setTabletEditorVisible(false) })
+            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+        } else {
+          this.buildQuickConnectionMenu()
+        }
       }
       .width('100%')
-      .height(38)
+      .constraintSize({ minHeight: 38 })
 
       this.buildRemoteIdInput()
-
+      this.buildQuickConnectionToggle()
       if (this.connectionFormExpanded) {
         Column({ space: 10 }) {
-          this.buildConnectionNameInput()
-          this.buildConnectionGroupSelector()
+          this.buildPerformancePresetSelector()
           this.buildPasswordInput()
           this.buildRemoteSecurityOptions()
-          this.buildPerformancePresetSelector()
-          this.buildConnectionEditActions()
           if (this.connectionStatusText.length > 0) {
             this.buildConnectionStatus()
           }
@@ -575,6 +616,46 @@ export struct ConnectionPage {
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
     .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .margin({ bottom: 4 })
+  }
+
+  @Builder
+  buildQuickConnectionToggle() {
+    Row({ space: 8 }) {
+    Button() {
+      Image(this.connectionFormExpanded ? $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+        .width(12).height(12).objectFit(ImageFit.Contain)
+    }.width(this.savedHeaderButtonSize()).height(this.savedHeaderButtonSize()).padding(0)
+      .backgroundColor(this.selectedControlBackground())
+      .responseRegion({ x: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+        y: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+        width: this.savedHeaderHitSize(), height: this.savedHeaderHitSize() })
+      .accessibilityText(translate(this.connectionFormExpanded ? '收起连接选项' : '连接选项', this.uiLanguage))
+      .onClick(() => { this.setConnectionFormExpanded(!this.connectionFormExpanded) })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+      Text(translate(this.connectionFormExpanded ? '收起连接选项' : '连接选项', this.uiLanguage))
+        .fontSize(12).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .layoutWeight(1).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+        .onClick(() => { this.setConnectionFormExpanded(!this.connectionFormExpanded) })
+    }.width('100%').constraintSize({ minHeight: 32 }).alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  buildQuickConnectionMenu() {
+    Button('⋯')
+      .width(44).height(40).fontSize(24).padding(0)
+      .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+      .backgroundColor(Color.Transparent)
+      .bindMenu([
+        { value: translate('添加到已保存连接', this.uiLanguage),
+          action: () => { this.openNewSavedConnection(true) } },
+        { value: translate(this.connectionFormExpanded && !this.isWideDeviceLayout() ? '收起连接选项' : '连接选项', this.uiLanguage),
+          action: () => {
+            if (this.isWideDeviceLayout()) this.setTabletEditorVisible(true)
+            else this.setConnectionFormExpanded(!this.connectionFormExpanded)
+          } },
+        { value: translate('文件传输', this.uiLanguage), action: () => { this.onConnect(true) } }
+      ], { placement: Placement.BottomRight, enableArrow: true })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
   }
 
   @Builder
@@ -646,20 +727,20 @@ export struct ConnectionPage {
         Stack({ alignContent: Alignment.End }) {
           TextInput({ placeholder: translate('远端 ID / IP', this.uiLanguage), text: this.remoteId })
             .type(InputType.Normal)
-            .fontSize(20)
+            .enterKeyType(EnterKeyType.Go)
+            .onSubmit(() => { this.onConnect() })
+            .fontSize(18)
             .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.ID_COLOR)
             .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .width('100%')
-            .height(50)
-            .padding({ left: 12, right: 44 })
+            .height(this.connectionEditButtonHeight())
+            .padding({ left: 10, right: 44 })
             .backgroundColor(Color.Transparent)
             .onFocus(() => { this.focusedConnectionField = 'id' })
             .onBlur(() => { this.focusedConnectionField = '' })
             .onChange((value: string) => {
-              let normalized: string = this.normalizeRemoteId(value)
-              this.remoteId = normalized
-              this.isIdEmpty = normalized.length === 0
+              this.onRemoteIdChanged(value)
             })
 
           if (!this.isIdEmpty) {
@@ -670,27 +751,29 @@ export struct ConnectionPage {
             }
             .width(24)
             .height(24)
+            .responseRegion({ x: -10, y: -10, width: 44, height: 44 })
             .margin({ right: 10 })
             .backgroundColor(RustDeskTheme.DARK_GRAY)
             .onClick(() => {
-              this.remoteId = ''
-              this.isIdEmpty = true
+                this.onRemoteIdChanged('')
             })
             .transition(TransitionEffect.OPACITY)
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Circle))
           }
         }
         .layoutWeight(1)
-        .height(50)
+        .height(this.connectionEditButtonHeight())
 
         Button() {
           Image($r('app.media.connect_arrow'))
-            .width(26)
-            .height(26)
+            .width(22)
+            .height(22)
             .objectFit(ImageFit.Contain)
         }
-        .width(50)
-        .height(50)
+        .width(this.connectionEditButtonHeight())
+        .height(this.connectionEditButtonHeight())
+        .responseRegion({ x: -2, y: -2, width: this.connectionEditButtonHeight() + 4,
+          height: this.connectionEditButtonHeight() + 4 })
         .padding(0)
         .borderRadius(12)
         .backgroundColor(RustDeskTheme.ACCENT)
@@ -699,8 +782,8 @@ export struct ConnectionPage {
         })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
       }
-      .padding({ left: 14, right: 6 })
-      .height(62)
+      .padding({ left: 6, right: 4 })
+      .height(this.connectionEditButtonHeight() + 8)
       .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
       .border({ width: 1, color: this.connectionInputBorder('id') })
       .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
@@ -786,79 +869,30 @@ export struct ConnectionPage {
   @Builder
   buildPasswordInput() {
     Column({ space: 8 }) {
-      if (this.passwordEditMode === 'keep' && this.hasSavedConnectionPassword()) {
-        Row({ space: 8 }) {
-          Text(translate('密码已保存', this.uiLanguage))
-            .fontSize(16)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
-            .layoutWeight(1)
-          Button(translate('更换', this.uiLanguage))
-            .fontSize(14)
-            .height(36)
-            .backgroundColor(this.selectedControlBackground())
-            .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-            .onClick(() => { this.startPasswordReplacement() })
-          Button(translate('清除', this.uiLanguage))
-            .fontSize(14)
-            .height(36)
-            .backgroundColor(Color.Transparent)
-            .fontColor(RustDeskTheme.ERROR)
-            .onClick(() => { this.clearSavedPassword() })
-        }
-        .width('100%')
-        .padding({ left: 16, right: 8, top: 6, bottom: 6 })
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-        .border({ width: 1, color: this.connectionInputBorder('password') })
-        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-      } else if (this.passwordEditMode === 'clear') {
-        Row({ space: 8 }) {
-          Text(translate('密码待清除，保存后生效', this.uiLanguage))
-            .fontSize(14)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .layoutWeight(1)
-          Button(translate('撤销', this.uiLanguage))
-            .fontSize(14)
-            .height(36)
-            .backgroundColor(this.selectedControlBackground())
-            .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-            .onClick(() => { this.cancelPasswordChange() })
-        }
-        .width('100%')
-      } else {
-        TextInput({ placeholder: translate(this.hasSavedConnectionPassword() ? '输入新密码' : 'Password', this.uiLanguage), text: this.password })
-      .type(InputType.Password)
-      .showPasswordIcon(true)
-      .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-      .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-      .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-      .width('100%')
-      .height(48)
-      .padding({ left: 16, right: 16 })
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-      .border({ width: 1, color: this.connectionInputBorder('password') })
-      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-      .onFocus(() => { this.focusedConnectionField = 'password' })
-      .onBlur(() => { this.focusedConnectionField = '' })
-      .onChange((value: string) => {
-        this.password = value
-        this.passwordEditMode = 'replace'
-      })
-        if (this.passwordEditMode === 'replace' && this.hasSavedConnectionPassword()) {
-          Button(translate('取消更换，保留已保存密码', this.uiLanguage))
-            .fontSize(13)
-            .height(32)
-            .backgroundColor(Color.Transparent)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .onClick(() => { this.cancelPasswordChange() })
-        }
+      if (this.hasSavedConnectionPassword()) {
+        Text(translate('密码已保存', this.uiLanguage)).fontSize(14)
+          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY).width('100%')
       }
-    }
-    .width('100%')
+      TextInput({ placeholder: translate(this.hasSavedConnectionPassword() ?
+        '本次连接密码（留空使用已保存密码）' : 'Password', this.uiLanguage), text: this.password })
+        .type(InputType.Password).showPasswordIcon(true).fontSize(RustDeskTheme.FONT_SIZE_BODY)
+        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+        .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        .width('100%').height(48).padding({ left: 16, right: 16 })
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.connectionInputBorder('password') }).borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+        .onFocus(() => { this.focusedConnectionField = 'password' }).onBlur(() => { this.focusedConnectionField = '' })
+        .onChange((value: string) => { this.password = value; this.passwordEditMode = value.length > 0 ? 'replace' : 'keep' })
+      if (this.hasSavedConnectionPassword()) {
+        Text(translate('已保存密码不会回填；更换或清除请在“更多 → 修改连接”中操作。', this.uiLanguage))
+          .fontSize(12).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY).width('100%')
+      }
+    }.width('100%')
   }
 
   @Builder
   buildSavedConnections() {
-    Column({ space: 8 }) {
+    Column({ space: this.savedConnectionViewMode === 'compact' ? 6 : 8 }) {
       Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
       Row() {
         Button() {
@@ -868,35 +902,58 @@ export struct ConnectionPage {
             .height(12)
             .objectFit(ImageFit.Contain)
         }
-          .width(42)
-          .height(42)
+          .width(this.savedHeaderButtonSize())
+          .height(this.savedHeaderButtonSize())
+          .responseRegion({ x: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+            y: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+            width: this.savedHeaderHitSize(), height: this.savedHeaderHitSize() })
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(21)
+          .borderRadius(8)
           .padding(0)
           .onClick(() => {
             this.toggleSavedConnectionsExpanded()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 21, ButtonType.Capsule))
-        Text(translate('已保存连接', this.uiLanguage))
-          .fontSize(20)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .margin({ left: 8 })
-        Text(translate(`${this.savedConnections.length}`, this.uiLanguage))
-          .fontSize(12)
-          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(9)
-          .margin({ left: 8 })
+        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
+          Text(translate('已保存连接', this.uiLanguage))
+            .fontSize(20)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .flexShrink(1)
+          Text(translate(`${this.savedConnections.length}`, this.uiLanguage))
+            .fontSize(12)
+            .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+            .borderRadius(9)
+            .margin({ left: 8 })
+            .flexShrink(0)
+        }
+        .layoutWeight(1)
+        .margin({ left: 8, right: 16 })
         this.buildSavedConnectionViewSelector()
+        Button() {
+          Stack({ alignContent: Alignment.Center }) {
+            Row().width(12).height(2).borderRadius(1).backgroundColor(this.selectedControlText())
+            Row().width(2).height(12).borderRadius(1).backgroundColor(this.selectedControlText())
+          }.width(16).height(16)
+        }
+          .width(this.savedHeaderButtonSize()).height(this.savedHeaderButtonSize()).padding(0).margin({ left: 8 })
+          .responseRegion({ x: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+            y: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+            width: this.savedHeaderHitSize(), height: this.savedHeaderHitSize() })
+          .enabled(!this.savingConnection)
+          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
+          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+          .accessibilityText(translate('新增连接', this.uiLanguage))
+          .onClick(() => { this.openNewSavedConnection() })
+          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width(this.isWideDeviceLayout() ? '35%' : '100%')
       .flexShrink(0)
-      .constraintSize({ minHeight: Math.ceil(46 + Math.max(0, this.uiFontScale - 1) * 18) })
+      .constraintSize({ minHeight: this.savedHeaderRowMinHeight() })
 
       Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
         if (this.savedConnectionSearchExpanded) {
@@ -927,11 +984,11 @@ export struct ConnectionPage {
             .backgroundColor(Color.Transparent)
             .padding({ left: 0, right: 2 })
             .bindMenu([
-              { value: translate(`${this.savedConnectionSort === 'id' ? '✓ ' : ''}远端 ID`, this.uiLanguage),
+              { value: translate('远端 ID', this.uiLanguage) + (this.savedConnectionSort === 'id' ? '  ✓' : ''),
                 action: () => { this.setSavedConnectionSort('id') } },
-              { value: translate(`${this.savedConnectionSort === 'name' ? '✓ ' : ''}设备名称`, this.uiLanguage),
+              { value: translate('设备名称', this.uiLanguage) + (this.savedConnectionSort === 'name' ? '  ✓' : ''),
                 action: () => { this.setSavedConnectionSort('name') } },
-              { value: translate(`${this.savedConnectionSort === 'online' ? '✓ ' : ''}在线优先`, this.uiLanguage),
+              { value: translate('在线优先', this.uiLanguage) + (this.savedConnectionSort === 'online' ? '  ✓' : ''),
                 action: () => { this.setSavedConnectionSort('online') } }
             ], { placement: Placement.BottomLeft, enableArrow: true })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
@@ -1032,7 +1089,7 @@ export struct ConnectionPage {
       .width('100%')
 
       if (this.savedConnectionsExpanded) {
-        Column({ space: 8 }) {
+        Column({ space: this.savedConnectionViewMode === 'compact' ? 4 : 8 }) {
           if (this.savedConnections.length === 0 && this.connectionGroups.length === 0) {
             Column({ space: 8 }) {
               Text(translate('暂无保存的连接', this.uiLanguage))
@@ -1087,7 +1144,8 @@ export struct ConnectionPage {
       }
     }
     .width('100%')
-    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .padding({ left: 14, right: 14, top: this.savedConnectionViewMode === 'compact' ? 10 : 12,
+      bottom: this.savedConnectionViewMode === 'compact' ? 8 : 12 })
     .onAreaChange((_oldArea: Area, area: Area) => {
       this.savedConnectionsContentWidth = Math.max(0, (area.width as number) - 28)
     })
@@ -1102,23 +1160,23 @@ export struct ConnectionPage {
   buildSavedConnectionViewSelector() {
     Button() {
       if (this.savedConnectionViewMode === 'compact') {
-        Column({ space: 4 }) {
+        Column({ space: 3 }) {
           ForEach([0, 1, 2], (_index: number) => {
-            Row({ space: 3 }) {
-              Row().width(3).height(3).borderRadius(1)
+            Row({ space: 2 }) {
+              Row().width(2).height(2).borderRadius(1)
                 .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-              Row().width(13).height(2).borderRadius(1)
+              Row().width(10).height(2).borderRadius(1)
                 .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
             }
           }, (index: number) => `${index}`)
         }
       } else {
-        Column({ space: 3 }) {
+        Column({ space: 2 }) {
           ForEach([0, 1], (_index: number) => {
-            Row({ space: 3 }) {
-              Row().width(7).height(7).borderRadius(2)
+            Row({ space: 2 }) {
+              Row().width(6).height(6).borderRadius(2)
                 .border({ width: 1, color: this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY })
-              Row().width(7).height(7).borderRadius(2)
+              Row().width(6).height(6).borderRadius(2)
                 .border({ width: 1, color: this.isDarkMode ? '#AFCBFF' : RustDeskTheme.TEXT_SECONDARY })
             }
           }, (index: number) => `${index}`)
@@ -1126,10 +1184,13 @@ export struct ConnectionPage {
       }
     }
     .id('saved-connection-view-selector')
-    .width(44)
-    .height(Math.max(44, this.savedToolbarButtonHeight()))
+    .width(this.savedHeaderButtonSize())
+    .height(this.savedHeaderButtonSize())
+    .responseRegion({ x: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+      y: -(this.savedHeaderHitSize() - this.savedHeaderButtonSize()) / 2,
+      width: this.savedHeaderHitSize(), height: this.savedHeaderHitSize() })
     .padding(0)
-    .margin({ right: 4 })
+    .margin({ right: 8 })
     .backgroundColor(this.savedConnectionViewMode === 'compact' ?
       (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT) : Color.Transparent)
     .accessibilityText(translate('连接显示方式', this.uiLanguage))
@@ -1138,7 +1199,7 @@ export struct ConnectionPage {
       { value: this.savedConnectionViewMenuLabel('normal'), action: () => { this.setSavedConnectionView('normal') } },
       { value: this.savedConnectionViewMenuLabel('compact'), action: () => { this.setSavedConnectionView('compact') } }
     ], { placement: Placement.BottomLeft, enableArrow: true })
-    .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+    .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
   }
 
   @Builder
@@ -1308,7 +1369,7 @@ export struct ConnectionPage {
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
       }
       .width('100%')
-      .height(this.savedConnectionViewMode === 'compact' ? Math.ceil(34 + Math.max(0, this.uiFontScale - 1) * 12) : 38)
+      .constraintSize({ minHeight: this.savedConnectionViewMode === 'compact' ? Math.ceil(30 + Math.max(0, this.uiFontScale - 1) * 12) : 38 })
       .padding({ left: 4, right: 4 })
       .alignItems(VerticalAlign.Center)
 
@@ -1381,7 +1442,7 @@ export struct ConnectionPage {
       }
     }
     .width('100%')
-    .margin({ top: 4 })
+    .margin({ top: this.savedConnectionViewMode === 'compact' ? 0 : 4 })
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
     .borderRadius(12)
@@ -1405,23 +1466,7 @@ export struct ConnectionPage {
       } else {
         Row({ space: 6 }) {
           this.buildCompactSavedConnectionStatus(item)
-          if (this.savedCompactSingleLine()) {
-            Text(item.name.length > 0 ? item.name : item.remoteId)
-              .fontSize(14)
-              .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-              .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-            Text(item.remoteId)
-              .fontSize(12)
-              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-              .width(this.savedCompactIdWidth())
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          } else {
-            this.buildCompactSavedConnectionIdentity(item)
-          }
+          this.buildCompactSavedConnectionIdentity(item)
           this.buildSavedConnectionConnectButton(item, true)
           this.buildSavedConnectionMoreButton(item, true)
         }
@@ -1432,7 +1477,7 @@ export struct ConnectionPage {
     .width('100%')
     .constraintSize({ minHeight: this.savedCompactRowMinHeight() })
     .justifyContent(FlexAlign.Center)
-    .padding({ left: 6, right: 4, top: 3, bottom: 3 })
+    .padding({ left: 6, right: 4, top: 0, bottom: 0 })
     .border({ width: { bottom: 1 }, color: this.isDarkMode ? '#303B4D' : RustDeskTheme.DIVIDER })
   }
 
@@ -1450,32 +1495,25 @@ export struct ConnectionPage {
 
   @Builder
   buildCompactSavedConnectionIdentity(item: SavedConnectionInfo) {
-    Column({ space: 2 }) {
-      Text(item.name.length > 0 ? item.name : item.remoteId)
-        .fontSize(14)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(item.remoteId)
-        .fontSize(12)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .layoutWeight(1)
-    .alignItems(HorizontalAlign.Start)
+    Text(this.savedCompactDisplayName(item))
+      .fontSize(14)
+      .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+      .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .layoutWeight(1)
   }
 
   @Builder
   buildSavedConnectionConnectButton(item: SavedConnectionInfo, compact: boolean) {
     Button(translate('连接', this.uiLanguage))
       .width(compact ? this.savedCompactConnectWidth() : 68)
-      .height(compact ? this.savedCompactActionHeight() : 32)
+      .height(compact ? this.savedCompactConnectVisualHeight() : 32)
+      .responseRegion({ x: 0, y: compact ? -(this.savedCompactActionHeight() - this.savedCompactConnectVisualHeight()) / 2 : 0,
+        width: '100%', height: compact ? this.savedCompactActionHeight() : '100%' })
+      .padding(0)
       .fontSize(12)
-      .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+      .fontWeight(compact ? FontWeight.Medium : RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
       .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
       .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
       .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
@@ -1487,7 +1525,9 @@ export struct ConnectionPage {
   buildSavedConnectionMoreButton(item: SavedConnectionInfo, compact: boolean) {
     Button('⋯')
       .width(compact ? 44 : 42)
-      .height(compact ? this.savedCompactActionHeight() : 32)
+      .height(compact ? this.savedCompactMoreVisualHeight() : 32)
+      .responseRegion({ x: 0, y: compact ? -(this.savedCompactActionHeight() - this.savedCompactMoreVisualHeight()) / 2 : 0,
+        width: '100%', height: compact ? this.savedCompactActionHeight() : '100%' })
       .fontSize(15)
       .fontColor(this.isDarkMode ? '#D6DCE7' : RustDeskTheme.TEXT_SECONDARY)
       .backgroundColor(Color.Transparent)
@@ -1495,8 +1535,7 @@ export struct ConnectionPage {
       .padding(0)
       .bindMenu([
         { value: translate('文件传输（不打开画面）', this.uiLanguage), action: () => {
-          this.applySavedConnection(item)
-          this.onConnect(true)
+          this.onConnect(true, this.requestForSavedConnection(item))
         } },
         { value: translate('移动到分组', this.uiLanguage), action: () => { this.openGroupPickerForConnection(item.id) } },
         { value: translate('重命名', this.uiLanguage), action: () => { this.openRenameConnectionDialog(item.id) } },
@@ -1727,7 +1766,7 @@ export struct ConnectionPage {
             this.rememberConnectionPassword = isOn
           })
         Column({ space: 2 }) {
-          Text(translate(this.selectedConnectionId.length > 0 ? '保存密码到此连接' : '保存密码并保存此连接', this.uiLanguage))
+          Text(translate((this.pendingConnectionRequest?.savedId.length ?? 0) > 0 ? '保存密码到此连接' : '保存密码并保存此连接', this.uiLanguage))
             .fontSize(14)
             .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
             .width('100%')
@@ -1999,7 +2038,7 @@ export struct ConnectionPage {
   @Builder
   buildConnectionEditActions() {
     Row({ space: 10 }) {
-      Button(translate(this.selectedConnectionId.length > 0 ? '保存修改' : '保存连接', this.uiLanguage))
+      Button(translate('保存新连接', this.uiLanguage))
         .enabled(!this.savingConnection && this.remoteId.trim().length > 0)
         .height(this.connectionEditButtonHeight())
         .layoutWeight(1)
@@ -2054,24 +2093,23 @@ export struct ConnectionPage {
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
 
-      Row({ space: 3 }) {
-        this.buildPresetButton('稳定', 'stable')
-        this.buildPresetButton('高帧率', 'high_fps')
-        this.buildPresetButton('高流畅', 'smooth')
-        this.buildPresetButton('高丝滑', 'silky')
-      }
-      .width('100%')
-      .padding(3)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-      .borderRadius(12)
-      Row({ space: 3 }) {
-        this.buildPresetButton('高清优先', 'best')
-        this.buildPresetButton('自定义', 'custom')
-      }
-      .width('100%')
-      .padding(3)
-      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
-      .borderRadius(12)
+      Select(this.connectionModeOptions())
+        .menuItemContentModifier(new CompactConnectionModeMenu(this.isDarkMode, this.uiFontScale))
+        .optionWidth(OptionWidthMode.FIT_TRIGGER)
+        .selected(this.connectionModeIndex())
+        .value(translate(['稳定', '高帧率', '高流畅', '高丝滑', '高清优先', '自定义'][this.connectionModeIndex()], this.uiLanguage))
+        .font({ size: 14, weight: FontWeight.Medium })
+        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+        .selectedOptionFontColor(this.selectedControlText())
+        .selectedOptionBgColor(this.selectedControlBackground())
+        .optionBgColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .width('100%')
+        .constraintSize({ minHeight: this.connectionEditButtonHeight() })
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+        .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+        .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+        .accessibilityText(translate('连接模式', this.uiLanguage))
+        .onSelect((index: number) => { this.selectConnectionMode(index) })
 
       if (PerformanceSettings.isCustom(this.performancePreset)) {
         Text(translate(`码率比例：${PerformanceSettings.bitrate(this.performancePreset)}%`, this.uiLanguage))
@@ -2113,27 +2151,24 @@ export struct ConnectionPage {
     return Math.ceil(40 + Math.max(0, this.uiFontScale - 1) * 18)
   }
 
-  @Builder
-  buildPresetButton(label: string, preset: string) {
-    Button(translate(label, this.uiLanguage))
-      .height(36)
-      .layoutWeight(1)
-      .fontSize(12)
-      .fontColor(this.isPerformancePresetSelected(preset) ? this.selectedControlText() :
-        (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY))
-      .backgroundColor(this.isPerformancePresetSelected(preset) ? this.selectedControlBackground() : Color.Transparent)
-      .border({ width: 1, color: this.isPerformancePresetSelected(preset) ?
-        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
-      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-      .onClick(() => {
-        this.performancePreset = preset === 'custom' ? PerformanceSettings.custom(
-          PerformanceSettings.bitrate(this.performancePreset), PerformanceSettings.fps(this.performancePreset)) : preset
-      })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+  connectionModeOptions(): SelectOption[] {
+    return ['稳定', '高帧率', '高流畅', '高丝滑', '高清优先', '自定义'].map((label: string): SelectOption => {
+      return { value: translate(label, this.uiLanguage) }
+    })
   }
 
-  private isPerformancePresetSelected(preset: string): boolean {
-    return preset === 'custom' ? PerformanceSettings.isCustom(this.performancePreset) : this.performancePreset === preset
+  connectionModeIndex(): number {
+    const preset = PerformanceSettings.normalize(this.performancePreset)
+    return PerformanceSettings.isCustom(preset) ? 5 : ['stable', 'high_fps', 'smooth', 'silky', 'best'].indexOf(preset)
+  }
+
+  selectConnectionMode(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index > 5) return
+    this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
+      this.performancePreset = index === 5 ? PerformanceSettings.custom(
+        PerformanceSettings.bitrate(this.performancePreset), PerformanceSettings.fps(this.performancePreset)) :
+        ['stable', 'high_fps', 'smooth', 'silky', 'best'][index]
+    })
   }
 
   private selectedControlText(): ResourceColor {
@@ -2151,11 +2186,19 @@ export struct ConnectionPage {
     return this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG
   }
 
-  async onConnect(fileOnly: boolean = false): Promise<void> {
+  async onConnect(fileOnly: boolean = false, requested: SavedConnectionRequest | undefined = undefined): Promise<void> {
     if (this.preparingAccount) return
-    let peerId: string = this.normalizeRemoteId(this.remoteId)
-    this.remoteId = peerId
-    this.isIdEmpty = peerId.length === 0
+    let password: string = this.connectionPasswordForUse()
+    const request: SavedConnectionRequest = requested ?? this.requestForCurrentForm()
+    let peerId: string = this.normalizeRemoteId(request.draft.remoteId)
+    if (requested === undefined) {
+      this.remoteId = peerId
+      this.isIdEmpty = peerId.length === 0
+    } else password = request.draft.password
+    if (request.serverScope !== this.currentConnectionScope()) {
+      this.connectionStatusText = '此连接属于其他网络，请切换服务器后重试'
+      return
+    }
     let nativeStatus: ConnectionStatus = this.syncConnectionState()
     if (nativeStatus === ConnectionStatus.CONNECTED || nativeStatus === ConnectionStatus.WAITING_2FA) {
       // A user-triggered connect action means this page is currently visible.
@@ -2170,9 +2213,9 @@ export struct ConnectionPage {
       this.connectionStatusColor = RustDeskTheme.ERROR
       return
     }
-    let password: string = this.connectionPasswordForUse()
     if (password.length <= 0) {
       this.pendingFileOnly = fileOnly
+      this.pendingConnectionRequest = request
       this.openConnectionPasswordDialog()
       return
     }
@@ -2185,21 +2228,22 @@ export struct ConnectionPage {
       let status: ConnectionStatus
       try {
         const selectedMatchesPeer: boolean = this.savedConnections.some((item: SavedConnectionInfo) =>
-          item.id === this.selectedConnectionId && this.normalizeRemoteId(item.remoteId) === peerId)
-        if (this.autoUnlock && selectedMatchesPeer && this.osPasswordDraft.length === 0 &&
-          !RemoteSecurityStore.isCurrentServer(this.selectedConnectionId)) {
+          item.id === request.savedId && SavedConnectionEditing.endpoint(item.remoteId) === SavedConnectionEditing.endpoint(peerId))
+        if (request.draft.autoUnlock && selectedMatchesPeer && request.draft.osPassword.length === 0 &&
+          !RemoteSecurityStore.isCurrentServer(request.savedId)) {
           RustDeskNapi.appendDiagnosticLog('remote-security', 'auto_unlock_skipped server_configuration_changed')
         }
         const security: RemoteSecurityOptions = {
-          lockAfterDisconnect: this.lockAfterDisconnect,
-          privacyMode: this.privacyMode,
-          autoUnlock: this.autoUnlock && this.lockAfterDisconnect && selectedMatchesPeer &&
-            (this.osPasswordDraft.length > 0 || RemoteSecurityStore.isCurrentServer(this.selectedConnectionId))
+          lockAfterDisconnect: request.draft.lockAfterDisconnect,
+          privacyMode: request.draft.privacyMode,
+          autoUnlock: request.draft.autoUnlock && request.draft.lockAfterDisconnect && selectedMatchesPeer &&
+            (request.draft.osPassword.length > 0 || RemoteSecurityStore.isCurrentServer(request.savedId))
         }
         const osPassword: string = security.autoUnlock ?
-          (this.osPasswordDraft.length > 0 ? this.osPasswordDraft :
-            (this.clearOsPassword ? '' : await RemoteSecurityStore.loadOsPassword(this.selectedConnectionId))) : ''
-        status = await ConnectionService.connect(peerId, password, this.performancePreset, fileOnly,
+          (request.draft.osPassword.length > 0 ? request.draft.osPassword :
+            (request.draft.clearOsPassword ? '' : await RemoteSecurityStore.loadOsPassword(request.savedId))) : ''
+        if (request.serverScope !== this.currentConnectionScope()) throw new Error('Connection network changed')
+        status = await ConnectionService.connect(peerId, password, request.draft.performancePreset, fileOnly,
           security, osPassword)
       } catch (_error) {
         this.preparingAccount = false
@@ -2223,18 +2267,15 @@ export struct ConnectionPage {
   }
 
   loadConnectionFormState(): void {
-    try {
-      this.connectionFormExpanded = RustDeskNapi.getOption('connection-advanced-expanded') === '1'
-    } catch (_error) {
-      this.connectionFormExpanded = false
-    }
+    // Expansion is a session UI state, not a connection setting. Ignore the legacy saved flag.
+    this.connectionFormExpanded = false
+    this.tabletEditorVisible = false
   }
 
   setConnectionFormExpanded(expanded: boolean): void {
     this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
       this.connectionFormExpanded = expanded
     })
-    RustDeskNapi.setOption('connection-advanced-expanded', expanded ? '1' : '0')
   }
 
   toggleSavedConnectionsExpanded(): void {
@@ -2318,7 +2359,7 @@ export struct ConnectionPage {
 
   savedConnectionViewMenuLabel(mode: string): string {
     const label: string = translate(mode === 'compact' ? '精简列表' : '现有布局', this.uiLanguage)
-    return `${mode === this.savedConnectionViewMode ? '✓ ' : ''}${label}`
+    return label + (mode === this.savedConnectionViewMode ? '  ✓' : '')
   }
 
   savedCompactContentWidth(): number {
@@ -2329,26 +2370,42 @@ export struct ConnectionPage {
     return this.uiFontScale > 1.6 || this.savedCompactContentWidth() < 280
   }
 
-  savedCompactSingleLine(): boolean {
-    return this.isWideDeviceLayout() && !this.savedCompactStackActions() &&
-      this.savedCompactContentWidth() >= Math.ceil(560 + Math.max(0, this.uiFontScale - 1) * 220)
+  savedCompactDisplayName(item: SavedConnectionInfo): string {
+    return item.name.trim() || item.remoteId
   }
 
   savedCompactRowMinHeight(): number {
-    return Math.ceil((this.savedCompactSingleLine() ? 44 : 50) + Math.max(0, this.uiFontScale - 1) * 26)
+    return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 26)
   }
 
   savedCompactActionHeight(): number {
     return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 16)
   }
 
-  savedCompactConnectWidth(): number {
-    const longLabel: boolean = translate('连接', this.uiLanguage).length > 4
-    return Math.ceil((longLabel ? 76 : 60) + Math.max(0, this.uiFontScale - 1) * (longLabel ? 42 : 22))
+  savedCompactMoreVisualHeight(): number {
+    return Math.ceil(32 + Math.max(0, this.uiFontScale - 1) * 16)
   }
 
-  savedCompactIdWidth(): number {
-    return Math.ceil(154 + Math.max(0, this.uiFontScale - 1) * 62)
+  savedHeaderButtonSize(): number {
+    return Math.ceil(28 + Math.max(0, this.uiFontScale - 1) * 8)
+  }
+
+  savedHeaderHitSize(): number {
+    return Math.max(44, this.savedHeaderButtonSize())
+  }
+
+  savedHeaderRowMinHeight(): number {
+    return Math.max(this.savedHeaderHitSize(), Math.ceil(40 + Math.max(0, this.uiFontScale - 1) * 18))
+  }
+
+  savedCompactConnectWidth(): number {
+    const longLabel: boolean = translate('连接', this.uiLanguage).length > 4
+    return Math.ceil((longLabel ? 68 : 52) + Math.max(0, this.uiFontScale - 1) * (longLabel ? 42 : 22))
+  }
+
+  savedCompactConnectVisualHeight(): number {
+    // Keep a 44vp hit region while making the compact visual less dominant.
+    return Math.ceil(28 + Math.max(0, this.uiFontScale - 1) * 16)
   }
 
   loadSavedConnectionSort(): void {
@@ -2762,6 +2819,7 @@ export struct ConnectionPage {
     this.connectionPasswordDraft = ''
     this.rememberConnectionPassword = false
     this.connectionPasswordError = ''
+    this.pendingConnectionRequest = undefined
   }
 
   async confirmConnectionPassword(): Promise<void> {
@@ -2770,14 +2828,35 @@ export struct ConnectionPage {
       this.connectionPasswordError = '请输入连接密码'
       return
     }
-    let remember: boolean = this.rememberConnectionPassword
-    this.password = password
-    this.passwordEditMode = 'replace'
-    this.closeConnectionPasswordDialog()
-    if (remember) {
-      await this.saveCurrentConnection()
+    const request = this.pendingConnectionRequest
+    if (request === undefined || request.serverScope !== this.currentConnectionScope()) {
+      this.connectionPasswordError = '连接或服务器已改变，请重试'
+      return
     }
-    this.onConnect(this.pendingFileOnly)
+    let remember: boolean = this.rememberConnectionPassword
+    request.draft.password = password
+    request.draft.passwordMode = 'replace'
+    if (remember) {
+      if (this.savingConnection) return
+      this.savingConnection = true
+      try {
+        const original = this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === request.savedId)
+        if (request.savedId.length > 0 && original === undefined) throw new ConnectionSaveConflict('此连接已不存在，请关闭后重试')
+        if (original !== undefined && SavedConnectionEditing.endpoint(original.remoteId) !==
+          SavedConnectionEditing.endpoint(request.draft.remoteId)) throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+        const savedDraft = original === undefined ? request.draft : this.requestForSavedConnection(original).draft
+        savedDraft.password = password
+        savedDraft.passwordMode = 'replace'
+        await this.saveConnectionDraft(savedDraft, original?.id ?? '', original === undefined ? 'new' : 'update',
+          original === undefined ? undefined : this.cloneSavedConnections([original])[0], request.serverScope)
+      } catch (_error) {
+        this.connectionPasswordError = _error instanceof ConnectionSaveConflict ? _error.message : '保存失败，请重试'
+        return
+      } finally { this.savingConnection = false }
+    }
+    this.closeConnectionPasswordDialog()
+    this.pendingConnectionRequest = undefined
+    this.onConnect(this.pendingFileOnly, request)
   }
 
   closeBackupDialogs(): void {
@@ -3025,7 +3104,9 @@ export struct ConnectionPage {
       if (remoteId.length <= 0) {
         return
       }
-      let existingIndex: number = connections.findIndex((item: SavedConnectionInfo) => item.remoteId === remoteId)
+      const importedScope = SavedConnectionEditing.validScope(source.serverScope)
+      let existingIndex: number = connections.findIndex((item: SavedConnectionInfo) => item.remoteId === remoteId &&
+        (importedScope === undefined || SavedConnectionEditing.sameNetwork(item.serverScope, importedScope)))
       let groupId: string = groupIdMap[source.groupId] ?? ''
       let preset: string = this.normalizePerformancePreset(source.performancePreset)
       let name: string = source.name.trim().length > 0 ? source.name.trim().substring(0, 200) : remoteId
@@ -3038,7 +3119,8 @@ export struct ConnectionPage {
           password: existing.password.length > 0 ? existing.password :
             (payload.includesPasswords ? source.password : ''),
           performancePreset: preset,
-          groupId: groupId
+          groupId: groupId,
+          serverScope: importedScope ?? existing.serverScope
         }
       } else {
         let id: string = source.id.trim()
@@ -3051,7 +3133,8 @@ export struct ConnectionPage {
           remoteId: remoteId,
           password: payload.includesPasswords ? source.password : '',
           performancePreset: preset,
-          groupId: groupId
+          groupId: groupId,
+          serverScope: importedScope
         })
       }
       importedCount++
@@ -3081,7 +3164,8 @@ export struct ConnectionPage {
         remoteId: item.remoteId,
         password: includesPasswords ? item.password : '',
         performancePreset: item.performancePreset,
-        groupId: item.groupId
+        groupId: item.groupId,
+        serverScope: item.serverScope
       })
     })
     return ConnectionBackupService.createPayload(groups, connections, includesPasswords)
@@ -3117,10 +3201,75 @@ export struct ConnectionPage {
       `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   }
 
-  editSavedConnection(item: SavedConnectionInfo): void {
-    this.applySavedConnection(item)
-    this.setConnectionFormExpanded(true)
-    if (this.isWideDeviceLayout()) this.setTabletEditorVisible(true)
+  openNewSavedConnection(useQuickId: boolean = false): void {
+    if (this.savingConnection || !this.savePageActive) return
+    this.closeConnectionEditor()
+    this.creatingSavedConnection = true
+    this.editingConnectionScope = this.currentConnectionScope()
+    this.connectionEditorDraft = SavedConnectionEditing.empty()
+    // Only the ID is offered as a convenience. Quick-session secrets/settings stay separate.
+    if (useQuickId) this.connectionEditorDraft.remoteId = this.normalizeRemoteId(this.remoteId)
+    this.connectionEditorGroups = this.connectionGroups.map((group: SavedConnectionGroup): ConnectionEditorGroup => {
+      return { id: group.id, name: group.name }
+    })
+    this.connectionEditorController.open()
+  }
+
+  async editSavedConnection(item: SavedConnectionInfo): Promise<void> {
+    if (this.savingConnection) return
+    this.closeConnectionEditor()
+    const generation = this.editingConnectionGeneration
+    const scope = this.currentConnectionScope()
+    if (!SavedConnectionEditing.sameNetwork(item.serverScope, scope)) {
+      promptAction.showToast({ message: translate('此连接属于其他网络，请切换服务器后重试', this.uiLanguage) })
+      return
+    }
+    this.editingConnectionId = item.id
+    this.editingConnectionOriginal = this.cloneSavedConnections([item])[0]
+    this.editingConnectionScope = scope
+    const options = RemoteSecurityStore.options(item.id)
+    const hasOsPassword = (await RemoteSecurityStore.loadOsPassword(item.id)).length > 0
+    if (!this.savePageActive || generation !== this.editingConnectionGeneration || scope !== this.currentConnectionScope() ||
+      !this.savedConnections.some((entry: SavedConnectionInfo) => entry.id === item.id)) return
+    this.connectionEditorDraft = {
+      remoteId: item.remoteId, name: item.name, groupId: this.validGroupId(item.groupId), performancePreset: item.performancePreset,
+      password: '', passwordMode: 'keep', lockAfterDisconnect: options.lockAfterDisconnect, privacyMode: options.privacyMode,
+      autoUnlock: options.autoUnlock, osPassword: '', clearOsPassword: false, hasPassword: item.password.length > 0, hasOsPassword: hasOsPassword
+    }
+    this.connectionEditorGroups = this.connectionGroups.map((group: SavedConnectionGroup): ConnectionEditorGroup => {
+      return { id: group.id, name: group.name }
+    })
+    this.connectionEditorController.open()
+  }
+
+  closeConnectionEditor(): void {
+    this.editingConnectionGeneration++
+    this.connectionEditorController.close()
+    this.editingConnectionId = ''
+    this.editingConnectionOriginal = undefined
+    this.creatingSavedConnection = false
+    this.connectionEditorDraft = SavedConnectionEditing.empty()
+  }
+
+  async saveEditedConnection(draft: SavedConnectionDraft, action: string): Promise<ConnectionEditResult> {
+    if (this.savingConnection || (!this.creatingSavedConnection && this.editingConnectionId.length === 0) || !this.savePageActive) {
+      return { success: false, message: '编辑已过期，请重新打开连接' }
+    }
+    if (!this.creatingSavedConnection &&
+      SavedConnectionEditing.endpoint(draft.remoteId) !== SavedConnectionEditing.endpoint(this.editingConnectionOriginal?.remoteId ?? '')) {
+      return { success: false, message: '远端 ID 不能修改，请新增连接' }
+    }
+    this.savingConnection = true
+    const generation = this.editingConnectionGeneration
+    try {
+      await this.saveConnectionDraft(draft, this.creatingSavedConnection ? '' : this.editingConnectionId,
+        this.creatingSavedConnection ? 'new' : 'update',
+        this.editingConnectionOriginal, this.editingConnectionScope, generation)
+      if (generation === this.editingConnectionGeneration && this.savePageActive) this.showSavedTip()
+      return { success: true, message: '已保存' }
+    } catch (_error) {
+      return { success: false, message: _error instanceof ConnectionSaveConflict ? _error.message : '保存失败，请重试' }
+    } finally { this.savingConnection = false }
   }
 
   async loadSavedConnections(): Promise<void> {
@@ -3159,7 +3308,8 @@ export struct ConnectionPage {
             remoteId: remoteId,
             password: savedPassword,
             performancePreset: PerformanceSettings.normalize(row['performancePreset'] ?? 'smooth'),
-            groupId: this.validGroupId(row['groupId'] ?? '')
+            groupId: this.validGroupId(row['groupId'] ?? ''),
+            serverScope: row['serverScope'] !== undefined && /^network-v1-[0-9a-f]{16}$/.test(row['serverScope']) ? row['serverScope'] : undefined
           })
         }
       }
@@ -3196,7 +3346,8 @@ export struct ConnectionPage {
         remoteId: item.remoteId,
         credentialAlias: item.id,
         performancePreset: item.performancePreset,
-        groupId: item.groupId
+        groupId: item.groupId,
+        serverScope: item.serverScope
       })
     })
     RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
@@ -3362,14 +3513,15 @@ export struct ConnectionPage {
   }
 
   connectSavedConnection(item: SavedConnectionInfo): void {
-    this.applySavedConnection(item)
-    this.onConnect()
+    const current = this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === item.id && entry.remoteId === item.remoteId)
+    if (current !== undefined) this.onConnect(false, this.requestForSavedConnection(current))
   }
 
   savedConnectionForPassword(): SavedConnectionInfo | undefined {
     const peerId: string = this.normalizeRemoteId(this.remoteId)
     return this.savedConnections.find((item: SavedConnectionInfo) =>
-      item.id === this.selectedConnectionId && this.normalizeRemoteId(item.remoteId) === peerId)
+      SavedConnectionEditing.endpoint(item.remoteId) === SavedConnectionEditing.endpoint(peerId) &&
+      SavedConnectionEditing.sameNetwork(item.serverScope, this.currentConnectionScope()))
   }
 
   hasSavedConnectionPassword(): boolean {
@@ -3437,95 +3589,223 @@ export struct ConnectionPage {
     }
     this.savingConnection = true
     try {
-      await this.saveCurrentConnection()
+      const saved = await this.saveCurrentConnection()
+      if (!saved) return
       if (this.savePageActive) {
         if (this.tabletEditorVisible) this.setTabletEditorVisible(false)
         this.showSavedTip()
       }
     } catch (_e) {
-      if (this.savePageActive) promptAction.showToast({ message: translate('保存失败，请重试', this.uiLanguage) })
+      if (this.savePageActive) promptAction.showToast({ message: translate(
+        _e instanceof ConnectionSaveConflict ? _e.message : '保存失败，请重试', this.uiLanguage) })
     } finally {
       this.savingConnection = false
     }
   }
 
-  async saveCurrentConnection(): Promise<void> {
-    let peerId: string = this.normalizeRemoteId(this.remoteId)
-    let password: string = this.connectionPasswordForUse()
-    if (peerId.length <= 0) {
-      return
+  async saveCurrentConnection(): Promise<boolean> {
+    const draft = this.requestForCurrentForm().draft
+    const duplicate = this.findDuplicateConnection(draft.remoteId, this.currentConnectionScope())
+    if (duplicate !== undefined) {
+      this.showDuplicateConnection(duplicate)
+      return false
     }
-    if (this.passwordEditMode === 'replace' && password.length === 0) {
-      throw new Error('Empty replacement password')
-    }
-    const originalSelection: string = this.selectedConnectionId
-    const originalDraft: string = this.password
-    const originalMode: string = this.passwordEditMode
-    let savedName: string = this.connectionName.trim()
-    let targetId: string = this.selectedConnectionId.length > 0 ? this.selectedConnectionId : this.makeConnectionId(peerId)
-    const identityChanged: boolean = this.savedConnections.some((item: SavedConnectionInfo) =>
-      item.id === targetId && this.normalizeRemoteId(item.remoteId) !== peerId)
-    const osPasswordDraft: string = this.osPasswordDraft
-    const storedOsPassword: boolean = this.hasStoredOsPassword
-    const draftClearOsPassword: boolean = this.clearOsPassword
-    const draftAutoUnlock: boolean = this.autoUnlock
-    const clearOsPassword: boolean = this.clearOsPassword || (identityChanged && osPasswordDraft.length === 0)
-    const security: RemoteSecurityOptions = {
-      lockAfterDisconnect: this.lockAfterDisconnect,
-      privacyMode: this.privacyMode,
-      autoUnlock: this.autoUnlock && this.lockAfterDisconnect && !(identityChanged && osPasswordDraft.length === 0)
-    }
-    if (identityChanged && osPasswordDraft.length === 0) {
-      RustDeskNapi.appendDiagnosticLog('remote-security', 'os_password_cleared peer_identity_changed')
-    }
-    let next: SavedConnectionInfo = {
-      id: targetId,
-      name: savedName.length > 0 ? savedName : peerId,
-      remoteId: peerId,
-      password: password,
-      performancePreset: this.performancePreset,
-      groupId: this.validGroupId(this.selectedGroupId)
-    }
-    let list: SavedConnectionInfo[] = []
-    let updated: boolean = false
-    this.savedConnections.forEach((item: SavedConnectionInfo) => {
-      if (item.id === targetId) {
-        list.push(next)
-        updated = true
-      } else {
-        list.push(item)
-      }
-    })
-    if (!updated) {
-      list.unshift(next)
-    }
-    await CredentialStore.save(targetId, password)
-    if (clearOsPassword) await RemoteSecurityStore.removeOsPassword(targetId)
-    if (osPasswordDraft.length > 0) await RemoteSecurityStore.saveOsPassword(targetId, osPasswordDraft)
-    RemoteSecurityStore.saveOptions(targetId, security)
-    RustDeskNapi.appendDiagnosticLog('remote-security',
-      `options_saved lock=${security.lockAfterDisconnect} privacy=${security.privacyMode} auto_unlock=${security.autoUnlock} ` +
-      `os_password_configured=${osPasswordDraft.length > 0 || (storedOsPassword && !clearOsPassword)}`)
-    if (this.selectedConnectionId === originalSelection && this.normalizeRemoteId(this.remoteId) === peerId &&
-      this.osPasswordDraft === osPasswordDraft && this.clearOsPassword === draftClearOsPassword &&
-      this.autoUnlock === draftAutoUnlock && this.lockAfterDisconnect === security.lockAfterDisconnect &&
-      this.privacyMode === security.privacyMode) {
-      this.hasStoredOsPassword = osPasswordDraft.length > 0 || (storedOsPassword && !clearOsPassword)
-      this.osPasswordDraft = ''
-      this.clearOsPassword = false
-      this.autoUnlock = security.autoUnlock
-    }
-    this.savedConnections = this.cloneSavedConnections(list)
-    this.savedConnectionsVersion++
-    if (this.selectedConnectionId === originalSelection && this.normalizeRemoteId(this.remoteId) === peerId &&
-      this.password === originalDraft && this.passwordEditMode === originalMode) {
-      this.selectedConnectionId = targetId
+    const originalForm = this.connectionFormSignature()
+    await this.saveConnectionDraft(draft)
+    // Keep the ID useful for connecting, but never bind the homepage to editing a row.
+    if (this.connectionFormSignature() === originalForm) {
+      this.selectedConnectionId = ''
+      this.lastSavedHomepageId = this.remoteId
       this.password = ''
       this.passwordEditMode = 'keep'
+      this.osPasswordDraft = ''
+      this.clearOsPassword = false
     }
-    this.persistSavedConnections(list)
+    return true
+  }
+
+  currentConnectionScope(): string {
+    return SavedConnectionEditing.network(RustDeskNapi.getOption('custom-rendezvous-server'),
+      RustDeskNapi.getOption('relay-server'))
+  }
+
+  connectionFormSignature(): string {
+    // Memory-only change detection; never persisted or logged.
+    return JSON.stringify([this.remoteId, this.connectionName, this.selectedGroupId, this.performancePreset,
+      this.password, this.passwordEditMode, this.osPasswordDraft, this.clearOsPassword,
+      this.lockAfterDisconnect, this.privacyMode, this.autoUnlock])
+  }
+
+  onRemoteIdChanged(value: string): void {
+    const normalized = this.normalizeRemoteId(value)
+    if (SavedConnectionEditing.endpoint(normalized) !== SavedConnectionEditing.endpoint(this.remoteId)) {
+      if (this.lastSavedHomepageId.length > 0 && this.remoteId === this.lastSavedHomepageId) this.connectionName = ''
+      this.lastSavedHomepageId = ''
+      this.selectedConnectionId = ''
+      this.password = ''
+      this.passwordEditMode = 'keep'
+      this.osPasswordDraft = ''
+      this.hasStoredOsPassword = false
+      this.clearOsPassword = false
+      this.lockAfterDisconnect = false
+      this.privacyMode = false
+      this.autoUnlock = false
+    }
+    this.remoteId = normalized
+    this.isIdEmpty = normalized.length === 0
+  }
+
+  findDuplicateConnection(remoteId: string, scope: string, excludedId: string = ''): SavedConnectionInfo | undefined {
+    return this.savedConnections.find((entry: SavedConnectionInfo) => entry.id !== excludedId &&
+      SavedConnectionEditing.endpoint(entry.remoteId) === SavedConnectionEditing.endpoint(remoteId) &&
+      SavedConnectionEditing.sameNetwork(entry.serverScope, scope))
+  }
+
+  showDuplicateConnection(item: SavedConnectionInfo): void {
+    try { RustDeskNapi.appendDiagnosticLog('saved-connection', 'duplicate_blocked') } catch (_logError) {}
+    this.getUIContext().showAlertDialog({
+      title: translate('此连接已保存', this.uiLanguage),
+      message: translate('不会覆盖已有记录。请选择直接连接，或修改已有连接。', this.uiLanguage),
+      buttons: [
+        { value: translate('连接', this.uiLanguage), action: () => { this.connectSavedConnection(item) } },
+        { value: translate('修改已有', this.uiLanguage), action: () => { this.editSavedConnection(item) } },
+        { value: translate('取消', this.uiLanguage), action: () => {} }
+      ]
+    })
+  }
+
+  requestForCurrentForm(): SavedConnectionRequest {
+    const saved = this.savedConnectionForPassword()
+    const draft: SavedConnectionDraft = {
+      remoteId: this.normalizeRemoteId(this.remoteId), name: this.connectionName, groupId: this.selectedGroupId,
+      performancePreset: this.performancePreset, password: this.connectionPasswordForUse(), passwordMode: this.passwordEditMode,
+      lockAfterDisconnect: this.lockAfterDisconnect, privacyMode: this.privacyMode, autoUnlock: this.autoUnlock,
+      osPassword: this.osPasswordDraft, clearOsPassword: this.clearOsPassword,
+      hasPassword: saved !== undefined && saved.password.length > 0, hasOsPassword: this.hasStoredOsPassword
+    }
+    return { draft: draft, savedId: saved?.id ?? '', serverScope: this.currentConnectionScope() }
+  }
+
+  requestForSavedConnection(item: SavedConnectionInfo): SavedConnectionRequest {
+    const options = RemoteSecurityStore.options(item.id)
+    return { savedId: item.id, serverScope: item.serverScope ?? this.currentConnectionScope(), draft: {
+      remoteId: item.remoteId, name: item.name, groupId: item.groupId, performancePreset: item.performancePreset,
+      password: item.password, passwordMode: 'keep', lockAfterDisconnect: options.lockAfterDisconnect,
+      privacyMode: options.privacyMode, autoUnlock: options.autoUnlock, osPassword: '', clearOsPassword: false,
+      hasPassword: item.password.length > 0, hasOsPassword: false
+    } }
+  }
+
+  async saveConnectionDraft(draft: SavedConnectionDraft, originalId: string = '', action: string = 'new',
+    expected: SavedConnectionInfo | undefined = undefined, scope: string = this.currentConnectionScope(),
+    expectedEditorGeneration: number = -1): Promise<void> {
+    const peerId = SavedConnectionEditing.endpoint(draft.remoteId)
+    if (peerId.length === 0) throw new ConnectionSaveConflict('请输入远程 ID')
+    if (!['new', 'update', 'copy', 'replace'].includes(action)) throw new ConnectionSaveConflict('编辑已过期，请重新打开连接')
+    const original = originalId.length > 0 ? this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === originalId) : undefined
+    if (originalId.length > 0 && (original === undefined || expected === undefined ||
+      JSON.stringify(this.cloneSavedConnections([original])[0]) !== JSON.stringify(this.cloneSavedConnections([expected])[0]))) {
+      throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+    }
+    if (original !== undefined && !SavedConnectionEditing.sameNetwork(original.serverScope, scope)) {
+      throw new ConnectionSaveConflict('此连接属于其他网络，请切换服务器后重试')
+    }
+    const identityChanged = original !== undefined && SavedConnectionEditing.endpoint(original.remoteId) !== peerId
+    if (action === 'update' && identityChanged) throw new ConnectionSaveConflict('远端 ID 已改变，请另存为新连接')
+    const keepOriginal = original !== undefined && (action === 'update' || action === 'replace')
+    if (this.findDuplicateConnection(peerId, scope, keepOriginal ? originalId : '') !== undefined) {
+      throw new ConnectionSaveConflict('此连接已保存，请从列表修改已有连接')
+    }
+    if (draft.passwordMode === 'replace' && draft.password.trim().length === 0) {
+      throw new ConnectionSaveConflict('请输入新密码，或取消更换后选择清除')
+    }
+    const targetId = keepOriginal ? originalId : this.makeConnectionId(peerId)
+    const password = draft.passwordMode === 'clear' ? '' :
+      (draft.password.trim().length > 0 ? draft.password.trim() :
+        (!identityChanged && keepOriginal && draft.passwordMode === 'keep' ? original!.password : ''))
+    const next: SavedConnectionInfo = { id: targetId, name: draft.name.trim() || peerId, remoteId: peerId, password: password,
+      performancePreset: PerformanceSettings.normalize(draft.performancePreset), groupId: this.validGroupId(draft.groupId), serverScope: scope }
+    const baseline = RustDeskNapi.getOption('saved-connections')
+    const editorGeneration = expectedEditorGeneration >= 0 ? expectedEditorGeneration : this.editingConnectionGeneration
+    const check = (): void => {
+      if (scope !== this.currentConnectionScope() || baseline !== RustDeskNapi.getOption('saved-connections') ||
+        ((originalId.length > 0 || expectedEditorGeneration >= 0) && editorGeneration !== this.editingConnectionGeneration)) {
+        throw new ConnectionSaveConflict('连接或服务器已改变，请重试')
+      }
+    }
+    check()
+    const oldPassword = await CredentialStore.load(targetId)
+    const oldOsPassword = await RemoteSecurityStore.loadOsPassword(targetId)
+    const oldOptions = RemoteSecurityStore.options(targetId)
+    const oldBinding = RemoteSecurityStore.serverBinding(targetId)
+    check()
+    if (keepOriginal && oldPassword !== original!.password) {
+      throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+    }
+    let wrotePassword = false
+    let wroteOsPassword = false
+    let wroteOptions = false
+    let wroteRows = false
+    let expectedRows = ''
+    try {
+      if (oldPassword !== password) {
+        wrotePassword = true
+        await CredentialStore.save(targetId, password)
+        if (await CredentialStore.load(targetId) !== password) throw new Error('Credential verification failed')
+      }
+      check()
+      const clearOsPassword = draft.clearOsPassword || (identityChanged && draft.osPassword.length === 0)
+      if (draft.osPassword.length > 0 || clearOsPassword) {
+        wroteOsPassword = true
+        if (draft.osPassword.length > 0) await RemoteSecurityStore.saveOsPassword(targetId, draft.osPassword)
+        else await RemoteSecurityStore.removeOsPassword(targetId)
+        if (await RemoteSecurityStore.loadOsPassword(targetId) !== (draft.osPassword || '')) throw new Error('OS credential verification failed')
+      }
+      check()
+      const security: RemoteSecurityOptions = {
+        lockAfterDisconnect: draft.lockAfterDisconnect, privacyMode: draft.privacyMode,
+        autoUnlock: draft.autoUnlock && draft.lockAfterDisconnect && !(identityChanged && draft.osPassword.length === 0)
+      }
+      wroteOptions = true
+      RemoteSecurityStore.saveOptions(targetId, security)
+      if (JSON.stringify(RemoteSecurityStore.options(targetId)) !== JSON.stringify(security)) throw new Error('Security options verification failed')
+      check()
+      let list = this.cloneSavedConnections(this.savedConnections)
+      if (keepOriginal) list = list.map((entry: SavedConnectionInfo) => entry.id === targetId ? next : entry)
+      else list.unshift(next)
+      // Read back the same serialized rows before declaring success or scheduling cloud sync.
+      const rows: SavedConnectionRow[] = list.map((entry: SavedConnectionInfo): SavedConnectionRow => {
+        return { id: entry.id, name: entry.name, remoteId: entry.remoteId, credentialAlias: entry.id,
+          performancePreset: entry.performancePreset, groupId: entry.groupId, serverScope: entry.serverScope }
+      })
+      expectedRows = JSON.stringify(rows)
+      wroteRows = true
+      this.persistSavedConnections(list, false)
+      if (RustDeskNapi.getOption('saved-connections') !== expectedRows) throw new Error('Connection readback failed')
+      this.savedConnections = list
+      this.savedConnectionsVersion++
+      CloudSyncService.markLocalChanged()
+    } catch (error) {
+      // Roll back only values still owned by this attempt, never a newer cloud/editor write.
+      if (wroteRows && RustDeskNapi.getOption('saved-connections') === expectedRows) RustDeskNapi.setOption('saved-connections', baseline)
+      const actualPassword = await CredentialStore.load(targetId)
+      if (wrotePassword && (actualPassword === password ||
+        (actualPassword.length === 0 && baseline === RustDeskNapi.getOption('saved-connections')))) {
+        await CredentialStore.save(targetId, oldPassword)
+      }
+      const actualOsPassword = await RemoteSecurityStore.loadOsPassword(targetId)
+      if (wroteOsPassword && (actualOsPassword === (draft.osPassword || '') ||
+        (actualOsPassword.length === 0 && baseline === RustDeskNapi.getOption('saved-connections')))) {
+        await RemoteSecurityStore.saveOsPassword(targetId, oldOsPassword)
+        RemoteSecurityStore.restoreServerBinding(targetId, oldBinding)
+      }
+      if (wroteOptions) RemoteSecurityStore.saveOptions(targetId, oldOptions)
+      try { RustDeskNapi.appendDiagnosticLog('saved-connection', 'save_failed_or_stale') } catch (_logError) {}
+      throw error as Error
+    }
     this.nextPeerOnlineRefreshAt = 0
-    this.refreshSavedConnectionOnlineStates(true)
+    try { this.refreshSavedConnectionOnlineStates(true) } catch (_refreshError) {}
+    try { RustDeskNapi.appendDiagnosticLog('saved-connection', `save_verified new=${!keepOriginal} identity_changed=${identityChanged}`) } catch (_logError) {}
   }
 
   async deleteSavedConnection(id: string): Promise<void> {
@@ -3548,6 +3828,7 @@ export struct ConnectionPage {
   }
 
   clearConnectionForm(): void {
+    this.lastSavedHomepageId = ''
     this.selectedConnectionId = ''
     this.selectedGroupId = ''
     this.connectionName = ''
@@ -3565,7 +3846,7 @@ export struct ConnectionPage {
   }
 
   makeConnectionId(remoteId: string): string {
-    return `${remoteId}-${Date.now()}`
+    return `${remoteId}-${util.generateRandomUUID(true)}`
   }
 
   normalizeRemoteId(remoteId: string): string {
@@ -3581,7 +3862,8 @@ export struct ConnectionPage {
         remoteId: item.remoteId,
         password: item.password,
         performancePreset: item.performancePreset,
-        groupId: item.groupId
+        groupId: item.groupId,
+        serverScope: item.serverScope
       })
     })
     return cloned

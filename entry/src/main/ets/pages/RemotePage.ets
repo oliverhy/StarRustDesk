@@ -2248,13 +2248,13 @@ struct RemotePage {
             .backgroundColor(this.controlSelectedBackgroundColor())
             .borderRadius(8)
             .bindMenu([
-              { value: translate(`${this.remoteFileSortField === 'name' ? '✓ ' : ''}名称`, this.uiLanguage),
+              { value: translate('名称', this.uiLanguage) + (this.remoteFileSortField === 'name' ? '  ✓' : ''),
                 action: () => { this.remoteFileSortField = 'name'; } },
-              { value: translate(`${this.remoteFileSortField === 'type' ? '✓ ' : ''}类型（扩展名）`, this.uiLanguage),
+              { value: translate('类型（扩展名）', this.uiLanguage) + (this.remoteFileSortField === 'type' ? '  ✓' : ''),
                 action: () => { this.remoteFileSortField = 'type'; } },
-              { value: translate(`${this.remoteFileSortField === 'size' ? '✓ ' : ''}大小`, this.uiLanguage),
+              { value: translate('大小', this.uiLanguage) + (this.remoteFileSortField === 'size' ? '  ✓' : ''),
                 action: () => { this.remoteFileSortField = 'size'; } },
-              { value: translate(`${this.remoteFileSortField === 'modified' ? '✓ ' : ''}修改时间`, this.uiLanguage),
+              { value: translate('修改时间', this.uiLanguage) + (this.remoteFileSortField === 'modified' ? '  ✓' : ''),
                 action: () => { this.remoteFileSortField = 'modified'; } }
             ], { placement: Placement.BottomRight, enableArrow: true })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))

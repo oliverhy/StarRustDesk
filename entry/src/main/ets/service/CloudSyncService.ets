@@ -32,6 +32,7 @@ interface SavedConnectionRow {
   credentialAlias: string
   performancePreset: string
   groupId: string
+  serverScope?: string
 }
 
 interface SavedConnectionGroupRow {
@@ -509,7 +510,8 @@ export class CloudSyncService {
         remoteId: row.remoteId,
         password: password,
         performancePreset: row.performancePreset,
-        groupId: row.groupId
+        groupId: row.groupId,
+        serverScope: row.serverScope
       })
     }
     let serverConfig: ConnectionBackupServerConfig = {
@@ -573,7 +575,8 @@ export class CloudSyncService {
         remoteId: item.remoteId,
         credentialAlias: item.id,
         performancePreset: item.performancePreset,
-        groupId: item.groupId
+        groupId: item.groupId,
+        serverScope: item.serverScope
       }
       newRows.push(row)
       if (payload.includesPasswords) {
@@ -583,7 +586,8 @@ export class CloudSyncService {
         }
       } else {
         let old: SavedConnectionRow | undefined = oldRows.find((value: SavedConnectionRow) =>
-          value.remoteId === item.remoteId)
+          value.remoteId === item.remoteId && (value.serverScope === undefined || item.serverScope === undefined ||
+            value.serverScope === item.serverScope))
         if (old !== undefined && old.id !== item.id) {
           let oldPassword: string = await CredentialStore.load(old.id)
           CloudSyncService.assertCurrent(epoch, revision)

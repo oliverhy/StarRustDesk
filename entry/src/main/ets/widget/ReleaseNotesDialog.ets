@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.28'
-export const RELEASE_NOTES_BUILD: string = '1002028'
+export const RELEASE_NOTES_VERSION: string = '1.2.29'
+export const RELEASE_NOTES_BUILD: string = '1002029'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.2.29（1002029）· 连接保存与紧凑界面优化', [
+            '首页快捷连接与保存连接分离：通过已保存连接右侧“＋”新增，通过设备“更多 → 修改”编辑；编辑时固定远端 ID，重复连接明确提示，不再误覆盖原记录。',
+            '新增和修改使用独立弹窗，取消不影响首页输入；完善保存校验、失败回滚及服务器切换保护，避免新设备沿用旧设备密码和安全设置，备份与云同步保留连接所属网络信息。',
+            '精简列表仅显示备注名称，无备注时显示远端 ID；缩小连接、展开折叠及标题操作按钮，减少行高和留白，优化设备数量间距，保留大字体适配和点击范围。',
+            '连接选项默认折叠，始终保留远端 ID / IP 输入框；缩小输入框和连接箭头，连接模式改为紧凑下拉菜单，展开折叠保留过渡动画和自定义画质设置。',
+            '排序、列表显示方式、语言、按钮样式及文件排序菜单的选中勾统一放到文字后面；移除设置页“账户 / 设备名称”栏目，保留服务器账号、API 登录与地址簿。'
+          ])
           this.buildSection('1.2.28（1002028）· 云同步恢复与诊断完善', [
             '加强重装后的云同步保护：新设备尚未建立同步基线且本机没有连接数据时，暂停上传空备份；首次同步存在本机与云端数据时先确认，避免误覆盖。',
             '“从云端恢复”新增历史备份列表，按时间降序排列，支持加载更早备份；恢复前预览连接、分组数量和服务器配置，加密备份需输入密码后查看。',

@@ -215,6 +215,11 @@ test('page lifecycle captures identity before loading and flushes only the old o
   const p = Object.assign(new h.context.exports.ConnectPage(), {
     remoteId: '123456789', normalizeRemoteId: value => value.replace(/\s/g, ''),
     syncConnectionState: () => 0, connectionPasswordForUse: () => 'test-only',
+    currentConnectionScope: () => 'network-test',
+    requestForCurrentForm() { return { savedId: '', serverScope: 'network-test', draft: {
+      remoteId: this.remoteId, password: 'test-only', lockAfterDisconnect: false, privacyMode: false,
+      autoUnlock: false, osPassword: '', clearOsPassword: false, performancePreset: 'smooth'
+    } }; },
     savedConnections: [], autoUnlock: false, lockAfterDisconnect: false, privacyMode: false
   });
   assert.equal(storage.has('connectedPeerId'), false);

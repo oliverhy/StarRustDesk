@@ -29,7 +29,10 @@ assert.match(source, /Math\.max\(this\.pageFullHeight, nextHeight\)/,
 assert.match(source, /if \(this\.isWideDeviceLayout\(\)\) \{\s*Column[\s\S]*?buildWideQuickConnect\(\)[\s\S]*?Scroll\(\)[\s\S]*?buildSavedConnections\(\)/);
 assert.match(source, /FlexWrap\.Wrap, justifyContent: FlexAlign\.SpaceBetween/);
 assert.match(source, /\.width\(this\.savedDeviceCardWidth\(\)\)/);
-assert.match(source, /editSavedConnection\(item:[\s\S]*?if \(this\.isWideDeviceLayout\(\)\) this\.setTabletEditorVisible\(true\)/);
+assert.match(source, /editSavedConnection\(item:[\s\S]*?this\.connectionEditorController\.open\(\)/);
+const editor = fs.readFileSync(require('node:path').join(__dirname,
+  '../entry/src/main/ets/widget/SavedConnectionEditorDialog.ets'), 'utf8');
+assert(editor.includes(".width('92%').height(this.showAdvanced ? '78%' : '52%').constraintSize({ maxWidth: 560 })"));
 assert.match(source, /await this\.saveCurrentConnection\(\)[\s\S]*?if \(this\.tabletEditorVisible\) this\.setTabletEditorVisible\(false\)/);
 assert.match(source, /\.zIndex\(8\)[\s\S]*?duration: 240/);
 console.log('PASS tablet/PC layout: device/size scope, IME stability, quick connect, adaptive grid and editor');

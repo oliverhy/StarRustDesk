@@ -144,13 +144,13 @@ for (const locale of ['zh-Hans', 'zh-Hant', 'en']) {
   for (const [preference, label] of [['zh-Hans', '简体中文'], ['zh-Hant', '繁體中文'], ['en', 'English']]) {
     selector.uiLanguagePreference = preference;
     assert.equal(selector.languagePreferenceLabel(), label, 'current language uses recognizable self-name');
-    assert.equal(selector.languageMenuLabel(preference, label), '✓ ' + label, 'current choice is marked in popup');
+    assert.equal(selector.languageMenuLabel(preference, label), label + '  ✓', 'current choice is marked after the label');
     selector.uiLanguagePreference = 'system';
     assert.equal(selector.languageMenuLabel(preference, label), label, 'other choices stay unmarked');
   }
   selector.uiLanguagePreference = 'system';
   assert.equal(selector.languagePreferenceLabel(), translate('跟随系统', locale));
-  assert.equal(selector.languageMenuLabel('system', '跟随系统'), '✓ ' + translate('跟随系统', locale));
+  assert.equal(selector.languageMenuLabel('system', '跟随系统'), translate('跟随系统', locale) + '  ✓');
 }
 const home = read('entry/src/main/ets/pages/HomePage.ets');
 assert(home.includes("this.buildTabItem(0, 'Connection')"), 'builders must receive stable source labels, not previous-locale text');

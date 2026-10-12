@@ -82,6 +82,19 @@ export class RemoteSecurityStore {
     return RemoteSecurityStore.bindings()[id] === RemoteSecurityStore.currentServer()
   }
 
+  static serverBinding(id: string): string {
+    return RemoteSecurityStore.bindings()[id] ?? ''
+  }
+
+  // Transaction rollback restores only this connection's previous binding.
+  static restoreServerBinding(id: string, value: string): void {
+    const original = RemoteSecurityStore.bindings()
+    const restored: Record<string, string> = {}
+    Object.keys(original).forEach((key: string) => { if (key !== id) restored[key] = original[key] })
+    if (value.length > 0) restored[id] = value
+    RustDeskNapi.setOption(BINDING_KEY, JSON.stringify(restored))
+  }
+
   static async loadOsPassword(id: string): Promise<string> {
     if (!id) return ''
     let query: asset.AssetMap = new Map()
