@@ -72,7 +72,7 @@ test('a fresh runtime restores all whitelisted option types without pressed-inpu
     'edge-auto-pan-enabled': '1', 'remote-control-toolbar-order': 'input,keyboard,disconnect',
     'remote-keyboard-toolbar-order': 'ctrl,shift,alt', 'remote-keyboard-more-order': 'Up,Down,Esc',
     'remote-toolbar-position-v1': '{"x":0.8,"y":0.4}', 'keyboard-toolbar-position-v1': '{"x":0.2,"y":0.1}',
-    'remote-toolbar-collapsed': '1', 'keyboard-tools-collapsed': '0', 'pc-toolbar-pinned': '1',
+    'remote-toolbar-collapsed': '1', 'keyboard-tools-collapsed': '0', 'pc-toolbar-pinned': '1', 'pc-immersive-window': '1',
     'desktop-view-mode': 'custom', 'desktop-custom-percent': '175', 'handheld-zoom': '2.5',
     'show-local-cursor': '0', 'show-virtual-mouse': '1' };
   for (const [name, value] of Object.entries(values)) assert(p.set(name, value), name);

@@ -142,11 +142,12 @@ function windowHarness(originalDecor = true, deviceType = 'pc') {
   });
   await test('page leaving during borderless entry ignores stale failure and still queues restoration', async () => {
     const requests = [], toasts = [];
-    const context = { exports: {}, RustDeskNapi: { appendDiagnosticLog() {} },
+    const context = { exports: {}, ConnectionStatus: { CONNECTED: 2 }, RustDeskNapi: { appendDiagnosticLog() {} },
       RemoteFullscreenPolicy: { setBorderless(enabled) { const d = deferred(); requests.push({ enabled, ...d }); return d.promise; } } };
     vm.runInNewContext(ts.transpile('class Page {' + ['toggleImmersiveWindow', 'restoreImmersiveWindowOnLeave'].map(method).join('\n') + '} exports.Page = Page;'), context);
     const page = Object.assign(new context.exports.Page(), {
       isPcDevice: () => true, remotePageVisible: true, immersiveWindow: false, immersiveWindowTransitioning: false,
+      connectionStatus: 2,
       immersiveWindowRequestId: 0, setControlMenu() {}, closeRemoteKeyboard() {},
       showFileToast: message => toasts.push(message), scheduleSurfaceRebindIfSizeChanged() { throw Error('stale rebind'); }
     });

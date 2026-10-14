@@ -6,7 +6,7 @@ export const REMOTE_PEER_OPTION_NAMES: string[] = [
   'keyboard-compat', 'relative-mouse', 'cursor-compat', 'remote-control-toolbar-order',
   'remote-keyboard-toolbar-order', 'remote-keyboard-more-order', 'remote-toolbar-position-v1',
   'keyboard-toolbar-position-v1', 'remote-toolbar-collapsed', 'keyboard-tools-collapsed',
-  'pc-toolbar-pinned', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1',
+  'pc-toolbar-pinned', 'pc-immersive-window', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1',
   'keyboard-layout-mode'
 ];
 

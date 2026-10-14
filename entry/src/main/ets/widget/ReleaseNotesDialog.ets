@@ -2,9 +2,9 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.0'
-export const RELEASE_NOTES_BUILD: string = '1003000'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
+export const RELEASE_NOTES_VERSION: string = '1.3.1'
+export const RELEASE_NOTES_BUILD: string = '1003001'
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,6 +48,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.1（1003001）· 沉浸窗口记忆', [
+            'PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连或重启 App 后自动恢复；首次使用需开启一次，未设置的远端保持普通窗口。',
+            '窗口切换成功后才保存选择；退出远控恢复普通窗口，但保留已记住的开关。切换失败保留原设置，保存失败明确提示并支持重试。',
+            '自动恢复会等待窗口和全屏、画中画等操作就绪；完善退出、断线和切换远端时的异步保护，补充不记录远端标识或输入内容的诊断日志。'
+          ])
           this.buildSection('1.3.0（1003000）· 远控菜单与方向设置升级', [
             '统一重做远控“屏幕、输入、键盘、画面、更多、屏幕方向”六类子菜单，采用紧凑半透明面板、统一图标和淡蓝选中状态，减少遮挡并保留原有功能。',
             '子菜单跟随功能栏位置智能向上或向下展开；优化打开、切换和关闭动效，点击菜单外部只收起菜单，不把操作传给远端。',

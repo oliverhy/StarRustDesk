@@ -257,6 +257,7 @@ struct RemotePage {
   @State immersiveWindow: boolean = false;
   @State immersiveWindowTransitioning: boolean = false;
   private immersiveWindowRequestId: number = 0;
+  private immersivePreferenceRestored: boolean = false;
   @State showVirtualMouse: boolean = false;
   @State virtualMouseX: number = 0;
   @State virtualMouseY: number = 0;
@@ -620,6 +621,7 @@ struct RemotePage {
     this.peerPreferenceServer = RustDeskNapi.getOption('custom-rendezvous-server');
     this.peerPreferences?.dispose();
     this.peerPreferences = new RemotePeerPreferences(this.peerPreferenceServer, this.connectedPeerId);
+    this.immersivePreferenceRestored = false;
     this.resetRemoteViewportForSession();
     this.showRemoteSurface = true;
     this.insecureFallbackPromptShown = false;
@@ -636,6 +638,7 @@ struct RemotePage {
     let status: number = RustDeskNapi.getConnectionStatus();
     this.connectionStatus = status as ConnectionStatus;
     if (status === ConnectionStatus.CONNECTED) this.loadInputCompatibility();
+    this.restoreImmersiveWindowPreference();
     this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
     if (status === ConnectionStatus.WAITING_2FA) {
       this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
@@ -813,6 +816,8 @@ struct RemotePage {
         }
       }
       this.connectionStatus = status as ConnectionStatus;
+      if (status === ConnectionStatus.CONNECTED) this.restoreImmersiveWindowPreference();
+      else this.immersivePreferenceRestored = false;
       if (status !== ConnectionStatus.CONNECTED && this.showOrientationDialog) this.closeOrientationMenu();
       if (status !== ConnectionStatus.CONNECTED && this.pipSurfaceOwned && this.pipPhase !== 'stopping') {
         this.pictureInPicture?.stop();
@@ -2154,21 +2159,43 @@ struct RemotePage {
     else this.schedulePcToolbarAutoCollapse();
   }
 
-  toggleImmersiveWindow(): void {
-    if (!this.isPcDevice() || this.immersiveWindowTransitioning || this.fullscreenTransitioning ||
+  restoreImmersiveWindowPreference(): void {
+    if (this.immersivePreferenceRestored || !this.isPcDevice() || this.fileOnly || !this.remotePageVisible ||
+      this.isLeavingAfterDisconnect || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      this.immersiveWindowTransitioning || this.fullscreenTransitioning || this.isFullScreen ||
+      this.pipSurfaceOwned || this.desktopWindowAdjusting || !RemoteDisplayPolicy.getMainWindow()) return;
+    const preferences = this.peerPreferences;
+    if (!preferences) return;
+    this.immersivePreferenceRestored = true;
+    const enabled = preferences.get('pc-immersive-window') === '1';
+    RustDeskNapi.appendDiagnosticLog('remote-window', `immersive_preference_restore enabled=${enabled}`);
+    if (enabled !== this.immersiveWindow) this.toggleImmersiveWindow(enabled, false);
+  }
+
+  toggleImmersiveWindow(enabled: boolean = !this.immersiveWindow, remember: boolean = true): void {
+    if (!this.isPcDevice() || this.fileOnly || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      this.immersiveWindowTransitioning || this.fullscreenTransitioning ||
       this.isFullScreen || this.pipSurfaceOwned || this.desktopWindowAdjusting || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+    if (enabled === this.immersiveWindow) return;
     this.setControlMenu('');
     this.closeRemoteKeyboard();
     const previous = this.immersiveWindow;
-    const enabled = !previous;
+    const preferences = this.peerPreferences;
     const requestId = ++this.immersiveWindowRequestId;
     this.immersiveWindowTransitioning = true;
     this.immersiveWindow = enabled;
     RemoteFullscreenPolicy.setBorderless(enabled).then(() => {
-      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect ||
+        this.peerPreferences !== preferences) return;
+      if (remember && this.connectionStatus === ConnectionStatus.CONNECTED) {
+        const saved = preferences !== undefined && preferences.set('pc-immersive-window', enabled ? '1' : '0') && preferences.flush();
+        RustDeskNapi.appendDiagnosticLog('remote-window', `immersive_preference_save enabled=${enabled} result=${saved}`);
+        if (!saved) this.showFileToast('保存沉浸窗口设置失败，请重试');
+      }
       this.scheduleSurfaceRebindIfSizeChanged();
     }).catch((error: BusinessError) => {
-      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+      if (requestId !== this.immersiveWindowRequestId || !this.remotePageVisible || this.isLeavingAfterDisconnect ||
+        this.peerPreferences !== preferences) return;
       this.immersiveWindow = previous;
       RustDeskNapi.appendDiagnosticLog('remote-window', `borderless_failed code=${error.code ?? -1}`);
       this.showFileToast('当前设备无法切换沉浸窗口');
