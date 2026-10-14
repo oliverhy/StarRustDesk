@@ -75,10 +75,11 @@ assert(builder.includes('.width(20).height(20)'));
 assert(builder.includes('.fillColor(this.controlMenuIconColor(category))'));
 assert(builder.includes('.hitTestBehavior(HitTestMode.None)'));
 assert(builder.includes('this.controlSelectedBackgroundColor()'));
-for (const action of ['this.toggleRemoteKeyboard()', 'this.disconnectSession()', 'this.toggleControlMenu(category)']) {
+for (const action of ['this.disconnectSession()', 'this.toggleControlMenu(category)']) {
   assert(builder.includes(action), action);
 }
-assert(method('buildUnifiedControlItems').includes(".accessibilityText(translate('组合键'"));
+assert(method('handleGlassMenuAction').includes('this.toggleRemoteKeyboard()'));
+assert(method('buildUnifiedControlItems').includes('this.buildControlCategoryButton(category, vertical)'));
 const license = read('entry/src/main/resources/rawfile/licenses/material-icons-Apache-2.0.txt');
 assert(license.includes('Apache License') && license.includes('Version 2.0'));
 console.log(`PASS remote-control icons: ${assets.length} upstream paths, ${states} theme/selection states, contrast, action and license guards`);

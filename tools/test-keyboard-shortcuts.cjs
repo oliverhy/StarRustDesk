@@ -30,8 +30,8 @@ assert.match(page, /@State keyboardToolsCollapsed: boolean = true;/,
   'Remote sessions must start with the shortcut overlay collapsed');
 assert.match(page, /if \(this\.connectionStatus === ConnectionStatus\.CONNECTED && !this\.fileOnly && !this\.keyboardToolsCollapsed\) \{\s*this\.buildKeyboardShortcutOverlay\(\);\s*\}/,
   'Shortcut access must not depend on opening the local software keyboard');
-assert.match(page, /setFloatingPanelCollapsed\(true, !this\.keyboardToolsCollapsed\)/,
-  'Unified keyboard dropdown must independently open or close shortcuts');
+assert.match(page, /this\.toggleControlMenu\(category\)/,
+  'Unified keyboard button must open the paged shortcut popup without opening the IME');
 assert.match(page, /if \(this\.showKeyboardPanel && this\.connectionStatus === ConnectionStatus\.CONNECTED\) \{\s*this\.buildKeyboardCapture\(\);/,
   'The IME capture must remain opt-in instead of opening on connection');
 assert.match(page, /closeRemoteKeyboard\(\): void \{[\s\S]*?this\.keyboardToolsCollapsed = !this\.isHandheldLandscape\(\);/,

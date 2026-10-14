@@ -59,8 +59,8 @@ expect(remotePage, /LongPressGesture\(\{ repeat: false, duration: 550 \}\)[\s\S]
   'toolbar buttons must expose long-press ordering')
 expect(remotePage, /getOption\('show-virtual-mouse'\)[\s\S]*peerPreferences\?\.set\('show-virtual-mouse'/,
   'the RustDesk-style virtual mouse preference must be toggleable')
-expect(remotePage, /menu-\$\{item\}[\s\S]*showVirtualMouse \? 1 : 0/,
-  'the control toolbar key must refresh when virtual mouse visibility changes')
+expect(remotePage, /state\.virtualMouse = this\.showVirtualMouse/,
+  'the menu must receive reactive virtual mouse visibility rather than a stale Builder value')
 expect(remotePage, /this\.showVirtualMouse[\s\S]*this\.isHandheldDevice\(\)[\s\S]*this\.buildVirtualMouseOverlay\(\)/,
   'the RustDesk-style virtual mouse must render only on handheld devices')
 expect(remotePage, /showVirtualMouse[\s\S]*canPanViewport\(\)[\s\S]*handleViewportPan\(event\)/,

@@ -16,3 +16,6 @@
 /.appanalyzer
 /signing
 *.log
+# Private remote-desktop screenshots used only for submenu visual QA.
+/design/remote-submenus-20261013/device-*.png
+/design/remote-submenus-20261013/final-*.png

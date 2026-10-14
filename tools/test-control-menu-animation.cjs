@@ -71,7 +71,7 @@ for(const fail of ['failFrame','failAnimation']) {
   const h=harness();h.page.isLeavingAfterDisconnect=true;h.page.setControlMenu('view');assert.equal(h.frames.length,0);cases++;
 }
 const overlay=method('buildControlMenuOverlay');
-assert.equal((overlay.match(/\.opacity\(this\.controlMenuProgress\)/g)||[]).length,2,'scrim/card share animation progress');
+assert.equal((overlay.match(/\.opacity\(this\.controlMenuProgress\)/g)||[]).length,3,'scrim/card/anchor pointer share animation progress');
 assert(overlay.includes('0.97 + 0.03 * this.controlMenuProgress'));
 assert(overlay.includes('.enabled(!this.controlMenuClosing)'),'fading actions cannot be executed twice');
 assert(!overlay.includes('.transition('),'no second/default transition competes with explicit animation');

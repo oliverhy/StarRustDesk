@@ -27,6 +27,10 @@ import { OperationDiagnostic } from '../service/OperationDiagnostic';
 import { RecordingDialog } from '../widget/RecordingDialog';
 import { sortRemoteFiles } from '../utils/RemoteFileSort';
 import { RemoteDisplayPolicy, RemoteOrientationMode } from '../service/RemoteDisplayPolicy';
+import { RemoteGlassMenu } from '../widget/RemoteGlassMenu';
+import { RemoteGlassMenuState, RemoteGlassMenuMetrics, glassMenuMetrics, glassOrientationDescription, placeGlassMenu,
+  RemoteGlassMenuPlacement } from '../model/RemoteGlassMenu';
+import { RemoteGlassStyle } from '../theme/RemoteGlassStyle';
 import { RemoteFullscreenPolicy } from '../service/RemoteFullscreenPolicy';
 import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent } from '../model/RemoteDesktopView';
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
@@ -171,6 +175,7 @@ struct RemotePage {
   @StorageLink('isDarkMode') isDarkMode: boolean = false;
   @StorageLink('uiFontScale') uiFontScale: number = 1;
   @StorageLink('remoteOrientationMode') remoteOrientationMode: string = 'system';
+  @StorageLink('remoteFollowSystemRotation') remoteFollowSystemRotation: boolean = true;
   @StorageLink('remoteExternalDisplay') remoteExternalDisplay: boolean = false;
   @StorageLink('remoteProjectionDisplayId') @Watch('onProjectionDisplayChanged') remoteProjectionDisplayId: number = -1;
   @StorageLink('appForegroundEpoch') @Watch('onAppForegroundEpochChanged') appForegroundEpoch: number = 0;
@@ -290,6 +295,13 @@ struct RemotePage {
   private relativePointerY: number = 0;
   @State showGestureHelp: boolean = false;
   @State showKeyboardSettings: boolean = false;
+  @State showOrientationDialog: boolean = false;
+  private orientationMenuDisplayId: number = -1;
+  private orientationMenuPeer: RemotePeerPreferences | undefined = undefined;
+  @State orientationMenuError: string = '';
+  @State glassKeyboardTab: string = 'more';
+  private orientationFooterMeasureKey: string = '';
+  private orientationFooterMeasuredHeight: number = 0;
   @State showMouseSettings: boolean = false;
   @State showKeyboardCalibration: boolean = false;
   @State keyboardLayoutMode: string = 'auto';
@@ -642,6 +654,7 @@ struct RemotePage {
 
   aboutToDisappear(): void {
     this.remotePageVisible = false;
+    this.closeOrientationMenu();
     this.keyboardLayoutService?.stop();
     this.keyboardLayoutService = undefined;
     ConnectionService.configureHardwareKeyboardLayout(false);
@@ -703,6 +716,7 @@ struct RemotePage {
 
   onBackPress(): boolean {
     if (this.fullscreenTransitioning) return true;
+    if (this.showOrientationDialog) { this.closeOrientationMenu(); return true; }
     if (this.showKeyboardSettings || this.showMouseSettings) {
       this.closeInputSettings();
       return true;
@@ -799,6 +813,7 @@ struct RemotePage {
         }
       }
       this.connectionStatus = status as ConnectionStatus;
+      if (status !== ConnectionStatus.CONNECTED && this.showOrientationDialog) this.closeOrientationMenu();
       if (status !== ConnectionStatus.CONNECTED && this.pipSurfaceOwned && this.pipPhase !== 'stopping') {
         this.pictureInPicture?.stop();
       }
@@ -1191,6 +1206,7 @@ struct RemotePage {
   }
 
   onProjectionDisplayChanged(): void {
+    if (this.showOrientationDialog) this.closeOrientationMenu();
     this.physicalMouseDeduplicator.clear();
     this.compatibilityLeftSequence = false;
     this.relativePointerSampleValid = false;
@@ -1384,7 +1400,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.showKeyboardPanel) {
       this.hardwareModifierTrackingActive = false;
@@ -1435,7 +1451,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (event.hover >= 0) {
       this.handleRemoteHover(event.hover === 1);
@@ -1529,7 +1545,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
@@ -1743,6 +1759,7 @@ struct RemotePage {
       this.relativePointerSampleValid = false;
       this.pageWidth = newValue.width as number;
       this.pageHeight = newValue.height as number;
+      if (this.showOrientationDialog) this.syncOrientationMenuViewport();
       this.controlMenuPageOriginX = Number(newValue.globalPosition.x) || 0;
       this.controlMenuPageOriginY = Number(newValue.globalPosition.y) || 0;
       // IME resizing is not folding/rotation. Also detect height-only changes
@@ -2846,6 +2863,7 @@ struct RemotePage {
   setControlMenu(category: string): void {
     if (category.length > 0 && (!this.remotePageVisible || this.isLeavingAfterDisconnect)) return;
     if (category.length === 0 && this.controlMenuClosing) return;
+    if (this.showOrientationDialog && category !== 'orientation') this.finishOrientationMenu();
     this.cancelPcToolbarAutoCollapse();
     this.handleNonRemoteHover(true);
     this.releaseVirtualMouseButtons();
@@ -2924,7 +2942,7 @@ struct RemotePage {
   }
 
   controlMenuSelected(category: string): boolean {
-    if (category === 'keyboard') return this.showKeyboardPanel || !this.keyboardToolsCollapsed;
+    if (category === 'view' && this.controlMenu === 'orientation') return true;
     return this.controlMenu === category;
   }
 
@@ -2939,41 +2957,7 @@ struct RemotePage {
   @Builder
   buildUnifiedControlItems(vertical: boolean) {
     ForEach(REMOTE_CONTROL_CATEGORIES, (category: string) => {
-      if (category === 'keyboard') {
-        Row({ space: 0 }) {
-          this.buildControlCategoryButton(category, vertical)
-          Divider().vertical(true).width(1).height(16)
-            .color(this.controlMenuSelected(category) ? this.controlSelectedBorderColor() : this.themeBorderColor())
-            .hitTestBehavior(HitTestMode.None)
-          Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.remote_keyboard_expand'))
-              .width(14).height(14)
-              .fillColor(this.controlMenuIconColor(category))
-              .hitTestBehavior(HitTestMode.None)
-              .rotate({ angle: this.keyboardToolsCollapsed ? 0 : 180 })
-              .animation({ duration: 200, curve: Curve.EaseOut })
-          }
-            .id('remoteKeyboardShortcutToggle')
-            .width(28).height(this.getRemoteToolbarButtonHeight() + 8)
-            .padding(0).focusable(false)
-            .backgroundColor(Color.Transparent)
-            .borderRadius({ topLeft: 0, bottomLeft: 0, topRight: 10, bottomRight: 10 })
-            .accessibilityText(translate('组合键', this.uiLanguage))
-            .accessibilityDescription(translate(this.keyboardToolsCollapsed ? '展开' : '收起', this.uiLanguage))
-            .onClick(() => {
-              this.setControlMenu('');
-              this.setFloatingPanelCollapsed(true, !this.keyboardToolsCollapsed);
-            })
-        }
-        .width(this.adaptiveToolbarButtonWidth(vertical ? 80 : 68))
-        .alignItems(VerticalAlign.Center)
-        .backgroundColor(this.controlMenuSelected(category) ? this.controlSelectedBackgroundColor() : Color.Transparent)
-        .border({ width: this.controlMenuSelected(category) ? 1 : 0, color: this.controlSelectedBorderColor() })
-        .borderRadius(10)
-        .clip(true)
-      } else {
-        this.buildControlCategoryButton(category, vertical)
-      }
+      this.buildControlCategoryButton(category, vertical)
     }, (category: string) => category)
   }
 
@@ -2985,6 +2969,7 @@ struct RemotePage {
           .fillColor(this.controlMenuIconColor(category))
           .hitTestBehavior(HitTestMode.None)
         Text(translate(remoteControlCategoryLabel(category), this.uiLanguage))
+          .fontFamily(RemoteGlassStyle.FONT)
           .fontSize(11).minFontSize(9).maxFontSize(11).maxLines(1)
           .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
           .fontWeight(this.controlMenuSelected(category) ? 600 : 500)
@@ -2992,20 +2977,16 @@ struct RemotePage {
             (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
       }
     }
-    .width(this.adaptiveToolbarButtonWidth(vertical ? (category === 'keyboard' ? 62 : 80) : 38))
-    .layoutWeight(category === 'keyboard' ? 1 : 0)
+    .width(this.adaptiveToolbarButtonWidth(vertical ? 80 : 38))
     .height(this.getRemoteToolbarButtonHeight() + 8)
     .padding({ left: 2, right: 2, top: 3, bottom: 3 })
-    .backgroundColor(category !== 'keyboard' && this.controlMenuSelected(category) ? this.controlSelectedBackgroundColor() : Color.Transparent)
-    .border({ width: category !== 'keyboard' && this.controlMenuSelected(category) ? 1 : 0, color: this.controlSelectedBorderColor() })
+    .backgroundColor(this.controlMenuSelected(category) ? this.controlSelectedBackgroundColor() : Color.Transparent)
+    .border({ width: this.controlMenuSelected(category) ? 1 : 0, color: this.controlSelectedBorderColor() })
     .borderRadius(10).focusable(false)
     .accessibilityText(translate(remoteControlCategoryLabel(category), this.uiLanguage))
     .onAreaChange((_oldValue: Area, area: Area) => { this.recordControlMenuAnchor(category, area); })
     .onClick(() => {
-      if (category === 'keyboard') {
-        this.setControlMenu('');
-        this.toggleRemoteKeyboard();
-      } else if (category === 'disconnect') {
+      if (category === 'disconnect') {
         this.setControlMenu('');
         this.disconnectSession();
       } else {
@@ -3108,7 +3089,8 @@ struct RemotePage {
   }
 
   getControlMenuAnchor(): RemoteMenuAnchor {
-    const anchor = this.controlMenuAnchors.find((entry: RemoteMenuAnchor) => entry.category === this.controlMenu);
+    const anchor = this.controlMenuAnchors.find((entry: RemoteMenuAnchor) => entry.category ===
+      (this.controlMenu === 'orientation' ? 'view' : this.controlMenu));
     if (anchor) return { category: anchor.category, x: anchor.x - this.controlMenuPageOriginX,
       y: anchor.y - this.controlMenuPageOriginY, width: anchor.width, height: anchor.height };
     return { category: this.controlMenu, x: this.getRemoteToolbarX(),
@@ -3129,71 +3111,203 @@ struct RemotePage {
     return placeCompactControlMenu(this.getControlMenuMetrics(), this.getControlMenuAnchor(), this.isControlMenuBesideToolbar()).y;
   }
 
+  getGlassMenuState(): RemoteGlassMenuState {
+    const state = new RemoteGlassMenuState();
+    state.category = this.controlMenu;
+    state.items = this.getVisibleControlMenuItems();
+    const prototypeKeys: string[] = ['Esc', 'Tab', 'Del', 'Home', 'End', 'PgUp', 'Left', 'Up', 'PgDn',
+      'Down', 'Right', 'Enter', 'Ctrl+Alt+Del', 'Ctrl+Shift+Esc', 'Ins', 'Ctrl+Shift+Del', 'Alt+F4'];
+    state.keyboardItems = this.keyboardMoreOrder.join('|') === KEYBOARD_MORE_DEFAULT_ORDER.join('|') ? prototypeKeys :
+      this.keyboardMoreOrder.includes('Enter') ? this.keyboardMoreOrder.slice() : this.keyboardMoreOrder.concat(['Enter']);
+    state.displayCount = this.displayCount; state.currentDisplay = this.currentDisplay;
+    state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
+    state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
+    state.zoom = Math.round(this.zoomScale * 100); state.fullscreen = this.isFullScreen;
+    state.pip = this.pipPhase === 'active'; state.recording = this.recordingActive;
+    state.privacy = this.privacyModeState === 2; state.privacyPending = this.privacyModeState === 1;
+    state.monitor = this.showQualityMonitor; state.transferBusy = this.transferActive || this.uploadStaging;
+    state.canSendCtrlAltDel = this.canSendCtrlAltDel;
+    state.modifiers = (this.virtualCtrlSelected ? 1 : 0) | (this.virtualAltSelected ? 2 : 0) |
+      (this.virtualShiftSelected ? 4 : 0) | (this.virtualMetaSelected ? 8 : 0);
+    state.keyboardTab = this.glassKeyboardTab; state.keyboardOpen = this.showKeyboardPanel;
+    state.desktop = this.isPcDevice(); state.desktopViewMode = this.desktopViewMode;
+    state.desktopPercent = this.getDesktopDisplayedPercent(); state.desktopCustomPercent = this.desktopCustomPercent;
+    state.immersive = this.immersiveWindow;
+    state.windowBusy = this.fullscreenTransitioning || this.desktopWindowAdjusting || this.immersiveWindowTransitioning;
+    state.followSystem = this.remoteFollowSystemRotation; state.orientation = this.remoteOrientationMode;
+    state.projection = this.remoteExternalDisplay;
+    state.orientationError = this.orientationMenuError || AppStorage.get<string>('remoteOrientationError') || '';
+    return state;
+  }
+
+  getGlassMenuMetrics(): RemoteGlassMenuMetrics {
+    const state = this.getGlassMenuState();
+    const labelWidth = this.getControlMenuLabelWidth();
+    const metrics = glassMenuMetrics(state, this.pageWidth, this.getControlMenuViewportHeight(), this.uiFontScale, labelWidth);
+    if (state.category !== 'orientation') return metrics;
+    const text: string = translate(glassOrientationDescription(state), this.uiLanguage);
+    const context = this.getUIContext();
+    const key: string = `${text}|${metrics.width}|${this.uiFontScale}|${context.vp2px(1)}`;
+    if (key !== this.orientationFooterMeasureKey) {
+      let measured: number = metrics.footerHeight;
+      try {
+        const size = context.getMeasureUtils().measureTextSize({ textContent: text, fontSize: '11fp',
+          fontFamily: RemoteGlassStyle.FONT, constraintWidth: context.vp2px(Math.max(1, metrics.width - 24)), maxLines: 3 });
+        const height: number = context.px2vp(Number(size.height));
+        if (Number.isFinite(height) && height > 0) measured = Math.ceil(height + 3);
+      } catch (_error) {
+        // Keep wrapped descriptions visible if native text measurement is unavailable.
+        measured = metrics.footerHeight * 3;
+      }
+      this.orientationFooterMeasureKey = key;
+      this.orientationFooterMeasuredHeight = measured;
+    }
+    return glassMenuMetrics(state, this.pageWidth, this.getControlMenuViewportHeight(), this.uiFontScale,
+      labelWidth, this.orientationFooterMeasuredHeight);
+  }
+
+  getGlassMenuPlacement(): RemoteGlassMenuPlacement {
+    const anchor = this.getControlMenuAnchor();
+    return placeGlassMenu(this.getGlassMenuMetrics(), this.pageWidth, this.getControlMenuViewportHeight(),
+      anchor.x, anchor.y, anchor.width, anchor.height);
+  }
+
+  handleGlassMenuAction(action: string): void {
+    if (!this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      this.controlMenuClosing || !this.controlMenu) return;
+    RustDeskNapi.appendDiagnosticLog('remote-ui', `glass_menu_action category=${this.controlMenu} action=${action}`);
+    if (action.startsWith('tab-')) {
+      const tab = action.substring(4);
+      if (this.controlMenu === 'keyboard' && ['modifiers', 'function', 'more'].includes(tab)) this.glassKeyboardTab = tab;
+      return;
+    }
+    if (action.startsWith('key-')) { this.sendGlassMenuKey(action.substring(4)); return; }
+    if (action.startsWith('display-')) {
+      const display = Number(action.substring(8));
+      if (Number.isInteger(display) && display >= 0 && display < this.displayCount) {
+        this.setControlMenu(''); this.switchDisplay(display);
+      }
+      return;
+    }
+    if (action.startsWith('mode-')) { this.selectInputModeChoice(action.substring(5)); return; }
+    if (action.startsWith('view-')) {
+      const mode = action.substring(5);
+      if (this.isPcDevice() && (mode === 'adaptive' || mode === 'original' || mode === 'custom')) this.selectDesktopViewMode(mode);
+      return;
+    }
+    if (action.startsWith('scale-')) {
+      const percent = Number(action.substring(6));
+      if (this.isPcDevice() && Number.isFinite(percent)) this.setDesktopCustomPercent(Math.max(25, Math.min(300, percent)));
+      return;
+    }
+    if (action === 'follow-system' || action.startsWith('orientation-')) {
+      this.applyGlassOrientationAction(action); return;
+    }
+    switch (action) {
+      case 'virtualMouse': this.setVirtualMouseEnabled(!this.showVirtualMouse); return;
+      case 'clipboard': this.toggleClipboardSync(); return;
+      case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
+      case 'edgePan': if (this.canPanViewport()) this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled); return;
+      case 'monitor': this.showQualityMonitor = !this.showQualityMonitor; return;
+      case 'privacy': if (this.privacyModeState !== 1) this.togglePrivacyMode(); return;
+      case 'zoomIn': this.adjustZoom(0.25); return;
+      case 'zoomOut': this.adjustZoom(-0.25); return;
+      case 'release': this.releaseVirtualModifiers(); return;
+      case 'orientation': this.showOrientationMenu(); return;
+    }
+    this.setControlMenu('');
+    switch (action) {
+      case 'gestureHelp': this.showGestureHelp = true; break;
+      case 'keyboardSettings': this.openKeyboardSettings(); break;
+      case 'mouseSettings': this.openMouseSettings(); break;
+      case 'mobileActions': if (this.isPeerAndroid) this.showMobileActions = true; break;
+      case 'fullscreen': if (!this.fullscreenTransitioning && !this.immersiveWindowTransitioning && !this.pipSurfaceOwned) {
+        if (this.isFullScreen) this.exitFullScreen(); else this.enterFullScreen();
+      } break;
+      case 'pip': if (this.hasVideo && !this.fullscreenTransitioning && (this.pipPhase === 'idle' || this.pipPhase === 'active')) this.togglePictureInPicture(); break;
+      case 'chat': this.openCommunication(); break;
+      case 'upload': if (!this.transferActive) this.pickFileForUpload(); break;
+      case 'uploadFolder': if (!this.transferActive && !this.uploadStaging) this.pickFolderForUpload(); break;
+      case 'download': if (!this.transferActive) this.openRemoteDownloadBrowser(); break;
+      case 'recordings': this.recordingDialog.open(); break;
+      case 'recording': this.handleGlassRecording(); break;
+      case 'sort': this.openToolbarOrderEditor('control', ''); break;
+      case 'softKeyboard': this.toggleRemoteKeyboard(); break;
+      case 'adjustWindow': this.adjustDesktopWindow(); break;
+      case 'immersive': if (!this.fullscreenTransitioning && !this.isFullScreen && !this.pipSurfaceOwned && !this.immersiveWindowTransitioning) this.toggleImmersiveWindow(); break;
+    }
+  }
+
+  sendGlassMenuKey(key: string): void {
+    if (this.controlMenu !== 'keyboard') return;
+    switch (key) {
+      case 'Ctrl': this.toggleVirtualModifier(VIRTUAL_MODIFIER_CTRL); return;
+      case 'Alt': this.toggleVirtualModifier(VIRTUAL_MODIFIER_ALT); return;
+      case 'Shift': this.toggleVirtualModifier(VIRTUAL_MODIFIER_SHIFT); return;
+      case 'Win/Cmd': this.toggleVirtualModifier(VIRTUAL_MODIFIER_META); return;
+      case 'Ctrl+Alt+Del': if (this.canSendCtrlAltDel) this.sendCtrlAltDel(); return;
+      case 'Ctrl+Shift+Esc': this.sendPresetShortcut(27, MODIFIER_MASK_CTRL | MODIFIER_MASK_SHIFT, key); return;
+      case 'Ctrl+Shift+Del': this.sendPresetShortcut(46, MODIFIER_MASK_CTRL | MODIFIER_MASK_SHIFT, key); return;
+      case 'Alt+F4': this.sendPresetShortcut(115, MODIFIER_MASK_ALT, key); return;
+    }
+    let code = 0;
+    switch (key) {
+      case 'Esc': code = 27; break; case 'Tab': code = 9; break; case 'Del': code = 46; break;
+      case 'Home': code = 36; break; case 'End': code = 35; break; case 'Ins': code = 45; break;
+      case 'PgUp': code = 33; break; case 'PgDn': code = 34; break; case 'Enter': code = 13; break;
+      case 'Left': code = 37; break; case 'Up': code = 38; break; case 'Right': code = 39; break; case 'Down': code = 40; break;
+      default: if (/^F([1-9]|1[0-2])$/.test(key)) code = 111 + Number(key.substring(1)); break;
+    }
+    if (code > 0) this.sendVirtualControlKey(code, key);
+  }
+
+  handleGlassRecording(): void {
+    if (this.recordingActive) { SessionRecording.stop(); this.recordingActive = false; this.recordingDialog.open(); return; }
+    AlertDialog.show({ title: translate('开始远控录像', this.uiLanguage), message: translate('录像仅包含远端画面，不含音频。期间将请求 VP9 编码；请确认已获得必要授权。最长保存到约 4GB，切换显示器或分辨率后可能自动停止。', this.uiLanguage),
+      primaryButton: { value: translate('取消', this.uiLanguage), action: () => {} },
+      secondaryButton: { value: translate('开始', this.uiLanguage), action: () => {
+        this.recordingActive = SessionRecording.begin(getContext(this) as common.UIAbilityContext);
+        if (!this.recordingActive) this.showFileToast('无法开始录像，请检查连接和可用空间');
+      } } });
+  }
+
   @Builder
   buildControlMenuOverlay() {
     Stack({ alignContent: Alignment.TopStart }) {
       // Modal scrim consumes the dismiss tap instead of passing it to the peer.
-      Column().width('100%').height('100%').backgroundColor('#12000000')
+      Column().width('100%').height('100%').backgroundColor(Color.Transparent)
         .opacity(this.controlMenuProgress)
         .onClick(() => { this.setControlMenu(''); })
         .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
       Column() {
-        if (this.controlMenu === 'screens') {
-          this.buildCompactDisplayMenu();
-        } else {
-          Scroll() {
-            Column({ space: 2 }) {
-              if (this.controlMenu === 'view' && this.isPcDevice()) {
-                this.buildDesktopViewOptions();
-              }
-              ForEach(this.getVisibleControlMenuItems(), (item: string) => {
-                Column() {
-                  this.buildControlToolbarItem(item, true)
-                }.width('100%')
-              }, (item: string) => `menu-${item}-${this.currentDisplay}-${this.displayCount}-${this.showVirtualMouse ? 1 : 0}`)
-              if (this.controlMenu === 'input') {
-                Column() {
-                  this.buildToolbarButton('键盘设置', 92, false, false, true, () => { this.openKeyboardSettings(); })
-                }.width('100%')
-                Column() {
-                  this.buildToolbarButton('鼠标设置', 92, false, false, true, () => { this.openMouseSettings(); })
-                }.width('100%')
-              }
-              if (this.controlMenu === 'view' && this.isPcDevice()) {
-                Column() {
-                  this.buildToolbarButton(this.immersiveWindow ? '退出沉浸' : '沉浸窗口', 92, this.immersiveWindow,
-                    false, !this.fullscreenTransitioning && !this.isFullScreen && !this.pipSurfaceOwned &&
-                    !this.immersiveWindowTransitioning, () => { this.toggleImmersiveWindow(); })
-                }.width('100%')
-              }
-              if (this.controlMenu === 'more') {
-                Column() {
-                  this.buildToolbarButton('连接信息', 92, this.showQualityMonitor, false, true, () => {
-                    this.showQualityMonitor = !this.showQualityMonitor;
-                    this.setControlMenu('');
-                  })
-                }.width('100%')
-                Column() {
-                  this.buildToolbarButton('工具栏排序', 92, false, false, true, () => {
-                    this.setControlMenu('');
-                    this.openToolbarOrderEditor('control', '');
-                  })
-                }.width('100%')
-              }
-            }.width('100%').justifyContent(FlexAlign.Start)
-          }.width('100%').height(this.getControlMenuMetrics().bodyHeight).scrollBar(BarState.Off)
-            .align(Alignment.TopStart)
-        }
-      }
-      .width(this.getControlMenuWidth()).height(this.getControlMenuHeight()).padding(8)
-      .backgroundColor(this.isDarkMode ? '#F21B2638' : '#F2FFFFFF')
-      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' }).borderRadius(12)
+        ForEach([this.controlMenu], (category: string) => {
+          RemoteGlassMenu({ state: this.getGlassMenuState(), metrics: this.getGlassMenuMetrics(),
+            dark: this.isDarkMode, language: this.uiLanguage,
+            onAction: (action: string) => { if (this.controlMenu === category) this.handleGlassMenuAction(action); },
+            onOrderEdit: (key: string) => { if (this.controlMenu === category) this.openToolbarOrderEditor(
+              key.startsWith('key-') ? 'keyboardMore' : 'control', key.replace('key-', '')); } })
+        }, (category: string) => `glass-menu-${category}`)
+      }.id('remoteGlassMenu')
+      .width(this.getGlassMenuMetrics().width).height(this.getGlassMenuMetrics().height).padding(12)
+      .backgroundColor(this.isDarkMode ? RemoteGlassStyle.SURFACE_DARK : RemoteGlassStyle.SURFACE)
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THIN, { colorMode: this.isDarkMode ? ThemeColorMode.DARK :
+        ThemeColorMode.LIGHT, adaptiveColor: AdaptiveColor.DEFAULT, scale: 0.35 })
+      .border({ width: 1, color: this.isDarkMode ? RemoteGlassStyle.BORDER_DARK : RemoteGlassStyle.BORDER }).borderRadius(12)
       .shadow({ radius: 20, color: '#33000000', offsetX: 0, offsetY: 6 })
-      .position({ x: this.getControlMenuX(), y: this.getControlMenuY() })
+      .position({ x: this.getGlassMenuPlacement().x, y: this.getGlassMenuPlacement().y })
       .opacity(this.controlMenuProgress)
       .scale({ x: 0.97 + 0.03 * this.controlMenuProgress, y: 0.97 + 0.03 * this.controlMenuProgress })
       .enabled(!this.controlMenuClosing)
       .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
+      if (this.getGlassMenuPlacement().arrowVisible) {
+        Polygon().width(16).height(9).points(this.getGlassMenuPlacement().arrowAbove ? [[0, 9], [8, 0], [16, 9]] :
+          [[0, 0], [8, 9], [16, 0]])
+          .fill(this.isDarkMode ? RemoteGlassStyle.SURFACE_DARK : RemoteGlassStyle.SURFACE)
+          .position({ x: this.getGlassMenuPlacement().x + this.getGlassMenuPlacement().arrowX - 8,
+            y: this.getGlassMenuPlacement().arrowAbove ? this.getGlassMenuPlacement().y - 8 :
+              this.getGlassMenuPlacement().y + this.getGlassMenuMetrics().height - 1 })
+          .opacity(this.controlMenuProgress).hitTestBehavior(HitTestMode.None)
+      }
     }.width('100%').height('100%').zIndex(68)
   }
 
@@ -4486,7 +4600,7 @@ struct RemotePage {
         }
 
         this.buildGestureHelpSection('手机 / 平板单独投屏',
-          '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n手机本屏默认跟随系统旋转锁定；可在“控”的屏幕方向菜单选择“跟随系统”“固定竖屏”或“固定横屏”。\n单独投屏时方向独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏选择。方向选择仅对本次远控生效，不更改远端分辨率。')
+          '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。')
         this.buildGestureHelpSection('拖拽与框选',
           '鼠标模式：先将远端指针移到起点，轻点一次，第二次按住并拖动，松手结束。框选文件时请从文件列表或桌面的空白处开始；从文件上开始通常是拖动文件。\n触摸模式：在目标位置按住并移动，松手结束。')
         this.buildGestureHelpSection('组合键与本地键盘',
@@ -5978,7 +6092,7 @@ struct RemotePage {
   }
 
   handleRemoteHover(isHovering: boolean): void {
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
     if (isHovering) {
@@ -6083,7 +6197,7 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.controlMenu) return;
     if (this.pipSurfaceOwned) return;
@@ -6569,7 +6683,7 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     let now: number = Date.now();
@@ -6597,7 +6711,7 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6692,7 +6806,7 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -6950,7 +7064,7 @@ struct RemotePage {
   handleRemoteKey(event: KeyEvent): boolean {
     if (this.pipSurfaceOwned) return false;
     if (this.showCommunicationPanel) return false;
-    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings) return false;
+    if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return false;
     if (this.desktopWindowActive === false) return false;
     if (this.controlMenu) {
       if (event.type === KeyType.Down && this.mapControlKeyCode(event.keyCode) === 27) this.setControlMenu('');
@@ -7788,35 +7902,60 @@ struct RemotePage {
   orientationModeLabel(): string {
     if (this.remoteOrientationMode === RemoteOrientationMode.PORTRAIT) return '固定竖屏';
     if (this.remoteOrientationMode === RemoteOrientationMode.LANDSCAPE) return '固定横屏';
+    if (this.remoteOrientationMode === RemoteOrientationMode.AUTO) return '自动旋转';
     return this.remoteExternalDisplay ? '自动适配' : '跟随系统';
   }
 
-  showOrientationMenu(): void {
-    const displayId: number = this.remoteProjectionDisplayId;
-    const modes: RemoteOrientationMode[] = [RemoteOrientationMode.SYSTEM,
-      RemoteOrientationMode.PORTRAIT, RemoteOrientationMode.LANDSCAPE];
-    const selectedColor: string = this.isDarkMode ? '#A7CFFF' : '#2467BF';
-    const normalColor: string = this.isDarkMode ? '#E5E7EB' : '#182033';
-    try {
-      this.getUIContext().getPromptAction().showActionMenu({
-        title: translate(this.remoteExternalDisplay ? '投屏方向（仅本次）' : '屏幕方向（仅本次）', this.uiLanguage),
-        buttons: [
-          { text: translate(this.remoteExternalDisplay ? '自动适配' : '跟随系统', this.uiLanguage),
-            color: this.remoteOrientationMode === RemoteOrientationMode.SYSTEM ? selectedColor : normalColor },
-          { text: translate('固定竖屏', this.uiLanguage),
-            color: this.remoteOrientationMode === RemoteOrientationMode.PORTRAIT ? selectedColor : normalColor },
-          { text: translate('固定横屏', this.uiLanguage),
-            color: this.remoteOrientationMode === RemoteOrientationMode.LANDSCAPE ? selectedColor : normalColor },
-        ],
-      }).then((result) => {
-        // A projection change while the menu is open must not alter the other screen's policy.
-        if (!this.remotePageVisible || this.remoteProjectionDisplayId !== displayId ||
-          result.index < 0 || result.index >= modes.length) return;
-        RemoteDisplayPolicy.setOrientationMode(modes[result.index]);
-      }).catch(() => {}); // Dismissing the selector does not change orientation.
-    } catch (_error) {
-      RustDeskNapi.appendDiagnosticLog('projection', 'orientation_picker_unavailable');
+  syncOrientationMenuViewport(): void {
+    AppStorage.setOrCreate('remoteOrientationDialogWidth', this.pageWidth > 0 ? this.pageWidth : 360);
+    AppStorage.setOrCreate('remoteOrientationDialogHeight', this.pageHeight > 0 ? this.pageHeight : 640);
+  }
+
+  finishOrientationMenu(): void {
+    if (this.showOrientationDialog) {
+      try { RustDeskNapi.takeNativeInputEvents(); } catch (_error) {}
+      ConnectionService.releaseModifiers();
     }
+    this.showOrientationDialog = false;
+    this.orientationMenuDisplayId = -1;
+    this.orientationMenuPeer = undefined;
+  }
+
+  closeOrientationMenu(): void {
+    if (this.controlMenu === 'orientation') this.setControlMenu('');
+    this.finishOrientationMenu();
+  }
+
+  showOrientationMenu(): void {
+    if (!this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED || this.showOrientationDialog) return;
+    this.releaseHeldMouseButtons('orientation_picker'); this.stopEdgeAutoPan();
+    this.releaseRemoteNavigationKeys('orientation_picker'); this.releaseVirtualModifiers();
+    ConnectionService.releaseModifiers();
+    if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+    this.orientationMenuDisplayId = this.remoteProjectionDisplayId;
+    this.orientationMenuPeer = this.peerPreferences;
+    this.orientationMenuError = '';
+    this.showOrientationDialog = true;
+    this.setControlMenu('orientation');
+  }
+
+  applyGlassOrientationAction(action: string): void {
+    // Capture both the session and display target before opening: a late tap
+    // must never rotate a different remote session/projected screen.
+    if (!this.remotePageVisible || !this.showOrientationDialog || this.controlMenu !== 'orientation' ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED || this.orientationMenuPeer !== this.peerPreferences ||
+      this.orientationMenuDisplayId !== this.remoteProjectionDisplayId) return;
+    let accepted = false;
+    if (action === 'follow-system' && !this.remoteExternalDisplay) {
+      accepted = RemoteDisplayPolicy.setFollowSystemRotation(!this.remoteFollowSystemRotation, this.orientationMenuDisplayId);
+    } else if (action.startsWith('orientation-') && (!this.remoteFollowSystemRotation || this.remoteExternalDisplay)) {
+      const name = action.substring(12);
+      const mode = name === 'portrait' ? RemoteOrientationMode.PORTRAIT : name === 'landscape' ?
+        RemoteOrientationMode.LANDSCAPE : name === 'auto' ? (this.remoteExternalDisplay ? RemoteOrientationMode.SYSTEM :
+        RemoteOrientationMode.AUTO) : undefined;
+      if (mode !== undefined) accepted = RemoteDisplayPolicy.setOrientationMode(mode, this.orientationMenuDisplayId);
+    } else return;
+    this.orientationMenuError = accepted ? '' : '切换屏幕方向失败或显示屏已改变，请重试';
   }
 
   toggleRemoteKeyboard(): void {

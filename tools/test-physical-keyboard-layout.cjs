@@ -251,7 +251,8 @@ test('calibration dialog consumes key events locally and cannot save an incomple
 });
 test('UI has an independent input-settings entrance and blocks all remote routes during calibration', () => {
   const source=read('pages/RemotePage'), settings=method('pages/RemotePage','buildKeyboardSettingsOptions');
-  assert(source.includes("this.buildToolbarButton('键盘设置'")); assert(source.includes("this.buildToolbarButton('鼠标设置'"));
+  assert(source.includes("case 'keyboardSettings': this.openKeyboardSettings()"));
+  assert(source.includes("case 'mouseSettings': this.openMouseSettings()"));
   assert(settings.indexOf("'键盘模式'") < settings.indexOf("'键盘布局'"));
   assert(settings.indexOf("'键盘布局'") < settings.indexOf("'自定义键盘映射：已开启'"));
   assert(settings.includes("this.keyboardLayoutMode === 'apple'"));

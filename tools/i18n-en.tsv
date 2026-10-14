@@ -13,9 +13,17 @@
 固定横屏	Lock landscape
 自动适配	Auto fit
 屏幕方向	Screen orientation
+跟随系统旋转	Follow system rotation
+遵循系统横竖屏设置和旋转锁定。	Follow system orientation settings and rotation lock.
+应用独立控制方向；自动旋转不受系统旋转锁限制。	The app controls its own orientation. Auto rotate ignores the system rotation lock.
+开关和独立方向都保存在本机，重启 App 后仍有效。退出远控恢复原方向，单独投屏不受此开关影响。	The switch and independent orientation are saved locally and retained after restarting the app. Leaving remote control restores the original orientation. Separate projection is unaffected.
+保存旋转开关失败或远控页面已改变，请重试	Failed to save the rotation switch, or the remote page changed. Please retry.
+切换屏幕方向失败或显示屏已改变，请重试	Failed to change orientation, or the display changed. Please retry.
+系统暂未允许切换屏幕方向，请稍后重试	The system did not allow the orientation change. Please retry later.
+无法打开屏幕方向设置，请重试	Unable to open orientation settings. Please retry.
 屏幕方向（仅本次）	Screen orientation (this session)
 投屏方向（仅本次）	Projection orientation (this session)
-先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n手机本屏默认跟随系统旋转锁定；可在“控”的屏幕方向菜单选择“跟随系统”“固定竖屏”或“固定横屏”。\n单独投屏时方向独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏选择。方向选择仅对本次远控生效，不更改远端分辨率。	Connect wireless projection in Control Center, then use the projection capsule to project StarRustDesk separately. Availability depends on the device, OS and receiver.\nThe phone screen respects the system rotation lock by default. In Controls, choose Follow system, Lock portrait or Lock landscape.\nProjection has a separate orientation choice: landscape external screens are fitted automatically, or you can lock portrait/landscape manually. Returning to the phone restores its own choice. These choices apply only to this remote session and do not change remote resolution.
+先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。	Connect wireless projection in Control Center, then use the projection capsule to project StarRustDesk separately. Availability depends on the device, OS and receiver.\nUnder Controls > View > Screen orientation, Follow system rotation respects the system rotation lock. Turn it off to choose Auto rotate, Lock portrait or Lock landscape. Both the switch and independent orientation are saved locally and retained after restarting the app. Leaving remote control restores the original orientation.\nProjection keeps a separate policy: landscape external screens are fitted automatically, or you can lock portrait/landscape manually. Returning to the phone restores its local policy. This changes only the local window, not remote resolution.
 连接	Connect
 简体中文	简体中文
 繁體中文	繁體中文
@@ -1271,3 +1279,20 @@ F3 → Ctrl+↑	F3 to Ctrl+Up
 精简列表仅显示备注名称，无备注时显示远端 ID；缩小连接、展开折叠及标题操作按钮，减少行高和留白，优化设备数量间距，保留大字体适配和点击范围。	The compact list shows only the device name, falling back to the remote ID when no name is set. Smaller connect, expand/collapse and header buttons reduce row height and whitespace. Improved spacing around the device count while preserving large-font support and touch targets.
 连接选项默认折叠，始终保留远端 ID / IP 输入框；缩小输入框和连接箭头，连接模式改为紧凑下拉菜单，展开折叠保留过渡动画和自定义画质设置。	Connection options start collapsed while the remote ID / IP input remains visible. Reduced the input and connect-arrow size, and replaced connection modes with a compact dropdown. Expanding and collapsing retain transition animations and custom quality settings.
 排序、列表显示方式、语言、按钮样式及文件排序菜单的选中勾统一放到文字后面；移除设置页“账户 / 设备名称”栏目，保留服务器账号、API 登录与地址簿。	Selection checkmarks now follow the labels in sorting, list view, language, button style and file sorting menus. Removed the Account / Device name card from Settings while keeping server accounts, API login and address books.
+选择屏幕	Choose screen
+投屏方向	Projection orientation
+剪贴板同步	Clipboard sync
+释放按键	Release keys
+竖屏	Portrait
+修饰键	Modifiers
+功能键	Function keys
+仅调整本地投屏方向	Only changes local projection orientation
+遵循系统旋转设置	Follows system rotation settings
+独立旋转，不受系统锁定影响	Independent rotation, unaffected by system rotation lock
+仅本次	This session
+1.3.0（1003000）· 远控菜单与方向设置升级	1.3.0 (1003000) · Remote menus and orientation settings upgrade
+统一重做远控“屏幕、输入、键盘、画面、更多、屏幕方向”六类子菜单，采用紧凑半透明面板、统一图标和淡蓝选中状态，减少遮挡并保留原有功能。	Redesigned the six remote-control menus—Screens, Input, Keyboard, View, More and Screen orientation—with compact translucent panels, consistent icons and pale-blue selection states. They obscure less of the remote view while preserving existing functions.
+子菜单跟随功能栏位置智能向上或向下展开；优化打开、切换和关闭动效，点击菜单外部只收起菜单，不把操作传给远端。	Submenus open above or below the toolbar according to available space. Opening, switching and closing animations are smoother, and tapping outside only dismisses the menu without sending input to the remote device.
+屏幕方向新增持久化：跟随系统开关以及自动、竖屏、横屏选择都保存在本机，重启 App 后继续生效；应用单独投屏方向仍按本次会话处理。	Screen orientation settings are now persistent. Follow system and the Auto, Portrait and Landscape choices are stored locally and restored after restarting the app. Orientation for independent app projection remains session-only.
+优化手机、平板、折叠屏和 PC 窗口的大字体与窄窗口适配；说明文字按实际宽度测量，修复屏幕方向底部提示被裁切。	Improved large-text and narrow-window layouts across phones, tablets, foldables and PC windows. Help text is measured against the actual available width, fixing clipped orientation descriptions.
+鼠标、触摸和屏幕方向选项改为仅用淡蓝高亮表示选中，不再显示勾号；同步完善深色模式、滚动区域和键盘快捷键分页显示。	Mouse, Touch and Screen orientation selections now use pale-blue highlighting without checkmarks. Dark mode, scroll areas and keyboard shortcut tabs were also refined.

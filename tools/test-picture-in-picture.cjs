@@ -158,7 +158,7 @@ const test = async (name, fn) => { await fn(); console.log('PASS ' + name); coun
     }
     const menuModel = read('entry/src/main/ets/model/RemoteControlMenu.ets');
     assert(menuModel.includes("'fullscreen', 'pip', 'orientation'"));
-    assert(page.includes('this.buildControlToolbarItem(item, true)'));
+    assert(page.includes('RemoteGlassMenu({ state: this.getGlassMenuState()'));
     assert(page.includes("'fullscreen', 'pip', 'orientation'"));
     assert(page.includes('this.pictureInPicture?.updateContentSize(frame.width, frame.height)'));
     assert(page.includes('this.pictureInPicture.dispose().finally('));

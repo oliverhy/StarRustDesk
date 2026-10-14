@@ -100,13 +100,14 @@ p.controlMenu='more';assert.equal(p.getControlActionPadding(),8);
 p.controlMenu='view';assert.equal(p.getControlActionPadding(),8);
 p.controlMenu='';assert.equal(p.getControlActionPadding(),2,'fixed toolbar spacing is unchanged');
 const overlay=method('buildControlMenuOverlay');
-assert(overlay.includes('this.buildCompactDisplayMenu()'));
-assert(overlay.includes('this.getVisibleControlMenuItems()'));
+assert(overlay.includes('RemoteGlassMenu({ state: this.getGlassMenuState()'));
+assert(method('getGlassMenuState').includes('this.getVisibleControlMenuItems()'));
 assert(!overlay.includes('FlexWrap.Wrap') && !overlay.includes('当前屏幕') && !overlay.includes('Divider()'));
 assert(overlay.includes('.onClick(() => { this.setControlMenu(\'\'); })'),'dismiss tap remains local');
-assert(overlay.includes('.height(this.getControlMenuMetrics().bodyHeight).scrollBar(BarState.Off)'));
+const glass=read('entry/src/main/ets/widget/RemoteGlassMenu.ets');
+assert(glass.includes('.layoutWeight(1).scrollBar(BarState.Off)'));
 assert(!overlay.includes('BarState.Auto'));
-assert(overlay.includes('.align(Alignment.TopStart)') && overlay.includes('.justifyContent(FlexAlign.Start)'),
+assert(glass.includes('.align(Alignment.TopStart)') && glass.includes('.justifyContent(FlexAlign.Start)'),
   'spare viewport space is not split above and below the content');
 const display=method('buildCompactDisplayMenu');
 assert(display.includes('ScrollDirection.Horizontal') && display.includes('this.switchDisplay(display)'));

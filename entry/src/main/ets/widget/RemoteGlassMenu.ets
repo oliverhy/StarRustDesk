@@ -1,0 +1,431 @@
+import { RemoteGlassMenuMetrics, RemoteGlassMenuState, glassOrientationDescription } from '../model/RemoteGlassMenu';
+import { RemoteGlassStyle as Style } from '../theme/RemoteGlassStyle';
+import { translate } from '../utils/I18n';
+
+@Component
+export struct RemoteGlassMenu {
+  @Prop state: RemoteGlassMenuState = new RemoteGlassMenuState();
+  @Prop metrics: RemoteGlassMenuMetrics = { width: 224, height: 300, rowHeight: 36, contentHeight: 274,
+    bodyHeight: 274, padding: 12, headerHeight: 26, segmentHeight: 40, screenHeight: 62, displayWidth: 70, footerHeight: 18, stacked: false };
+  @Prop dark: boolean = false;
+  @Prop language: string = 'zh-Hans';
+  onAction: (action: string) => void = () => {};
+  onOrderEdit: (key: string) => void = () => {};
+
+  textColor(): string { return this.dark ? Style.TEXT_DARK : Style.TEXT; }
+  blue(): string { return this.dark ? Style.BLUE_DARK : Style.BLUE; }
+  selected(): string { return this.dark ? Style.SELECTED_DARK : Style.SELECTED; }
+  keyColor(): string { return this.dark ? Style.KEY_DARK : Style.KEY; }
+  title(): string {
+    switch (this.state.category) {
+      case 'screens': return '选择屏幕';
+      case 'input': return '输入';
+      case 'keyboard': return '键盘';
+      case 'view': return '画面';
+      case 'more': return '更多';
+      default: return this.state.projection ? '投屏方向' : '屏幕方向';
+    }
+  }
+  icon(key: string): Resource {
+    switch (key) {
+      case 'mouse': case 'mouseSettings': return $r('app.media.glass_mouse');
+      case 'touch': case 'gestureHelp': return $r('app.media.remote_input_touch');
+      case 'keyboardSettings': case 'release': case 'softKeyboard': return $r('app.media.keyboard_launcher');
+      case 'upload': return $r('app.media.glass_file_upload');
+      case 'download': return $r('app.media.glass_upload');
+      case 'uploadFolder': return $r('app.media.glass_folder');
+      case 'chat': return $r('app.media.glass_chat');
+      case 'recording': return $r('app.media.glass_record');
+      case 'recordings': return $r('app.media.glass_recordings');
+      case 'privacy': return $r('app.media.glass_list');
+      case 'monitor': return $r('app.media.glass_info');
+      case 'sort': return $r('app.media.glass_sliders');
+      case 'fullscreen': return $r('app.media.glass_fullscreen');
+      case 'pip': return $r('app.media.glass_pip');
+      case 'orientation': return $r('app.media.glass_orientation');
+      default: return $r('app.media.glass_monitor');
+    }
+  }
+  label(key: string): string {
+    switch (key) {
+      case 'virtualMouse': return '虚拟鼠标';
+      case 'clipboard': return '剪贴板同步';
+      case 'gestureHelp': return '手势说明';
+      case 'keyboardSettings': return '键盘设置';
+      case 'mouseSettings': return '鼠标设置';
+      case 'pan': return '移动画面';
+      case 'edgePan': return '边缘跟随';
+      case 'fullscreen': return this.state.fullscreen ? '退出全屏' : '全屏';
+      case 'pip': return this.state.pip ? '关闭小窗' : '画中画';
+      case 'orientation': return this.state.projection ? '投屏方向' : '屏幕方向';
+      case 'chat': return '聊天';
+      case 'upload': return '发送文件';
+      case 'uploadFolder': return '发送文件夹';
+      case 'download': return '取回文件';
+      case 'recording': return this.state.recording ? '停止录像' : '录像';
+      case 'recordings': return '录像列表';
+      case 'privacy': return this.state.privacyPending ? '隐私屏处理中' : '隐私屏';
+      case 'monitor': return '连接信息';
+      case 'sort': return '工具栏排序';
+      case 'mobileActions': return '手机操作';
+      case 'release': return '释放按键';
+      case 'softKeyboard': return this.state.keyboardOpen ? '收起键盘' : '打开键盘';
+      case 'immersive': return this.state.immersive ? '退出沉浸' : '沉浸窗口';
+      case 'adjustWindow': return this.state.windowBusy ? '调整中…' : '调整窗口';
+      default: return key;
+    }
+  }
+  isToggle(key: string): boolean {
+    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor'].includes(key);
+  }
+  isOn(key: string): boolean {
+    switch (key) {
+      case 'virtualMouse': return this.state.virtualMouse;
+      case 'clipboard': return this.state.clipboard;
+      case 'pan': return this.state.pan;
+      case 'edgePan': return this.state.edgePan;
+      case 'privacy': return this.state.privacy;
+      case 'monitor': return this.state.monitor;
+      default: return false;
+    }
+  }
+  actionEnabled(key: string): boolean {
+    if (['upload', 'uploadFolder', 'download'].includes(key)) return !this.state.transferBusy;
+    if (key === 'privacy') return !this.state.privacyPending;
+    if (key === 'adjustWindow') return !this.state.windowBusy && !this.state.fullscreen;
+    return true;
+  }
+  gridKeys(): string[] {
+    if (this.state.keyboardTab === 'function') return ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
+    if (this.state.keyboardTab === 'modifiers') return ['Ctrl', 'Alt', 'Shift', 'Win/Cmd'];
+    return this.state.keyboardItems.filter((key: string) => !key.includes('+') && key !== 'Ins');
+  }
+  gridRows(): number[] {
+    const count = Math.ceil(this.gridKeys().length / (this.metrics.stacked ? 2 : 3));
+    const rows: number[] = [];
+    for (let index = 0; index < count; index++) rows.push(index);
+    return rows;
+  }
+  rowKeys(row: number): string[] {
+    const columns = this.metrics.stacked ? 2 : 3;
+    return this.gridKeys().slice(row * columns, (row + 1) * columns);
+  }
+  displayIndexes(): number[] {
+    const indexes: number[] = [];
+    for (let index = 0; index < Math.max(1, this.state.displayCount); index++) indexes.push(index);
+    return indexes;
+  }
+  shortcutKeys(): string[] {
+    return this.state.keyboardItems.filter((key: string) => ['Ctrl+Alt+Del', 'Ctrl+Shift+Esc'].includes(key) &&
+      (key !== 'Ctrl+Alt+Del' || this.state.canSendCtrlAltDel));
+  }
+  extraKeys(): string[] {
+    return this.state.keyboardItems.filter((key: string) => key === 'Ins' || key === 'Ctrl+Shift+Del' || key === 'Alt+F4');
+  }
+  keySelected(key: string): boolean {
+    const mask = key === 'Ctrl' ? 1 : key === 'Alt' ? 2 : key === 'Shift' ? 4 : key === 'Win/Cmd' ? 8 : 0;
+    return (this.state.modifiers & mask) !== 0;
+  }
+  segmentSelected(key: string): boolean {
+    if (key === 'mode-mouse') return this.state.inputMode === 'mouse';
+    if (key === 'mode-touch') return this.state.inputMode !== 'mouse';
+    if (key.startsWith('tab-')) return this.state.keyboardTab === key.substring(4);
+    if (key.startsWith('view-')) return this.state.desktopViewMode === key.substring(5);
+    if (key.startsWith('orientation-')) return this.state.orientation === key.substring(12) ||
+      (key === 'orientation-auto' && this.state.orientation === 'system');
+    return false;
+  }
+  keyLabel(key: string): string {
+    switch (key) { case 'Left': return '←'; case 'Up': return '↑'; case 'Down': return '↓'; case 'Right': return '→'; default: return key; }
+  }
+
+  @Builder
+  divider() { Divider().height(1).color(Style.DIVIDER).margin({ top: 4, bottom: 4 }) }
+
+  @Builder
+  text(label: string, secondary: boolean = false) {
+    Text(translate(label, this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(500)
+      .fontColor(secondary ? Style.SECONDARY : this.textColor()).maxLines(2)
+      .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+  }
+
+  @Builder
+  actionContent(key: string) {
+    Row({ space: 10 }) {
+      if (this.state.category === 'more' || !this.isToggle(key)) {
+        Image(this.icon(key)).width(17).height(17).fillColor(this.textColor()).flexShrink(0)
+          .hitTestBehavior(HitTestMode.None)
+      }
+      Text(translate(this.label(key), this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(500)
+        .fontColor(this.textColor()).layoutWeight(1).maxLines(2)
+        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+      if (this.isToggle(key)) {
+        Toggle({ type: ToggleType.Switch, isOn: this.isOn(key) }).width(40).height(24)
+          .selectedColor(Style.BLUE).switchPointColor('#FFFFFF').focusable(false)
+          .accessibilityText(translate(this.label(key), this.language))
+          .onChange((value: boolean) => { if (value !== this.isOn(key)) this.onAction(key); })
+      } else {
+        if (key === 'orientation') {
+          Text(translate(this.state.orientation === 'portrait' ? '竖屏' : this.state.orientation === 'landscape' ? '横屏' : '自动', this.language))
+            .fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY).maxLines(1)
+        }
+        if (key !== 'release') {
+          Image($r('app.media.glass_chevron')).width(12).height(12).fillColor(Style.SECONDARY)
+            .hitTestBehavior(HitTestMode.None)
+        }
+      }
+    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+  }
+
+  @Builder
+  action(key: string) {
+    if (this.isToggle(key)) {
+      Row() { this.actionContent(key) }.width('100%').height(this.metrics.rowHeight)
+        .enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
+        .id(`glass-action-${key}`)
+        .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => { this.onOrderEdit(key); }))
+    } else {
+      Button({ type: ButtonType.Normal }) { this.actionContent(key) }
+        .width('100%').height(this.metrics.rowHeight).padding(0).backgroundColor(Color.Transparent)
+        .borderRadius(7).focusable(false).enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
+        .id(`glass-action-${key}`).accessibilityText(translate(this.label(key), this.language))
+        .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => { this.onOrderEdit(key); }))
+        .onClick(() => { this.onAction(key); })
+    }
+  }
+
+  @Builder
+  segment(key: string, label: string, selected: boolean, icon: string = '') {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 5 }) {
+        if (this.segmentSelected(key) && !key.startsWith('tab-') && !key.startsWith('mode-') && !key.startsWith('orientation-')) { Text('✓').fontFamily(Style.FONT).fontSize(13).fontColor(this.blue()).flexShrink(0) }
+        if (icon) { Image(this.icon(icon)).width(17).height(17).fillColor(this.segmentSelected(key) ? this.blue() : this.textColor()).flexShrink(0) }
+        Text(translate(label, this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(this.segmentSelected(key) ? 600 : 500)
+          .fontColor(this.segmentSelected(key) ? this.blue() : this.textColor()).maxLines(2)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+      }.justifyContent(FlexAlign.Center)
+    }.layoutWeight(1).height(this.metrics.segmentHeight).padding(3).focusable(false)
+      .backgroundColor(this.segmentSelected(key) ? this.selected() : this.keyColor())
+      .border({ width: this.segmentSelected(key) ? 1 : 0, color: Style.SELECTED_BORDER }).borderRadius(7)
+      .id(`glass-segment-${key}`).accessibilityText(translate(label, this.language))
+      .accessibilityDescription(translate(this.segmentSelected(key) ? '已选中' : '', this.language))
+      .onClick(() => { this.onAction(key); })
+  }
+
+  @Builder
+  input() {
+    if (this.metrics.stacked) {
+      Column({ space: 4 }) {
+        this.segment('mode-mouse', '鼠标', this.state.inputMode === 'mouse', 'mouse')
+        this.segment('mode-touch', '触摸', this.state.inputMode !== 'mouse', 'touch')
+      }.width('100%').margin({ bottom: 8 })
+    } else {
+      Row({ space: 4 }) {
+        this.segment('mode-mouse', '鼠标', this.state.inputMode === 'mouse', 'mouse')
+        this.segment('mode-touch', '触摸', this.state.inputMode !== 'mouse', 'touch')
+      }.width('100%').margin({ bottom: 8 })
+    }
+    ForEach(this.state.items.filter((key: string) => key !== 'input' && key !== 'gestureHelp'), (key: string) => {
+      this.action(key)
+    }, (key: string) => key)
+    this.divider()
+    this.action('gestureHelp')
+    this.action('keyboardSettings')
+    this.action('mouseSettings')
+  }
+
+  @Builder
+  screens() {
+    Scroll() {
+      Row({ space: 5 }) {
+        ForEach(this.displayIndexes(), (display: number) => {
+          Button({ type: ButtonType.Normal }) {
+            Column({ space: 5 }) {
+              Image($r('app.media.glass_monitor')).width(23).height(23)
+                .fillColor(display === this.state.currentDisplay ? this.blue() : this.textColor())
+              Text(translate(`屏幕 ${display + 1}`, this.language)).fontFamily(Style.FONT).fontSize(12).maxLines(1)
+                .fontWeight(display === this.state.currentDisplay ? 600 : 500)
+                .fontColor(display === this.state.currentDisplay ? this.blue() : this.textColor())
+            }
+          }.width(this.metrics.displayWidth).height(this.metrics.screenHeight).padding(4).focusable(false)
+            .backgroundColor(display === this.state.currentDisplay ? this.selected() : this.keyColor())
+            .border({ width: 1, color: display === this.state.currentDisplay ? Style.SELECTED_BORDER : Style.DIVIDER })
+            .borderRadius(7).id(`glass-display-${display}`)
+            .gesture(LongPressGesture({ duration: 550 }).onAction(() => { this.onOrderEdit('displays'); }))
+            .onClick(() => { this.onAction(`display-${display}`); })
+        }, (display: number) => `display-${display}`)
+      }
+    }.width('100%').height(this.metrics.screenHeight + 8).scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+  }
+
+  @Builder
+  zoom() {
+    Row({ space: 0 }) {
+      Text(translate('缩放', this.language)).fontFamily(Style.FONT).fontSize(13).fontColor(this.textColor()).layoutWeight(1)
+      Button('−', { type: ButtonType.Normal }).width(32).height(30).padding(0).fontFamily(Style.FONT).fontSize(17).fontColor(this.textColor())
+        .id('glass-zoom-out')
+        .backgroundColor(this.keyColor()).borderRadius({ topLeft: 6, bottomLeft: 6 }).focusable(false)
+        .onClick(() => { this.onAction('zoomOut'); })
+      Text(`${this.state.zoom}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor()).width(58).height(30)
+        .textAlign(TextAlign.Center).backgroundColor(this.keyColor())
+        .border({ width: { left: 1, right: 1 }, color: Style.DIVIDER })
+      Button('+', { type: ButtonType.Normal }).width(32).height(30).padding(0).fontFamily(Style.FONT).fontSize(17).fontColor(this.textColor())
+        .id('glass-zoom-in')
+        .backgroundColor(this.keyColor()).borderRadius({ topRight: 6, bottomRight: 6 }).focusable(false)
+        .onClick(() => { this.onAction('zoomIn'); })
+    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+  }
+
+  @Builder
+  desktop() {
+    Row({ space: 3 }) {
+      this.segment('view-adaptive', '适应窗口', this.state.desktopViewMode === 'adaptive')
+      this.segment('view-original', '原始比例', this.state.desktopViewMode === 'original')
+      this.segment('view-custom', '自定义', this.state.desktopViewMode === 'custom')
+    }.width('100%')
+    Row() {
+      Text(translate('显示比例', this.language)).fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY).layoutWeight(1)
+      Text(`${this.state.desktopPercent}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor())
+    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+    if (this.state.desktopViewMode === 'custom') {
+      Slider({ value: this.state.desktopCustomPercent, min: 25, max: 300, step: 5 }).height(this.metrics.rowHeight)
+        .onChange((value: number) => { this.onAction(`scale-${value}`); })
+    }
+    this.action('adjustWindow')
+    this.action('immersive')
+    Text(translate('按远端比例调整窗口，不拉伸画面', this.language)).fontFamily(Style.FONT).fontSize(11)
+      .fontColor(Style.SECONDARY).maxLines(3).width('100%').height(this.metrics.rowHeight)
+    this.divider()
+  }
+
+  @Builder
+  view() {
+    if (this.state.desktop) { this.desktop() }
+    this.zoom()
+    ForEach(this.state.items.filter((key: string) => key === 'pan' || key === 'edgePan'), (key: string) => {
+      this.action(key)
+    }, (key: string) => key)
+    this.divider()
+    ForEach(this.state.items.filter((key: string) => !['pan', 'edgePan', 'zoomIn', 'zoomOut'].includes(key)), (key: string) => {
+      this.action(key)
+    }, (key: string) => key)
+  }
+
+  @Builder
+  more() {
+    Text(translate('文件传输', this.language)).fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).height(20)
+    ForEach(this.state.items.filter((key: string) => ['upload', 'uploadFolder', 'download'].includes(key)), (key: string) => {
+      this.action(key)
+    }, (key: string) => key)
+    this.divider()
+    ForEach(this.state.items.filter((key: string) => !['upload', 'uploadFolder', 'download'].includes(key)), (key: string) => {
+      this.action(key)
+    }, (key: string) => key)
+    this.divider()
+    this.action('monitor')
+    this.action('sort')
+  }
+
+  @Builder
+  keyCap(key: string) {
+    Button(this.keyLabel(key), { type: ButtonType.Normal }).layoutWeight(1).height(this.metrics.rowHeight)
+      .padding(3).fontFamily(Style.FONT).fontSize(12).fontColor(this.keySelected(key) ? this.blue() : this.textColor())
+      .backgroundColor(this.keySelected(key) ? this.selected() : this.keyColor())
+      .border({ width: 1, color: this.keySelected(key) ? Style.SELECTED_BORDER : Style.DIVIDER })
+      .borderRadius(Style.KEY_RADIUS).focusable(false).id(`glass-key-${key}`)
+      .gesture(LongPressGesture({ duration: 550 }).onAction(() => { this.onOrderEdit(`key-${key}`); }))
+      .onClick(() => { this.onAction(`key-${key}`); })
+  }
+
+  @Builder
+  keyboard() {
+    Row({ space: 0 }) {
+      this.segment('tab-modifiers', '修饰键', this.state.keyboardTab === 'modifiers')
+      this.segment('tab-function', '功能键', this.state.keyboardTab === 'function')
+      this.segment('tab-more', '更多按键', this.state.keyboardTab === 'more')
+    }.width('100%').margin({ bottom: 8 })
+    Scroll() {
+      Column() {
+        ForEach(this.gridRows(), (row: number) => {
+          Row({ space: 5 }) {
+            ForEach(this.rowKeys(row), (key: string) => { this.keyCap(key) }, (key: string) => key)
+            if (this.rowKeys(row).length < (this.metrics.stacked ? 2 : 3)) { Blank().layoutWeight(1) }
+          }.width('100%').margin({ bottom: 4 })
+        }, (row: number) => `row-${row}-${this.state.keyboardTab}`)
+        this.divider()
+        if (this.state.keyboardTab === 'more') {
+          ForEach(this.shortcutKeys(), (key: string) => {
+            Row() { this.keyCap(key) }.width('100%').margin({ bottom: 4 })
+          }, (key: string) => key)
+          if (this.extraKeys().length > 0) {
+            this.divider()
+            ForEach(this.extraKeys(), (key: string) => {
+              Row() { this.keyCap(key) }.width('100%').margin({ bottom: 4 })
+            }, (key: string) => key)
+          }
+        } else if (this.state.keyboardTab === 'modifiers') { this.action('softKeyboard') }
+      }.width('100%')
+    }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
+    this.action('release')
+  }
+
+  @Builder
+  orientationSegments() {
+    if (this.metrics.stacked) {
+      Column({ space: 2 }) {
+        this.segment('orientation-auto', '自动', this.state.orientation === 'auto' || this.state.orientation === 'system')
+        this.segment('orientation-portrait', '竖屏', this.state.orientation === 'portrait')
+        this.segment('orientation-landscape', '横屏', this.state.orientation === 'landscape')
+      }.width('100%')
+    } else {
+      Row({ space: 0 }) {
+        this.segment('orientation-auto', '自动', this.state.orientation === 'auto' || this.state.orientation === 'system')
+        this.segment('orientation-portrait', '竖屏', this.state.orientation === 'portrait')
+        this.segment('orientation-landscape', '横屏', this.state.orientation === 'landscape')
+      }.width('100%')
+    }
+  }
+
+  @Builder
+  orientation() {
+    if (!this.state.projection) {
+      Row({ space: 8 }) {
+        Text(translate('跟随系统旋转', this.language)).fontFamily(Style.FONT).fontSize(13).fontColor(this.textColor()).layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.state.followSystem }).width(40).height(24)
+          .selectedColor(Style.BLUE).switchPointColor('#FFFFFF').focusable(false).id('glass-follow-system')
+          .onChange((value: boolean) => { if (value !== this.state.followSystem) this.onAction('follow-system'); })
+      }.width('100%').height(this.metrics.rowHeight).margin({ bottom: 10 })
+    }
+    if (!this.state.followSystem || this.state.projection) { this.orientationSegments() }
+    Text(translate(glassOrientationDescription(this.state), this.language))
+      .fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).maxLines(3)
+      .width('100%').height(this.metrics.footerHeight).margin({ top: 10 })
+    if (this.state.orientationError) {
+      Text(translate(this.state.orientationError, this.language)).fontFamily(Style.FONT).fontSize(11).fontColor('#D84A4A').maxLines(4)
+    }
+  }
+
+  build() {
+    Column() {
+        Row() {
+          Text(translate(this.title(), this.language)).fontFamily(Style.FONT).fontSize(14).fontWeight(600)
+            .fontColor(this.textColor()).layoutWeight(1).maxLines(2)
+          if (this.state.category === 'orientation' && this.state.projection) {
+            Text(translate('仅本次', this.language)).fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY)
+          }
+        }.width('100%').height(this.metrics.headerHeight)
+        if (this.state.category === 'keyboard') { this.keyboard() }
+        else {
+          Scroll() {
+            Column() {
+              if (this.state.category === 'screens') { this.screens() }
+              else if (this.state.category === 'input') { this.input() }
+              else if (this.state.category === 'view') { this.view() }
+              else if (this.state.category === 'more') { this.more() }
+              else if (this.state.category === 'orientation') { this.orientation() }
+            }.width('100%').alignItems(HorizontalAlign.Start).justifyContent(FlexAlign.Start)
+          }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
+        }
+    }.width('100%').height(this.metrics.bodyHeight).alignItems(HorizontalAlign.Start).justifyContent(FlexAlign.Start)
+  }
+}

@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.2.30'
-export const RELEASE_NOTES_BUILD: string = '1002030'
+export const RELEASE_NOTES_VERSION: string = '1.3.0'
+export const RELEASE_NOTES_BUILD: string = '1003000'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.0（1003000）· 远控菜单与方向设置升级', [
+            '统一重做远控“屏幕、输入、键盘、画面、更多、屏幕方向”六类子菜单，采用紧凑半透明面板、统一图标和淡蓝选中状态，减少遮挡并保留原有功能。',
+            '子菜单跟随功能栏位置智能向上或向下展开；优化打开、切换和关闭动效，点击菜单外部只收起菜单，不把操作传给远端。',
+            '屏幕方向新增持久化：跟随系统开关以及自动、竖屏、横屏选择都保存在本机，重启 App 后继续生效；应用单独投屏方向仍按本次会话处理。',
+            '优化手机、平板、折叠屏和 PC 窗口的大字体与窄窗口适配；说明文字按实际宽度测量，修复屏幕方向底部提示被裁切。',
+            '鼠标、触摸和屏幕方向选项改为仅用淡蓝高亮表示选中，不再显示勾号；同步完善深色模式、滚动区域和键盘快捷键分页显示。'
+          ])
           this.buildSection('1.2.30（1002030）· 实体键盘布局与校准', [
             '远控“控 → 输入”新增独立的“键盘设置”和“鼠标设置”；键盘模式、布局、自定义映射集中管理，手势说明保留操作教程并更新新入口。',
             '新增实体键盘布局选择：自动、系统原样、苹果布局修正。按服务器与远端独立保存；自动只恢复已确认的校准，不根据品牌盲目交换按键。',
