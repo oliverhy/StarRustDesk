@@ -94,9 +94,9 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
         // The initial viewport matches the prototype. Additional legacy keys
         // remain available by scrolling without making the first view taller.
         content += Math.ceil(12 / (stacked ? 2 : 3)) * (rowHeight + 4) +
-          2 * (rowHeight + 4) + rowHeight + 9;
-      } else if (state.keyboardTab === 'function') content += Math.ceil(12 / (stacked ? 2 : 3)) * (rowHeight + 4) + rowHeight + 9;
-      else content += (stacked ? 4 : 2) * (rowHeight + 4) + 2 * rowHeight + 9;
+          2 * (rowHeight + 4) + 9;
+      } else if (state.keyboardTab === 'function') content += Math.ceil(12 / (stacked ? 2 : 3)) * (rowHeight + 4) + 9;
+      else content += (stacked ? 4 : 2) * (rowHeight + 4) + rowHeight + 9;
       break;
     case 'orientation':
       // Toggle bottom margin and description top margin are separate, including

@@ -339,11 +339,6 @@ export struct RemoteGlassMenu {
 
   @Builder
   keyboard() {
-    Row({ space: 0 }) {
-      this.segment('tab-modifiers', '修饰键', this.state.keyboardTab === 'modifiers')
-      this.segment('tab-function', '功能键', this.state.keyboardTab === 'function')
-      this.segment('tab-more', '更多按键', this.state.keyboardTab === 'more')
-    }.width('100%').margin({ bottom: 8 })
     Scroll() {
       Column() {
         ForEach(this.gridRows(), (row: number) => {
@@ -366,7 +361,11 @@ export struct RemoteGlassMenu {
         } else if (this.state.keyboardTab === 'modifiers') { this.action('softKeyboard') }
       }.width('100%')
     }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
-    this.action('release')
+    Row({ space: 0 }) {
+      this.segment('tab-modifiers', '修饰键', this.state.keyboardTab === 'modifiers')
+      this.segment('tab-function', '功能键', this.state.keyboardTab === 'function')
+      this.segment('tab-more', '更多按键', this.state.keyboardTab === 'more')
+    }.width('100%').margin({ top: 8 })
   }
 
   @Builder
@@ -407,9 +406,21 @@ export struct RemoteGlassMenu {
 
   build() {
     Column() {
-        Row() {
+        Row({ space: 8 }) {
           Text(translate(this.title(), this.language)).fontFamily(Style.FONT).fontSize(14).fontWeight(600)
             .fontColor(this.textColor()).layoutWeight(1).maxLines(2)
+          if (this.state.category === 'keyboard') {
+            Button({ type: ButtonType.Normal }) {
+              Text(translate(this.label('release'), this.language)).fontFamily(Style.FONT).fontSize(11)
+                .minFontSize(10).maxFontSize(11).maxLines(2).fontColor(this.blue())
+                .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+            }.height(this.metrics.headerHeight).constraintSize({ maxWidth: '65%' })
+              .padding({ left: 6, right: 3, top: 0, bottom: 0 }).backgroundColor(Color.Transparent)
+              .borderRadius(5).focusable(false).id('glass-action-release')
+              .accessibilityText(translate(this.label('release'), this.language))
+              .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => { this.onOrderEdit('release'); }))
+              .onClick(() => { this.onAction('release'); })
+          }
           if (this.state.category === 'orientation' && this.state.projection) {
             Text(translate('仅本次', this.language)).fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY)
           }
