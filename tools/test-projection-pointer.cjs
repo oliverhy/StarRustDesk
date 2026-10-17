@@ -65,24 +65,37 @@ test('expired, invalid and reset samples never suppress new input', () => {
 test('projected delivery pairs work in either order and across three paths', () => {
   for (const order of [[1,2,4], [2,4,1], [4,1,2], [8,1,2]]) {
     d.clear();
-    assert.equal(d.consumeProjectedDuplicate(0,50,60,1000,order[0]),false);
-    assert.equal(d.consumeProjectedDuplicate(0,50.2,60.1,1010,order[1]),true);
-    assert.equal(d.consumeProjectedDuplicate(0,50,60,1020,order[2]),true);
-    assert.equal(d.consumeProjectedDuplicate(0,51,60,1021,order[0]),false);
-    assert.equal(d.consumeProjectedDuplicate(2,51,60,1022,order[1]),false);
+    assert.equal(d.consumePointerDuplicate(0,50,60,1000,order[0]),false);
+    assert.equal(d.consumePointerDuplicate(0,50.2,60.1,1010,order[1]),true);
+    assert.equal(d.consumePointerDuplicate(0,50,60,1020,order[2]),true);
+    assert.equal(d.consumePointerDuplicate(0,51,60,1021,order[0]),false);
+    assert.equal(d.consumePointerDuplicate(2,51,60,1022,order[1]),false);
   }
 });
 
 test('same-origin events and real fast double-clicks are never suppressed', () => {
   d.clear();
   for (let i=0;i<2;i++) {
-    assert.equal(d.consumeProjectedDuplicate(1,50,60,1000+i*20,2),false);
-    assert.equal(d.consumeProjectedDuplicate(2,50,60,1005+i*20,2),false);
+    assert.equal(d.consumePointerDuplicate(1,50,60,1000+i*20,2),false);
+    assert.equal(d.consumePointerDuplicate(2,50,60,1005+i*20,2),false);
   }
-  for (const action of [1,2,1,2]) assert.equal(d.consumeProjectedDuplicate(action,50,60,1050,1),true);
-  assert.equal(d.consumeProjectedDuplicate(0,50,60,1200,1),false);
-  d.clear(); assert.equal(d.consumeProjectedDuplicate(2,50,60,1201,2),false);
+  for (const action of [1,2,1,2]) assert.equal(d.consumePointerDuplicate(action,50,60,1050,1),true);
+  assert.equal(d.consumePointerDuplicate(0,50,60,1200,1),false);
+  d.clear(); assert.equal(d.consumePointerDuplicate(2,50,60,1201,2),false);
 });
+test('coordinate-free compatibility releases match once per origin and learn their position', () => {
+  d.clear();
+  assert.equal(d.consumePointerDuplicate(1,0,0,1000,8,false),false);
+  assert.equal(d.consumePointerDuplicate(0,0,0,1000,8,false),false);
+  assert.equal(d.consumePointerDuplicate(2,0,0,1000,8,false),false);
+  assert.equal(d.consumePointerDuplicate(2,50,60,1001,2),true);
+  assert.equal(d.consumePointerDuplicate(2,70,60,1002,1),false, 'do not reuse a position-free wildcard');
+  assert.equal(d.consumePointerDuplicate(2,50,60,1003,4),true);
+  assert.equal(d.consumePointerDuplicate(2,50,60,1004,2),false, 'same path is a new release');
+  assert.equal(d.consumePointerDuplicate(2,50,60,1100,1),false, 'old pairs expire');
+  d.clear(); assert.equal(d.consumePointerDuplicate(2,50,60,1101,2),false);
+});
+
 test('explicit mouse/touchpad survives touch wrapper; real finger/pen stays filtered', () => {
   assert.equal(context.isTouchOnly(true, false, true, false), false);
   assert.equal(context.isTouchOnly(false, true, false, true), false);

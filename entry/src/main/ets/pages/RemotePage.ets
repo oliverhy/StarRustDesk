@@ -1487,10 +1487,12 @@ struct RemotePage {
       if (event.action === NATIVE_MOUSE_ACTION_PRESS) pairedAction = 3;
       else if (event.action === NATIVE_MOUSE_ACTION_RELEASE) pairedAction = 4;
     }
-    if (this.remoteExternalDisplay) {
-      if (this.physicalMouseDeduplicator.consumeProjectedDuplicate(
+    if (this.remoteExternalDisplay || pairedAction > 0) {
+      if (this.physicalMouseDeduplicator.consumePointerDuplicate(
         pairedAction, localX, localY, this.lastNativeMouseEventAt, 1)) {
         this.pointerDuplicateEvents++;
+        if (pairedAction > 0) RustDeskNapi.appendDiagnosticLog('input',
+          `physical_mouse_duplicate action=${pairedAction} origin=native`);
         return;
       }
     } else {
@@ -1523,7 +1525,7 @@ struct RemotePage {
     let forwardedAction: number = -1;
     if (event.button === NATIVE_MOUSE_BUTTON_LEFT) {
       if (event.action === NATIVE_MOUSE_ACTION_PRESS) {
-        this.sendLeftDown(remotePoint.x, remotePoint.y);
+        this.sendLeftDown(remotePoint.x, remotePoint.y, false);
         forwardedAction = 1;
       } else if (event.action === NATIVE_MOUSE_ACTION_RELEASE) {
         const hadLeftDown: boolean = this.leftButtonHeld;
@@ -6353,6 +6355,13 @@ struct RemotePage {
     if (completedSequence) this.lastMappedPhysicalLeftUpAt = Date.now();
     if (touchCount <= 0 && changedCount <= 0) {
       if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+        if (event.type === TouchType.Up && this.physicalMouseDeduplicator.consumePointerDuplicate(
+          2, 0, 0, Date.now(), 8, false)) {
+          this.pointerDuplicateEvents++;
+          RustDeskNapi.appendDiagnosticLog('input', 'physical_mouse_duplicate action=2 origin=compatibility_empty');
+          event.stopPropagation();
+          return;
+        }
         const hadLeftDown: boolean = this.leftButtonHeld;
         this.sendLeftUp(this.lastAbsX, this.lastAbsY, true);
         if (hadLeftDown && event.type === TouchType.Up) this.lastMappedPhysicalLeftUpAt = Date.now();
@@ -6361,13 +6370,17 @@ struct RemotePage {
     }
     let x: number = touchCount > 0 ? event.touches[0].x : event.changedTouches[0].x;
     let y: number = touchCount > 0 ? event.touches[0].y : event.changedTouches[0].y;
-    let localX: number = x - this.getDisplayLeft();
-    let localY: number = y - this.getDisplayTop();
+    // This is the same capture component as onMouse: in mouse mode it covers
+    // the viewport; in direct-touch mode its origin is already the picture.
+    let localX: number = this.inputMode === INPUT_MODE_MOUSE ? x - this.getDisplayLeft() : x;
+    let localY: number = this.inputMode === INPUT_MODE_MOUSE ? y - this.getDisplayTop() : y;
     const pairedAction: number = event.type === TouchType.Down ? 1 :
       event.type === TouchType.Up ? 2 : event.type === TouchType.Move ? 0 : -1;
-    if (this.remoteExternalDisplay && this.physicalMouseDeduplicator.consumeProjectedDuplicate(
+    if ((this.remoteExternalDisplay || pairedAction > 0) && this.physicalMouseDeduplicator.consumePointerDuplicate(
       pairedAction, localX, localY, Date.now(), 8)) {
       this.pointerDuplicateEvents++;
+      if (pairedAction > 0) RustDeskNapi.appendDiagnosticLog('input',
+        `physical_mouse_duplicate action=${pairedAction} origin=compatibility`);
       event.stopPropagation();
       return;
     }
@@ -6377,7 +6390,7 @@ struct RemotePage {
     this.handleRemoteHover(true);
     this.requestRemoteInputFocus();
     if (event.type === TouchType.Down) {
-      this.sendLeftDown(remotePoint.x, remotePoint.y);
+      this.sendLeftDown(remotePoint.x, remotePoint.y, false);
       RustDeskNapi.appendDiagnosticLog('input', 'pointer_touch_forwarded action=1');
     } else if (event.type === TouchType.Move) {
       if (this.lastMouseEventAt - this.lastMoveSentAt > 8) {
@@ -6630,7 +6643,7 @@ struct RemotePage {
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
   }
 
-  sendLeftDown(remoteX: number, remoteY: number): void {
+  sendLeftDown(remoteX: number, remoteY: number, showHoldIndicator: boolean = true): void {
     if (this.leftButtonHeld) {
       return;
     }
@@ -6638,7 +6651,9 @@ struct RemotePage {
     this.leftButtonHeld = true;
     this.leftButtonHeldAt = Date.now();
     this.preferAuthoritativeCursor = false;
-    this.showLeftButtonHoldIndicator = this.inputMode === INPUT_MODE_MOUSE;
+    // This hint describes a simulated held button (touch/virtual-mouse drag),
+    // not every ordinary physical mouse press in a single or double click.
+    this.showLeftButtonHoldIndicator = showHoldIndicator && this.inputMode === INPUT_MODE_MOUSE;
   }
 
   sendLeftUp(remoteX: number, remoteY: number, force: boolean = false): void {
@@ -6693,7 +6708,7 @@ struct RemotePage {
     let leftPressed: boolean = event.pressedButtons.indexOf(MouseButton.Left) >= 0;
     let rightPressed: boolean = event.pressedButtons.indexOf(MouseButton.Right) >= 0;
     if (!this.leftButtonHeld && leftPressed) {
-      this.sendLeftDown(remoteX, remoteY);
+      this.sendLeftDown(remoteX, remoteY, false);
       RustDeskNapi.appendDiagnosticLog('input', 'mouse_left_down recovered_from_move');
     } else if (this.leftButtonHeld && !leftPressed) {
       this.sendLeftUp(remoteX, remoteY, true);
@@ -6772,14 +6787,16 @@ struct RemotePage {
     let localY: number = coordinatesFromViewport || (this.inputMode === INPUT_MODE_MOUSE && !coordinatesFromSurface) ?
       event.y - this.getDisplayTop() : event.y;
     if (!Number.isFinite(localX) || !Number.isFinite(localY)) return;
-    // Suppress only a matching native event. In projected windows native may
-    // deliver buttons while ArkUI alone delivers unpressed mouse movement.
-    const duplicate: boolean = this.remoteExternalDisplay ?
-      this.physicalMouseDeduplicator.consumeProjectedDuplicate(action, localX, localY, Date.now(),
+    // Local physical buttons also arrive through compatibility touch. Dedup
+    // across all button paths, while retaining the local movement policy.
+    const duplicate: boolean = this.remoteExternalDisplay || action > 0 ?
+      this.physicalMouseDeduplicator.consumePointerDuplicate(action, localX, localY, Date.now(),
         coordinatesFromViewport ? 4 : 2) :
       this.physicalMouseDeduplicator.consumeDuplicate(action, localX, localY, Date.now());
     if (duplicate) {
       this.pointerDuplicateEvents++;
+      if (action > 0) RustDeskNapi.appendDiagnosticLog('input',
+        `physical_mouse_duplicate action=${action} origin=${coordinatesFromViewport ? 'viewport' : 'arkui'}`);
       event.stopPropagation();
       return;
     }
@@ -6812,7 +6829,7 @@ struct RemotePage {
       this.lastMoveSentAt = now;
     }
     if (action === 1) {
-      this.sendLeftDown(remotePoint.x, remotePoint.y);
+      this.sendLeftDown(remotePoint.x, remotePoint.y, false);
     } else if (action === 2) {
       const hadLeftDown: boolean = this.leftButtonHeld;
       this.sendLeftUp(remotePoint.x, remotePoint.y, true);

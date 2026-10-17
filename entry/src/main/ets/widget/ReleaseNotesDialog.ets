@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.1'
-export const RELEASE_NOTES_BUILD: string = '1003001'
+export const RELEASE_NOTES_VERSION: string = '1.3.2'
+export const RELEASE_NOTES_BUILD: string = '1003002'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.2（1003002）· 鼠标双击与拖拽提示修复', [
+            '修复实体鼠标和触控板点击经多条输入通路重复发送“松开”的问题，统一按下、松开去重，改善资源管理器双击文件夹等操作。',
+            '普通实体鼠标单击、双击不再误显示“左键按住”；保留触屏模拟拖拽和虚拟鼠标拖拽提示，不改变原有单击、右键及拖拽功能。',
+            '完善无坐标松开事件和投屏、触摸模式下的坐标一致性处理；补充鼠标事件去重诊断，保留漏事件点击补偿。'
+          ])
           this.buildSection('1.3.1（1003001）· 沉浸窗口记忆', [
             'PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连或重启 App 后自动恢复；首次使用需开启一次，未设置的远端保持普通窗口。',
             '窗口切换成功后才保存选择；退出远控恢复普通窗口，但保留已记住的开关。切换失败保留原设置，保存失败明确提示并支持重试。',

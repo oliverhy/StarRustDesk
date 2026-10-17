@@ -192,13 +192,132 @@ for (const empty of [false,true]) test(`compatibility click is not replayed afte
   p.releaseHeldMouseButtons('input_blur');
   assert.equal(p.leftButtonHeld,false);
   now+=20; touch(p,TouchType.Up,empty); fallback(p);
-  assert.deepEqual(sent,[1,2,2],'only a harmless release, no second left-down');
+  assert.deepEqual(sent,[1,2,2],'cleanup keeps click repair suppressed; no second left-down');
   assert.equal(p.compatibilityLeftSequence,false); assert.equal(p.pointerFallbackClicks,0);
 });
 
 test('empty compatibility down does not suppress a later click-only repair', () => {
   const p=page(); touch(p,TouchType.Down,true); now+=20; touch(p,TouchType.Up,true); fallback(p);
   assert.deepEqual(sent,[2,1,2]); assert.equal(p.pointerFallbackClicks,1);
+});
+
+test('20261016 local PC log replay sends two balanced clicks, not two duplicate releases', () => {
+  const p = page();
+  for (const [at, route, action] of [
+    [1000, 'touch', TouchType.Down], [1003, 'ark', MouseAction.Press],
+    [1080, 'touch', TouchType.Up], [1083, 'ark', MouseAction.Release],
+    [1191, 'touch', TouchType.Down], [1193, 'ark', MouseAction.Press],
+    [1274, 'touch', TouchType.Up], [1276, 'ark', MouseAction.Release]
+  ]) {
+    now = at;
+    if (route === 'touch') touch(p, action); else ark(p, action);
+  }
+  fallback(p);
+  assert.deepEqual(sent, [1, 2, 1, 2]);
+  assert.equal(p.pointerDuplicateEvents, 4);
+  assert.equal(p.pointerFallbackClicks, 0);
+  assert.equal(logs.filter(v => v[1].startsWith('physical_mouse_duplicate')).length, 4);
+});
+
+test('physical compatibility clicks in direct-touch mode use the same letterbox coordinates as ArkUI', () => {
+  const p = page({ inputMode: 'touch', getDisplayLeft: () => 12, getDisplayTop: () => 8 });
+  touch(p, TouchType.Down); now += 2; ark(p, MouseAction.Press);
+  now += 20; touch(p, TouchType.Up); now += 2; ark(p, MouseAction.Release);
+  fallback(p);
+  assert.deepEqual(sent, [1, 2]);
+  assert.equal(p.pointerDuplicateEvents, 2);
+});
+
+for (const projected of [false, true]) for (const reverse of [false, true]) {
+  for (const emptyUp of [false, true]) {
+    test(`compatibility/ArkUI fast double-click stays balanced projected=${projected} reverse=${reverse} emptyUp=${emptyUp}`, () => {
+      const p = page({ remoteExternalDisplay: projected });
+      for (let click = 0; click < 2; click++) {
+        for (const down of [true, false]) {
+          const first = () => touch(p, down ? TouchType.Down : TouchType.Up, !down && emptyUp);
+          const second = () => ark(p, down ? MouseAction.Press : MouseAction.Release);
+          (reverse ? second : first)(); now += 2;
+          (reverse ? first : second)(); now += 8;
+        }
+        fallback(p);
+      }
+      assert.deepEqual(sent, [1, 2, 1, 2]);
+      assert.equal(p.pointerFallbackClicks, 0);
+      assert.equal(p.leftButtonHeld, false);
+    });
+  }
+}
+
+test('local ArkUI before queued native delivery does not repeat either left or right release', () => {
+  const p = page();
+  for (const button of [MouseButton.Left, MouseButton.Right]) {
+    ark(p, MouseAction.Press, button); now += 10; native(p, 1, button);
+    now += 10; ark(p, MouseAction.Release, button); now += 10; native(p, 2, button);
+    now += 100;
+  }
+  assert.deepEqual(sent, [1, 2, 3, 4]);
+  assert.equal(p.pointerDuplicateEvents, 4);
+});
+
+test('local native/compatibility/ArkUI paths forward physical buttons only once', () => {
+  const p = page();
+  native(p, 1); now += 10; touch(p, TouchType.Down); now += 10; ark(p, MouseAction.Press);
+  now += 10; touch(p, TouchType.Up); now += 10; native(p, 2); now += 10; ark(p, MouseAction.Release);
+  fallback(p);
+  assert.deepEqual(sent, [1, 2]);
+  assert.equal(p.pointerDuplicateEvents, 4);
+  assert.equal(p.pointerFallbackClicks, 0);
+});
+
+test('local touchpad wrapped as TouchScreen stays on the physical button path', () => {
+  const p = page();
+  const pointer = { source: SourceType.TouchScreen, sourceTool: SourceTool.TOUCHPAD };
+  for (const down of [true, false]) {
+    p.handleRemoteTouch({ ...clickEvent(pointer), type: down ? TouchType.Down : TouchType.Up,
+      touches: [{ x: 50, y: 50 }], changedTouches: [], stopPropagation() {} });
+    now += 2; ark(p, down ? MouseAction.Press : MouseAction.Release, MouseButton.Left, pointer);
+    now += 20;
+  }
+  assert.deepEqual(sent, [1, 2]);
+  assert.equal(p.pointerDuplicateEvents, 2);
+  assert.equal(p.lastTouchEventAt, 0);
+});
+
+test('duplicate orphan releases still allow one click-only repair', () => {
+  const p = page();
+  touch(p, TouchType.Up, true); now += 2; ark(p, MouseAction.Release); fallback(p);
+  assert.deepEqual(sent, [2, 1, 2]);
+  assert.equal(p.pointerFallbackClicks, 1);
+});
+
+test('single-route fast clicks and dragging still forward all real presses and releases', () => {
+  const p = page();
+  for (let i = 0; i < 3; i++) {
+    ark(p, MouseAction.Press); now += 5; ark(p, MouseAction.Release); now += 5;
+  }
+  ark(p, MouseAction.Press); now += 20;
+  ark(p, MouseAction.Move, MouseButton.None, { x: 80, pressedButtons: [MouseButton.Left] });
+  now += 20; ark(p, MouseAction.Release, MouseButton.Left, { x: 80 });
+  assert.deepEqual(sent, [1, 2, 1, 2, 1, 2, 1, 0, 2]);
+  assert.equal(p.leftButtonHeld, false);
+});
+
+test('ordinary physical presses do not show the simulated drag hint', () => {
+  for (const route of [p => ark(p, MouseAction.Press), p => touch(p, TouchType.Down), p => native(p, 1),
+    p => ark(p, MouseAction.Move, MouseButton.None, { pressedButtons: [MouseButton.Left] })]) {
+    const p = page(); route(p);
+    assert.equal(p.leftButtonHeld, true);
+    assert.equal(p.showLeftButtonHoldIndicator, false);
+  }
+});
+
+test('confirmed simulated touch/virtual-mouse drag keeps its held hint until release', () => {
+  const p = page(); p.sendLeftDown(100, 100);
+  assert.equal(p.showLeftButtonHoldIndicator, true);
+  assert.equal(p.leftButtonHeld, true);
+  p.sendLeftUp(100, 100);
+  assert.deepEqual(sent, [1, 2]);
+  assert.equal(p.showLeftButtonHoldIndicator, false);
 });
 
 test('projected ArkUI/native/touch button deliveries do not duplicate left or right clicks', () => {
