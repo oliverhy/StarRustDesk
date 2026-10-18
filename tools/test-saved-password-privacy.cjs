@@ -14,7 +14,7 @@ assert(!slice('  editSavedConnection(', '  closeConnectionEditor(').includes('it
 assert(editor.includes("password: string = ''"));
 assert(editor.includes("osPassword: string = ''"));
 assert(editor.includes("this.password = ''")&&editor.includes("this.osPassword = ''"));
-assert.match(source,/SavedConnectionEditing\.endpoint\(item\.remoteId\) === SavedConnectionEditing\.endpoint\(peerId\)/);
+assert.match(source,/SavedConnectionEditing\.sameEndpoint\(item\.remoteId, peerId\)/);
 assert.match(source,/SavedConnectionEditing\.sameNetwork\(item\.serverScope, this\.currentConnectionScope\(\)\)/);
 assert.match(source,/password: includesPasswords \? item\.password : ''/);
 assert.doesNotMatch(slice('  buildBackupPayload(', '  async saveBackupFile('), /osPassword|RemoteSecurityStore/);

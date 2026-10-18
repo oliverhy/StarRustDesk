@@ -59,13 +59,13 @@ export struct SavedConnectionEditorDialog {
   }
 
   identityChanged(): boolean {
-    return SavedConnectionEditing.endpoint(this.remoteId) !== SavedConnectionEditing.endpoint(this.initial.remoteId)
+    return !SavedConnectionEditing.sameEndpoint(this.remoteId, this.initial.remoteId)
   }
 
   changeRemoteId(value: string): void {
     if (!this.createNew || this.busy) return
     const normalized = SavedConnectionEditing.endpoint(value)
-    const changed = normalized !== SavedConnectionEditing.endpoint(this.remoteId)
+    const changed = !SavedConnectionEditing.sameEndpoint(normalized, this.remoteId)
     this.remoteId = normalized
     this.error = ''
     if (changed) {

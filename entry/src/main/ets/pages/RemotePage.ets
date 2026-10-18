@@ -489,7 +489,6 @@ struct RemotePage {
   // does not continuously acknowledge display switches. Keep the user's local
   // selection after the initial sync instead of overwriting it during polling.
   private displayStateInitialized: boolean = false;
-  private connectingStartedAt: number = 0;
   private mobileActionsDragStartX: number = 0;
   private mobileActionsDragStartY: number = 0;
   private keyboardToolsDragStartX: number = 0;
@@ -639,7 +638,6 @@ struct RemotePage {
     this.connectionStatus = status as ConnectionStatus;
     if (status === ConnectionStatus.CONNECTED) this.loadInputCompatibility();
     this.restoreImmersiveWindowPreference();
-    this.connectingStartedAt = status === ConnectionStatus.CONNECTING ? Date.now() : 0;
     if (status === ConnectionStatus.WAITING_2FA) {
       this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
     }
@@ -786,16 +784,8 @@ struct RemotePage {
       } else {
         this.directLoginStartedAt = 0;
       }
-      if (status === ConnectionStatus.CONNECTING) {
-        if (this.connectingStartedAt === 0) {
-          this.connectingStartedAt = now;
-        } else if (now - this.connectingStartedAt > 30000) {
-          ConnectionService.disconnect();
-          status = ConnectionStatus.FAILED;
-        }
-      } else {
-        this.connectingStartedAt = 0;
-      }
+      // Native code owns transport/login budgets and the absolute attempt limit.
+      // A page timer must not cut off a newly established slow relay session.
       if (status === ConnectionStatus.FAILED) {
         const failedMessage: string = ConnectionService.getLastConnectionError();
         if (ConnectionService.recoverInterruptedSession(failedMessage)) {
@@ -809,7 +799,6 @@ struct RemotePage {
           this.resetRemoteViewportForSession();
           this.displayStateInitialized = false;
           this.directLoginStartedAt = 0;
-          this.connectingStartedAt = now;
           this.connectionError = '';
           this.videoWaitingHint = recoveryHint;
           status = ConnectionStatus.CONNECTING;
@@ -1134,7 +1123,6 @@ struct RemotePage {
     this.resetRemoteViewportForSession();
     this.displayStateInitialized = false;
     this.directLoginStartedAt = 0;
-    this.connectingStartedAt = 0;
     this.connectionStatus = ConnectionStatus.CONNECTING;
     this.videoWaitingHint = '直连未收到响应，正在通过中继重试';
     return true;
@@ -1931,7 +1919,6 @@ struct RemotePage {
       this.twoFaCode = '';
       this.twoFaError = '';
       this.connectionStatus = ConnectionStatus.CONNECTING;
-      this.connectingStartedAt = Date.now();
     } else {
       this.twoFaError = '验证码发送失败，请重试';
     }
@@ -9699,7 +9686,6 @@ struct RemotePage {
         action: () => {
           this.connectionError = '';
           this.connectionStatus = ConnectionStatus.CONNECTING;
-          this.connectingStartedAt = Date.now();
           if (!ConnectionService.retryWithoutEncryption()) {
             this.connectionStatus = ConnectionStatus.FAILED;
             this.connectionError = ConnectionService.getLastConnectionError();

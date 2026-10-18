@@ -2228,7 +2228,7 @@ export struct ConnectionPage {
       let status: ConnectionStatus
       try {
         const selectedMatchesPeer: boolean = this.savedConnections.some((item: SavedConnectionInfo) =>
-          item.id === request.savedId && SavedConnectionEditing.endpoint(item.remoteId) === SavedConnectionEditing.endpoint(peerId))
+          item.id === request.savedId && SavedConnectionEditing.sameEndpoint(item.remoteId, peerId))
         if (request.draft.autoUnlock && selectedMatchesPeer && request.draft.osPassword.length === 0 &&
           !RemoteSecurityStore.isCurrentServer(request.savedId)) {
           RustDeskNapi.appendDiagnosticLog('remote-security', 'auto_unlock_skipped server_configuration_changed')
@@ -2842,8 +2842,8 @@ export struct ConnectionPage {
       try {
         const original = this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === request.savedId)
         if (request.savedId.length > 0 && original === undefined) throw new ConnectionSaveConflict('此连接已不存在，请关闭后重试')
-        if (original !== undefined && SavedConnectionEditing.endpoint(original.remoteId) !==
-          SavedConnectionEditing.endpoint(request.draft.remoteId)) throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+        if (original !== undefined && !SavedConnectionEditing.sameEndpoint(original.remoteId,
+          request.draft.remoteId)) throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
         const savedDraft = original === undefined ? request.draft : this.requestForSavedConnection(original).draft
         savedDraft.password = password
         savedDraft.passwordMode = 'replace'
@@ -3256,7 +3256,7 @@ export struct ConnectionPage {
       return { success: false, message: '编辑已过期，请重新打开连接' }
     }
     if (!this.creatingSavedConnection &&
-      SavedConnectionEditing.endpoint(draft.remoteId) !== SavedConnectionEditing.endpoint(this.editingConnectionOriginal?.remoteId ?? '')) {
+      !SavedConnectionEditing.sameEndpoint(draft.remoteId, this.editingConnectionOriginal?.remoteId ?? '')) {
       return { success: false, message: '远端 ID 不能修改，请新增连接' }
     }
     this.savingConnection = true
@@ -3520,7 +3520,7 @@ export struct ConnectionPage {
   savedConnectionForPassword(): SavedConnectionInfo | undefined {
     const peerId: string = this.normalizeRemoteId(this.remoteId)
     return this.savedConnections.find((item: SavedConnectionInfo) =>
-      SavedConnectionEditing.endpoint(item.remoteId) === SavedConnectionEditing.endpoint(peerId) &&
+      SavedConnectionEditing.sameEndpoint(item.remoteId, peerId) &&
       SavedConnectionEditing.sameNetwork(item.serverScope, this.currentConnectionScope()))
   }
 
@@ -3638,7 +3638,7 @@ export struct ConnectionPage {
 
   onRemoteIdChanged(value: string): void {
     const normalized = this.normalizeRemoteId(value)
-    if (SavedConnectionEditing.endpoint(normalized) !== SavedConnectionEditing.endpoint(this.remoteId)) {
+    if (!SavedConnectionEditing.sameEndpoint(normalized, this.remoteId)) {
       if (this.lastSavedHomepageId.length > 0 && this.remoteId === this.lastSavedHomepageId) this.connectionName = ''
       this.lastSavedHomepageId = ''
       this.selectedConnectionId = ''
@@ -3657,7 +3657,7 @@ export struct ConnectionPage {
 
   findDuplicateConnection(remoteId: string, scope: string, excludedId: string = ''): SavedConnectionInfo | undefined {
     return this.savedConnections.find((entry: SavedConnectionInfo) => entry.id !== excludedId &&
-      SavedConnectionEditing.endpoint(entry.remoteId) === SavedConnectionEditing.endpoint(remoteId) &&
+      SavedConnectionEditing.sameEndpoint(entry.remoteId, remoteId) &&
       SavedConnectionEditing.sameNetwork(entry.serverScope, scope))
   }
 
@@ -3710,7 +3710,7 @@ export struct ConnectionPage {
     if (original !== undefined && !SavedConnectionEditing.sameNetwork(original.serverScope, scope)) {
       throw new ConnectionSaveConflict('此连接属于其他网络，请切换服务器后重试')
     }
-    const identityChanged = original !== undefined && SavedConnectionEditing.endpoint(original.remoteId) !== peerId
+    const identityChanged = original !== undefined && !SavedConnectionEditing.sameEndpoint(original.remoteId, peerId)
     if (action === 'update' && identityChanged) throw new ConnectionSaveConflict('远端 ID 已改变，请另存为新连接')
     const keepOriginal = original !== undefined && (action === 'update' || action === 'replace')
     if (this.findDuplicateConnection(peerId, scope, keepOriginal ? originalId : '') !== undefined) {

@@ -86,6 +86,7 @@ export class ConnectionService {
   private static relayRetryUsed: boolean = false
   private static rendezvousRetryCount: number = 0
   private static relayFailureRetryCount: number = 0
+  private static loginTimeoutRetryUsed: boolean = false
   private static insecureRetryUsed: boolean = false
   private static preparationGeneration: number = 0
   private static recoveryTimer: number = -1
@@ -196,6 +197,7 @@ export class ConnectionService {
     ConnectionService.relayRetryUsed = false
     ConnectionService.rendezvousRetryCount = 0
     ConnectionService.relayFailureRetryCount = 0
+    ConnectionService.loginTimeoutRetryUsed = false
     ConnectionService.insecureRetryUsed = false
     ConnectionService.sessionSettings = ConnectionService.authNetworkSnapshot()
     ConnectionService.sessionAccountRevision = AccountSession.getApi().sessionRevision()
@@ -255,6 +257,7 @@ export class ConnectionService {
     ConnectionService.relayRetryUsed = true
     ConnectionService.rendezvousRetryCount = 2
     ConnectionService.relayFailureRetryCount = 1
+    ConnectionService.loginTimeoutRetryUsed = true
     ConnectionService.insecureRetryUsed = true
     ConnectionService.releaseModifiers()
     RemoteSessionBackgroundTask.stop()
@@ -293,6 +296,16 @@ export class ConnectionService {
     }
 
     const route: number = RustDeskNapi.getConnectionRoute()
+    if (message === '远端登录超时' && !ConnectionService.loginTimeoutRetryUsed &&
+      !ConnectionService.sessionAuthenticated && !ConnectionService.insecureRetryUsed &&
+      !RemoteSessionBackgroundTask.isAppBackground()) {
+      ConnectionService.loginTimeoutRetryUsed = true
+      ConnectionService.relayRetryUsed = true
+      if (ConnectionService.restartConnection(true, 'peer_login_timeout', 1, 1)) {
+        return '远端登录无响应，正在重新连接（1/1）'
+      }
+      return ''
+    }
     if ((message === '与远端安全握手失败' || message === 'Peer secure handshake failed') &&
       route === 1 && !ConnectionService.relayRetryUsed) {
       ConnectionService.relayRetryUsed = true

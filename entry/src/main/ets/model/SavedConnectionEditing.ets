@@ -19,9 +19,18 @@ export interface ConnectionEditResult { success: boolean; message: string }
 
 export class SavedConnectionEditing {
   static endpoint(value: string): string {
-    const clean = value.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
-    // IDs retain leading zeroes; address hostnames and IPv6 are case insensitive.
-    return /^\d+$/.test(clean) ? clean : clean.toLowerCase()
+    // Keep custom IDs and displayed/saved addresses exactly as entered, apart from spacing.
+    return value.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+  }
+
+  static sameEndpoint(left: string, right: string): boolean {
+    const a = SavedConnectionEditing.endpoint(left)
+    const b = SavedConnectionEditing.endpoint(right)
+    if (a === b) return true
+    // Native direct connections accept IP literals. Only IPv6 hex letters are case
+    // insensitive; other strings are opaque peer IDs, including names with dots.
+    const ipv6 = /^(\[[0-9a-fA-F:.]+\](?::\d+)?|[0-9a-fA-F:.]+)$/
+    return a.includes(':') && b.includes(':') && ipv6.test(a) && ipv6.test(b) && a.toLowerCase() === b.toLowerCase()
   }
 
   static network(idServer: string, relayServer: string): string {

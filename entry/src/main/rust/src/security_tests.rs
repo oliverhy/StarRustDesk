@@ -33,6 +33,60 @@ async fn stream_pair() -> (Stream, Stream) {
     (Stream::from(client, addr), Stream::from(server, peer))
 }
 
+static LOGIN_DIAGNOSTIC_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+extern "C" fn collect_login_event(value: *const c_char) {
+    if let Some(value) = cstr_to_string(value) {
+        LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().push(value);
+    }
+}
+
+#[test]
+fn login_challenge_reaches_the_network_and_diagnostics_never_include_secrets() {
+    // Run the real receive task, Hash handler, queue and network writer against
+    // a loopback peer. Receiving LoginRequest proves this is not just queue success.
+    let previous_callback = EVENT_CALLBACK.lock().unwrap().replace(collect_login_event);
+    LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().clear();
+    let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    CURRENT_PEER_ID.lock().unwrap().clone_from(&"case-Sensitive-peer".to_string());
+    *PASSWORD_HASH.lock().unwrap() = b"private-login-password".to_vec();
+    runtime().block_on(async {
+        let (client, mut peer) = stream_pair().await;
+        spawn_receive_loop(session_id, client, None);
+        // A silent open socket must remain available until the peer supplies its challenge.
+        assert!(peer.next_timeout(25).await.is_none());
+        let mut challenge = PeerMessage::new();
+        challenge.set_hash(Hash { salt: "private-salt".into(), challenge: "private-challenge".into(), ..Default::default() });
+        peer.send(&challenge).await.unwrap();
+        let bytes = peer.next_timeout(1500).await.expect("login was never written").unwrap();
+        let request = PeerMessage::parse_from_bytes(&bytes).unwrap();
+        let Some(message::Union::LoginRequest(request)) = request.union else { panic!("expected login request"); };
+        assert_eq!(request.username, "case-Sensitive-peer");
+        assert!(!request.password.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().iter().any(|s| s == "login request sent") { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        drop(peer);
+    });
+    finish_peer_task(session_id, false);
+    let events = LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().clone();
+    let position = |prefix: &str| events.iter().position(|event| event.starts_with(prefix)).unwrap();
+    assert!(position("peer-login: transport_ready") < position("peer-login: first_packet"));
+    assert!(position("peer message: Hash") < position("peer-login: request_queued"));
+    assert!(position("peer-login: request_queued") < position("peer-login: request_write_start"));
+    assert!(position("peer-login: request_write_start") < position("login request sent"));
+    let log = events.join("\n");
+    for private in ["private-login-password", "private-salt", "private-challenge", "case-Sensitive-peer"] {
+        assert!(!log.contains(private), "private login data leaked into diagnostics");
+    }
+    *EVENT_CALLBACK.lock().unwrap() = previous_callback;
+    PASSWORD_HASH.lock().unwrap().clear();
+}
+
 #[test]
 fn account_rendezvous_requires_verified_encryption_without_downgrade() {
     runtime().block_on(async {

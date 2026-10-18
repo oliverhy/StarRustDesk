@@ -2877,7 +2877,9 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 }
 
 fn emit_event(message: &str) {
-    let cb = match EVENT_CALLBACK.try_lock() {
+    // Copy and release before calling native code. Lifecycle events also update
+    // connection state, so concurrent emitters must not silently drop them.
+    let cb = match EVENT_CALLBACK.lock() {
         Ok(guard) => *guard,
         Err(_) => return,
     };
@@ -4409,6 +4411,8 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
         *guard = Some((session_id, tx));
     }
     let (task_completed, task_completed_receiver) = mpsc::channel();
+    emit_event(&format!("peer-login: transport_ready session_id={session_id} route={} transport={}",
+        CONNECTION_ROUTE.load(Ordering::SeqCst), CONNECTION_TRANSPORT.load(Ordering::SeqCst)));
     let task = runtime().spawn(async move {
             let _task_completion = PeerTaskCompletion(Some(task_completed));
             let _kcp_guard = kcp_guard;
@@ -4421,6 +4425,10 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
             let mut misc_messages = 0_u64;
             let mut last_message_kind = "none";
             let mut last_message_at = receive_started_at;
+            let mut next_login_wait_ms = 5000_u128;
+            let mut challenge_received = false;
+            let mut login_request_written = false;
+            let mut login_response_received = false;
             let mut health = session_health::PeerHealth::new(receive_started_at,
                 APP_LIFECYCLE_EPOCH.load(Ordering::SeqCst));
             let mut health_timer = tokio::time::interval(Duration::from_secs(1));
@@ -4445,6 +4453,11 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                 }
                 let keep_running = tokio::select! {
                     _ = health_timer.tick() => {
+                        let elapsed_ms = receive_started_at.elapsed().as_millis();
+                        if !login_response_received && next_login_wait_ms <= 25000 && elapsed_ms >= next_login_wait_ms {
+                            emit_event(&format!("peer-login: waiting session_id={session_id} elapsed_ms={elapsed_ms} received={received_messages} challenge={challenge_received} request_written={login_request_written}"));
+                            next_login_wait_ms += 10000;
+                        }
                         if health.timed_out(Instant::now(), APP_LIFECYCLE_EPOCH.load(Ordering::SeqCst),
                             BACKGROUND_VIDEO_MODE.load(Ordering::SeqCst),
                             video_messages > 0 && test_delay_messages > 0) {
@@ -4475,11 +4488,19 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                             match command {
                                 QueuedPeerCommand::Message { message, voice_timestamp, .. } => {
                                     if !communication::consume_frame(voice_timestamp) { continue; }
+                                    let is_login = matches!(&message.union, Some(message::Union::LoginRequest(_)));
+                                    if is_login { emit_event("peer-login: request_write_start"); }
                                     trace_input_message("network_send", &message);
                                     if let Err(e) = stream.send(&message).await {
+                                        if is_login { emit_event("peer-login: request_write_failed"); }
                                         emit_event(&format!("peer message send failed: {e}"));
                                         mark_connection_lost(command_session_id, &e.to_string());
                                         return;
+                                    }
+                                    if is_login {
+                                        login_request_written = true;
+                                        emit_event("login request sent");
+                                        emit_event(&format!("peer-login: request_written session_id={session_id} elapsed_ms={}", receive_started_at.elapsed().as_millis()));
                                     }
                                     trace_input_message("network_sent", &message);
                                     true
@@ -4548,8 +4569,14 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                     bytes = stream.next() => {
                         match bytes {
                             Some(Ok(bytes)) => {
+                                if received_messages == 0 {
+                                    emit_event(&format!("peer-login: first_packet session_id={session_id} elapsed_ms={} bytes={}",
+                                        receive_started_at.elapsed().as_millis(), bytes.len()));
+                                }
                                 let message_kind =
                                     handle_peer_bytes(&bytes, &mut read_jobs, &mut stream).await;
+                                challenge_received |= message_kind == "hash";
+                                login_response_received |= message_kind == "login_response";
                                 received_messages += 1;
                                 if message_kind == "video_frame" {
                                     video_messages += 1;
@@ -5394,7 +5421,7 @@ async fn send_login(hash: Hash) {
     out.set_login_request(login);
     match send_peer_message_async(out).await {
         Ok(_) => {
-            emit_event("login request sent");
+            emit_event("peer-login: request_queued");
             emit_event(&format!("remote security: lock_option_sent enabled={}",
                 LOCK_AFTER_DISCONNECT.load(Ordering::SeqCst)));
         }

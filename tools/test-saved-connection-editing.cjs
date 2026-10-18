@@ -10,7 +10,7 @@ function method(s,name){const start=s.search(new RegExp(`\\n  (?:async )?${name}
 const names=['saveCurrentConnection','currentConnectionScope','findDuplicateConnection','showDuplicateConnection',
   'requestForCurrentForm','requestForSavedConnection','saveConnectionDraft','cloneSavedConnections','persistSavedConnections',
   'savedConnectionForPassword','hasSavedConnectionPassword','connectionPasswordForUse','connectSavedConnection',
-  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','saveEditedConnection','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature'];
+  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','saveEditedConnection','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature','loadSavedConnections'];
 function compile(s,ctx){const out=ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ES2021},reportDiagnostics:true});assert.equal(out.diagnostics.length,0);vm.runInContext(out.outputText,ctx);}
 const row=(id,remoteId,name='Office',password='old-secret')=>({id,remoteId,name,password,performancePreset:'smooth',groupId:'work'});
 function fixture(rows=[]){
@@ -25,14 +25,14 @@ function fixture(rows=[]){
       saveOsPassword:async(id,p)=>{if(failOs){failOs=false;osSecrets.delete(id);bindings.delete(id);throw Error('OS asset add failed');}if(p)osSecrets.set(id,p);else osSecrets.delete(id);bindings.set(id,'new-binding');},
       removeOsPassword:async id=>{osSecrets.delete(id);bindings.delete(id);},
       serverBinding:id=>bindings.get(id)||'',restoreServerBinding:(id,b)=>b?bindings.set(id,b):bindings.delete(id)},
-    CloudSyncService:{markLocalChanged:()=>dirty++},PerformanceSettings:{normalize:v=>v},translate:v=>v,
+    CloudSyncService:{markLocalChanged:()=>dirty++,getLastRestoreOperationId:()=>'',recordUi:()=>{}},PerformanceSettings:{normalize:v=>v},translate:v=>v,
     promptAction:{showToast:()=>{}},Date,Math
   });
   compile(model+`\nclass ConnectionSaveConflict extends Error {}\nclass Page {${names.map(n=>method(source,n)).join('\n')}} globalThis.Page=Page; globalThis.Editing=SavedConnectionEditing;`,context);
   const p=Object.assign(new context.Page(),{savedConnections:rows.map(r=>({...r})),savedConnectionsVersion:0,selectedConnectionId:'',
     remoteId:'',connectionName:'',password:'',passwordEditMode:'keep',selectedGroupId:'work',performancePreset:'smooth',
     lockAfterDisconnect:false,privacyMode:false,autoUnlock:false,osPasswordDraft:'',clearOsPassword:false,hasStoredOsPassword:false,
-    editingConnectionGeneration:1,editingConnectionId:'',creatingSavedConnection:false,connectionGroups:[],lastSavedHomepageId:'',savePageActive:true,savingConnection:false,uiLanguage:'zh-Hans'});
+    editingConnectionGeneration:1,editingConnectionId:'',creatingSavedConnection:false,connectionGroups:[],lastSavedHomepageId:'',savePageActive:true,savingConnection:false,uiLanguage:'zh-Hans',savedConnectionsLoadGeneration:0,savedConnectionsCloudRevision:0});
   p.makeConnectionId=remoteId=>`${remoteId}-${Date.now()}-${p.savedConnectionsVersion}`;
   p.validGroupId=id=>['work','home'].includes(id)?id:'';
   p.refreshSavedConnectionOnlineStates=()=>{};
@@ -48,6 +48,39 @@ const draft=(f,r)=>({...f.context.Editing.empty(),remoteId:r.remoteId,name:r.nam
 let count=0;
 async function test(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
+ await test('new editor and homepage preserve uppercase and mixed-case IDs while removing spacing',()=>{
+   const f=fixture();compile(`class Editor {${['identityChanged','changeRemoteId'].map(n=>method(editor,n)).join('\n')}} globalThis.Editor=Editor;`,f.context);
+   const e=Object.assign(new f.context.Editor(),{initial:f.context.Editing.empty(),remoteId:'',createNew:true,busy:false});
+   for(const [input,expected] of [['C','C'],[' AbCd\u200B123 ','AbCd123'],['MY-PC','MY-PC'],['001234','001234'],['[2001:DB8::ABCD]:21118','[2001:DB8::ABCD]:21118']]){
+     e.changeRemoteId(input);assert.equal(e.remoteId,expected);f.p.onRemoteIdChanged(input);assert.equal(f.p.remoteId,expected);
+   }
+   Object.assign(e,{remoteId:'AbCd123',initial:{...f.context.Editing.empty(),remoteId:'AbCd123'},password:'typed-secret',osPassword:'typed-os',autoUnlock:true});
+   e.changeRemoteId('abcd123');assert.equal(e.identityChanged(),true);assert.equal(e.password,'');assert.equal(e.osPassword,'');assert.equal(e.autoUnlock,false);
+ });
+ await test('mixed-case IDs survive both save flows, persisted reload and direct connection requests',async()=>{
+   const f=fixture();f.p.openNewSavedConnection();const d=draft(f,row('a','AbCd123','Work Mac',''));
+   d.passwordMode='replace';d.password='Mixed-Secret';assert.equal((await f.p.saveEditedConnection(d,'new')).success,true);f.p.closeConnectionEditor();
+   f.p.onRemoteIdChanged('MY-PC');f.p.connectionName='Uppercase';assert.equal(await f.p.saveCurrentConnection(),true);
+   const stored=JSON.parse(f.options.get('saved-connections'));assert.deepEqual(stored.map(r=>r.remoteId).sort(),['AbCd123','MY-PC']);
+   assert.equal(f.p.cloneSavedConnections(stored).find(r=>r.remoteId==='AbCd123').name,'Work Mac');
+   f.p.savedConnections=[];await f.p.loadSavedConnections();const saved=f.p.savedConnections.find(r=>r.remoteId==='AbCd123');f.p.connectSavedConnection(saved);
+   assert.equal(f.p.connectionRequest.draft.remoteId,'AbCd123');assert.equal(f.p.connectionRequest.draft.password,'Mixed-Secret');assert.equal(f.secrets.get(saved.id),'Mixed-Secret');
+ });
+ await test('case-only ID changes cannot reuse passwords, overwrite old rows or inherit security options',async()=>{
+   const a=row('a','AbCd123');const f=fixture([a]);Object.assign(f.p,{remoteId:'AbCd123',password:'typed-secret',osPasswordDraft:'typed-os',privacyMode:true});
+   f.p.onRemoteIdChanged('abcd123');assert.equal(f.p.password,'');assert.equal(f.p.osPasswordDraft,'');assert.equal(f.p.privacyMode,false);
+   assert.equal(f.p.connectionPasswordForUse(),'');assert.equal(f.p.savedConnectionForPassword(),undefined);
+   assert.equal(await f.p.saveCurrentConnection(),true);assert.equal(f.p.savedConnections.length,2);assert.equal(f.secrets.get('a'),'old-secret');
+   assert.equal(f.p.savedConnections.find(r=>r.remoteId==='abcd123').password,'');
+   f.p.onRemoteIdChanged('AbCd123');assert.equal(f.p.connectionPasswordForUse(),'old-secret');assert.equal(await f.p.saveCurrentConnection(),false);
+   const g=fixture([row('legacy','abcd123')]);g.p.onRemoteIdChanged('AbCd123');assert.equal(g.p.connectionPasswordForUse(),'');
+   assert.equal(await g.p.saveCurrentConnection(),true);assert.equal(g.p.savedConnections.find(r=>r.id==='legacy').remoteId,'abcd123');
+ });
+ await test('IPv6 comparison ignores hex letter case without rewriting the saved address',async()=>{
+   const address='[2001:DB8::ABCD]:21118';const f=fixture();f.p.onRemoteIdChanged(address);assert.equal(await f.p.saveCurrentConnection(),true);
+   assert.equal(f.p.savedConnections[0].remoteId,address);assert.equal(JSON.parse(f.options.get('saved-connections'))[0].remoteId,address);
+   f.p.onRemoteIdChanged(address.toLowerCase());assert.equal(await f.p.saveCurrentConnection(),false);assert.equal(f.p.savedConnections.length,1);
+ });
  await test('save A then type B adds B without clicking New; legacy selected ID cannot overwrite A',async()=>{
    const f=fixture(),p=f.p;p.remoteId='111111';p.connectionName='A';p.password='secret-A';p.passwordEditMode='replace';
    assert.equal(await p.saveCurrentConnection(),true);const original=JSON.stringify(p.savedConnections[0]);const id=p.savedConnections[0].id;

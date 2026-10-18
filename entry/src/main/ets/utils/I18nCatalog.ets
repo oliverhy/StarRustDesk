@@ -713,6 +713,11 @@ export const ENGLISH: Record<string, string> = {
   "暂无已结束的录像": "No completed recordings",
   "本次更新内容": "What's new",
   "StarRustDesk 已更新": "StarRustDesk updated",
+  "1.3.3（1003003）· 连接大小写与登录稳定性修复": "1.3.3 (1003003) · Case-preserving connections and login stability",
+  "新增连接、首页输入、保存和重新读取均保留远端 ID 的大小写，不再自动转为小写；修正重复连接与保存密码匹配，避免大小写不同的自定义 ID 混用凭据。": "Remote IDs now retain their letter case when entered, saved and reloaded. Duplicate detection and saved-password matching keep custom IDs with different letter case separate.",
+  "连接建立和远端登录分阶段计时，移除页面重复的 30 秒断开判断，改善慢速中继建链后登录等待时间不足的问题。": "Connection setup and remote login now have separate timeout budgets. Removed the page's duplicate 30-second disconnect timer so slow relay setup does not consume the login window.",
+  "登录无响应时最多自动重新连接一次；密码错误、密钥错误、两步验证及用户取消不会自动重试，也不会自动降级为未加密连接。": "An unresponsive remote login can reconnect once. Password errors, key errors, two-factor verification and user cancellation do not trigger this retry, and connections never automatically downgrade to unencrypted mode.",
+  "完善连接诊断，区分通道就绪、首包、密码挑战、请求入队和实际写出，记录等待阶段与超时原因；日志不包含密码、挑战内容或令牌。": "Connection diagnostics distinguish transport readiness, first packet, password challenge, request queueing and actual network writes, and record waiting phases and timeout causes without passwords, challenge contents or tokens.",
   "1.3.2（1003002）· 鼠标双击与拖拽提示修复": "1.3.2 (1003002) · Mouse double-click and drag indicator fixes",
   "修复实体鼠标和触控板点击经多条输入通路重复发送“松开”的问题，统一按下、松开去重，改善资源管理器双击文件夹等操作。": "Fixed duplicate button releases when physical mouse or touchpad clicks arrive through multiple input paths. Presses and releases are now deduplicated consistently, improving actions such as double-clicking folders in File Explorer.",
   "普通实体鼠标单击、双击不再误显示“左键按住”；保留触屏模拟拖拽和虚拟鼠标拖拽提示，不改变原有单击、右键及拖拽功能。": "Ordinary physical mouse clicks and double-clicks no longer incorrectly show the Left button held indicator. The indicator remains available for simulated touch and virtual-mouse drags, while normal clicking, right-clicking and dragging are preserved.",
@@ -1200,6 +1205,8 @@ export const ENGLISH: Record<string, string> = {
   "普通备份不得包含服务器密钥": "Plain backups must not contain server keys",
   "远端传输中断": "Peer transport interrupted",
   "连接已取消或服务器配置已改变，请重试": "Connection cancelled or server configuration changed; retry",
+  "远端登录超时": "Remote login timed out",
+  "远端登录无响应，正在重新连接（1/1）": "Remote login did not respond. Reconnecting (1/1).",
   "与远端安全握手失败": "Peer secure handshake failed",
   "直连安全握手失败，正在通过加密中继重试": "Direct secure handshake failed; retrying through an encrypted relay",
   "ID 服务器未响应": "ID server did not respond",
@@ -1435,7 +1442,8 @@ export const ENGLISH: Record<string, string> = {
   "替换原连接（需要确认）": "Replace original connection (confirmation required)",
   "仅调整本地投屏方向": "Only changes local projection orientation",
   "遵循系统旋转设置": "Follows system rotation settings",
-  "独立旋转，不受系统锁定影响": "Independent rotation, unaffected by system rotation lock"
+  "独立旋转，不受系统锁定影响": "Independent rotation, unaffected by system rotation lock",
+  "两步验证响应超时，请重试": "Two-factor verification timed out. Please retry."
 }
 
 export const TRADITIONAL: Record<string, string> = {
@@ -2151,6 +2159,11 @@ export const TRADITIONAL: Record<string, string> = {
   "暂无已结束的录像": "暫無已結束的錄像",
   "本次更新内容": "本次更新內容",
   "StarRustDesk 已更新": "StarRustDesk 已更新",
+  "1.3.3（1003003）· 连接大小写与登录稳定性修复": "1.3.3（1003003）· 連接大小寫與登錄穩定性修復",
+  "新增连接、首页输入、保存和重新读取均保留远端 ID 的大小写，不再自动转为小写；修正重复连接与保存密码匹配，避免大小写不同的自定义 ID 混用凭据。": "新增連接、首頁輸入、保存和重新讀取均保留遠端 ID 的大小寫，不再自動轉為小寫；修正重複連接與保存密碼匹配，避免大小寫不同的自定義 ID 混用憑據。",
+  "连接建立和远端登录分阶段计时，移除页面重复的 30 秒断开判断，改善慢速中继建链后登录等待时间不足的问题。": "連接建立和遠端登錄分階段計時，移除頁面重複的 30 秒斷開判斷，改善慢速中繼建鏈後登錄等待時間不足的問題。",
+  "登录无响应时最多自动重新连接一次；密码错误、密钥错误、两步验证及用户取消不会自动重试，也不会自动降级为未加密连接。": "登錄無響應時最多自動重新連接一次；密碼錯誤、密鑰錯誤、兩步驗證及用戶取消不會自動重試，也不會自動降級為未加密連接。",
+  "完善连接诊断，区分通道就绪、首包、密码挑战、请求入队和实际写出，记录等待阶段与超时原因；日志不包含密码、挑战内容或令牌。": "完善連接診斷，區分通道就緒、首包、密碼挑戰、請求入隊和實際寫出，記錄等待階段與超時原因；日誌不包含密碼、挑戰內容或令牌。",
   "1.3.2（1003002）· 鼠标双击与拖拽提示修复": "1.3.2（1003002）· 鼠標雙擊與拖拽提示修復",
   "修复实体鼠标和触控板点击经多条输入通路重复发送“松开”的问题，统一按下、松开去重，改善资源管理器双击文件夹等操作。": "修復實體鼠標和觸控板點擊經多條輸入通路重複發送“鬆開”的問題，統一按下、鬆開去重，改善資源管理器雙擊文件夾等操作。",
   "普通实体鼠标单击、双击不再误显示“左键按住”；保留触屏模拟拖拽和虚拟鼠标拖拽提示，不改变原有单击、右键及拖拽功能。": "普通實體鼠標單擊、雙擊不再誤顯示“左鍵按住”；保留觸屏模擬拖拽和虛擬鼠標拖拽提示，不改變原有單擊、右鍵及拖拽功能。",
@@ -2638,6 +2651,8 @@ export const TRADITIONAL: Record<string, string> = {
   "普通备份不得包含服务器密钥": "普通備份不得包含服務器密鑰",
   "远端传输中断": "遠端傳輸中斷",
   "连接已取消或服务器配置已改变，请重试": "連接已取消或服務器配置已改變，請重試",
+  "远端登录超时": "遠端登錄超時",
+  "远端登录无响应，正在重新连接（1/1）": "遠端登錄無響應，正在重新連接（1/1）",
   "与远端安全握手失败": "與遠端安全握手失敗",
   "直连安全握手失败，正在通过加密中继重试": "直連安全握手失敗，正在通過加密中繼重試",
   "ID 服务器未响应": "ID 服務器未響應",
@@ -2873,7 +2888,8 @@ export const TRADITIONAL: Record<string, string> = {
   "替换原连接（需要确认）": "替換原連接（需要確認）",
   "仅调整本地投屏方向": "僅調整本地投屏方向",
   "遵循系统旋转设置": "遵循系統旋轉設置",
-  "独立旋转，不受系统锁定影响": "獨立旋轉，不受系統鎖定影響"
+  "独立旋转，不受系统锁定影响": "獨立旋轉，不受系統鎖定影響",
+  "两步验证响应超时，请重试": "兩步驗證響應超時，請重試"
 }
 
 export const DYNAMIC_KEYS: string[] = [

@@ -121,6 +121,7 @@ test('static desktop with no new input frames does not restart a healthy decoder
 });
 let route=1, status=2, forcedConnections=0, normalConnections=0, insecureConnections=0, disconnects=0;
 let lastConnectionError='';
+let serviceBackground=false;
 const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,
   getLastConnectionError:()=>lastConnectionError,
   disconnect:()=>{disconnects++;}, appendDiagnosticLog:()=>{},
@@ -134,7 +135,7 @@ const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,
 const Service = subject(slice('entry/src/main/ets/service/ConnectionService.ets',
   '  static disconnect():', '  static sendKeyEvent(').replaceAll('ConnectionService','Subject'), {
   RustDeskNapi:serviceNapi,ConnectionStatus:{CONNECTING:1,CONNECTED:2,FAILED:3},
-  RemoteSessionBackgroundTask:{stop:()=>{},syncForConnectionStatus:()=>{}},
+  RemoteSessionBackgroundTask:{stop:()=>{},syncForConnectionStatus:()=>{},isAppBackground:()=>serviceBackground},
 });
 Object.assign(Service,{retryPeer:'test',retryPassword:'test-only',relayRetryUsed:false,
   cancelRecovery:()=>{},
@@ -198,6 +199,26 @@ test('security failure on a relay route does not loop or downgrade',()=>{
   Object.assign(Service,{retryPeer:'test',relayRetryUsed:false});
   assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
   assert.equal(insecureConnections,0);
+});
+
+test('peer login timeout gets one fresh encrypted relay attempt, then stops',()=>{
+  status=3;route=2;
+  Object.assign(Service,{retryPeer:'test',loginTimeoutRetryUsed:false,sessionAuthenticated:false,insecureRetryUsed:false,fileOnly:false});
+  const before=forcedConnections,unsecured=insecureConnections;
+  assert.match(Service.retryRecoverableConnectionFailure('远端登录超时'),/1\/1/);
+  assert.equal(forcedConnections,before+1);assert.equal(insecureConnections,unsecured);
+  assert.equal(Service.retryRecoverableConnectionFailure('远端登录超时'),'');
+});
+test('login timeout retry excludes authenticated, insecure, file-only, cancelled, 2FA and explicit rejection cases',()=>{
+  for(const overrides of [{sessionAuthenticated:true},{insecureRetryUsed:true},{fileOnly:true},{retryPeer:''}]){
+    Object.assign(Service,{retryPeer:'test',loginTimeoutRetryUsed:false,sessionAuthenticated:false,insecureRetryUsed:false,fileOnly:false},overrides);
+    assert.equal(Service.retryRecoverableConnectionFailure('远端登录超时'),'');
+  }
+  Object.assign(Service,{retryPeer:'test',loginTimeoutRetryUsed:false,sessionAuthenticated:false,insecureRetryUsed:false,fileOnly:false});
+  for(const error of ['远端登录失败','密码错误','需要两步验证','两步验证响应超时，请重试','服务器密钥无效','连接超时'])assert.equal(Service.retryRecoverableConnectionFailure(error),'');
+  serviceBackground=true;assert.equal(Service.retryRecoverableConnectionFailure('远端登录超时'),'');serviceBackground=false;
+  status=4;assert.equal(Service.retryRecoverableConnectionFailure('远端登录超时'),'');status=3;
+  Service.disconnect();assert.equal(Service.loginTimeoutRetryUsed,true);assert.equal(Service.retryRecoverableConnectionFailure('远端登录超时'),'');
 });
 
 for (const endpoint of ['192.168.2.123', '192.168.2.123:21118', '[2001:db8::1]:21118', '::1']) {

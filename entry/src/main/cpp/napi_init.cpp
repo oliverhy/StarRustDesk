@@ -2,6 +2,7 @@
 #include "core/rustdesk_ffi.h"
 #include "core/config.h"
 #include "core/diagnostic_log.h"
+#include "core/connection_deadline.h"
 #include "crypto/aead.h"
 #include "core/video_render.h"
 #include "core/xcomponent_render.h"
@@ -50,6 +51,9 @@ static std::atomic<int64_t> g_stageStartedAtMs{0};
 static std::atomic<int> g_lastConnectionResult{0};
 static std::atomic<uint64_t> g_connectionGeneration{0};
 static std::atomic<int64_t> g_connectionStartedAtMs{0};
+static std::atomic<int64_t> g_loginStartedAtMs{0};
+static std::atomic<int> g_loginProgress{0}; // transport, first packet, challenge, queued, written, response
+static std::atomic<bool> g_secondFactorSubmitted{false};
 static std::atomic<bool> g_disconnectInProgress{false};
 static std::atomic<bool> g_enableTrustedDevices{false};
 static std::atomic<uint64_t> g_videoReadyGeneration{0};
@@ -595,6 +599,7 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "secure peer: wait signed id timeout",
         "secure peer: first peer msg not SignedId; use non-secure connection",
         "receive loop spawned",
+        "peer-login: ",
         "peer message:",
         "login request sent",
         "login response: ok/",
@@ -643,6 +648,20 @@ static void OnRustEvent(const char* message) {
         return;
     }
     const std::string text(message);
+    if (g_connectionStatus.load() == 1) {
+        if (text.rfind("peer-login: transport_ready ", 0) == 0) {
+            int64_t unset = 0;
+            g_loginStartedAtMs.compare_exchange_strong(unset, NowMs());
+        }
+        int progress = 0;
+        if (text.rfind("peer-login: first_packet ", 0) == 0) progress = 1;
+        else if (text == "peer message: Hash") progress = 2;
+        else if (text == "peer-login: request_queued") progress = 3;
+        else if (text == "login request sent") progress = 4;
+        else if (text == "peer message: LoginResponse") progress = 5;
+        int previous = g_loginProgress.load();
+        while (progress > previous && !g_loginProgress.compare_exchange_weak(previous, progress)) {}
+    }
     if (text == "previous connection cleared") {
         g_videoReadyGeneration.store(g_connectionGeneration.load());
     }
@@ -861,6 +880,9 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     g_stageStartedAtMs.store(NowMs());
     g_lastConnectionResult.store(0);
     g_connectionStartedAtMs.store(NowMs());
+    g_loginStartedAtMs.store(0);
+    g_loginProgress.store(0);
+    g_secondFactorSubmitted.store(false);
     g_enableTrustedDevices.store(false);
     SetLastConnectionMessage("");
     g_lastVideoHealthLogMs.store(0);
@@ -1146,6 +1168,9 @@ static napi_value Send2FA(napi_env env, napi_callback_info info) {
             SetLastConnectionMessage("");
             g_connectionStatus.store(1);
             g_connectionStartedAtMs.store(NowMs());
+            g_loginStartedAtMs.store(NowMs());
+            g_loginProgress.store(4);
+            g_secondFactorSubmitted.store(true);
         } else {
             SetLastConnectionMessage("Invalid 2FA code");
         }
@@ -1275,12 +1300,26 @@ static napi_value GetConnectionStatus(napi_env env, napi_callback_info info) {
     int status = g_connectionStatus.load();
     if (status == 1) {
         int64_t startedAt = g_connectionStartedAtMs.load();
-        if (startedAt > 0 && NowMs() - startedAt > 30000) {
+        const int64_t now = NowMs();
+        const int64_t loginStarted = g_loginStartedAtMs.load();
+        const auto expired = ConnectionDeadline::evaluate(startedAt, loginStarted, now);
+        if (expired != ConnectionDeadline::Expired::None) {
+            DiagnosticLog::instance().append("W", "connection-login",
+                "attempt_timeout generation=" + std::to_string(g_connectionGeneration.load()) +
+                " phase=" + (expired == ConnectionDeadline::Expired::Login ? "login" :
+                    expired == ConnectionDeadline::Expired::Total ? "total" : "transport") +
+                " total_ms=" + std::to_string(now - startedAt) +
+                " login_ms=" + std::to_string(loginStarted > 0 ? now - loginStarted : 0) +
+                " progress=" + std::to_string(g_loginProgress.load()) +
+                " two_factor_submitted=" + std::to_string(g_secondFactorSubmitted.load()) +
+                " route=" + std::to_string(rust_get_connection_route()) +
+                " transport=" + std::to_string(rust_get_connection_transport()));
             const uint64_t timeoutGeneration = g_connectionGeneration.fetch_add(1) + 1;
             g_videoReadyGeneration.store(0);
             g_connectionStartedAtMs.store(0);
             g_lastConnectionResult.store(-20);
-            SetLastConnectionMessage("连接超时");
+            SetLastConnectionMessage(expired == ConnectionDeadline::Expired::Login ?
+                (g_secondFactorSubmitted.load() ? "两步验证响应超时，请重试" : "远端登录超时") : "连接超时");
             g_connectionStatus.store(3);
             bool expected = false;
             if (g_disconnectInProgress.compare_exchange_strong(expected, true)) {
@@ -1592,7 +1631,7 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
     std::string content = std::string("native_build=official-transports-20260911-r2 cpp=") + __DATE__ + " " + __TIME__ +
-        " rust=" + rust_get_build_id() + "\n" + DiagnosticLog::instance().exportText();
+        " rust=" + rust_get_build_id() + " connection_policy=staged-login-v1\n" + DiagnosticLog::instance().exportText();
     napi_value ret;
     napi_create_string_utf8(env, content.c_str(), content.size(), &ret);
     return ret;

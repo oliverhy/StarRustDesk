@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.2'
-export const RELEASE_NOTES_BUILD: string = '1003002'
+export const RELEASE_NOTES_VERSION: string = '1.3.3'
+export const RELEASE_NOTES_BUILD: string = '1003003'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.3（1003003）· 连接大小写与登录稳定性修复', [
+            '新增连接、首页输入、保存和重新读取均保留远端 ID 的大小写，不再自动转为小写；修正重复连接与保存密码匹配，避免大小写不同的自定义 ID 混用凭据。',
+            '连接建立和远端登录分阶段计时，移除页面重复的 30 秒断开判断，改善慢速中继建链后登录等待时间不足的问题。',
+            '登录无响应时最多自动重新连接一次；密码错误、密钥错误、两步验证及用户取消不会自动重试，也不会自动降级为未加密连接。',
+            '完善连接诊断，区分通道就绪、首包、密码挑战、请求入队和实际写出，记录等待阶段与超时原因；日志不包含密码、挑战内容或令牌。'
+          ])
           this.buildSection('1.3.2（1003002）· 鼠标双击与拖拽提示修复', [
             '修复实体鼠标和触控板点击经多条输入通路重复发送“松开”的问题，统一按下、松开去重，改善资源管理器双击文件夹等操作。',
             '普通实体鼠标单击、双击不再误显示“左键按住”；保留触屏模拟拖拽和虚拟鼠标拖拽提示，不改变原有单击、右键及拖拽功能。',

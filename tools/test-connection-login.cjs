@@ -1,0 +1,28 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),cp=require('node:child_process'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'..');
+const read=p=>fs.readFileSync(path.join(root,p),'utf8');
+const native=read('entry/src/main/cpp/napi_init.cpp'),page=read('entry/src/main/ets/pages/RemotePage.ets');
+const poll=page.slice(page.indexOf('  startPolling():'),page.indexOf('  stopPolling():'));
+assert(!/now - this\.connectingStartedAt > 30000/.test(poll),'page must not override native login budget');
+assert(native.includes('ConnectionDeadline::evaluate(startedAt, loginStarted, now)'));
+assert(native.includes('g_loginStartedAtMs.compare_exchange_strong(unset, NowMs())'),'packets must not reset the login timer');
+assert(native.includes('g_secondFactorSubmitted.store(true)'));
+assert(native.includes('两步验证响应超时，请重试'),'submitted 2FA must not be retried as a password-only login');
+const allow=native.slice(native.indexOf('static bool IsSafeRustLifecycleEvent'),native.indexOf('static void OnRustEvent'));
+assert(allow.includes('"peer-login: "'));
+const rust=read('entry/src/main/rust/src/lib.rs');
+const queued=rust.slice(rust.indexOf('async fn send_login('),rust.indexOf('async fn send_performance_options('));
+assert(queued.includes('peer-login: request_queued'));assert(!queued.includes('emit_event("login request sent")'));
+const sender=rust.slice(rust.indexOf('fn spawn_receive_loop('),rust.indexOf('async fn handle_peer_bytes('));
+assert(sender.indexOf('stream.send(&message).await') < sender.indexOf('emit_event("login request sent")'));
+for(const stage of ['transport_ready','first_packet','waiting','request_write_start','request_written','request_write_failed'])assert(sender.includes(`peer-login: ${stage}`));
+
+const vswhere='C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe';
+const vs=cp.execFileSync(vswhere,['-latest','-products','*','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath'],{encoding:'utf8'}).trim();
+const out=fs.mkdtempSync(path.join(os.tmpdir(),'starrustdesk-login-deadline-'));
+const exe=path.join(out,'test.exe');
+const command=`call "${path.join(vs,'VC/Auxiliary/Build/vcvars64.bat')}" >nul && cl /nologo /std:c++17 /EHsc /W4 /I"${path.join(root,'entry/src/main/cpp/core')}" "${path.join(root,'tools/native/test-connection-deadline.cpp')}" /Fe:"${exe}" /Fo:"${out}/"`;
+cp.execFileSync('cmd.exe',['/d','/s','/c',command],{cwd:out,windowsVerbatimArguments:true,stdio:'pipe'});
+process.stdout.write(cp.execFileSync(exe,[],{encoding:'utf8',timeout:10000}));
+console.log('PASS login diagnostics: exported fixed metadata, queued/written distinction and single timeout owner');
