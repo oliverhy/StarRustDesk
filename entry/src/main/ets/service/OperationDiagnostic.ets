@@ -6,7 +6,7 @@ const SCOPES: string[] = ['api-book-sync', 'recording', 'file-operation', 'file-
 const ACTIONS: string[] = ['preview', 'apply', 'record', 'export', 'delete', 'prepare_files', 'prepare_folder', 'prepare_download', 'transfer', 'remote_action', 'qr_scan'];
 const STEPS: string[] = ['start', 'read_local', 'read_remote', 'preflight', 'permissions', 'write_remote', 'write_local',
   'verify', 'select', 'copy', 'open_source', 'open_target', 'close', 'queued', 'cancel_requested', 'failed', 'cancelled',
-  'completed', 'started', 'stop', 'decode', 'ready', 'stale', 'timeout', 'rejected', 'progress', 'archive'];
+  'completed', 'started', 'stop', 'decode', 'ready', 'stale', 'timeout', 'rejected', 'progress', 'archive', 'waiting_confirmation'];
 const FIELDS: string[] = ['code', 'result', 'items', 'bytes', 'written_bytes', 'conflicts', 'deletions', 'remote_items',
   'writes', 'prefer_local', 'legacy', 'kind', 'job', 'upload', 'files', 'depth', 'source_bytes', 'native_status', 'bytes_per_second'];
 interface DiagnosticError { code?: number | string; status?: number; message?: string; }

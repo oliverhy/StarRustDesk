@@ -368,6 +368,7 @@ struct RemotePage {
   @State transferProgress: number = 0;
   @State transferActive: boolean = false;
   @State transferDirection: string = 'upload';
+  @State transferPhase: string = 'starting';
   @State transferTransferredBytes: number = 0;
   @State transferTotalBytes: number = 0;
   @State transferSpeedBytesPerSecond: number = 0;
@@ -550,6 +551,7 @@ struct RemotePage {
   private fileOperationTrace?: OperationDiagnostic;
   private transferTrace?: OperationDiagnostic;
   private transferLastDiagnosticAt: number = 0;
+  private transferIgnoredDirection: boolean = false;
   @State fileOperationBusy: boolean = false;
   private nameDialog?: CustomDialogController;
   private pendingUploadName: string = '';
@@ -9085,6 +9087,8 @@ struct RemotePage {
   }
 
   formatTransferSpeed(bytesPerSecond: number): string {
+    if (this.transferPhase === 'waiting_confirmation') return '等待远端确认';
+    if (this.transferPhase === 'starting') return '正在准备传输';
     return bytesPerSecond > 0 ? `${this.formatFileSize(bytesPerSecond)}/s` : '等待数据';
   }
 
@@ -9475,6 +9479,8 @@ struct RemotePage {
   }
 
   resetTransferTracking(totalItems: number): void {
+    this.transferPhase = 'starting';
+    this.transferIgnoredDirection = false;
     this.transferProgress = 0;
     this.transferTransferredBytes = 0;
     this.transferTotalBytes = 0;
@@ -9574,7 +9580,23 @@ struct RemotePage {
     if (raw.length === 0) return;
     try {
       let status: FileTransferStatus = JSON.parse(raw) as FileTransferStatus;
-      this.transferDirection = status.direction ?? this.transferDirection;
+      // The UI owns the selected operation. An unrelated/late native response
+      // must not turn an upload into a download (or trigger a local export).
+      if (status.direction && status.direction !== this.transferDirection) {
+        if (!this.transferIgnoredDirection) {
+          this.transferIgnoredDirection = true;
+          this.transferTrace?.event('stale', { upload: this.transferDirection === 'upload' });
+        }
+        return;
+      }
+      if (status.state !== this.transferPhase) {
+        this.transferPhase = status.state;
+        const step: string = status.state === 'waiting_confirmation' ? 'waiting_confirmation' :
+          status.state === 'completed' ? 'verify' : status.state === 'transferring' ? 'progress' :
+          status.state === 'failed' ? 'rejected' : status.state === 'cancelled' ? 'cancel_requested' : 'started';
+        this.transferTrace?.event(step, { upload: this.transferDirection === 'upload',
+          bytes: status.transferred, source_bytes: status.total, items: status.completedItems ?? 0 });
+      }
       this.updateTransferMetrics(status);
       this.transferProgress = status.total > 0 ? Math.min(100, status.transferred * 100 / status.total) : 0;
       if (status.state === 'completed') {

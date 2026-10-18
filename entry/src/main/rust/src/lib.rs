@@ -7,6 +7,8 @@ mod performance;
 mod session_recording;
 mod input_compat;
 mod session_health;
+mod file_transfer_state;
+use file_transfer_state::{TransferWatchdog, UploadTransferState, TRANSFER_IDLE_TIMEOUT};
 use performance::PerformanceConfig;
 #[cfg(test)]
 mod keyboard_tests;
@@ -14,6 +16,8 @@ mod keyboard_tests;
 mod network_tests;
 #[cfg(test)]
 mod security_tests;
+#[cfg(test)]
+mod file_transfer_tests;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
@@ -203,6 +207,32 @@ struct DownloadBatchState {
     completed_jobs: usize,
     completed_bytes: u64,
     total_bytes: u64,
+    watchdog: Option<TransferWatchdog>,
+}
+
+// Every exit from a file session must resolve a pending UI task. Directory-only
+// sessions and already terminal tasks are deliberately left untouched.
+struct FileSessionTransferGuard(u64);
+
+impl Drop for FileSessionTransferGuard {
+    fn drop(&mut self) {
+        if SESSION_ID.load(Ordering::SeqCst) != self.0 { return; }
+        let current = FILE_TRANSFER_STATUS.lock().ok().and_then(|value|
+            serde_json::from_str::<serde_json::Value>(&value).ok());
+        if let Some(value) = current {
+            if value["sessionId"].as_u64() == Some(self.0)
+                && matches!(value["state"].as_str(), Some("starting" | "transferring" | "waiting_confirmation")) {
+                set_file_transfer_status_detail(
+                    value["direction"].as_str().unwrap_or("upload"), "failed",
+                    value["transferred"].as_u64().unwrap_or(0),
+                    value["total"].as_u64().unwrap_or(0),
+                    "文件传输连接已中断，请重试",
+                    value["completedItems"].as_u64().unwrap_or(0) as usize,
+                    value["totalItems"].as_u64().unwrap_or(1) as usize);
+                emit_event("file-session:transfer-failed reason=session_closed");
+            }
+        }
+    }
 }
 
 struct PeerTaskControl {
@@ -2111,6 +2141,7 @@ async fn run_file_session(
     config: ConnectionConfig,
     receiver: mpsc::Receiver<QueuedPeerCommand>,
 ) {
+    let _transfer_guard = FileSessionTransferGuard(session_id);
     emit_event("file-session:connecting");
     let connection = await_connection_attempt(
         session_id,
@@ -2132,6 +2163,7 @@ async fn run_file_session(
     let mut stream = match result {
         Ok(stream) => stream,
         Err(error) => {
+            emit_event("file-session:connect-failed");
             set_remote_directory_result(RemoteDirectoryResult {
                 path: String::new(),
                 entries: Vec::new(),
@@ -2146,6 +2178,7 @@ async fn run_file_session(
     let mut read_jobs: Vec<TransferJob> = Vec::new();
     let mut write_jobs: Vec<TransferJob> = Vec::new();
     let mut download_state = DownloadBatchState::default();
+    let mut upload_state: Option<UploadTransferState> = None;
     let login_started = Instant::now();
     loop {
         if SESSION_ID.load(Ordering::SeqCst) != session_id {
@@ -2162,6 +2195,7 @@ async fn run_file_session(
                     &mut read_jobs,
                     &mut write_jobs,
                     &mut download_state,
+                    &mut upload_state,
                 )
                 .await
                 {
@@ -2171,18 +2205,13 @@ async fn run_file_session(
                 pending.push(command);
             }
         }
-        if authenticated && !read_jobs.is_empty() {
-            let total = read_jobs[0].total_size();
-            if let Err(error) = fs::handle_read_jobs(&mut read_jobs, &mut stream).await {
-                set_file_transfer_status("failed", 0, total, &error.to_string());
-                read_jobs.clear();
-            } else if let Some(job) = read_jobs.first() {
-                set_file_transfer_status("transferring", job.finished_size(), job.total_size(), "");
-            } else {
-                set_file_transfer_status("completed", total, total, "");
-            }
+        if authenticated {
+            drive_file_upload(&mut read_jobs, &mut upload_state, &mut stream).await;
+            check_file_transfer_timeout(&mut read_jobs, &mut write_jobs,
+                &mut upload_state, &mut download_state, &mut stream, Instant::now()).await;
         }
         if !authenticated && login_started.elapsed().as_secs() > 120 {
+            emit_event("file-session:login-timeout");
             set_remote_directory_result(RemoteDirectoryResult { path: String::new(), entries: Vec::new(), error: "文件传输登录超时".into() });
             return;
         }
@@ -2194,6 +2223,7 @@ async fn run_file_session(
                 match message.union {
                     Some(message::Union::Hash(hash)) => {
                         if let Err(error) = send_file_login(hash, &config, &mut stream).await {
+                            emit_event("file-session:login-send-failed");
                             set_remote_directory_result(RemoteDirectoryResult {
                                 path: String::new(),
                                 entries: Vec::new(),
@@ -2217,6 +2247,7 @@ async fn run_file_session(
                                 entries: Vec::new(),
                                 error,
                             });
+                            emit_event("file-session:login-rejected");
                             return;
                         }
                         _ => {
@@ -2234,6 +2265,7 @@ async fn run_file_session(
                                     &mut read_jobs,
                                     &mut write_jobs,
                                     &mut download_state,
+                                    &mut upload_state,
                                 )
                                 .await
                                 {
@@ -2248,29 +2280,129 @@ async fn run_file_session(
                             &mut read_jobs,
                             &mut write_jobs,
                             &mut download_state,
+                            &mut upload_state,
                             &mut stream,
                         )
                         .await;
                     }
                     Some(message::Union::FileAction(action)) => {
                         if let Some(file_action::Union::SendConfirm(confirm)) = action.union {
-                            if let Some(job) = fs::get_job(confirm.id, &mut read_jobs) {
-                                job.confirm(&confirm).await;
-                                emit_event("file-session:upload-confirmed");
-                            }
+                            handle_file_send_confirm(confirm, &mut read_jobs, &mut upload_state).await;
                         }
                     }
                     Some(message::Union::TestDelay(delay)) => { send_test_delay_response(delay, &mut stream).await; }
                     _ => {}
                 }
             }
-            Ok(Some(Err(error))) => {
-                set_file_transfer_status("failed", 0, 0, &error.to_string());
+            Ok(Some(Err(_error))) => {
+                emit_event("file-session:transport-failed");
                 return;
             }
-            Ok(None) => { return; }
+            Ok(None) => { emit_event("file-session:transport-closed"); return; }
             Err(_) => {}
         }
+    }
+}
+
+fn file_cancel_message(id: i32) -> PeerMessage {
+    let mut action = FileAction::new();
+    action.set_cancel(FileTransferCancel { id, ..Default::default() });
+    let mut message = PeerMessage::new();
+    message.set_file_action(action);
+    message
+}
+
+async fn handle_file_send_confirm(confirm: FileTransferSendConfirmRequest,
+    read_jobs: &mut [TransferJob], upload_state: &mut Option<UploadTransferState>) {
+    if let Some(job) = fs::get_job(confirm.id, read_jobs) {
+        job.confirm(&confirm).await;
+        if let Some(state) = upload_state.as_mut().filter(|state| state.id == confirm.id) {
+            state.watchdog.restart(Instant::now());
+        }
+        emit_event(&format!("file-session:upload-confirmed job={} file={}", confirm.id, confirm.file_num));
+    }
+}
+
+async fn drive_file_upload(
+    read_jobs: &mut Vec<TransferJob>,
+    upload_state: &mut Option<UploadTransferState>,
+    stream: &mut Stream,
+) {
+    let Some(state) = upload_state.as_mut() else { return; };
+    if state.waiting_confirmation || read_jobs.is_empty() { return; }
+    if let Err(error) = fs::handle_read_jobs(read_jobs, stream).await {
+        set_file_transfer_status("failed", state.transferred, state.total, &error.to_string());
+        emit_event(&format!("file-session:upload-failed job={} reason=send bytes={} total={}",
+            state.id, state.transferred, state.total));
+        read_jobs.clear();
+        *upload_state = None;
+    } else if let Some(job) = fs::get_job_immutable(state.id, read_jobs) {
+        state.transferred = job.finished_size();
+        state.watchdog.progress(state.transferred, Instant::now());
+        set_file_transfer_status("transferring", state.transferred, state.total, "");
+    } else {
+        // Sending our Done is not proof of a successful remote write. Keep the
+        // job identity/counters after the vendor sender removes its read job.
+        if state.transferred != state.total {
+            set_file_transfer_status("failed", state.transferred, state.total,
+                "本地文件在传输过程中发生变化，请重新选择文件");
+            emit_event(&format!("file-session:upload-failed job={} reason=size_mismatch bytes={} total={}",
+                state.id, state.transferred, state.total));
+            let _ = stream.send(&file_cancel_message(state.id)).await;
+            *upload_state = None;
+            return;
+        }
+        state.data_sent(Instant::now());
+        set_file_transfer_status("waiting_confirmation", state.transferred, state.total, "");
+        emit_event(&format!("file-session:upload-waiting-confirmation job={} bytes={} total={}",
+            state.id, state.transferred, state.total));
+    }
+}
+
+async fn check_file_transfer_timeout(
+    read_jobs: &mut Vec<TransferJob>,
+    write_jobs: &mut Vec<TransferJob>,
+    upload_state: &mut Option<UploadTransferState>,
+    download_state: &mut DownloadBatchState,
+    stream: &mut Stream,
+    now: Instant,
+) {
+    if let Some(state) = upload_state.as_mut() {
+        if state.expired(now) {
+            let reason = if state.waiting_confirmation { "confirmation_timeout" } else { "data_timeout" };
+            let error = if state.waiting_confirmation {
+                "等待远端确认超时，文件可能已送达，请检查远端后重试"
+            } else { "文件传输长时间没有进展，请检查连接后重试" };
+            set_file_transfer_status("failed", state.transferred, state.total, error);
+            emit_event(&format!("file-session:upload-failed job={} reason={} bytes={} total={} idle_ms={}",
+                state.id, reason, state.transferred, state.total, state.watchdog.idle(now).as_millis()));
+            let _ = stream.send(&file_cancel_message(state.id)).await;
+            read_jobs.clear();
+            *upload_state = None;
+        } else if state.watchdog.should_report(now) {
+            emit_event(&format!("file-session:upload-progress job={} waiting_confirmation={} bytes={} total={} idle_ms={}",
+                state.id, state.waiting_confirmation, state.transferred, state.total, state.watchdog.idle(now).as_millis()));
+        }
+    }
+    if !download_state.active { return; }
+    let transferred = download_state.completed_bytes.saturating_add(write_jobs.iter().map(TransferJob::finished_size).sum::<u64>());
+    let watchdog = download_state.watchdog.get_or_insert_with(|| TransferWatchdog::new(now));
+    watchdog.progress(transferred, now);
+    if watchdog.idle(now) >= TRANSFER_IDLE_TIMEOUT {
+        let idle_ms = watchdog.idle(now).as_millis();
+        set_download_transfer_status("failed", write_jobs, download_state,
+            "文件传输长时间没有进展，请检查连接后重试");
+        emit_event(&format!("file-session:download-failed reason=data_timeout bytes={} items={} idle_ms={}",
+            transferred, download_state.completed_jobs, idle_ms));
+        for job in write_jobs.iter() {
+            let _ = stream.send(&file_cancel_message(job.id())).await;
+            job.remove_download_file();
+        }
+        write_jobs.clear();
+        download_state.active = false;
+    } else if watchdog.should_report(now) {
+        emit_event(&format!("file-session:download-progress bytes={} items={} idle_ms={}",
+            transferred, download_state.completed_jobs, watchdog.idle(now).as_millis()));
     }
 }
 
@@ -2294,6 +2426,7 @@ async fn send_file_command(
     read_jobs: &mut Vec<TransferJob>,
     write_jobs: &mut Vec<TransferJob>,
     download_state: &mut DownloadBatchState,
+    upload_state: &mut Option<UploadTransferState>,
 ) -> bool {
     match command {
         QueuedPeerCommand::Message {
@@ -2313,6 +2446,8 @@ async fn send_file_command(
             write_jobs.clear();
             *download_state = DownloadBatchState::default();
             let total = job.total_size();
+            *upload_state = Some(UploadTransferState::new(job.id(), total, Instant::now()));
+            emit_event(&format!("file-session:upload-started job={} bytes={} items={}", job.id(), total, job.files().len()));
             read_jobs.push(job);
             set_file_transfer_status("transferring", 0, total, "");
             true
@@ -2326,9 +2461,11 @@ async fn send_file_command(
             }
             read_jobs.clear();
             write_jobs.clear();
+            *upload_state = None;
             *download_state = DownloadBatchState {
                 active: true,
                 total_jobs: jobs.len(),
+                watchdog: Some(TransferWatchdog::new(Instant::now())),
                 ..Default::default()
             };
             for command in jobs {
@@ -2372,11 +2509,12 @@ async fn send_file_command(
                 .map(TransferJob::finished_size)
                 .sum::<u64>();
             let active_total = write_jobs.iter().map(TransferJob::total_size).sum::<u64>();
-            let upload_finished = read_jobs
-                .iter()
-                .map(TransferJob::finished_size)
-                .sum::<u64>();
-            let upload_total = read_jobs.iter().map(TransferJob::total_size).sum::<u64>();
+            let upload_finished = upload_state.as_ref().map(|state| state.transferred).unwrap_or(0);
+            let upload_total = upload_state.as_ref().map(|state| state.total).unwrap_or(0);
+
+            if let Some(state) = upload_state.as_ref().filter(|state| state.waiting_confirmation) {
+                let _ = stream.send(&file_cancel_message(state.id)).await;
+            }
 
             for job in read_jobs.iter().chain(write_jobs.iter()) {
                 let mut action = FileAction::new();
@@ -2394,6 +2532,7 @@ async fn send_file_command(
             read_jobs.clear();
             write_jobs.clear();
             *download_state = DownloadBatchState::default();
+            *upload_state = None;
 
             let transferred = if is_download {
                 completed_bytes.saturating_add(active_finished)
@@ -4921,6 +5060,7 @@ async fn handle_file_session_response(
     read_jobs: &mut Vec<TransferJob>,
     write_jobs: &mut Vec<TransferJob>,
     download_state: &mut DownloadBatchState,
+    upload_state: &mut Option<UploadTransferState>,
     stream: &mut Stream,
 ) {
     if consume_file_operation_result(&response) { return; }
@@ -4956,7 +5096,29 @@ async fn handle_file_session_response(
                 download_state.active = false;
             }
         }
-        Some(file_response::Union::Digest(digest)) if !digest.is_upload => {
+        Some(file_response::Union::Digest(digest)) if digest.is_upload => {
+            let Some(state) = upload_state.as_mut().filter(|state| state.id == digest.id && !state.waiting_confirmation) else {
+                emit_event(&format!("file-session:reply-ignored kind=upload_digest job={}", digest.id));
+                return;
+            };
+            let Some(job) = fs::get_job(digest.id, read_jobs) else { return; };
+            let confirm = FileTransferSendConfirmRequest {
+                id: digest.id, file_num: digest.file_num,
+                union: Some(file_transfer_send_confirm_request::Union::OffsetBlk(0)),
+                ..Default::default()
+            };
+            job.confirm(&confirm).await;
+            if stream.send(&fs::new_send_confirm(confirm)).await.is_err() {
+                set_file_transfer_status("failed", state.transferred, state.total, "发送文件传输确认失败");
+                emit_event(&format!("file-session:upload-failed job={} reason=send_confirm", state.id));
+                read_jobs.clear();
+                *upload_state = None;
+            } else {
+                state.watchdog.restart(Instant::now());
+                emit_event(&format!("file-session:upload-confirmed job={} file={} overwrite=true", digest.id, digest.file_num));
+            }
+        }
+        Some(file_response::Union::Digest(digest)) => {
             if let Some(job) = fs::get_job(digest.id, write_jobs) {
                 job.set_digest(digest.file_size, digest.last_modified);
                 let confirm = FileTransferSendConfirmRequest {
@@ -4966,6 +5128,7 @@ async fn handle_file_session_response(
                     ..Default::default()
                 };
                 job.confirm(&confirm).await;
+                if let Some(watchdog) = download_state.watchdog.as_mut() { watchdog.restart(Instant::now()); }
                 if let Err(error) = stream.send(&fs::new_send_confirm(confirm)).await {
                     set_download_transfer_status(
                         "failed",
@@ -4979,6 +5142,10 @@ async fn handle_file_session_response(
             }
         }
         Some(file_response::Union::Block(block)) => {
+            if !download_state.active || fs::get_job_immutable(block.id, write_jobs).is_none() {
+                emit_event(&format!("file-session:reply-ignored kind=download_block job={}", block.id));
+                return;
+            }
             let mut error = String::new();
             if let Some(job) = fs::get_job(block.id, write_jobs) {
                 if let Err(err) = job.write(block).await {
@@ -4994,12 +5161,23 @@ async fn handle_file_session_response(
             }
         }
         Some(file_response::Union::Done(done)) => {
+            if let Some(state) = upload_state.as_ref().filter(|state| state.id == done.id && state.waiting_confirmation) {
+                set_file_transfer_status_detail("upload", "completed", state.transferred, state.total, "", 1, 1);
+                emit_event(&format!("file-session:upload-completed job={} bytes={} total={} confirmed=true", state.id, state.transferred, state.total));
+                *upload_state = None;
+                return;
+            }
+            if !download_state.active || fs::get_job_immutable(done.id, write_jobs).is_none() {
+                emit_event(&format!("file-session:reply-ignored kind=done job={}", done.id));
+                return;
+            }
             if let Some(job) = fs::remove_job(done.id, write_jobs) {
                 job.modify_time();
                 download_state.completed_bytes = download_state
                     .completed_bytes
                     .saturating_add(job.finished_size());
                 download_state.completed_jobs = download_state.completed_jobs.saturating_add(1);
+                if let Some(watchdog) = download_state.watchdog.as_mut() { watchdog.restart(Instant::now()); }
             }
             if download_state.active
                 && download_state.completed_jobs >= download_state.total_jobs
@@ -5016,12 +5194,20 @@ async fn handle_file_session_response(
             }
         }
         Some(file_response::Union::Error(error)) => {
-            if fs::remove_job(error.id, write_jobs).is_some() {
+            if let Some(state) = upload_state.as_ref().filter(|state| state.id == error.id) {
+                let message = sanitize_remote_value(error.error, 512);
+                set_file_transfer_status("failed", state.transferred, state.total, &message);
+                emit_event(&format!("file-session:upload-failed job={} reason=remote bytes={} total={}", state.id, state.transferred, state.total));
+                read_jobs.clear();
+                *upload_state = None;
+            } else if download_state.active && fs::get_job_immutable(error.id, write_jobs).is_some() {
                 let message = sanitize_remote_value(error.error, 512);
                 set_download_transfer_status("failed", write_jobs, download_state, &message);
+                emit_event(&format!("file-session:download-failed job={} reason=remote", error.id));
                 write_jobs.clear();
                 download_state.active = false;
             } else {
+                emit_event(&format!("file-session:reply-ignored kind=unmatched_error job={}", error.id));
                 let mut response = hbb_common::message_proto::FileResponse::new();
                 response.set_error(error);
                 handle_file_response(response, read_jobs, stream).await;

@@ -2,8 +2,8 @@ import { translate } from '../utils/I18n'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.3'
-export const RELEASE_NOTES_BUILD: string = '1003003'
+export const RELEASE_NOTES_VERSION: string = '1.3.4'
+export const RELEASE_NOTES_BUILD: string = '1003004'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.4（1003004）· 文件传输等待与完成确认修复', [
+            '修复上传完成确认被误当成下载回复，导致进度变成 0 字节并一直显示“等待数据”的问题；上传、取回按任务独立处理，迟到或重复回复不再干扰其他任务。',
+            '上传数据发送完毕后明确显示“等待远端确认”，收到对应任务的远端完成确认后才报告成功并清理本地临时文件，改善小文件、空文件及连续上传的状态一致性。',
+            '增加文件传输停滞、等待确认超时和连接中断处理，避免任务无限等待；确认超时时提示文件可能已送达，请检查远端后重试，取消后保留正确方向和进度。',
+            '补充文件传输诊断：记录任务编号、上传或取回方向、字节数、确认阶段、停滞时长及失败原因；仍由诊断开关控制，新增日志不记录文件内容、密码或完整路径。'
+          ])
           this.buildSection('1.3.3（1003003）· 连接大小写与登录稳定性修复', [
             '新增连接、首页输入、保存和重新读取均保留远端 ID 的大小写，不再自动转为小写；修正重复连接与保存密码匹配，避免大小写不同的自定义 ID 混用凭据。',
             '连接建立和远端登录分阶段计时，移除页面重复的 30 秒断开判断，改善慢速中继建链后登录等待时间不足的问题。',
