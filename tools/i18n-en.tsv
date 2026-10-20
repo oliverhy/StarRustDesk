@@ -1,4 +1,10 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+恢复 100% 并居中	Reset to 100% and center
+1.3.6（1003006）· 缩放按钮与一键复位修复	1.3.6 (1003006) · Zoom controls and one-tap reset
+修复画面菜单“＋／−”缩成小点的问题，改用独立 SVG 图标，适配不同屏幕密度及深浅色主题，保留原有紧凑布局。	Fixed the + and - icons appearing as tiny dots in the picture menu. Dedicated SVG icons adapt to screen density and light or dark themes while preserving the compact layout.
+缩放按钮改为按 25% 标准档位增减，双指缩放得到任意比例后也能准确经过 100%；例如 121% 缩小到 100%，96% 放大到 100%，不再持续跳过。	Zoom buttons now move between standard 25% stops, reaching exactly 100% even after arbitrary pinch zoom: for example, 121% zooms out to 100%, and 96% zooms in to 100%.
+点击中间缩放百分比即可一键恢复 100% 并居中，已是 100% 时也能重新居中；手机和平板恢复初始适应画面比例，PC 保留原始物理像素比例含义。	Tap the center zoom percentage to reset to 100% and recenter, including when already at 100%. Phones and tablets restore the initial fitted view; PCs retain the original physical-pixel scale.
+恢复后的缩放按远端独立保存，同步清理未完成的拖动和缩放手势并更新虚拟鼠标位置；保留此前键盘避让、画面上移及功能栏独立收放优化。	The reset scale is saved per remote device. Pending pan and pinch gestures are cleared and the virtual mouse is synchronized. Previous keyboard avoidance, upward picture movement and independent toolbar behavior are preserved.
 正在重新连接远端设备	Reconnecting to the remote device
 正在重新连接（第 {0} 次）	Reconnecting (attempt {0})
 连接暂时中断，正在重新连接…	Connection interrupted. Reconnecting...

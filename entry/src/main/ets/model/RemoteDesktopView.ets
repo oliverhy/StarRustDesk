@@ -16,6 +16,15 @@ export function desktopScalePercent(value: number): number {
   return Number.isFinite(value) ? Math.max(25, Math.min(300, Math.round(value))) : 100;
 }
 
+// Snap to the next 25% stop without carrying an arbitrary pinch remainder.
+export function nextZoomPercent(value: number, direction: number, minimum: number, maximum: number): number {
+  const current: number = Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : 100));
+  if (!Number.isFinite(direction) || direction === 0) return current;
+  const stop: number = direction > 0 ? Math.floor(current / 25 + 0.0000001) + 1 :
+    Math.ceil(current / 25 - 0.0000001) - 1;
+  return Math.max(minimum, Math.min(maximum, stop * 25));
+}
+
 // Layout is in vp; 100% means one remote pixel per local physical pixel.
 // Retain the common fit-sized surface and apply the final scale to its parent.
 export function desktopZoomScale(mode: DesktopViewMode, percent: number, fit: number, density: number): number {

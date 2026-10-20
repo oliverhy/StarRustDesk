@@ -2,9 +2,9 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.5'
-export const RELEASE_NOTES_BUILD: string = '1003005'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r2`
+export const RELEASE_NOTES_VERSION: string = '1.3.6'
+export const RELEASE_NOTES_BUILD: string = '1003006'
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.6（1003006）· 缩放按钮与一键复位修复', [
+            '修复画面菜单“＋／−”缩成小点的问题，改用独立 SVG 图标，适配不同屏幕密度及深浅色主题，保留原有紧凑布局。',
+            '缩放按钮改为按 25% 标准档位增减，双指缩放得到任意比例后也能准确经过 100%；例如 121% 缩小到 100%，96% 放大到 100%，不再持续跳过。',
+            '点击中间缩放百分比即可一键恢复 100% 并居中，已是 100% 时也能重新居中；手机和平板恢复初始适应画面比例，PC 保留原始物理像素比例含义。',
+            '恢复后的缩放按远端独立保存，同步清理未完成的拖动和缩放手势并更新虚拟鼠标位置；保留此前键盘避让、画面上移及功能栏独立收放优化。'
+          ])
           this.buildSection('1.3.5（1003005）· 修订 r2：键盘避让与横屏操控优化', [
             '修复软键盘遮挡远端输入位置的问题：手机、平板及折叠屏保留键盘弹出前的画面比例和缩放，只向上移动画面避让输入位置；收起键盘后恢复原位置，不再整体缩小远端桌面。',
             '横屏独立键盘悬浮按钮默认移到右侧，继续支持拖动；键盘弹出后保持在可见区域，避免默认居中遮挡画面。',

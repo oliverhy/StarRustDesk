@@ -275,18 +275,24 @@ export struct RemoteGlassMenu {
   zoomControls() {
     Row({ space: 0 }) {
       Button({ type: ButtonType.Normal }) {
-        Path().commands('M 1 6 L 11 6').width(12).height(12).stroke(this.textColor()).strokeWidth(1.6)
+        Image($r('app.media.glass_zoom_minus')).width(16).height(16)
+          .objectFit(ImageFit.Contain).fillColor(this.textColor()).hitTestBehavior(HitTestMode.None)
       }.width(32).height(this.metrics.stacked ? this.metrics.rowHeight : 30).padding(0)
         .accessibilityText(translate('缩小', this.language))
         .id('glass-zoom-out')
         .backgroundColor(this.keyColor()).borderRadius({ topLeft: 6, bottomLeft: 6 }).focusable(false)
         .onClick(() => { this.onAction('zoomOut'); })
-      Text(`${this.state.zoom}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor()).layoutWeight(1)
-        .constraintSize({ minHeight: this.metrics.stacked ? this.metrics.rowHeight : 30 })
-        .textAlign(TextAlign.Center).backgroundColor(this.keyColor())
-        .border({ width: { left: 1, right: 1 }, color: Style.DIVIDER })
       Button({ type: ButtonType.Normal }) {
-        Path().commands('M 1 6 L 11 6 M 6 1 L 6 11').width(12).height(12).stroke(this.textColor()).strokeWidth(1.6)
+        Text(`${this.state.zoom}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor())
+      }.layoutWeight(1).padding(0)
+        .constraintSize({ minHeight: this.metrics.stacked ? this.metrics.rowHeight : 30 })
+        .backgroundColor(this.keyColor()).borderRadius(0).focusable(false)
+        .border({ width: { left: 1, right: 1 }, color: Style.DIVIDER })
+        .accessibilityText(translate('恢复 100% 并居中', this.language)).id('glass-zoom-reset')
+        .onClick(() => { this.onAction('zoomReset'); })
+      Button({ type: ButtonType.Normal }) {
+        Image($r('app.media.glass_zoom_plus')).width(16).height(16)
+          .objectFit(ImageFit.Contain).fillColor(this.textColor()).hitTestBehavior(HitTestMode.None)
       }.width(32).height(this.metrics.stacked ? this.metrics.rowHeight : 30).padding(0)
         .accessibilityText(translate('放大', this.language))
         .id('glass-zoom-in')

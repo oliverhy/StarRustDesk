@@ -36,7 +36,7 @@ import { RemoteGlassMenuState, RemoteGlassMenuMetrics, glassMenuMetrics, glassOr
 import { RemoteGlassStyle } from '../theme/RemoteGlassStyle';
 import { RemoteFullscreenPolicy } from '../service/RemoteFullscreenPolicy';
 import { RemoteNavigationBarPolicy } from '../service/RemoteNavigationBarPolicy';
-import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent } from '../model/RemoteDesktopView';
+import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent, nextZoomPercent } from '../model/RemoteDesktopView';
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
 import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition } from '../model/RemoteToolbarPlacement';
 import { RemotePeerPreferences } from '../service/RemotePeerPreferences';
@@ -3221,7 +3221,8 @@ struct RemotePage {
     state.displayCount = this.displayCount; state.currentDisplay = this.currentDisplay;
     state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
     state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
-    state.zoom = Math.round(this.zoomScale * 100); state.fullscreen = this.isFullScreen;
+    state.zoom = this.isPcDevice() ? this.getDesktopDisplayedPercent() : Math.round(this.zoomScale * 100);
+    state.fullscreen = this.isFullScreen;
     state.pip = this.pipPhase === 'active'; state.recording = this.recordingActive;
     state.privacy = this.privacyModeState === 2; state.privacyPending = this.privacyModeState === 1;
     state.monitor = this.showQualityMonitor; state.transferBusy = this.transferActive || this.uploadStaging;
@@ -3311,6 +3312,7 @@ struct RemotePage {
       case 'privacy': if (this.privacyModeState !== 1) this.togglePrivacyMode(); return;
       case 'zoomIn': this.adjustZoom(0.25); return;
       case 'zoomOut': this.adjustZoom(-0.25); return;
+      case 'zoomReset': this.resetZoomTo100(); return;
       case 'release': this.releaseVirtualModifiers(); return;
       case 'orientation': this.showOrientationMenu(); return;
     }
@@ -7911,14 +7913,36 @@ struct RemotePage {
   }
 
   adjustZoom(delta: number): void {
+    if (this.pipSurfaceOwned || !Number.isFinite(delta) || delta === 0) return;
     if (this.isPcDevice()) {
-      this.setDesktopCustomPercent(this.getDesktopDisplayedPercent() + delta * 100);
+      this.setDesktopCustomPercent(nextZoomPercent(this.getDesktopDisplayedPercent(), delta, 25, 300));
       return;
     }
-    let nextScale: number = Math.max(0.5, Math.min(5.0, this.zoomScale + delta));
+    const nextScale: number = nextZoomPercent(this.zoomScale * 100, delta, 50, 500) / 100;
     this.applyZoomAt(this.componentWidth / 2, this.componentHeight / 2, nextScale);
     this.rememberedHandheldZoomScale = nextScale;
     this.peerPreferences?.set('handheld-zoom', nextScale.toString());
+  }
+
+  resetZoomTo100(): void {
+    if (this.pipSurfaceOwned) return;
+    this.cancelActiveTouchGesture();
+    if (this.isPcDevice()) {
+      // PC 100% remains one remote pixel per local physical pixel.
+      this.selectDesktopViewMode('original');
+    } else {
+      // Mobile 100% is the initial fit-sized canvas, independent of PC density.
+      this.zoomScale = 1;
+      this.offsetX = 0;
+      this.offsetY = 0;
+      this.pinchStartScale = 1;
+      this.relativePointerSampleValid = false;
+      this.setPanMode(false);
+      this.syncVirtualMouseToCurrentPointer();
+      this.rememberedHandheldZoomScale = 1;
+      this.peerPreferences?.set('handheld-zoom', '1');
+    }
+    RustDeskNapi.appendDiagnosticLog('viewport-zoom', 'action=reset_100 centered=1');
   }
 
   applyZoomAt(localX: number, localY: number, nextScale: number): void {
