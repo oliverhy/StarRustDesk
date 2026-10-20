@@ -4,7 +4,7 @@ import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.3.5'
 export const RELEASE_NOTES_BUILD: string = '1003005'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r2`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,7 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
-          this.buildSection('1.3.5（1003005）· 修订 r1：重连保护与操控优化', [
+          this.buildSection('1.3.5（1003005）· 修订 r2：键盘避让与横屏操控优化', [
+            '修复软键盘遮挡远端输入位置的问题：手机、平板及折叠屏保留键盘弹出前的画面比例和缩放，只向上移动画面避让输入位置；收起键盘后恢复原位置，不再整体缩小远端桌面。',
+            '横屏独立键盘悬浮按钮默认移到右侧，继续支持拖动；键盘弹出后保持在可见区域，避免默认居中遮挡画面。',
+            '软键盘与修饰键、功能键栏独立收放，点击键盘按钮或切换横竖屏不再自动展开左侧按键栏，保留用户已保存的展开或折叠选择。',
+            '修复远控画面横屏底部出现白边的问题，手势导航区域使用深色背景，保留系统手势；退出远控后恢复原导航栏样式。',
+            '补充键盘高度、可见画面高度、上移距离、缩放及功能键栏状态诊断，仍由诊断开关控制，不记录输入文字或密码。',
             '修复虚拟鼠标滚轮上下箭头错位及中键图案不清晰的问题：滚轮改为固定三段布局与 SVG 图标，不随系统字体撑高；左右键保留独立尺寸，避免挤入下方移动区域。',
             '手机和平板的独立键盘悬浮按钮在“控”展开和折叠时均保留，继续支持拖动和一键打开、收起软键盘；文件传输模式及设置、聊天等弹层的隐藏规则保持不变。',
             '已登录的远控会话遇到传输中断、登录切换期间临时离线或连接超时时，在约 30 秒窗口内按退避间隔尝试自动重连；认证失败、远端主动结束及安全条件变化不会自动重连。',

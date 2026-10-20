@@ -87,16 +87,16 @@ expect(remotePage, /buildVirtualMouseWheelIcon\(1\)[\s\S]*?\.position\(\{ x: 29,
   'virtual wheel controls must stay above the overlapping mouse drag body')
 expect(remotePage, /setKeyboardAvoidMode\(KeyboardAvoidMode\.RESIZE\)/,
   'the keyboard must resize the available area for floating controls')
-expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.keyboardViewportHeight[\s\S]*?\.align\(Alignment.Center\)/,
+expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.keyboardViewportHeight[\s\S]*?\.align\(Alignment.TopStart\)/,
   'the landscape canvas keeps its full height and moves upward inside the clipped available area')
 expect(remotePage, /keyboardViewportHeight = this\.isHandheldDevice\(\) \?[\s\S]*?this\.componentHeight/,
   'opening the keyboard must preserve the unscaled canvas on all handheld aspect ratios')
 expect(remotePage, /openRemoteKeyboard\(\)[\s\S]*?this\.snapshotRemoteKeyboardViewport\(\)/,
   'opening the keyboard must capture the current viewport before IME resize')
-expect(remotePage, /\.align\(Alignment\.Center\)[\s\S]*?\.translate\(\{ y: this\.getKeyboardCanvasShiftY\(\) \}\)/,
+expect(remotePage, /\.align\(Alignment\.TopStart\)[\s\S]*?\.translate\(\{ y: this\.getKeyboardCanvasShiftY\(\) \}\)/,
   'canvas and both cursor layers must share input-anchor keyboard avoidance')
-expect(remotePage, /keyboardToolsCollapsed = !landscape;/,
-  'entering handheld landscape retains the existing keyboard shortcut behavior')
+require('node:assert/strict').equal(remotePage.includes('keyboardToolsCollapsed = !landscape;'), false,
+  'orientation changes must preserve the user shortcut collapse choice')
 
 // Execute production orientation/canvas logic: IME resize is not a rotation.
 const layoutMethods = remotePage.slice(remotePage.indexOf('  isHandheldLandscape():'),
@@ -108,7 +108,7 @@ Object.assign(layout, { pageWidth: 800, pageHeight: 400, showKeyboardPanel: fals
   keyboardLayoutHeight: 0, keyboardViewportHeight: 0, handheldLayoutInitialized: false,
   keyboardToolsCollapsed: true, remoteToolbarCollapsed: true, showVirtualMouse: false })
 layout.handleHandheldLayoutChange()
-require('node:assert/strict').equal(layout.keyboardToolsCollapsed, false)
+require('node:assert/strict').equal(layout.keyboardToolsCollapsed, true)
 require('node:assert/strict').equal(layout.remoteToolbarCollapsed, true)
 layout.keyboardToolsCollapsed = true // Explicit user collapse survives IME show/hide.
 Object.assign(layout, { showKeyboardPanel: true, keyboardLayoutHeight: 400,

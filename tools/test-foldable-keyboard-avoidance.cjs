@@ -18,7 +18,7 @@ const context = vm.createContext({ deviceInfo, RustDeskNapi: {
   appendDiagnosticLog: (category, message) => logs.push([category, message]),
 } });
 const names = ['isHandheldDevice', 'isHandheldLandscape', 'getRemoteCanvasHeight',
-  'snapshotRemoteKeyboardViewport', 'hasKeyboardViewportSizeChanged', 'getKeyboardCanvasShiftY',
+  'snapshotRemoteKeyboardViewport', 'hasKeyboardViewportSizeChanged', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
   'restoreKeyboardAvoidMode', 'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
   'remotePointToVisual', 'visualPointToRemote'];
 vm.runInContext(ts.transpile('class Page {' + names.map(method).join('\n') +
@@ -30,7 +30,7 @@ function page(overrides = {}) {
     qualityViewportHeight: 780, remoteWidth: 1920, remoteHeight: 1080,
     zoomScale: 1, offsetX: 0, offsetY: 0, lastAbsX: 900, lastAbsY: 1030,
     pointerInitialized: true, showKeyboardPanel: false, keyboardAvoidModeChanged: false,
-    keyboardViewportHeight: 0, keyboardLayoutWidth: 0, keyboardLayoutHeight: 0,
+    keyboardViewportHeight: 0, keyboardLayoutWidth: 0, keyboardLayoutHeight: 0, controlMenuKeyboardInset: 0,
     remoteKeyboardWindow: { getWindowProperties: () => ({ windowRect: rect }) },
     rect,
   }, overrides);
@@ -42,7 +42,7 @@ function open(p, visibleHeight) {
 }
 function near(actual, expected) { assert(Math.abs(actual - expected) < 1e-7, `${actual} != ${expected}`); }
 function focusOnScreen(p) {
-  return (p.qualityViewportHeight - p.keyboardViewportHeight) / 2 + p.getKeyboardCanvasShiftY() +
+  return p.getKeyboardCanvasShiftY() +
     p.remotePointToVisual(p.keyboardFocusRemoteX, p.keyboardFocusRemoteY).y;
 }
 let passed = 0;
@@ -64,11 +64,10 @@ test('a low input anchor is moved above the keyboard instead of clipped by half-
   assert(p.getKeyboardCanvasShiftY() < 0);
   near(focusOnScreen(p), 432);
 });
-test('a high input anchor is not cropped above the screen', () => {
+test('a high input anchor remains stationary; avoidance never moves the canvas down', () => {
   const p = page({ remoteWidth: 800, remoteHeight: 780, lastAbsY: 30 }); open(p, 480);
-  assert(p.getKeyboardCanvasShiftY() > 0);
+  assert.equal(p.getKeyboardCanvasShiftY(), 0);
   near(focusOnScreen(p), 30);
-  near((480 - 780) / 2 + p.getKeyboardCanvasShiftY(), 0);
 });
 test('landscape still retains original fit; tablet and folded outer screen use the same path', () => {
   for (const type of ['phone', 'tablet']) {
@@ -86,8 +85,8 @@ test('avoidance retains user zoom/pan and cursor inverse mapping at repeated zoo
     open(p, 480); p.getKeyboardCanvasShiftY();
     assert.equal(p.zoomScale, zoomScale); assert.equal(p.offsetX, -70); assert.equal(p.offsetY, 20);
     const before = p.remotePointToVisual(850, 730);
-    const translatedY = before.y - 150 + p.getKeyboardCanvasShiftY();
-    const back = p.visualPointToRemote(before.x, translatedY + 150 - p.getKeyboardCanvasShiftY());
+    const translatedY = before.y + p.getKeyboardCanvasShiftY();
+    const back = p.visualPointToRemote(before.x, translatedY - p.getKeyboardCanvasShiftY());
     near(back.x, 850); near(back.y, 730);
   }
 });
@@ -130,6 +129,30 @@ test('window query failure falls back safely to width invalidation', () => {
   const p = page({ remoteKeyboardWindow: { getWindowProperties() { throw Error('gone'); } } });
   open(p, 480); assert(!p.hasKeyboardViewportSizeChanged());
   p.pageWidth = 360; assert(p.hasKeyboardViewportSizeChanged());
+});
+
+test('IME inset also clips fullscreen windows that report an unchanged viewport; already resized windows are not subtracted twice', () => {
+  for (const measured of [780, 480]) {
+    const p = page(); open(p, measured); p.controlMenuKeyboardInset = 300;
+    assert.equal(p.getKeyboardViewportMaxHeight(), 480);
+    const focus = p.getKeyboardCanvasShiftY() + p.remotePointToVisual(p.keyboardFocusRemoteX, p.keyboardFocusRemoteY).y;
+    near(focus, 432);
+    assert.equal(p.getRemoteCanvasHeight(), 780);
+    assert.equal(p.zoomScale, 1);
+  }
+});
+
+test('keyboard size changes only shift the canvas; repeated zoom levels retain pixel scale and pan', () => {
+  for (const zoomScale of [1, 2, 4]) {
+    const p = page({ zoomScale, offsetX: -70, offsetY: 20 }); open(p, 780);
+    const pixelScale = p.getDisplayWidth() * p.zoomScale / p.remoteWidth;
+    for (const inset of [300, 350, 240, 0]) {
+      p.controlMenuKeyboardInset = inset;
+      assert(p.getKeyboardCanvasShiftY() <= 0);
+      near(p.getDisplayWidth() * p.zoomScale / p.remoteWidth, pixelScale);
+      assert.equal(p.offsetX, -70); assert.equal(p.offsetY, 20);
+    }
+  }
 });
 test('PC uses existing resize behavior, not handheld fixed canvas or anchor shift', () => {
   deviceInfo.deviceType = '2in1';

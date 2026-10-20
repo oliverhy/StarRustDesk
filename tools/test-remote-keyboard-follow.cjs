@@ -61,7 +61,7 @@ const names = ['isHandheldDevice', 'shouldFollowTouchMouse', 'touchMouseFollowBl
   'canKeepRemoteKeyboardForPointer', 'keepRemoteKeyboardForPointer', 'refocusRemoteKeyboard',
   'cancelRemoteKeyboardRefocus', 'requestRemoteInputFocus',
   'toggleRemoteKeyboard', 'openRemoteKeyboard', 'closeRemoteKeyboard',
-  'snapshotRemoteKeyboardViewport', 'getKeyboardCanvasShiftY',
+  'snapshotRemoteKeyboardViewport', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
   'applyKeyboardResizeMode', 'restoreKeyboardAvoidMode', 'buildKeyboardCapture',
   'updateCenterFollowPointer', 'remotePointToVisual', 'getDisplayWidth', 'getDisplayHeight',
   'getDisplayLeft', 'getDisplayTop', 'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport'];
@@ -259,4 +259,15 @@ for (const name of ['updateEdgeAutoPan', 'runEdgeAutoPanFrame']) {
 assert(method('aboutToDisappear').includes('this.stopRemoteKeyboardTracking();'));
 assert(method('onProjectionDisplayChanged').includes('this.startRemoteKeyboardTracking();'));
 assert(method('flushPointerDiagnostics').includes('follow_reason='));
+test('repeated software keyboard toggles preserve the independent shortcut panel and viewport transform', () => {
+  for (const collapsed of [true, false]) {
+    const { p } = page(); p.keyboardToolsCollapsed = collapsed;
+    const zoom = p.zoomScale, x = p.offsetX, y = p.offsetY;
+    for (let i = 0; i < 3; i++) {
+      p.openRemoteKeyboard(); assert.equal(p.keyboardToolsCollapsed, collapsed);
+      p.closeRemoteKeyboard(); assert.equal(p.keyboardToolsCollapsed, collapsed);
+      assert.equal(p.zoomScale, zoom); assert.equal(p.offsetX, x); assert.equal(p.offsetY, y);
+    }
+  }
+});
 console.log(`PASSED=${passed} FAILED=0`);

@@ -35,6 +35,7 @@ import { RemoteGlassMenuState, RemoteGlassMenuMetrics, glassMenuMetrics, glassOr
   RemoteGlassMenuPlacement } from '../model/RemoteGlassMenu';
 import { RemoteGlassStyle } from '../theme/RemoteGlassStyle';
 import { RemoteFullscreenPolicy } from '../service/RemoteFullscreenPolicy';
+import { RemoteNavigationBarPolicy } from '../service/RemoteNavigationBarPolicy';
 import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent } from '../model/RemoteDesktopView';
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
 import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition } from '../model/RemoteToolbarPlacement';
@@ -621,6 +622,7 @@ struct RemotePage {
   private edgePanMoving: boolean = false;
   private keyboardAvoidModeBeforePanel: KeyboardAvoidMode = KeyboardAvoidMode.OFFSET;
   private keyboardAvoidModeChanged: boolean = false;
+  private navigationBarPolicy: RemoteNavigationBarPolicy = new RemoteNavigationBarPolicy();
 
   aboutToAppear(): void {
     this.remotePageVisible = true;
@@ -665,6 +667,7 @@ struct RemotePage {
     this.startPolling();
     if (this.fileOnly) { this.showGestureHelp = false; return; }
     this.startRemoteKeyboardTracking();
+    if (this.isHandheldDevice() && !this.remoteExternalDisplay) this.navigationBarPolicy.enter(this.remoteKeyboardWindow);
     this.startDesktopWindowTracking();
     this.startRemoteCursorPolling();
     this.startNativeMousePolling();
@@ -675,6 +678,7 @@ struct RemotePage {
   }
 
   aboutToDisappear(): void {
+    this.navigationBarPolicy.leave();
     this.fullTextController?.close();
     this.remotePageVisible = false;
     this.retryRequestGeneration++;
@@ -939,7 +943,8 @@ struct RemotePage {
   onAreaChangeCallback(oldValue: Area, newValue: Area): void {
     this.relativePointerSampleValid = false;
     this.componentWidth = newValue.width as number;
-    this.componentHeight = newValue.height as number;
+    this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
+      this.keyboardViewportHeight : newValue.height as number;
     if (this.lastSurfaceWidth <= 0 || this.lastSurfaceHeight <= 0) {
       this.bindSurfaceIfReady();
       return;
@@ -1697,6 +1702,15 @@ struct RemotePage {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
+      if (!this.fileOnly && this.isHandheldDevice() && !this.remoteExternalDisplay) {
+        // Paint only behind the system gesture area. Keep the viewport and
+        // draggable controls inside their original safe-area bounds.
+        Column() {}
+          .width('100%').height('100%')
+          .backgroundColor('#090D14')
+          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+          .hitTestBehavior(HitTestMode.None);
+      }
       Column() {
         if (this.connectionStatus === ConnectionStatus.DISCONNECTED) {
           this.buildDisconnectedView();
@@ -1779,7 +1793,7 @@ struct RemotePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : '#E7EEF8')
+    .backgroundColor(this.fileOnly ? (this.isDarkMode ? RustDeskTheme.BG_DARK : '#E7EEF8') : '#090D14')
     .focusable(true)
     .onKeyEventDispatch((event: KeyEvent) => {
       return this.fileOnly ? false : this.handleRemoteKey(event);
@@ -2653,7 +2667,7 @@ struct RemotePage {
       .width('100%')
       .height(this.getRemoteCanvasHeight())
       .constraintSize({ minHeight: this.keyboardViewportHeight })
-      .align(Alignment.Center)
+      .align(Alignment.TopStart)
       .translate({ y: this.getKeyboardCanvasShiftY() })
       .backgroundColor('#090D14')
       if (this.pipSurfaceOwned) {
@@ -2663,6 +2677,7 @@ struct RemotePage {
     }
     .width('100%')
     .layoutWeight(1)
+    .constraintSize({ maxHeight: this.getKeyboardViewportMaxHeight() })
     .clip(true)
     .onAreaChange((_oldValue: Area, newValue: Area) => {
       const previousHeight: number = this.qualityViewportHeight;
@@ -2826,7 +2841,8 @@ struct RemotePage {
       let previousWidth: number = this.componentWidth;
       let previousHeight: number = this.componentHeight;
       this.componentWidth = newValue.width as number;
-      this.componentHeight = newValue.height as number;
+      this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
+        this.keyboardViewportHeight : newValue.height as number;
       if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
         Math.abs(this.componentHeight - previousHeight) > 0.5) {
         this.stopEdgeAutoPan();
@@ -5267,14 +5283,20 @@ struct RemotePage {
 
   getKeyboardLauncherBase(horizontal: boolean): number {
     const width: number = this.pageWidth > 0 ? this.pageWidth : 360;
-    const height: number = this.pageHeight > 0 ? this.pageHeight : 640;
-    if (horizontal) return this.isHandheldLandscape() ? Math.max(8, (width - 52) / 2) : Math.max(8, width - 64);
-    return Math.max(8, height - (this.isHandheldLandscape() ? 62 : this.getRemoteToolbarHeight() + 78));
+    const height: number = this.getKeyboardUsablePageHeight();
+    if (horizontal) return Math.max(8, width - 64);
+    return Math.max(8, height - (this.isHandheldLandscape() ? 118 : this.getRemoteToolbarHeight() + 78));
+  }
+
+  getKeyboardUsablePageHeight(): number {
+    const measured: number = this.pageHeight > 0 ? this.pageHeight : 640;
+    if (!this.showKeyboardPanel || this.keyboardLayoutHeight <= 0 || !(this.controlMenuKeyboardInset > 0)) return measured;
+    return Math.max(1, Math.min(measured, this.keyboardLayoutHeight - this.controlMenuKeyboardInset));
   }
 
   clampKeyboardLauncherOffset(offset: number, horizontal: boolean): number {
     const dimension: number = horizontal ? (this.pageWidth > 0 ? this.pageWidth : 360) :
-      (this.pageHeight > 0 ? this.pageHeight : 640);
+      this.getKeyboardUsablePageHeight();
     const size: number = horizontal ? 52 : 46;
     const base: number = this.getKeyboardLauncherBase(horizontal);
     return Math.max(8 - base, Math.min(Math.max(8, dimension - size - 8) - base, offset));
@@ -5693,20 +5715,26 @@ struct RemotePage {
   getKeyboardCanvasShiftY(): number {
     if (!this.showKeyboardPanel || !this.isHandheldDevice() || this.keyboardViewportHeight <= 0 ||
       !Number.isFinite(this.qualityViewportHeight) || this.qualityViewportHeight <= 0) return 0;
-    const hiddenHeight: number = Math.max(0, this.keyboardViewportHeight - this.qualityViewportHeight);
+    const visibleHeight: number = Math.min(this.qualityViewportHeight, this.getKeyboardViewportMaxHeight());
+    const hiddenHeight: number = Math.max(0, this.keyboardViewportHeight - visibleHeight);
     if (hiddenHeight <= 0.5) return 0;
     const focusY: number = this.keyboardFocusAvailable ?
       this.remotePointToVisual(this.keyboardFocusRemoteX, this.keyboardFocusRemoteY).y :
       this.keyboardViewportHeight / 2;
     if (!Number.isFinite(focusY)) return 0;
-    const margin: number = Math.min(48, this.qualityViewportHeight / 4);
-    const centeredTop: number = -hiddenHeight / 2;
-    // Centering alone only lifts half the obscured height. Bring a low input
-    // anchor above the IME (or retain a high one) without changing user pan/zoom.
-    const wantedTop: number = Math.max(margin - focusY,
-      Math.min(centeredTop, this.qualityViewportHeight - margin - focusY));
-    const canvasTop: number = Math.max(-hiddenHeight, Math.min(0, wantedTop));
-    return canvasTop - centeredTop;
+    const margin: number = Math.min(48, visibleHeight / 4);
+    // The full-size canvas is top-aligned. Apply one absolute upward shift,
+    // never an implicit half-height centering plus a second correction.
+    return Math.max(-hiddenHeight, Math.min(0, visibleHeight - margin - focusY));
+  }
+
+  getKeyboardViewportMaxHeight(): number {
+    if (this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 &&
+      this.controlMenuKeyboardInset > 0) {
+      // Use the original canvas, not an already resized height: no double inset.
+      return Math.max(1, this.keyboardViewportHeight - this.controlMenuKeyboardInset);
+    }
+    return this.pageHeight > 0 ? this.pageHeight : 640;
   }
 
   handleHandheldLayoutChange(): void {
@@ -5715,7 +5743,7 @@ struct RemotePage {
     if (!this.handheldLayoutInitialized || landscape !== this.lastHandheldLandscape) {
       this.handheldLayoutInitialized = true;
       this.lastHandheldLandscape = landscape;
-      if (!this.peerPreferences?.has('keyboard-tools-collapsed')) this.keyboardToolsCollapsed = !landscape;
+      // Rotation and IME layout never override the user's shortcut collapse choice.
       this.keyboardToolsOffsetX = 0;
       this.keyboardToolsOffsetY = 0;
       this.keyboardLauncherOffsetX = 0;
@@ -8216,6 +8244,8 @@ struct RemotePage {
       `follow_reason=${this.touchMouseFollowBlockReason()} zoom=${this.zoomScale.toFixed(2)} ` +
       `pan_x=${Math.round(this.offsetX)} pan_y=${Math.round(this.offsetY)} ` +
       `canvas_h=${Math.round(this.keyboardViewportHeight)} visible_h=${Math.round(this.qualityViewportHeight)} ` +
+      `ime_inset=${Math.round(this.controlMenuKeyboardInset)} clipped_h=${Math.round(this.getKeyboardViewportMaxHeight())} ` +
+      `shortcuts_collapsed=${this.keyboardToolsCollapsed} ` +
       `ime_shift_y=${Math.round(this.getKeyboardCanvasShiftY())} input_anchor=${this.keyboardFocusAvailable}`);
   }
 
@@ -8254,7 +8284,7 @@ struct RemotePage {
     this.remoteKeyboardPointerHandoffUntil = 0;
     this.releaseRemoteNavigationKeys('keyboard_close');
     this.releaseVirtualModifiers();
-    this.keyboardToolsCollapsed = !this.isHandheldLandscape();
+    // Software keyboard visibility is independent of the modifier/F-key panel.
     this.showKeyboardPanel = false;
     this.remoteKeyboardEditing = false;
     this.showKeyboardFunctionKeys = false;
@@ -8431,7 +8461,7 @@ struct RemotePage {
   loadPeerToolbarState(): void {
     this.remoteToolbarCollapsed = this.peerPreferences?.get('remote-toolbar-collapsed') === '1';
     const keyboard: string = this.peerPreferences?.get('keyboard-tools-collapsed') ?? '';
-    this.keyboardToolsCollapsed = keyboard.length > 0 ? keyboard === '1' : !this.isHandheldLandscape();
+    this.keyboardToolsCollapsed = keyboard.length > 0 ? keyboard === '1' : true;
     this.keyboardToolsPositionX = -1;
     this.keyboardToolsPositionY = -1;
     this.keyboardToolsOffsetX = 0;

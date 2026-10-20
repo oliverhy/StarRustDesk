@@ -12,7 +12,7 @@ function method(name) {
   return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 const context = vm.createContext({});
-vm.runInContext(ts.transpile('class Page {' + ['getKeyboardLauncherBase', 'clampKeyboardLauncherOffset'].map(method).join('\n') +
+vm.runInContext(ts.transpile('class Page {' + ['getKeyboardLauncherBase', 'getKeyboardUsablePageHeight', 'clampKeyboardLauncherOffset'].map(method).join('\n') +
   '} globalThis.Page = Page;'), context);
 let count = 0;
 for (const [width, height, landscape] of [[360, 800, false], [800, 840, false], [840, 400, true],
@@ -29,8 +29,14 @@ for (const [width, height, landscape] of [[360, 800, false], [800, 840, false], 
     }
   }
   assert(p.getKeyboardLauncherBase(false) + 46 <= height - 8, 'above IME/navigation boundary');
-  if (landscape) assert.equal(p.getKeyboardLauncherBase(true), (width - 52) / 2);
-  else assert.equal(p.getKeyboardLauncherBase(true), width - 64);
+  assert.equal(p.getKeyboardLauncherBase(true), width - 64, 'default is right-aligned in either orientation');
+}
+for (const measured of [400, 150]) {
+  const p = Object.assign(new context.Page(), { pageWidth: 840, pageHeight: measured,
+    showKeyboardPanel: true, keyboardLayoutHeight: 400, controlMenuKeyboardInset: 250,
+    isHandheldLandscape: () => true, getRemoteToolbarHeight: () => 54 });
+  assert.equal(p.getKeyboardUsablePageHeight(), 150);
+  assert(p.getKeyboardLauncherBase(false) + 46 <= 150 - 8, 'right-side launcher remains above the IME even without a root resize');
 }
 const builder = method('buildKeyboardLauncher');
 assert(builder.includes(".id('remoteKeyboardLauncher')"));

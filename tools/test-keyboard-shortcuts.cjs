@@ -34,8 +34,8 @@ assert.match(page, /this\.toggleControlMenu\(category\)/,
   'Unified keyboard button must open the paged shortcut popup without opening the IME');
 assert.match(page, /if \(this\.showKeyboardPanel && this\.connectionStatus === ConnectionStatus\.CONNECTED\) \{\s*this\.buildKeyboardCapture\(\);/,
   'The IME capture must remain opt-in instead of opening on connection');
-assert.match(page, /closeRemoteKeyboard\(\): void \{[\s\S]*?this\.keyboardToolsCollapsed = !this\.isHandheldLandscape\(\);/,
-  'Closing the keyboard keeps the landscape shortcut expanded and portrait shortcut collapsed');
+const close = page.slice(page.indexOf('  closeRemoteKeyboard():'), page.indexOf('  applyKeyboardResizeMode():'));
+assert(!close.includes('this.keyboardToolsCollapsed ='), 'Closing software keyboard preserves the independent shortcut panel');
 assert.match(page, /beginKeyboardToolsDrag\(\)/,
   'The shortcut bar must expose a drag start handler');
 assert.match(page, /updateKeyboardToolsDrag\(event\.offsetX, event\.offsetY\)/,
