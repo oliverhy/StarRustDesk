@@ -4,6 +4,7 @@ import { translate } from '../utils/I18n';
 
 @Component
 export struct RemoteGlassMenu {
+  @StorageLink('uiFontScale') uiFontScale: number = 1;
   @Prop state: RemoteGlassMenuState = new RemoteGlassMenuState();
   @Prop metrics: RemoteGlassMenuMetrics = { width: 224, height: 300, rowHeight: 36, contentHeight: 274,
     bodyHeight: 274, padding: 12, headerHeight: 26, segmentHeight: 40, screenHeight: 62, displayWidth: 70, footerHeight: 18, stacked: false };
@@ -139,13 +140,24 @@ export struct RemoteGlassMenu {
     switch (key) { case 'Left': return '←'; case 'Up': return '↑'; case 'Down': return '↓'; case 'Right': return '→'; default: return key; }
   }
 
+  verticalSegment(key: string): boolean {
+    return this.metrics.stacked && (key.startsWith('mode-') || key.startsWith('orientation-'));
+  }
+
+  screenCaptionWidth(display: number): number {
+    const caption: string = translate(`屏幕 ${display + 1}`, this.language);
+    let units: number = 0;
+    for (let index = 0; index < caption.length; index++) units += caption.charCodeAt(index) <= 127 ? 8 : 13;
+    return Math.max(this.metrics.displayWidth, Math.ceil(units * Math.max(1, this.uiFontScale) + 16));
+  }
+
   @Builder
   divider() { Divider().height(1).color(Style.DIVIDER).margin({ top: 4, bottom: 4 }) }
 
   @Builder
   text(label: string, secondary: boolean = false) {
     Text(translate(label, this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(500)
-      .fontColor(secondary ? Style.SECONDARY : this.textColor()).maxLines(2)
+      .fontColor(secondary ? Style.SECONDARY : this.textColor()).wordBreak(WordBreak.BREAK_ALL)
       .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
   }
 
@@ -157,7 +169,7 @@ export struct RemoteGlassMenu {
           .hitTestBehavior(HitTestMode.None)
       }
       Text(translate(this.label(key), this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(500)
-        .fontColor(this.textColor()).layoutWeight(1).maxLines(2)
+        .fontColor(this.textColor()).layoutWeight(1).wordBreak(WordBreak.BREAK_ALL)
         .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
       if (this.isToggle(key)) {
         Toggle({ type: ToggleType.Switch, isOn: this.isOn(key) }).width(40).height(24)
@@ -167,26 +179,26 @@ export struct RemoteGlassMenu {
       } else {
         if (key === 'orientation') {
           Text(translate(this.state.orientation === 'portrait' ? '竖屏' : this.state.orientation === 'landscape' ? '横屏' : '自动', this.language))
-            .fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY).maxLines(1)
+            .fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY).wordBreak(WordBreak.BREAK_ALL)
         }
         if (key !== 'release') {
           Image($r('app.media.glass_chevron')).width(12).height(12).fillColor(Style.SECONDARY)
             .hitTestBehavior(HitTestMode.None)
         }
       }
-    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+    }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).padding({ left: 3, right: 2 })
   }
 
   @Builder
   action(key: string) {
     if (this.isToggle(key)) {
-      Row() { this.actionContent(key) }.width('100%').height(this.metrics.rowHeight)
+      Row() { this.actionContent(key) }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight })
         .enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
         .id(`glass-action-${key}`)
         .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => { this.onOrderEdit(key); }))
     } else {
       Button({ type: ButtonType.Normal }) { this.actionContent(key) }
-        .width('100%').height(this.metrics.rowHeight).padding(0).backgroundColor(Color.Transparent)
+        .width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).padding(0).backgroundColor(Color.Transparent)
         .borderRadius(7).focusable(false).enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
         .id(`glass-action-${key}`).accessibilityText(translate(this.label(key), this.language))
         .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => { this.onOrderEdit(key); }))
@@ -201,10 +213,11 @@ export struct RemoteGlassMenu {
         if (this.segmentSelected(key) && !key.startsWith('tab-') && !key.startsWith('mode-') && !key.startsWith('orientation-')) { Text('✓').fontFamily(Style.FONT).fontSize(13).fontColor(this.blue()).flexShrink(0) }
         if (icon) { Image(this.icon(icon)).width(17).height(17).fillColor(this.segmentSelected(key) ? this.blue() : this.textColor()).flexShrink(0) }
         Text(translate(label, this.language)).fontFamily(Style.FONT).fontSize(13).fontWeight(this.segmentSelected(key) ? 600 : 500)
-          .fontColor(this.segmentSelected(key) ? this.blue() : this.textColor()).maxLines(2)
+          .fontColor(this.segmentSelected(key) ? this.blue() : this.textColor()).layoutWeight(1).textAlign(TextAlign.Center).wordBreak(WordBreak.BREAK_ALL)
           .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
-      }.justifyContent(FlexAlign.Center)
-    }.layoutWeight(1).height(this.metrics.segmentHeight).padding(3).focusable(false)
+      }.width('100%').justifyContent(FlexAlign.Center)
+    }.layoutWeight(this.verticalSegment(key) ? 0 : 1).width(this.verticalSegment(key) ? '100%' : undefined)
+      .constraintSize({ minHeight: this.metrics.segmentHeight }).padding(3).focusable(false)
       .backgroundColor(this.segmentSelected(key) ? this.selected() : this.keyColor())
       .border({ width: this.segmentSelected(key) ? 1 : 0, color: Style.SELECTED_BORDER }).borderRadius(7)
       .id(`glass-segment-${key}`).accessibilityText(translate(label, this.language))
@@ -243,11 +256,11 @@ export struct RemoteGlassMenu {
             Column({ space: 5 }) {
               Image($r('app.media.glass_monitor')).width(23).height(23)
                 .fillColor(display === this.state.currentDisplay ? this.blue() : this.textColor())
-              Text(translate(`屏幕 ${display + 1}`, this.language)).fontFamily(Style.FONT).fontSize(12).maxLines(1)
+              Text(translate(`屏幕 ${display + 1}`, this.language)).fontFamily(Style.FONT).fontSize(12).wordBreak(WordBreak.BREAK_ALL)
                 .fontWeight(display === this.state.currentDisplay ? 600 : 500)
                 .fontColor(display === this.state.currentDisplay ? this.blue() : this.textColor())
             }
-          }.width(this.metrics.displayWidth).height(this.metrics.screenHeight).padding(4).focusable(false)
+          }.width(this.screenCaptionWidth(display)).height(this.metrics.screenHeight).padding(4).focusable(false)
             .backgroundColor(display === this.state.currentDisplay ? this.selected() : this.keyColor())
             .border({ width: 1, color: display === this.state.currentDisplay ? Style.SELECTED_BORDER : Style.DIVIDER })
             .borderRadius(7).id(`glass-display-${display}`)
@@ -259,21 +272,42 @@ export struct RemoteGlassMenu {
   }
 
   @Builder
-  zoom() {
+  zoomControls() {
     Row({ space: 0 }) {
-      Text(translate('缩放', this.language)).fontFamily(Style.FONT).fontSize(13).fontColor(this.textColor()).layoutWeight(1)
-      Button('−', { type: ButtonType.Normal }).width(32).height(30).padding(0).fontFamily(Style.FONT).fontSize(17).fontColor(this.textColor())
+      Button({ type: ButtonType.Normal }) {
+        Path().commands('M 1 6 L 11 6').width(12).height(12).stroke(this.textColor()).strokeWidth(1.6)
+      }.width(32).height(this.metrics.stacked ? this.metrics.rowHeight : 30).padding(0)
+        .accessibilityText(translate('缩小', this.language))
         .id('glass-zoom-out')
         .backgroundColor(this.keyColor()).borderRadius({ topLeft: 6, bottomLeft: 6 }).focusable(false)
         .onClick(() => { this.onAction('zoomOut'); })
-      Text(`${this.state.zoom}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor()).width(58).height(30)
+      Text(`${this.state.zoom}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor()).layoutWeight(1)
+        .constraintSize({ minHeight: this.metrics.stacked ? this.metrics.rowHeight : 30 })
         .textAlign(TextAlign.Center).backgroundColor(this.keyColor())
         .border({ width: { left: 1, right: 1 }, color: Style.DIVIDER })
-      Button('+', { type: ButtonType.Normal }).width(32).height(30).padding(0).fontFamily(Style.FONT).fontSize(17).fontColor(this.textColor())
+      Button({ type: ButtonType.Normal }) {
+        Path().commands('M 1 6 L 11 6 M 6 1 L 6 11').width(12).height(12).stroke(this.textColor()).strokeWidth(1.6)
+      }.width(32).height(this.metrics.stacked ? this.metrics.rowHeight : 30).padding(0)
+        .accessibilityText(translate('放大', this.language))
         .id('glass-zoom-in')
         .backgroundColor(this.keyColor()).borderRadius({ topRight: 6, bottomRight: 6 }).focusable(false)
         .onClick(() => { this.onAction('zoomIn'); })
-    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+    }.width(this.metrics.stacked ? '100%' : 122)
+  }
+
+  @Builder
+  zoom() {
+    if (this.metrics.stacked) {
+      Column({ space: 4 }) {
+        this.text('缩放')
+        this.zoomControls()
+      }.width('100%').padding({ left: 3, right: 2 })
+    } else {
+      Row() {
+        Text(translate('缩放', this.language)).fontFamily(Style.FONT).fontSize(13).fontColor(this.textColor()).layoutWeight(1)
+        this.zoomControls()
+      }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).padding({ left: 3, right: 2 })
+    }
   }
 
   @Builder
@@ -286,7 +320,7 @@ export struct RemoteGlassMenu {
     Row() {
       Text(translate('显示比例', this.language)).fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY).layoutWeight(1)
       Text(`${this.state.desktopPercent}%`).fontFamily(Style.FONT).fontSize(12).fontColor(this.textColor())
-    }.width('100%').height(this.metrics.rowHeight).padding({ left: 3, right: 2 })
+    }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).padding({ left: 3, right: 2 })
     if (this.state.desktopViewMode === 'custom') {
       Slider({ value: this.state.desktopCustomPercent, min: 25, max: 300, step: 5 }).height(this.metrics.rowHeight)
         .onChange((value: number) => { this.onAction(`scale-${value}`); })
@@ -294,7 +328,7 @@ export struct RemoteGlassMenu {
     this.action('adjustWindow')
     this.action('immersive')
     Text(translate('按远端比例调整窗口，不拉伸画面', this.language)).fontFamily(Style.FONT).fontSize(11)
-      .fontColor(Style.SECONDARY).maxLines(3).width('100%').height(this.metrics.rowHeight)
+      .fontColor(Style.SECONDARY).wordBreak(WordBreak.BREAK_ALL).width('100%').constraintSize({ minHeight: this.metrics.rowHeight })
     this.divider()
   }
 
@@ -313,7 +347,7 @@ export struct RemoteGlassMenu {
 
   @Builder
   more() {
-    Text(translate('文件传输', this.language)).fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).height(20)
+    Text(translate('文件传输', this.language)).fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).constraintSize({ minHeight: 20 })
     ForEach(this.state.items.filter((key: string) => ['upload', 'uploadFolder', 'download'].includes(key)), (key: string) => {
       this.action(key)
     }, (key: string) => key)
@@ -328,8 +362,8 @@ export struct RemoteGlassMenu {
 
   @Builder
   keyCap(key: string) {
-    Button(this.keyLabel(key), { type: ButtonType.Normal }).layoutWeight(1).height(this.metrics.rowHeight)
-      .padding(3).fontFamily(Style.FONT).fontSize(12).fontColor(this.keySelected(key) ? this.blue() : this.textColor())
+    Button(this.keyLabel(key), { type: ButtonType.Normal }).layoutWeight(1).constraintSize({ minHeight: this.metrics.rowHeight })
+      .labelStyle({ maxLines: 100, overflow: TextOverflow.Clip }).padding(3).fontFamily(Style.FONT).fontSize(12).fontColor(this.keySelected(key) ? this.blue() : this.textColor())
       .backgroundColor(this.keySelected(key) ? this.selected() : this.keyColor())
       .border({ width: 1, color: this.keySelected(key) ? Style.SELECTED_BORDER : Style.DIVIDER })
       .borderRadius(Style.KEY_RADIUS).focusable(false).id(`glass-key-${key}`)
@@ -393,14 +427,14 @@ export struct RemoteGlassMenu {
         Toggle({ type: ToggleType.Switch, isOn: this.state.followSystem }).width(40).height(24)
           .selectedColor(Style.BLUE).switchPointColor('#FFFFFF').focusable(false).id('glass-follow-system')
           .onChange((value: boolean) => { if (value !== this.state.followSystem) this.onAction('follow-system'); })
-      }.width('100%').height(this.metrics.rowHeight).margin({ bottom: 10 })
+      }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).margin({ bottom: 10 })
     }
     if (!this.state.followSystem || this.state.projection) { this.orientationSegments() }
     Text(translate(glassOrientationDescription(this.state), this.language))
-      .fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).maxLines(3)
-      .width('100%').height(this.metrics.footerHeight).margin({ top: 10 })
+      .fontFamily(Style.FONT).fontSize(11).fontColor(Style.SECONDARY).wordBreak(WordBreak.BREAK_ALL)
+      .width('100%').constraintSize({ minHeight: this.metrics.footerHeight }).margin({ top: 10 })
     if (this.state.orientationError) {
-      Text(translate(this.state.orientationError, this.language)).fontFamily(Style.FONT).fontSize(11).fontColor('#D84A4A').maxLines(4)
+      Text(translate(this.state.orientationError, this.language)).fontFamily(Style.FONT).fontSize(11).fontColor('#D84A4A').wordBreak(WordBreak.BREAK_ALL)
     }
   }
 
@@ -408,13 +442,13 @@ export struct RemoteGlassMenu {
     Column() {
         Row({ space: 8 }) {
           Text(translate(this.title(), this.language)).fontFamily(Style.FONT).fontSize(14).fontWeight(600)
-            .fontColor(this.textColor()).layoutWeight(1).maxLines(2)
+            .fontColor(this.textColor()).layoutWeight(1).wordBreak(WordBreak.BREAK_ALL)
           if (this.state.category === 'keyboard') {
             Button({ type: ButtonType.Normal }) {
               Text(translate(this.label('release'), this.language)).fontFamily(Style.FONT).fontSize(11)
-                .minFontSize(10).maxFontSize(11).maxLines(2).fontColor(this.blue())
-                .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
-            }.height(this.metrics.headerHeight).constraintSize({ maxWidth: '65%' })
+                .wordBreak(WordBreak.BREAK_ALL).fontColor(this.blue())
+                .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+            }.constraintSize({ minHeight: this.metrics.headerHeight, maxWidth: '65%' })
               .padding({ left: 6, right: 3, top: 0, bottom: 0 }).backgroundColor(Color.Transparent)
               .borderRadius(5).focusable(false).id('glass-action-release')
               .accessibilityText(translate(this.label('release'), this.language))
@@ -424,7 +458,7 @@ export struct RemoteGlassMenu {
           if (this.state.category === 'orientation' && this.state.projection) {
             Text(translate('仅本次', this.language)).fontFamily(Style.FONT).fontSize(12).fontColor(Style.SECONDARY)
           }
-        }.width('100%').height(this.metrics.headerHeight)
+        }.width('100%').constraintSize({ minHeight: this.metrics.headerHeight })
         if (this.state.category === 'keyboard') { this.keyboard() }
         else {
           Scroll() {

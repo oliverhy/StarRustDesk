@@ -21,7 +21,7 @@ for (const file of ['pages/ConnectionPage.ets', 'pages/SettingsPage.ets', 'pages
   'widget/ServerConfigDialog.ets', 'widget/ReleaseNotesDialog.ets', 'widget/FileTransferHistoryDialog.ets']) {
   const page = read(file);
   assert.match(page, /@StorageLink\('roundedRectButtons'\) roundedRectButtons: boolean = true/, file);
-  assert.match(page, /\.attributeModifier\(new ButtonShapeModifier\(this.roundedRectButtons,/, file);
+  assert.match(page, /\.attributeModifier\(new (?:ReadableButtonModifier|ButtonShapeModifier)\(this.roundedRectButtons,/, file);
 }
 const settings = read('pages/SettingsPage.ets');
 assert.match(settings, /value: this\.buttonShapeMenuLabel\(true\), action: \(\) => \{ this\.setButtonShape\(true\) \}/);
@@ -34,7 +34,8 @@ assert.equal((shapeCard.match(/Button\(/g) || []).length, 1, 'one compact select
 assert(shapeCard.includes(".id('button-shape-selector')") && shapeCard.includes('.bindMenu(['));
 assert(shapeCard.includes('Text(this.buttonShapeLabel())'));
 assert(shapeCard.includes('.constraintSize({ minHeight: this.buttonShapeOptionHeight() })'));
-assert(shapeCard.includes('.minFontSize(11)') && shapeCard.includes('.maxLines(2)'), 'larger fonts can adapt and wrap');
+assert(shapeCard.includes('.wordBreak(WordBreak.BREAK_ALL)') && !shapeCard.includes('.maxLines('),
+  'larger fonts wrap naturally without shrinking or a two-line cap');
 assert(shapeCard.includes('new ButtonShapeModifier(this.roundedRectButtons'), 'selector follows the selected style too');
 const labelEnd = settings.indexOf('  @Builder', labelStart);
 const writes = [];

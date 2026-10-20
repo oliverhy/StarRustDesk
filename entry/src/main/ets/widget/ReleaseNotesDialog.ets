@@ -1,9 +1,9 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.4'
-export const RELEASE_NOTES_BUILD: string = '1003004'
+export const RELEASE_NOTES_VERSION: string = '1.3.5'
+export const RELEASE_NOTES_BUILD: string = '1003005'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,14 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.5（1003005）· 重连保护与文字适配', [
+            '已登录的远控会话遇到传输中断、登录切换期间临时离线或连接超时时，在约 30 秒窗口内按退避间隔尝试自动重连；认证失败、远端主动结束及安全条件变化不会自动重连。',
+            '修复连接失败页“重试”反而退出远控的问题，改为保留当前页面重新连接；可取消等待中的重连，退出或切换账号、服务器后旧任务不能重新拉起连接，也不会自动沿用未加密连接授权。',
+            '活动连接点击断开或返回退出时增加确认弹窗，降低误触退出概率；收起菜单、关闭键盘和退出全屏仍优先处理，不额外中断远控。',
+            '优化已保存连接工具栏：搜索放在分组前、备份放在后面；展开后的搜索框与操作按钮保持协调，增加搜索框高度并适配窄窗口及大字体。',
+            '统一优化按钮与文字布局：操作按钮优先完整显示，说明文字自动换行，长连接名称支持查看完整内容；改善手机、平板、折叠屏及 PC 在大字体下的裁切与省略问题。',
+            '补充自动重连、取消、重试及退出确认诊断，区分远端主动关闭与网络中断；日志仍由诊断开关控制，不记录密码、令牌或输入内容。'
+          ])
           this.buildSection('1.3.4（1003004）· 文件传输等待与完成确认修复', [
             '修复上传完成确认被误当成下载回复，导致进度变成 0 字节并一直显示“等待数据”的问题；上传、取回按任务独立处理，迟到或重复回复不再干扰其他任务。',
             '上传数据发送完毕后明确显示“等待远端确认”，收到对应任务的远端完成确认后才报告成功并清理本地临时文件，改善小文件、空文件及连续上传的状态一致性。',
@@ -468,7 +476,7 @@ export struct ReleaseNotesDialog {
       .edgeEffect(EdgeEffect.Spring)
 
       Button(translate('知道了', this.uiLanguage))
-        .height(44)
+        .constraintSize({ minHeight: 44 })
         .width('100%')
         .fontSize(15)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -481,7 +489,7 @@ export struct ReleaseNotesDialog {
             this.controller.close()
           }
         })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
     }
     .width('90%')
     .height('78%')
@@ -512,7 +520,7 @@ export struct ReleaseNotesDialog {
           Text(translate(item, this.uiLanguage))
             .layoutWeight(1)
             .fontSize(13)
-            .lineHeight(21)
+            .lineHeight('21fp')
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         }
         .width('100%')

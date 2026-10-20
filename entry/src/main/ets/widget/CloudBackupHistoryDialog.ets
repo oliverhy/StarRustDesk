@@ -1,6 +1,6 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { CloudBackupSummary } from '../service/CloudSyncService'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { translate } from '../utils/I18n'
 
 @CustomDialog
@@ -34,12 +34,12 @@ export struct CloudBackupHistoryDialog {
                 Text(translate('包含服务器配置', this.uiLanguage)).fontSize(12).fontColor(this.secondaryColor()).width('100%')
               }
               Button(translate('预览并恢复', this.uiLanguage))
-                .width('100%').fontSize(14).height(40)
+                .width('100%').fontSize(14).constraintSize({ minHeight: 40 })
                 .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
                 .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
                 .enabled(backup.readable && !this.busy)
                 .onClick(() => { this.onSelect(backup.id) })
-                .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+                .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
             }
             .padding(12).width('100%').borderRadius(12)
             .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
@@ -50,15 +50,15 @@ export struct CloudBackupHistoryDialog {
             Button(translate(this.busy ? '加载中…' : '显示更早备份', this.uiLanguage))
               .width('100%').enabled(!this.busy).fontSize(14)
               .onClick(() => { this.onMore() })
-              .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+              .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
           }
         }
       }
       .width('100%').layoutWeight(1).scrollBar(BarState.Auto)
       Button(translate('关闭', this.uiLanguage))
-        .width('100%').height(42).fontSize(15).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT)
+        .width('100%').constraintSize({ minHeight: 42 }).fontSize(15).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT)
         .onClick(() => { this.onClose() })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
     }
     .width('92%').height('78%').constraintSize({ maxWidth: 620 }).padding(18)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White).borderRadius(16)

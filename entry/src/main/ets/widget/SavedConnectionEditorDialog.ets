@@ -1,10 +1,12 @@
+import { readableInputHeight } from '../theme/ReadableLayout'
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { ConnectionEditorGroup, ConnectionEditResult, SavedConnectionDraft, SavedConnectionEditing } from '../model/SavedConnectionEditing'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { translate } from '../utils/I18n'
 
 @CustomDialog
 export struct SavedConnectionEditorDialog {
+  @StorageLink('uiFontScale') uiFontScale: number = 1
   controller?: CustomDialogController
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('isDarkMode') isDarkMode: boolean = false
@@ -124,23 +126,24 @@ export struct SavedConnectionEditorDialog {
         Column({ space: 12 }) {
           if (this.createNew) {
             TextInput({ placeholder: translate('远端 ID / IP', this.uiLanguage), text: this.remoteId })
-              .height(48).fontSize(16).enabled(!this.busy).onChange((value: string) => { this.changeRemoteId(value) })
+              .height(readableInputHeight(48, this.uiFontScale, 18)).fontSize(16).enabled(!this.busy).onChange((value: string) => { this.changeRemoteId(value) })
           } else {
             Column({ space: 4 }) {
               Text(translate('远端 ID / IP', this.uiLanguage)).fontSize(12).fontColor(this.secondary()).width('100%')
               Text(this.remoteId).fontSize(18).fontWeight(FontWeight.Medium).fontColor(this.primary()).width('100%')
-                .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
             }.width('100%').padding(12).borderRadius(12)
               .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
           }
           TextInput({ placeholder: translate('连接名称（可选）', this.uiLanguage), text: this.name })
-            .height(48).fontSize(16).enabled(!this.busy).onChange((value: string) => { this.name = value })
+            .height(readableInputHeight(48, this.uiFontScale, 18)).fontSize(16).enabled(!this.busy).onChange((value: string) => { this.name = value })
           Select(this.groupOptions())
             .value(this.groups.find((group: ConnectionEditorGroup) => group.id === this.groupId)?.name ?? translate('未分组', this.uiLanguage))
             .selected(Math.max(0, this.groups.findIndex((group: ConnectionEditorGroup) => group.id === this.groupId) + 1))
             .width('100%').enabled(!this.busy).onSelect((index: number) => { this.groupId = index === 0 ? '' : this.groups[index - 1].id })
           Button(translate(this.showAdvanced ? '收起连接选项' : '连接选项', this.uiLanguage))
-            .width('100%').height(40).fontSize(14).enabled(!this.busy)
+            .width('100%').constraintSize({ minHeight: 40 }).fontSize(14).enabled(!this.busy)
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
             .backgroundColor(Color.Transparent).fontColor(this.secondary())
             .onClick(() => {
               this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
@@ -162,7 +165,7 @@ export struct SavedConnectionEditorDialog {
             }.width('100%')
           } else {
             TextInput({ placeholder: translate('输入新密码', this.uiLanguage), text: this.password })
-              .type(InputType.Password).showPasswordIcon(true).height(48).enabled(!this.busy)
+              .type(InputType.Password).showPasswordIcon(true).height(readableInputHeight(48, this.uiFontScale, 18)).enabled(!this.busy)
               .onChange((value: string) => {
                 this.password = value
                 this.passwordMode = value.length > 0 || (!this.identityChanged() && this.initial.hasPassword) ? 'replace' : 'keep'
@@ -190,7 +193,7 @@ export struct SavedConnectionEditorDialog {
               '系统密码已保存，不会回填显示' : '请输入远端系统登录密码', this.uiLanguage))
               .fontSize(12).fontColor(this.secondary()).width('100%')
             TextInput({ placeholder: translate('输入新的系统密码（可选）', this.uiLanguage), text: this.osPassword })
-              .type(InputType.Password).showPasswordIcon(false).height(48).enabled(!this.busy)
+              .type(InputType.Password).showPasswordIcon(false).height(readableInputHeight(48, this.uiFontScale, 18)).enabled(!this.busy)
               .onChange((value: string) => { this.osPassword = value })
             if (!this.identityChanged() && this.initial.hasOsPassword) {
               this.option('清除已保存系统密码', this.clearOsPassword, (value: boolean) => { this.clearOsPassword = value })
@@ -209,9 +212,9 @@ export struct SavedConnectionEditorDialog {
         this.smallAction('取消', () => { if (!this.busy) this.onClose() })
         Button(translate(this.busy ? '保存中…' : (this.createNew ? '保存新连接' : '保存修改'), this.uiLanguage))
           .layoutWeight(1).constraintSize({ minHeight: 44 }).fontSize(14)
-          .labelStyle({ maxLines: 2, minFontSize: 11, maxFontSize: 14 }).enabled(!this.busy && this.remoteId.length > 0)
+          .enabled(!this.busy && this.remoteId.length > 0)
           .fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).onClick(() => { this.requestSave() })
-          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
       }.width('100%')
     }.width('92%').height(this.showAdvanced ? '78%' : '52%').constraintSize({ maxWidth: 560 }).padding(18).borderRadius(18)
       .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
@@ -220,10 +223,9 @@ export struct SavedConnectionEditorDialog {
   @Builder
   smallAction(label: string, action: () => void) {
     Button(translate(label, this.uiLanguage)).constraintSize({ minHeight: 40 }).fontSize(14).enabled(!this.busy)
-      .labelStyle({ maxLines: 2, minFontSize: 11, maxFontSize: 14 })
       .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
       .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-      .onClick(action).attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+      .onClick(action).attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
   }
 
   @Builder

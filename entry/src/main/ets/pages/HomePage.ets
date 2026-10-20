@@ -1,4 +1,5 @@
 import { translate } from '../utils/I18n'
+import { readableLabelHeight } from '../theme/ReadableLayout'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { ConnectionPage } from './ConnectionPage'
 import { SettingsPage } from './SettingsPage'
@@ -156,10 +157,7 @@ struct HomePage {
     Row() {
       Text(translate(label, this.uiLanguage))
         .fontSize(14)
-        .maxLines(1)
-        .minFontSize(11)
-        .maxFontSize(14)
-        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+        .width('100%').wordBreak(WordBreak.BREAK_ALL)
         .fontWeight(index === this.currentTabIndex ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
         .fontColor(index === this.currentTabIndex ?
           (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
@@ -187,6 +185,8 @@ struct HomePage {
   }
 
   tabItemHeight(): number {
-    return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 14)
+    const available: number = Math.max(1, (this.pageWidth - 60) / 2 - 16)
+    return Math.max(readableLabelHeight(translate('连接', this.uiLanguage), available, this.uiFontScale),
+      readableLabelHeight(translate('设置', this.uiLanguage), available, this.uiFontScale))
   }
 }

@@ -54,11 +54,12 @@ assert(choice.includes("app.media.remote_menu_input") && choice.includes("app.me
 assert(choice.includes('.width(16).height(16)'));
 assert(choice.includes('Row({ space: 6 })') && choice.includes('justifyContent(FlexAlign.Center)'));
 assert(!choice.includes('layoutWeight(1)') && !choice.includes('buildInputModeIcon('));
-assert(choice.includes('.fontSize(13).minFontSize(11).maxFontSize(13)') && choice.includes('.maxLines(1).flexShrink(1)'));
+assert(choice.includes('.fontSize(13)') && choice.includes('.wordBreak(WordBreak.BREAK_ALL).flexShrink(1)') &&
+  !choice.includes('.maxLines('), 'mode labels wrap at the system font size without a one-line cap');
 assert(choice.includes('this.inputMode === mode ? this.controlSelectedBackgroundColor()'));
 assert(choice.includes('.border({ width: this.inputMode === mode ? 1 : 0, color: this.controlSelectedBorderColor() })'),
   'unselected choice has no boxed outline; selected keeps the shared pale-blue treatment');
-assert(choice.includes('.height(this.getControlActionHeight())'),
+assert(choice.includes('.constraintSize({ minHeight: this.getControlActionHeight() })'),
   'smaller visual content must not shrink the touch target');
 assert(choice.includes('.focusable(false)') && choice.includes('.hitTestBehavior(HitTestMode.None)'));
 assert(choice.includes('this.selectInputModeChoice(mode)') && !choice.includes('toggleInputMode('));

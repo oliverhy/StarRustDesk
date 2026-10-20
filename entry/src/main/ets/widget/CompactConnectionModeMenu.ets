@@ -23,8 +23,7 @@ export class CompactConnectionModeMenu implements ContentModifier<MenuItemConfig
 function compactConnectionModeItem(configuration: MenuItemConfiguration) {
   Row({ space: 8 }) {
     Text(configuration.value)
-      .fontSize(14).fontWeight(FontWeight.Medium).maxLines(1)
-      .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+      .fontSize(14).fontWeight(FontWeight.Medium).wordBreak(WordBreak.BREAK_ALL).layoutWeight(1)
       .fontColor(configuration.selected ?
         ((configuration.contentModifier as CompactConnectionModeMenu).isDarkMode ?
           RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
@@ -35,8 +34,8 @@ function compactConnectionModeItem(configuration: MenuItemConfiguration) {
         .fontColor((configuration.contentModifier as CompactConnectionModeMenu).isDarkMode ?
           RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
     }
-  }.width('100%').height((configuration.contentModifier as CompactConnectionModeMenu).rowHeight())
-    .padding({ left: 12, right: 12 }).borderRadius(8)
+  }.width('100%').constraintSize({ minHeight: (configuration.contentModifier as CompactConnectionModeMenu).rowHeight() })
+    .padding({ left: 12, right: 12, top: 6, bottom: 6 }).borderRadius(8)
     .backgroundColor(configuration.selected ?
       ((configuration.contentModifier as CompactConnectionModeMenu).isDarkMode ?
         RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) : Color.Transparent)

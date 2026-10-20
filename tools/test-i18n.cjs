@@ -132,7 +132,8 @@ const languageCard = settings.slice(cardStart, cardEnd);
 assert.equal((languageCard.match(/Button\(/g) || []).length, 1, 'one compact language selector, not four permanent buttons');
 assert(languageCard.includes(".id('language-selector')") && languageCard.includes('.bindMenu(['));
 assert(languageCard.includes('Text(this.languagePreferenceLabel())'));
-assert(languageCard.includes('.minFontSize(11)') && languageCard.includes('.maxLines(2)'), 'selector accommodates larger fonts');
+assert(languageCard.includes('.wordBreak(WordBreak.BREAK_ALL)') && !languageCard.includes('.maxLines('),
+  'selector wraps larger system fonts without an arbitrary line cap');
 assert(!settings.includes('buildLanguageChoice('));
 const labelEnd = settings.indexOf('  @Builder', cardEnd);
 const labels = {};

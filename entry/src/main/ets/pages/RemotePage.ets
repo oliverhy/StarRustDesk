@@ -1,3 +1,6 @@
+import { readableInputHeight } from '../theme/ReadableLayout'
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
+import { FullTextDialog } from '../widget/FullTextDialog'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { inputCompatibilityKey, selectedKeyboardMode, selectedCursorMode, shouldSuppressCursor } from '../model/InputCompatibility';
 import { PhysicalMouseDeduplicator, isTouchOnlyMouseEvent } from '../model/PhysicalMousePolicy';
@@ -148,22 +151,19 @@ struct ConnectionQualityRow {
   build() {
     Row() {
       Text(translate(this.label, this.uiLanguage))
-        .width(76)
+        .width('44%')
         .fontSize(11)
         .fontColor('#FFD2D2D2')
         .textAlign(TextAlign.End)
-        .maxLines(1)
-        .minFontSize(9)
-        .maxFontSize(11)
-        .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+        .wordBreak(WordBreak.BREAK_ALL)
       Text(translate(this.value, this.uiLanguage))
-        .width(96)
+        .width('56%')
         .fontSize(11)
         .fontColor(this.valueColor)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .wordBreak(WordBreak.BREAK_ALL)
     }
-    .height(17)
+    .width('100%')
+    .constraintSize({ minHeight: 17 })
   }
 }
 
@@ -539,6 +539,11 @@ struct RemotePage {
   private suppressClipboardText: string = '';
   private clipboardBaselineInitialized: boolean = false;
   private isLeavingAfterDisconnect: boolean = false;
+  @State reconnecting: boolean = false;
+  @State reconnectAttempt: number = 0;
+  private retryRequestGeneration: number = 0;
+  private disconnectConfirmationVisible: boolean = false;
+  private disconnectConfirmationEpoch: number = 0;
   private pendingUploadPath: string = '';
   @State recordingActive: boolean = false;
   private recordingDialog: CustomDialogController = new CustomDialogController({ builder: RecordingDialog(), customStyle: true });
@@ -578,6 +583,20 @@ struct RemotePage {
     customStyle: true,
     cornerRadius: 10,
   });
+  @State fullTextContent: string = '';
+  private fullTextController: CustomDialogController = new CustomDialogController({
+    builder: FullTextDialog({ title: '完整信息', content: this.fullTextContent, language: this.uiLanguage,
+      dark: this.isDarkMode, rectangular: this.roundedRectButtons }), autoCancel: true, customStyle: true
+  });
+
+  showFullText(content: string): void {
+    this.fullTextContent = content;
+    this.fullTextController.open();
+  }
+
+  showRemoteEntryDetails(entry: RemoteDirectoryEntry): void {
+    this.showFullText(`${entry.name}\n${this.joinRemotePath(entry.name)}\n${translate(this.remoteEntryMetadata(entry), this.uiLanguage)}`);
+  }
   private lastRemoteCursorSequence: number = -1;
   private lastRemoteCursorImageSequence: number = -1;
   private remoteCursorAbsX: number = 0;
@@ -656,7 +675,12 @@ struct RemotePage {
   }
 
   aboutToDisappear(): void {
+    this.fullTextController?.close();
     this.remotePageVisible = false;
+    this.retryRequestGeneration++;
+    this.disconnectConfirmationEpoch++;
+    this.disconnectConfirmationVisible = false;
+    ConnectionService.cancelPendingConnection();
     this.closeOrientationMenu();
     this.keyboardLayoutService?.stop();
     this.keyboardLayoutService = undefined;
@@ -756,7 +780,7 @@ struct RemotePage {
       this.exitFullScreen();
       return true;
     }
-    this.disconnectSession();
+    this.requestDisconnect();
     return true;
   }
 
@@ -788,15 +812,20 @@ struct RemotePage {
       }
       // Native code owns transport/login budgets and the absolute attempt limit.
       // A page timer must not cut off a newly established slow relay session.
-      if (status === ConnectionStatus.FAILED) {
+      if (ConnectionService.isManualRetryPending()) {
+        status = ConnectionStatus.CONNECTING;
+      } else if (status === ConnectionStatus.FAILED) {
         const failedMessage: string = ConnectionService.getLastConnectionError();
         if (ConnectionService.recoverInterruptedSession(failedMessage)) {
-          this.videoWaitingHint = '网络传输中断，正在安全重连…';
-          this.resetRemoteViewportForSession();
-          this.displayStateInitialized = false;
+          this.videoWaitingHint = '连接暂时中断，正在重新连接…';
+          if (!this.reconnecting) {
+            this.resetRemoteViewportForSession();
+            this.displayStateInitialized = false;
+          }
           status = ConnectionStatus.CONNECTING;
         }
-        const recoveryHint: string = ConnectionService.retryRecoverableConnectionFailure(failedMessage);
+        const recoveryHint: string = status === ConnectionStatus.FAILED ?
+          ConnectionService.retryRecoverableConnectionFailure(failedMessage) : '';
         if (recoveryHint.length > 0) {
           this.resetRemoteViewportForSession();
           this.displayStateInitialized = false;
@@ -814,6 +843,8 @@ struct RemotePage {
         this.pictureInPicture?.stop();
       }
       ConnectionService.observeSession(status);
+      this.reconnecting = ConnectionService.isReconnecting();
+      this.reconnectAttempt = ConnectionService.getRecoveryAttempt();
       if (status === ConnectionStatus.CONNECTED && !this.inputCompatibilityLoaded && !this.fileOnly) {
         this.loadInputCompatibility();
       } else if (status !== ConnectionStatus.CONNECTED) {
@@ -1699,6 +1730,7 @@ struct RemotePage {
             this.uploadGeneration++;
             this.clearUploadQueue();
           })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
         }.padding(20).borderRadius(16).backgroundColor(this.isDarkMode ? '#202B3A' : '#FFFFFF')
       }
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && !this.keyboardToolsCollapsed) {
@@ -1785,10 +1817,14 @@ struct RemotePage {
       Text(translate('独立文件会话 · 不采集远端画面，不发送键鼠输入', this.uiLanguage))
         .fontSize(13).fontColor(this.secondaryTextColor())
       Button(translate('浏览 / 取回远端文件', this.uiLanguage)).enabled(!this.transferActive).onClick(() => { this.openRemoteDownloadBrowser(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       Button(translate('发送本地文件（可多选）', this.uiLanguage)).enabled(!this.transferActive).onClick(() => { this.pickFileForUpload(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       Button(translate(this.uploadStaging ? '正在准备文件…' : '发送整个文件夹', this.uiLanguage)).enabled(!this.transferActive && !this.uploadStaging)
         .onClick(() => { this.pickFolderForUpload(); })
-      Button(translate('断开', this.uiLanguage)).onClick(() => { this.disconnectSession(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+      Button(translate('断开', this.uiLanguage)).onClick(() => { this.requestDisconnect(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     }.width('100%').height('100%').justifyContent(FlexAlign.Center).padding(24)
   }
 
@@ -1805,7 +1841,7 @@ struct RemotePage {
         .fontSize(RustDeskTheme.FONT_SIZE_SMALL).fontColor(this.secondaryTextColor());
       Button(translate('Back', this.uiLanguage)).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(6)
         .onClick(() => { this.disconnectSession(); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 6, ButtonType.Capsule));
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule));
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
@@ -1814,13 +1850,27 @@ struct RemotePage {
   buildConnectingView() {
     Column({ space: 14 }) {
       LoadingProgress().width(42).height(42).color(RustDeskTheme.ACCENT);
-      Text(translate('正在连接远端设备', this.uiLanguage))
+      Text(translate(this.reconnecting ? '正在重新连接远端设备' : '正在连接远端设备', this.uiLanguage))
         .fontSize(20)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
         .fontColor(this.primaryTextColor());
       Text(this.connectedPeerId.length > 0 ? this.connectedPeerId : translate('Connecting', this.uiLanguage))
         .fontSize(13)
         .fontColor(this.secondaryTextColor());
+      if (this.reconnecting) {
+        if (this.reconnectAttempt > 0) {
+          Text(translate(`正在重新连接（第 ${this.reconnectAttempt} 次）`, this.uiLanguage))
+            .fontSize(13).fontColor(this.secondaryTextColor());
+        }
+        Button(translate('取消重连', this.uiLanguage))
+          .constraintSize({ minHeight: 44 }).fontSize(14)
+          .fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor())
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+          .onClick(() => {
+            RustDeskNapi.appendDiagnosticLog('connection-recovery', 'user_cancelled_reconnect');
+            this.disconnectSession();
+          });
+      }
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
@@ -1845,7 +1895,7 @@ struct RemotePage {
         .fontColor(this.primaryTextColor())
         .placeholderColor(this.secondaryTextColor())
         .textAlign(TextAlign.Center)
-        .height(52)
+        .height(readableInputHeight(52, this.uiFontScale, 18))
         .width('100%')
         .backgroundColor(this.mutedSurfaceColor())
         .border({ width: 1, color: this.twoFaError.length > 0 ? RustDeskTheme.ERROR : this.themeBorderColor() })
@@ -1876,17 +1926,17 @@ struct RemotePage {
       Row({ space: 12 }) {
         Button(translate('取消', this.uiLanguage))
           .layoutWeight(1)
-          .height(44)
+          .constraintSize({ minHeight: 44 })
           .fontColor(this.primaryTextColor())
           .backgroundColor(this.mutedSurfaceColor())
           .borderRadius(8)
           .onClick(() => {
             this.disconnectSession();
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
         Button(translate('验证', this.uiLanguage))
           .layoutWeight(1)
-          .height(44)
+          .constraintSize({ minHeight: 44 })
           .enabled(this.isTwoFactorCodeReady())
           .fontColor(Color.White)
           .backgroundColor(this.isTwoFactorCodeReady() ? RustDeskTheme.ACCENT : '#94A3B8')
@@ -1894,7 +1944,7 @@ struct RemotePage {
           .onClick(() => {
             this.submitTwoFactor();
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
       }
       .width('100%');
     }
@@ -1950,7 +2000,7 @@ struct RemotePage {
   buildPcFullscreenExitButton() {
     Button(translate(this.fullscreenTransitioning ? '切换中…' : '退出全屏', this.uiLanguage))
       .width(88)
-      .height(36)
+      .constraintSize({ minHeight: 36 })
       .fontSize(12)
       .fontColor(Color.White)
       .backgroundColor('#99000000')
@@ -1963,7 +2013,7 @@ struct RemotePage {
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
       })
-      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 18, ButtonType.Capsule))
       .position({ x: Math.max(12, this.pageWidth - 100), y: 12 })
       .zIndex(70)
   }
@@ -2236,12 +2286,13 @@ struct RemotePage {
         .backgroundColor(Color.Transparent).fontColor(this.primaryTextColor()).focusable(false)
         .accessibilityText(translate('最小化', this.uiLanguage)).onClick(() => { this.minimizeImmersiveWindow(); })
       Button(translate('退出沉浸', this.uiLanguage), { type: ButtonType.Normal })
-        .height(30).padding({ left: 10, right: 10 }).fontSize(11).borderRadius(10)
+        .constraintSize({ minHeight: 30 }).padding({ left: 10, right: 10 }).fontSize(11).borderRadius(10)
         .backgroundColor(this.controlSelectedBackgroundColor()).fontColor(this.controlSelectedTextColor())
         .enabled(!this.immersiveWindowTransitioning).focusable(false).onClick(() => { this.toggleImmersiveWindow(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       Button('×', { type: ButtonType.Normal }).width(30).height(30).fontSize(19).padding(0)
         .backgroundColor(Color.Transparent).fontColor(RustDeskTheme.ERROR).focusable(false)
-        .accessibilityText(translate('断开', this.uiLanguage)).onClick(() => { this.disconnectSession(); })
+        .accessibilityText(translate('断开', this.uiLanguage)).onClick(() => { this.requestDisconnect(); })
     }
     .width(Math.min(350, Math.max(240, this.pageWidth - 24))).height(42).padding({ left: 10, right: 6 })
     .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
@@ -2261,7 +2312,7 @@ struct RemotePage {
             .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
             .fontColor(this.primaryTextColor())
           Button(translate('历史', this.uiLanguage))
-            .height(34)
+            .constraintSize({ minHeight: 34 })
             .fontSize(13)
             .fontColor(RustDeskTheme.ACCENT)
             .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
@@ -2269,12 +2320,12 @@ struct RemotePage {
             .onClick(() => {
               this.fileTransferHistoryDialogController.open();
             })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
         }
         .width('100%')
         Row({ space: 8 }) {
           Button(translate('上一级', this.uiLanguage))
-            .height(40)
+            .constraintSize({ minHeight: 40 })
             .fontColor(RustDeskTheme.ACCENT)
             .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
             .borderRadius(8)
@@ -2282,11 +2333,13 @@ struct RemotePage {
             .onClick(() => {
               this.openRemoteDirectory(this.getRemoteParentPath());
             })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
-          Button(translate('新建', this.uiLanguage)).height(36).fontSize(12)
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+          Button(translate('新建', this.uiLanguage)).constraintSize({ minHeight: 36 }).fontSize(12)
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
             .enabled(!this.fileOperationBusy && !this.transferActive && !this.remoteDirectoryLoading && this.remoteDirectoryPath !== '/')
             .onClick(() => { this.editRemoteFileName(); })
-          Button(translate('刷新', this.uiLanguage)).height(36).fontSize(12).enabled(!this.remoteDirectoryLoading && !this.fileOperationBusy)
+          Button(translate('刷新', this.uiLanguage)).constraintSize({ minHeight: 36 }).fontSize(12).enabled(!this.remoteDirectoryLoading && !this.fileOperationBusy)
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
             .onClick(() => { this.openRemoteDirectory(this.remoteDirectoryPath); })
           Text(translate(this.remoteDirectoryPath === '/' ? '此电脑' : this.remoteDirectoryPath, this.uiLanguage))
             .layoutWeight(1)
@@ -2294,6 +2347,8 @@ struct RemotePage {
             .fontColor(this.primaryTextColor())
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .accessibilityDescription(translate('长按查看完整内容', this.uiLanguage))
+            .gesture(LongPressGesture().onAction(() => { this.showFullText(this.remoteDirectoryPath); }))
         }
         .width('100%')
 
@@ -2303,7 +2358,7 @@ struct RemotePage {
             .fontSize(12)
             .fontColor(this.secondaryTextColor())
           Button(translate(`排序：${this.remoteFileSortLabel()}`, this.uiLanguage))
-            .height(32)
+            .constraintSize({ minHeight: 32 })
             .padding({ left: 10, right: 10 })
             .fontSize(12)
             .fontColor(this.controlSelectedTextColor())
@@ -2319,23 +2374,23 @@ struct RemotePage {
               { value: translate('修改时间', this.uiLanguage) + (this.remoteFileSortField === 'modified' ? '  ✓' : ''),
                 action: () => { this.remoteFileSortField = 'modified'; } }
             ], { placement: Placement.BottomRight, enableArrow: true })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
           Button(translate(this.remoteFileSortDescending ? '降序 ↓' : '升序 ↑', this.uiLanguage))
-            .height(32)
+            .constraintSize({ minHeight: 32 })
             .padding({ left: 8, right: 8 })
             .fontSize(12)
             .fontColor(this.primaryTextColor())
             .backgroundColor(this.mutedSurfaceColor())
             .borderRadius(8)
             .onClick(() => { this.remoteFileSortDescending = !this.remoteFileSortDescending; })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
         }
         .width('100%')
 
         if (this.remoteFileBrowserMode === 'download' && !this.remoteDirectoryLoading) {
           Row({ space: 8 }) {
             Button(translate(this.areAllRemoteEntriesSelected() ? '取消全选' : '全选', this.uiLanguage))
-              .height(36)
+              .constraintSize({ minHeight: 36 })
               .fontSize(13)
               .fontColor(RustDeskTheme.ACCENT)
               .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
@@ -2344,9 +2399,9 @@ struct RemotePage {
               .onClick(() => {
                 this.toggleSelectAllRemoteEntries();
               })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
             Button(translate('取回当前文件夹', this.uiLanguage))
-              .height(36)
+              .constraintSize({ minHeight: 36 })
               .fontSize(13)
               .fontColor(RustDeskTheme.ACCENT)
               .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
@@ -2355,7 +2410,7 @@ struct RemotePage {
               .onClick(() => {
                 this.prepareCurrentRemoteFolderDownload();
               })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
             Blank()
             Text(translate(`已选 ${this.selectedRemoteDownloads.length} 项`, this.uiLanguage))
               .fontSize(13)
@@ -2417,12 +2472,13 @@ struct RemotePage {
                       .fontColor(this.primaryTextColor())
                       .maxLines(3)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .accessibilityDescription(translate('长按查看完整内容', this.uiLanguage))
+                      .gesture(LongPressGesture().onAction(() => { this.showRemoteEntryDetails(entry); }))
                     Text(translate(this.remoteEntryMetadata(entry), this.uiLanguage))
                       .width('100%')
                       .fontSize(12)
                       .fontColor(this.secondaryTextColor())
-                      .maxLines(2)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .wordBreak(WordBreak.BREAK_ALL)
                   }
                     .layoutWeight(1)
                     .onClick(() => {
@@ -2436,6 +2492,7 @@ struct RemotePage {
                     Button('⋯').height(36).width(40).fontSize(20)
                       .enabled(!this.fileOperationBusy && !this.transferActive)
                       .bindMenu([
+                        { value: translate('查看完整信息', this.uiLanguage), action: () => { this.showRemoteEntryDetails(entry); } },
                         { value: translate('重命名', this.uiLanguage), action: () => { this.editRemoteFileName(entry); } },
                         { value: translate('删除', this.uiLanguage), action: () => { this.deleteRemoteEntry(entry); } }
                       ])
@@ -2474,29 +2531,29 @@ struct RemotePage {
         Row({ space: 12 }) {
           Button(translate('取消', this.uiLanguage))
             .layoutWeight(1)
-            .height(42)
+            .constraintSize({ minHeight: 42 })
             .borderRadius(8)
             .fontColor(this.primaryTextColor())
             .backgroundColor(this.mutedSurfaceColor())
             .onClick(() => {
               this.closeRemoteFileBrowser(true);
             })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
           if (this.remoteFileBrowserMode === 'download') {
             Button(translate(`取回所选 (${this.selectedRemoteDownloads.length})`, this.uiLanguage))
               .layoutWeight(1)
-              .height(42)
+              .constraintSize({ minHeight: 42 })
               .borderRadius(8)
               .enabled(this.selectedRemoteDownloads.length > 0 && !this.remoteDirectoryLoading)
               .backgroundColor(RustDeskTheme.ACCENT)
               .onClick(() => {
                 this.prepareRemoteDownload(this.selectedRemoteDownloads);
               })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
           } else {
             Button(translate('发送到这里', this.uiLanguage))
               .layoutWeight(1)
-              .height(42)
+              .constraintSize({ minHeight: 42 })
               .borderRadius(8)
               .enabled(this.remoteDirectoryPath.length > 0 && this.remoteDirectoryPath !== '/' && !this.remoteDirectoryLoading)
               .backgroundColor(RustDeskTheme.ACCENT)
@@ -2506,7 +2563,7 @@ struct RemotePage {
                   primaryButton: { value: translate('取消', this.uiLanguage), action: () => {} },
                   secondaryButton: { value: translate('发送', this.uiLanguage), action: () => { this.startPendingFileUpload(); } } });
               })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
           }
         }
         .width('100%')
@@ -2542,7 +2599,7 @@ struct RemotePage {
           .fontSize(12)
           .fontColor(this.transferCancelling ? this.secondaryTextColor() : RustDeskTheme.ACCENT)
         Button(translate('取消', this.uiLanguage))
-          .height(30)
+          .constraintSize({ minHeight: 30 })
           .fontSize(12)
           .fontColor('#C83B45')
           .backgroundColor(this.isDarkMode ? '#3A2025' : '#FFF0F1')
@@ -2551,7 +2608,7 @@ struct RemotePage {
           .onClick(() => {
             this.cancelActiveFileTransfer();
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width('100%')
 
@@ -2628,6 +2685,7 @@ struct RemotePage {
       Button(translate('返回主画面', this.uiLanguage))
         .onClick(() => { this.pictureInPicture?.stop(); })
         .enabled(this.pipPhase === 'active')
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     }
     .padding(24).width('100%').height('100%')
     .justifyContent(FlexAlign.Center).backgroundColor('#111820')
@@ -2795,11 +2853,11 @@ struct RemotePage {
         .textAlign(TextAlign.Center)
         .padding({ left: 24, right: 24 });
       Button(translate('Retry', this.uiLanguage)).fontColor(Color.White).backgroundColor(RustDeskTheme.ACCENT).borderRadius(8)
-        .onClick(() => { this.disconnectSession(); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
+        .onClick(() => { this.retrySession(); })
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
       Button(translate('Back', this.uiLanguage)).fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor()).borderRadius(8)
         .onClick(() => { this.disconnectSession(); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule));
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center);
   }
@@ -2854,7 +2912,7 @@ struct RemotePage {
   buildFloatingDragHandle(keyboard: boolean) {
     Button('⋮')
       .width(keyboard ? (this.isHandheldLandscape() ? 42 : 24) : 20)
-      .height(38)
+      .constraintSize({ minHeight: 38 })
       .padding(0)
       .fontSize(18)
       .fontColor(this.secondaryTextColor())
@@ -2875,7 +2933,7 @@ struct RemotePage {
           .onActionEnd(() => { if (keyboard) this.finishKeyboardToolsDrag(); else this.finishRemoteToolbarDrag(); })
           .onActionCancel(() => { if (keyboard) this.finishKeyboardToolsDrag(); else this.finishRemoteToolbarDrag(); })
       )
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
   }
 
   setControlMenu(category: string): void {
@@ -2988,14 +3046,13 @@ struct RemotePage {
           .hitTestBehavior(HitTestMode.None)
         Text(translate(remoteControlCategoryLabel(category), this.uiLanguage))
           .fontFamily(RemoteGlassStyle.FONT)
-          .fontSize(11).minFontSize(9).maxFontSize(11).maxLines(1)
-          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontSize(11).wordBreak(WordBreak.BREAK_ALL)
           .fontWeight(this.controlMenuSelected(category) ? 600 : 500)
           .fontColor(category === 'disconnect' ? this.controlMenuIconColor(category) :
             (this.controlMenuSelected(category) ? this.controlSelectedTextColor() : this.primaryTextColor()))
       }
     }
-    .width(this.adaptiveToolbarButtonWidth(vertical ? 80 : 38))
+    .width(this.controlCategoryButtonWidth(category, vertical))
     .height(this.getRemoteToolbarButtonHeight() + 8)
     .padding({ left: 2, right: 2, top: 3, bottom: 3 })
     .backgroundColor(this.controlMenuSelected(category) ? this.controlSelectedBackgroundColor() : Color.Transparent)
@@ -3006,11 +3063,19 @@ struct RemotePage {
     .onClick(() => {
       if (category === 'disconnect') {
         this.setControlMenu('');
-        this.disconnectSession();
+        this.requestDisconnect();
       } else {
         this.toggleControlMenu(category);
       }
     })
+  }
+
+  controlCategoryButtonWidth(category: string, vertical: boolean): number {
+    const label = translate(remoteControlCategoryLabel(category), this.uiLanguage);
+    let units: number = 0;
+    for (let index = 0; index < label.length; index++) units += label.charCodeAt(index) <= 127 ? 7 : 12;
+    return Math.max(this.adaptiveToolbarButtonWidth(vertical ? 80 : 38),
+      Math.ceil(units * Math.max(1, this.uiFontScale) + 12));
   }
 
   getControlMenuWidth(): number {
@@ -3170,7 +3235,7 @@ struct RemotePage {
       let measured: number = metrics.footerHeight;
       try {
         const size = context.getMeasureUtils().measureTextSize({ textContent: text, fontSize: '11fp',
-          fontFamily: RemoteGlassStyle.FONT, constraintWidth: context.vp2px(Math.max(1, metrics.width - 24)), maxLines: 3 });
+          fontFamily: RemoteGlassStyle.FONT, constraintWidth: context.vp2px(Math.max(1, metrics.width - 24)) });
         const height: number = context.px2vp(Number(size.height));
         if (Number.isFinite(height) && height > 0) measured = Math.ceil(height + 3);
       } catch (_error) {
@@ -3335,9 +3400,8 @@ struct RemotePage {
       Row({ space: 6 }) {
         ForEach(this.makeDisplayIndexes(), (display: number) => {
           Button(translate(`屏${display + 1}`, this.uiLanguage))
-            .width(this.getControlMenuMetrics().displayWidth).height(this.getControlMenuMetrics().rowHeight)
-            .fontSize(12).labelStyle({ maxLines: 1, minFontSize: 10, maxFontSize: 12,
-              heightAdaptivePolicy: TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST })
+            .width(this.getControlMenuMetrics().displayWidth).constraintSize({ minHeight: this.getControlMenuMetrics().rowHeight })
+            .fontSize(12)
             .fontWeight(display === this.currentDisplay ? 600 : 500)
             .fontColor(display === this.currentDisplay ? this.controlSelectedTextColor() : this.primaryTextColor())
             .backgroundColor(display === this.currentDisplay ? this.controlSelectedBackgroundColor() : Color.Transparent)
@@ -3347,7 +3411,7 @@ struct RemotePage {
               this.openToolbarOrderEditor('control', 'displays');
             }))
             .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
-            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
         }, (display: number) => `compact-display-${display}`)
       }
     }.width('100%').height(this.getControlMenuMetrics().bodyHeight)
@@ -3390,7 +3454,7 @@ struct RemotePage {
       ForEach(this.makeDisplayIndexes(), (display: number) => {
         Button(translate(`屏${display + 1}`, this.uiLanguage))
           .width(this.adaptiveToolbarButtonWidth(vertical ? 80 : 44))
-          .height(this.getRemoteToolbarButtonHeight())
+          .constraintSize({ minHeight: this.getRemoteToolbarButtonHeight() })
           .padding({ left: 2, right: 2 })
           .fontSize(12)
           .fontWeight(display === this.currentDisplay ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
@@ -3406,7 +3470,7 @@ struct RemotePage {
             this.openToolbarOrderEditor('control', 'displays');
           }))
           .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }, (display: number) => `${display}-${this.currentDisplay}`)
     } else if (item === 'input') {
       this.buildInputModeButton(vertical ? 80 : 56, vertical, item)
@@ -3489,7 +3553,7 @@ struct RemotePage {
         }, item)
     } else if (item === 'disconnect') {
       this.buildToolbarButton('断开', vertical ? 80 : 64, false, true, true, () => {
-        this.disconnectSession();
+        this.requestDisconnect();
       }, item)
     }
   }
@@ -3606,13 +3670,13 @@ struct RemotePage {
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
           Button(translate('完成', this.uiLanguage))
-            .height(34)
+            .constraintSize({ minHeight: 34 })
             .fontSize(13)
             .fontColor(Color.White)
             .backgroundColor(RustDeskTheme.ACCENT)
             .borderRadius(8)
             .onClick(() => { this.showToolbarOrderEditor = false; })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
         }
         .width('100%')
 
@@ -3660,13 +3724,13 @@ struct RemotePage {
 
         Button(translate('恢复默认排序', this.uiLanguage))
           .width('100%')
-          .height(38)
+          .constraintSize({ minHeight: 38 })
           .fontSize(13)
           .fontColor(RustDeskTheme.ACCENT)
           .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
           .borderRadius(8)
           .onClick(() => { this.resetToolbarOrder(this.toolbarOrderEditorKind); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width(this.isHandheldLandscape() ? 420 : '88%')
       .height(this.isHandheldLandscape() ? '86%' : '72%')
@@ -3743,7 +3807,7 @@ struct RemotePage {
                 .fontColor(this.pcToolbarPinned ? this.controlSelectedTextColor() : this.primaryTextColor())
             }
               .id('remoteToolbarPinButton')
-              .width(64).height(this.getRemoteToolbarButtonHeight() + 8)
+              .width(this.adaptiveToolbarButtonWidth(64)).height(this.getRemoteToolbarButtonHeight() + 8)
               .padding(2).focusable(false).borderRadius(8)
               .backgroundColor(this.pcToolbarPinned ? this.controlSelectedBackgroundColor() : Color.Transparent)
               .onClick(() => { this.togglePcToolbarPinned(); })
@@ -3775,17 +3839,15 @@ struct RemotePage {
     // Read state in the Button observer, not through @Builder value parameters.
     Button({ type: ButtonType.Normal }) {
       Text(translate(this.fullscreenTransitioning ? '切换中…' : (this.isFullScreen ? '退出全屏' : '全屏'), this.uiLanguage))
-        .width('100%').fontSize(13).minFontSize(11).maxFontSize(13).maxLines(2)
+        .width('100%').fontSize(13).wordBreak(WordBreak.BREAK_ALL)
         .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
         .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
         .fontColor(this.isFullScreen ? this.controlSelectedTextColor() : this.primaryTextColor())
     }
       .width(this.getControlActionWidth(buttonWidth))
-      .height(this.getControlActionHeight())
+      .constraintSize({ minHeight: this.getControlActionHeight() })
       .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(12)
-      .labelStyle({ maxLines: 2, minFontSize: 10, maxFontSize: 12,
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(this.isFullScreen ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(this.isFullScreen ? this.controlSelectedTextColor() : this.primaryTextColor())
       .backgroundColor(this.isFullScreen ? this.controlSelectedBackgroundColor() :
@@ -3811,19 +3873,15 @@ struct RemotePage {
     Button({ type: ButtonType.Normal }) {
       Text(translate(label, this.uiLanguage)).width('100%')
         .fontSize(this.controlMenu ? 13 : (label === '+' || label === '-' ? 18 : 12))
-        .minFontSize(10).maxFontSize(this.controlMenu ? 13 : (label === '+' || label === '-' ? 18 : 12))
-        .maxLines(2).heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+        .wordBreak(WordBreak.BREAK_ALL).heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
         .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
         .fontWeight(selected ? 600 : 500)
         .fontColor(danger ? RustDeskTheme.ERROR : (selected ? this.controlSelectedTextColor() : this.primaryTextColor()))
     }
       .width(this.getControlActionWidth(buttonWidth))
-      .height(this.getControlActionHeight())
+      .constraintSize({ minHeight: this.getControlActionHeight() })
       .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12))
-      .labelStyle({ maxLines: 2, minFontSize: label === '+' || label === '-' ? 14 : 10,
-        maxFontSize: label === '+' || label === '-' ? 18 : (buttonWidth <= 40 ? 11 : 12),
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(selected ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(danger ? RustDeskTheme.ERROR :
         (selected ? this.controlSelectedTextColor() : this.primaryTextColor()))
@@ -3851,17 +3909,15 @@ struct RemotePage {
   buildEdgeAutoPanButton(buttonWidth: number, orderKey: string = '') {
     Button({ type: ButtonType.Normal }) {
       Text(translate(this.edgeAutoPanEnabled ? '边缘跟随开' : '边缘跟随', this.uiLanguage))
-        .width('100%').fontSize(13).minFontSize(11).maxFontSize(13).maxLines(2)
+        .width('100%').fontSize(13).wordBreak(WordBreak.BREAK_ALL)
         .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
         .textAlign(this.controlMenu ? TextAlign.Start : TextAlign.Center)
         .fontColor(this.edgeAutoPanEnabled ? this.controlSelectedTextColor() : this.primaryTextColor())
     }
       .width(this.getControlActionWidth(buttonWidth))
-      .height(this.getControlActionHeight())
+      .constraintSize({ minHeight: this.getControlActionHeight() })
       .padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })
       .fontSize(12)
-      .labelStyle({ maxLines: 2, minFontSize: 10, maxFontSize: 12,
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(this.edgeAutoPanEnabled ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(this.edgeAutoPanEnabled ? this.controlSelectedTextColor() : this.primaryTextColor())
       .backgroundColor(this.edgeAutoPanEnabled ? this.controlSelectedBackgroundColor() :
@@ -3925,7 +3981,7 @@ struct RemotePage {
           .fontSize(12)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.controlSelectedTextColor())
-          .maxLines(1)
+          .wordBreak(WordBreak.BREAK_ALL)
           .textAlign(TextAlign.Center)
       }
     }
@@ -3977,14 +4033,14 @@ struct RemotePage {
           .fillColor(this.inputMode === mode ? this.controlSelectedTextColor() :
             (this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON))
         Text(translate(mode === INPUT_MODE_MOUSE ? '鼠标' : '触摸', this.uiLanguage))
-          .fontSize(13).minFontSize(11).maxFontSize(13).maxLines(1).flexShrink(1)
-          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .fontSize(13).wordBreak(WordBreak.BREAK_ALL).flexShrink(1)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
           .fontWeight(this.inputMode === mode ? 600 : 500)
           .fontColor(this.inputMode === mode ? this.controlSelectedTextColor() : this.primaryTextColor())
       }.width('100%').justifyContent(FlexAlign.Center).alignItems(VerticalAlign.Center)
     }
     .id(mode === INPUT_MODE_MOUSE ? 'remoteInputMouseChoice' : 'remoteInputTouchChoice')
-    .width(this.getControlMenuMetrics().inputSegmentWidth).height(this.getControlActionHeight())
+    .width(this.getControlMenuMetrics().inputSegmentWidth).constraintSize({ minHeight: this.getControlActionHeight() })
     .padding({ left: 8, right: 8 })
     .backgroundColor(this.inputMode === mode ? this.controlSelectedBackgroundColor() : Color.Transparent)
     .border({ width: this.inputMode === mode ? 1 : 0, color: this.controlSelectedBorderColor() })
@@ -4415,7 +4471,7 @@ struct RemotePage {
       Stack({ alignContent: Alignment.TopStart }) {
         Button(translate('左键', this.uiLanguage), { type: ButtonType.Normal })
           .width(29)
-          .height(67)
+          .constraintSize({ minHeight: 67 })
           .padding(0)
           .fontSize(9)
           .fontWeight(FontWeight.Medium)
@@ -4426,10 +4482,11 @@ struct RemotePage {
           .position({ x: 0, y: 0 })
           .onTouch((event: TouchEvent) => { this.handleVirtualMouseButtonTouch('left', event); })
           .onClick(() => { this.clickVirtualMouseButtonFallback('left'); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
 
         Button(translate('右键', this.uiLanguage), { type: ButtonType.Normal })
           .width(29)
-          .height(67)
+          .constraintSize({ minHeight: 67 })
           .padding(0)
           .fontSize(9)
           .fontWeight(FontWeight.Medium)
@@ -4440,6 +4497,7 @@ struct RemotePage {
           .position({ x: 51, y: 0 })
           .onTouch((event: TouchEvent) => { this.handleVirtualMouseButtonTouch('right', event); })
           .onClick(() => { this.clickVirtualMouseButtonFallback('right'); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
 
         Column({ space: 1 }) {
           Button('⌃')
@@ -4447,10 +4505,11 @@ struct RemotePage {
             .backgroundColor(Color.Transparent)
             .onClick(() => { this.sendVirtualMouseWheel(-VIRTUAL_MOUSE_WHEEL_BUTTON_STEP); })
           Button('≡')
-            .width(22).height(28).padding(0).fontSize(12).fontColor('#CCFFFFFF')
+            .width(22).constraintSize({ minHeight: 28 }).padding(0).fontSize(12).fontColor('#CCFFFFFF')
             .backgroundColor(Color.Transparent)
             .onTouch((event: TouchEvent) => { this.handleVirtualMouseWheelTouch(event); })
             .onClick(() => { this.clickVirtualMouseButtonFallback('middle'); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
           Button('⌄')
             .width(22).height(18).padding(0).fontSize(12).fontColor('#CCFFFFFF')
             .backgroundColor(Color.Transparent)
@@ -4606,13 +4665,13 @@ struct RemotePage {
         if (this.inputMode === INPUT_MODE_MOUSE) {
           Text(translate('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 轻点一次，第二次按住并移动：拖拽，松手结束\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 虚拟鼠标：左右键、中键和滚轮与实体鼠标一致，按住鼠标拖动区即可移动远端指针\n• 虚拟鼠标开启且画面放大后：单指拖动画面其他区域直接平移视野\n• 边缘跟随开启后：手机/平板放大画面，手指移动鼠标到可视区域中心附近，视野立即跟随；停手即停，抬手再滑无需等待\n• 虚拟鼠标拖动区同样支持中心跟随；到达远端桌面边界后，鼠标继续移动\n• 实体鼠标：靠近画面边缘并短暂停留后自动平移，越靠边越快\n• 全屏三指上滑：调出系统键盘，输入直达远端', this.uiLanguage))
             .fontSize(14)
-            .lineHeight(24)
+            .lineHeight('24fp')
             .fontColor(this.secondaryTextColor())
             .width('100%')
         } else {
           Text(translate('适合直接点按：\n• 点按位置：左键\n• 按住移动：拖拽\n• 双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 放大后点“移动画面”：按钮变为淡蓝色，单指平移视野且不点击远端\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端', this.uiLanguage))
             .fontSize(14)
-            .lineHeight(24)
+            .lineHeight('24fp')
             .fontColor(this.secondaryTextColor())
             .width('100%')
         }
@@ -4643,7 +4702,7 @@ struct RemotePage {
 
         Button(translate(mouseSettings ? '关闭' : '知道了', this.uiLanguage))
           .width('100%')
-          .height(42)
+          .constraintSize({ minHeight: 42 })
           .fontColor(Color.White)
           .backgroundColor(RustDeskTheme.ACCENT)
           .borderRadius(8)
@@ -4651,7 +4710,7 @@ struct RemotePage {
             if (mouseSettings) this.closeInputSettings();
             else this.dismissGestureHelp();
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width(this.isLargeLayout() ? 420 : '88%')
       .height(Math.min(760, Math.max(180, (this.pageHeight > 0 ? this.pageHeight : 640) - 24)))
@@ -4681,7 +4740,7 @@ struct RemotePage {
         .width('100%')
       Text(translate(details, this.uiLanguage))
         .fontSize(13)
-        .lineHeight(22)
+        .lineHeight('22fp')
         .fontColor(this.secondaryTextColor())
         .width('100%')
     }
@@ -4749,11 +4808,9 @@ struct RemotePage {
   buildMobileActionButton(label: string, action: number, danger: boolean = false) {
     Button(translate(label, this.uiLanguage))
       .layoutWeight(1)
-      .height(this.getRemoteToolbarButtonHeight())
+      .constraintSize({ minHeight: this.getRemoteToolbarButtonHeight() })
       .padding({ left: 1, right: 1 })
       .fontSize(11)
-      .labelStyle({ maxLines: 2, minFontSize: 9, maxFontSize: 11,
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
       .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
       .fontColor(danger ? RustDeskTheme.ERROR : this.primaryTextColor())
       .backgroundColor(danger ? (this.isDarkMode ? RustDeskTheme.DANGER_SOFT_DARK : '#FFF3F3') :
@@ -4762,7 +4819,7 @@ struct RemotePage {
       .onClick(() => {
         this.sendMobileAction(action, label);
       })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 9, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 9, ButtonType.Capsule))
   }
 
   @Builder
@@ -4851,15 +4908,11 @@ struct RemotePage {
     // Keep physical key names (Home, End, Ctrl...) distinct from UI labels.
     Button(/[\u4e00-\u9fff]/.test(label) ? translate(label, this.uiLanguage) : label)
       .width(this.adaptiveToolbarButtonWidth(buttonWidth))
-      .height(this.getKeyboardToolbarButtonHeight())
+      .constraintSize({ minHeight: this.getKeyboardToolbarButtonHeight() })
       .padding({ left: 3, right: 3 })
       .fontSize(label === '←' || label === '↑' || label === '↓' || label === '→' ? 20 :
         (label === '释放' ? 11 : (label.length > 10 ? 10 : 12)))
-      .labelStyle({ maxLines: 2,
-        minFontSize: label.length > 10 ? 9 : 10,
-        maxFontSize: label === '←' || label === '↑' || label === '↓' || label === '→' ? 20 :
-          (label.length > 10 ? 10 : 12),
-        heightAdaptivePolicy: TextHeightAdaptivePolicy.MAX_LINES_FIRST })
+
       .fontWeight(this.keyboardToolSelected(label, selected) ? RustDeskTheme.FONT_WEIGHT_SEMI_BOLD : 500)
       .fontColor(danger ? RustDeskTheme.ERROR : (this.keyboardToolSelected(label, selected) ?
         this.controlSelectedTextColor() : this.primaryTextColor()))
@@ -4882,7 +4935,7 @@ struct RemotePage {
           this.refocusRemoteKeyboard();
         }
       })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
   }
 
   @Builder
@@ -5259,7 +5312,7 @@ struct RemotePage {
     .width(this.getQualityMonitorWidth())
     .height(this.getQualityMonitorHeight())
     .scrollBar(BarState.Off)
-    .scrollable(ScrollDirection.None)
+    .scrollable(this.showQualityMonitor ? ScrollDirection.Vertical : ScrollDirection.None)
     .clip(true)
     .borderRadius(this.showQualityMonitor ? 6 : 15)
     .position({ x: this.getQualityMonitorX(), y: this.getQualityMonitorY() })
@@ -5278,12 +5331,14 @@ struct RemotePage {
   }
 
   getQualityMonitorWidth(): number {
-    return Math.min(this.showQualityMonitor ? 194 : 64,
+    const scale = Number.isFinite(this.uiFontScale) ? Math.max(1, this.uiFontScale) : 1;
+    return Math.min(380, (this.showQualityMonitor ? 194 : 64) * scale,
       Math.max(1, this.qualityViewportWidth - 16));
   }
 
   getQualityMonitorHeight(): number {
-    return Math.min(this.showQualityMonitor ? 212 : 30,
+    const scale = Number.isFinite(this.uiFontScale) ? Math.max(1, this.uiFontScale) : 1;
+    return Math.min((this.showQualityMonitor ? 212 : 30) * scale,
       Math.max(1, this.qualityViewportHeight - 16));
   }
 
@@ -5336,7 +5391,7 @@ struct RemotePage {
           })
       }
       .width('100%')
-      .height(22)
+      .constraintSize({ minHeight: 22 })
 
       ConnectionQualityRow({ label: '速度', value: this.speedText })
       ConnectionQualityRow({ label: 'FPS', value: this.fpsText })
@@ -5365,7 +5420,7 @@ struct RemotePage {
         .fontSize(11)
         .fontColor('#FFF2F2F2')
     }
-    .height(30)
+    .constraintSize({ minHeight: 30 })
     .width('100%')
     .padding({ left: 10, right: 10 })
     .backgroundColor('#80000000')
@@ -5528,7 +5583,7 @@ struct RemotePage {
       Row({ space: 6 }) {
         ForEach(this.makeDisplayIndexes(), (display: number) => {
           Button(translate(`屏幕 ${display + 1}`, this.uiLanguage))
-            .height(34)
+            .constraintSize({ minHeight: 34 })
             .fontSize(12)
             .fontColor(display === this.currentDisplay ? this.controlSelectedTextColor() : Color.White)
             .backgroundColor(display === this.currentDisplay ?
@@ -5541,7 +5596,7 @@ struct RemotePage {
             .onClick(() => {
               this.switchDisplay(display);
             })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 17, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 17, ButtonType.Capsule))
         })
       }
       .padding(6)
@@ -5821,7 +5876,7 @@ struct RemotePage {
         Button(translate('关闭', this.uiLanguage)).width('100%').fontSize(14)
           .constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
           .onClick(() => { this.closeInputSettings(); })
-          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       }.width(Math.min(520, Math.max(1, this.pageWidth - 32))).height('80%').padding(20).borderRadius(20)
         .backgroundColor(this.isDarkMode ? '#1E2A3A' : '#FFFFFF')
         .onClick(() => {})
@@ -5902,7 +5957,7 @@ struct RemotePage {
       .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
     Text(this.keyboardLayoutState.deviceName || translate(this.keyboardLayoutState.ready ?
       '未检测到唯一的实体键盘' : '键盘信息暂不可用', this.uiLanguage))
-      .fontSize(12).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      .fontSize(12).wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
       .fontColor(this.secondaryTextColor()).width('100%')
     Text(translate(this.keyboardLayoutStatus(), this.uiLanguage)).fontSize(12)
       .fontColor(this.secondaryTextColor()).width('100%')
@@ -5912,13 +5967,13 @@ struct RemotePage {
         .enabled(this.keyboardLayoutState.ready && this.keyboardLayoutState.count === 1 &&
           this.keyboardLayoutState.deviceId >= 0)
         .onClick(() => { this.openKeyboardLayoutCalibration(); })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     }
     Button(translate(this.keyboardRemappingEnabled ? '自定义键盘映射：已开启' : '自定义键盘映射：关闭', this.uiLanguage))
       .width('100%').constraintSize({ minHeight: 44 }).fontSize(13)
       .fontColor(this.primaryTextColor()).backgroundColor(this.mutedSurfaceColor())
       .onClick(() => { this.openKeyboardMappingDialog(); })
-      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     Text(translate('自定义映射的对应键规则优先；布局校准不会修改或重复套用已有规则。', this.uiLanguage))
       .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
   }
@@ -9717,6 +9772,70 @@ struct RemotePage {
     });
   }
 
+  async retrySession(): Promise<void> {
+    if (this.isLeavingAfterDisconnect || ConnectionService.isReconnecting()) return;
+    const generation = ++this.retryRequestGeneration;
+    this.connectionError = '';
+    this.reconnecting = true;
+    this.reconnectAttempt = 0;
+    this.connectionStatus = ConnectionStatus.CONNECTING;
+    this.insecureFallbackPromptShown = false;
+    this.directLoginStartedAt = 0;
+    this.releaseHeldMouseButtons('manual_retry');
+    this.releaseRemoteNavigationKeys('manual_retry');
+    this.resetRemoteViewportForSession();
+    this.displayStateInitialized = false;
+    let started: boolean = false;
+    try {
+      started = await ConnectionService.retryCurrentSession();
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('connection-recovery', 'manual_retry_failed reason=client_error');
+    }
+    if (generation !== this.retryRequestGeneration || !this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+    if (!started) {
+      this.reconnecting = false;
+      this.connectionStatus = ConnectionStatus.FAILED;
+      this.connectionError = ConnectionService.getLastConnectionError() || '重新连接失败，请重试';
+    }
+  }
+
+  requestDisconnect(): void {
+    if (this.isLeavingAfterDisconnect || this.pipDisconnectPending || this.disconnectConfirmationVisible) return;
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED && !ConnectionService.isReconnecting() &&
+      !this.transferActive && !this.uploadStaging && !this.recordingActive) {
+      this.disconnectSession();
+      return;
+    }
+    const epoch = ++this.disconnectConfirmationEpoch;
+    this.disconnectConfirmationVisible = true;
+    RustDeskNapi.appendDiagnosticLog('remote-page', 'disconnect_confirmation_shown');
+    const cancel = (): void => {
+      if (epoch !== this.disconnectConfirmationEpoch) return;
+      this.disconnectConfirmationVisible = false;
+      RustDeskNapi.appendDiagnosticLog('remote-page', 'disconnect_confirmation_cancelled');
+    };
+    try {
+      this.getUIContext().showAlertDialog({
+        title: translate('断开远程连接', this.uiLanguage),
+        message: translate('是否断开当前远程连接？正在进行的文件传输和录像也会停止。', this.uiLanguage),
+        autoCancel: true,
+        cancel: cancel,
+        primaryButton: { value: translate('继续远控', this.uiLanguage), action: cancel },
+        secondaryButton: { value: translate('断开连接', this.uiLanguage), fontColor: RustDeskTheme.ERROR, action: () => {
+          if (epoch !== this.disconnectConfirmationEpoch || !this.remotePageVisible) return;
+          this.disconnectConfirmationVisible = false;
+          this.disconnectConfirmationEpoch++;
+          RustDeskNapi.appendDiagnosticLog('remote-page', 'disconnect_confirmation_accepted');
+          this.disconnectSession();
+        } }
+      });
+    } catch (_error) {
+      this.disconnectConfirmationVisible = false;
+      RustDeskNapi.appendDiagnosticLog('remote-page', 'disconnect_confirmation_unavailable');
+      // A failed confirmation UI must not disconnect the live session.
+    }
+  }
+
   disconnectSession(): void {
     if (this.pipDisconnectPending) return;
     if (this.pipSurfaceOwned && this.pictureInPicture) {
@@ -9733,6 +9852,9 @@ struct RemotePage {
       return;
     }
     this.isLeavingAfterDisconnect = true;
+    this.retryRequestGeneration++;
+    this.disconnectConfirmationEpoch++;
+    this.disconnectConfirmationVisible = false;
     this.stopDesktopWindowTracking();
     if (this.transferHistoryStartedAt > 0) {
       this.finishFileTransferHistory('cancelled', '远控连接已断开');

@@ -1,5 +1,5 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier';
 
 // Reactive props keep async request completion and selection changes reflected
 // in the actual button, rather than retaining a builder's initial value args.
@@ -14,12 +14,12 @@ export struct ApiAccountAction {
   onAction: () => void = () => {};
 
   build() {
-    Button(translate(this.label, this.uiLanguage)).height(38).fontSize(13)
+    Button(translate(this.label, this.uiLanguage)).constraintSize({ minHeight: 38 }).fontSize(13)
       .fontColor(this.isDarkMode ? '#C5DFFF' : '#2763AC')
       .backgroundColor(this.isDarkMode ? (this.selected ? '#314E71' : '#27384D') :
         (this.selected ? '#CFE3FF' : '#EEF4FC'))
       .enabled(this.isEnabled)
       .onClick(() => { if (this.isEnabled) this.onAction(); })
-      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
   }
 }

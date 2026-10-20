@@ -1,5 +1,5 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { FileTransferHistoryRecord, FileTransferHistoryService } from '../service/FileTransferHistoryService'
 
@@ -11,6 +11,13 @@ export struct FileTransferHistoryDialog {
   @State records: FileTransferHistoryRecord[] = []
   @State filter: string = 'all'
   controller?: CustomDialogController
+  showRecordDetails(record: FileTransferHistoryRecord): void {
+    this.getUIContext().showAlertDialog({ title: translate('完整信息', this.uiLanguage),
+      message: `${record.displayName}\n${record.peerId}\n${record.fileType}\n${record.error}`,
+      textStyle: { wordBreak: WordBreak.BREAK_ALL },
+      primaryButton: { value: translate('关闭', this.uiLanguage), action: () => {} }
+    })
+  }
 
   aboutToAppear(): void {
     this.reload()
@@ -34,7 +41,7 @@ export struct FileTransferHistoryDialog {
         .alignItems(HorizontalAlign.Start)
 
         Button(translate('清空', this.uiLanguage))
-          .height(34)
+          .constraintSize({ minHeight: 34 })
           .fontSize(13)
           .fontColor(this.records.length > 0 ? RustDeskTheme.ERROR : this.secondaryTextColor())
           .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
@@ -43,7 +50,7 @@ export struct FileTransferHistoryDialog {
           .onClick(() => {
             this.confirmClear()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
       }
       .width('100%')
 
@@ -87,7 +94,7 @@ export struct FileTransferHistoryDialog {
       }
 
       Button(translate('关闭', this.uiLanguage))
-        .height(42)
+        .constraintSize({ minHeight: 42 })
         .width('100%')
         .fontSize(15)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -97,7 +104,7 @@ export struct FileTransferHistoryDialog {
         .onClick(() => {
           if (this.controller !== undefined) this.controller.close()
         })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
     }
     .width('92%')
     .height('78%')
@@ -113,7 +120,7 @@ export struct FileTransferHistoryDialog {
   buildFilterButton(label: string, value: string) {
     Button(translate(label, this.uiLanguage))
       .layoutWeight(1)
-      .height(34)
+      .constraintSize({ minHeight: 34 })
       .fontSize(13)
       .fontColor(this.filter === value ? Color.White : this.primaryTextColor())
       .backgroundColor(this.filter === value ? RustDeskTheme.ACCENT :
@@ -122,7 +129,7 @@ export struct FileTransferHistoryDialog {
       .onClick(() => {
         this.filter = value
       })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
   }
 
   @Builder
@@ -143,6 +150,8 @@ export struct FileTransferHistoryDialog {
           .fontColor(this.primaryTextColor())
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .accessibilityDescription(translate('长按查看完整内容', this.uiLanguage))
+          .gesture(LongPressGesture().onAction(() => { this.showRecordDetails(record) }))
         Text(translate(this.statusText(record.status), this.uiLanguage))
           .fontSize(12)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -154,8 +163,7 @@ export struct FileTransferHistoryDialog {
         .width('100%')
         .fontSize(12)
         .fontColor(this.secondaryTextColor())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .wordBreak(WordBreak.BREAK_ALL)
 
       Text(translate(`${this.formatFileSize(record.totalBytes)} · ${this.formatDuration(record.durationMs)} · 平均 ${this.formatSpeed(record.averageSpeed)}`, this.uiLanguage))
         .width('100%')
@@ -167,8 +175,13 @@ export struct FileTransferHistoryDialog {
           .layoutWeight(1)
           .fontSize(12)
           .fontColor(this.secondaryTextColor())
+        Button(translate('详情', this.uiLanguage))
+          .constraintSize({ minHeight: 36 }).fontSize(12)
+          .fontColor(this.primaryTextColor()).backgroundColor(Color.Transparent)
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+          .onClick(() => { this.showRecordDetails(record) })
         Button(translate('删除', this.uiLanguage))
-          .height(30)
+          .constraintSize({ minHeight: 30 })
           .fontSize(12)
           .fontColor(RustDeskTheme.ERROR)
           .backgroundColor(Color.Transparent)
@@ -176,7 +189,7 @@ export struct FileTransferHistoryDialog {
             FileTransferHistoryService.delete(record.id)
             this.reload()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
       }
       .width('100%')
 
@@ -185,8 +198,7 @@ export struct FileTransferHistoryDialog {
           .width('100%')
           .fontSize(12)
           .fontColor(RustDeskTheme.ERROR)
-          .maxLines(3)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .wordBreak(WordBreak.BREAK_ALL)
       }
     }
     .width('100%')

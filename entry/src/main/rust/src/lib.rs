@@ -8,6 +8,7 @@ mod session_recording;
 mod input_compat;
 mod session_health;
 mod file_transfer_state;
+mod session_recovery;
 use file_transfer_state::{TransferWatchdog, UploadTransferState, TRANSFER_IDLE_TIMEOUT};
 use performance::PerformanceConfig;
 #[cfg(test)]
@@ -4727,7 +4728,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                                 last_message_kind = message_kind;
                                 last_message_at = Instant::now();
                                 health.received(last_message_at);
-                                true
+                                message_kind != "misc_close_reason"
                             }
                             Some(Err(e)) => {
                                 if SESSION_ID.load(Ordering::SeqCst) == session_id {
@@ -4749,6 +4750,9 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                                 false
                             }
                             None => {
+                                if SESSION_ID.load(Ordering::SeqCst) == session_id {
+                                    emit_event("peer transport interrupted");
+                                }
                                 emit_event(&format!(
                                     "receive loop peer eof session_id={} elapsed_ms={} received={} video={} test_delay={} misc={} last_message={} last_message_age_ms={} route={} active={}",
                                     session_id,
@@ -5429,10 +5433,9 @@ fn handle_misc_message(misc_msg: Misc) -> &'static str {
             "misc_switch_display"
         }
         Some(misc::Union::CloseReason(reason)) => {
-            let reason = sanitize_remote_value(reason, 256);
             emit_event(&format!(
-                "peer close reason received value={}",
-                if reason.is_empty() { "empty" } else { &reason }
+                "peer close reason class={}",
+                session_recovery::classify_peer_close_reason(&reason)
             ));
             "misc_close_reason"
         }

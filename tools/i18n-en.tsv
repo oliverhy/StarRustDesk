@@ -1,4 +1,21 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+正在重新连接远端设备	Reconnecting to the remote device
+正在重新连接（第 {0} 次）	Reconnecting (attempt {0})
+连接暂时中断，正在重新连接…	Connection interrupted. Reconnecting...
+取消重连	Cancel reconnection
+重新连接失败，请重试	Reconnection failed. Please try again.
+断开远程连接	Disconnect remote session
+是否断开当前远程连接？正在进行的文件传输和录像也会停止。	Disconnect this session? Active file transfers and recording will also stop.
+继续远控	Continue session
+服务器配置或账号已改变，请返回首页重新连接	The server settings or account have changed. Return to the home page to reconnect.
+无法重新连接，请检查服务器账号与网络后重试	Unable to reconnect. Check the server account and network, then try again.
+远端已结束本次连接	The remote device ended this session
+完整信息	Full details
+缩小	Zoom out
+放大	Zoom in
+详情	Details
+查看完整信息	View full details
+长按查看完整内容	Long press to view the full text
 跟随系统	Follow system
 1.2.21（1002021）· 键盘输入、投屏鼠标与屏幕方向	1.2.21 (1002021) - Keyboard input, projected mouse and screen orientation
 新增独立键盘悬浮按钮，手机和平板不用展开“控”即可打开或收起软键盘，支持拖动调整位置。	Added a draggable floating keyboard button for phones and tablets to open or hide the soft keyboard without expanding Controls.
@@ -1316,6 +1333,13 @@ PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连�
 完善连接诊断，区分通道就绪、首包、密码挑战、请求入队和实际写出，记录等待阶段与超时原因；日志不包含密码、挑战内容或令牌。	Connection diagnostics distinguish transport readiness, first packet, password challenge, request queueing and actual network writes, and record waiting phases and timeout causes without passwords, challenge contents or tokens.
 等待远端确认	Waiting for remote confirmation
 正在准备传输	Preparing transfer
+1.3.5（1003005）· 重连保护与文字适配	1.3.5 (1003005) · Reconnection safeguards and readable layouts
+已登录的远控会话遇到传输中断、登录切换期间临时离线或连接超时时，在约 30 秒窗口内按退避间隔尝试自动重连；认证失败、远端主动结束及安全条件变化不会自动重连。	Previously authenticated remote sessions can reconnect with backoff within an approximately 30-second window after transport interruptions, temporary offline states during login switching or connection timeouts. Authentication failures, deliberate remote closure and changed security conditions do not trigger automatic reconnection.
+修复连接失败页“重试”反而退出远控的问题，改为保留当前页面重新连接；可取消等待中的重连，退出或切换账号、服务器后旧任务不能重新拉起连接，也不会自动沿用未加密连接授权。	Fixed Retry on the connection error page exiting remote control. It now reconnects in place, with cancellation for pending recovery. Stale tasks cannot reconnect after leaving or changing accounts or servers, and one-time unencrypted connection approval is not automatically reused.
+活动连接点击断开或返回退出时增加确认弹窗，降低误触退出概率；收起菜单、关闭键盘和退出全屏仍优先处理，不额外中断远控。	Added confirmation before deliberately disconnecting an active session from Disconnect or Back. Dismissing menus, hiding the keyboard and leaving fullscreen remain higher-priority actions that do not end remote control.
+优化已保存连接工具栏：搜索放在分组前、备份放在后面；展开后的搜索框与操作按钮保持协调，增加搜索框高度并适配窄窗口及大字体。	Refined the saved-connections toolbar: Search precedes Groups, with Backup last. The expanded search field aligns with the action buttons, has a taller touch area and adapts to narrow windows and large text.
+统一优化按钮与文字布局：操作按钮优先完整显示，说明文字自动换行，长连接名称支持查看完整内容；改善手机、平板、折叠屏及 PC 在大字体下的裁切与省略问题。	Improved button and text layouts throughout the app: action labels prioritize complete display, descriptions wrap and long connection names can be viewed in full. Reduced clipping and truncation with large text on phones, tablets, foldables and PCs.
+补充自动重连、取消、重试及退出确认诊断，区分远端主动关闭与网络中断；日志仍由诊断开关控制，不记录密码、令牌或输入内容。	Added diagnostics for automatic recovery, cancellation, manual retries and exit confirmation, distinguishing deliberate remote closure from interrupted transport. Logging still follows the diagnostic switch and does not record passwords, tokens or typed content.
 1.3.4（1003004）· 文件传输等待与完成确认修复	1.3.4 (1003004) · File transfer progress and completion confirmation fixes
 修复上传完成确认被误当成下载回复，导致进度变成 0 字节并一直显示“等待数据”的问题；上传、取回按任务独立处理，迟到或重复回复不再干扰其他任务。	Fixed upload completion acknowledgements being mistaken for download responses, leaving progress at 0 bytes and Waiting for data. Uploads and downloads are handled by task, and late or duplicate replies no longer interfere with other tasks.
 上传数据发送完毕后明确显示“等待远端确认”，收到对应任务的远端完成确认后才报告成功并清理本地临时文件，改善小文件、空文件及连续上传的状态一致性。	Uploads now show Waiting for remote confirmation after sending data. Success is reported and local staging files are removed only after the matching remote acknowledgement, improving state consistency for small files, empty files and queued uploads.

@@ -75,7 +75,7 @@ assert(builder.includes('.width(20).height(20)'));
 assert(builder.includes('.fillColor(this.controlMenuIconColor(category))'));
 assert(builder.includes('.hitTestBehavior(HitTestMode.None)'));
 assert(builder.includes('this.controlSelectedBackgroundColor()'));
-for (const action of ['this.disconnectSession()', 'this.toggleControlMenu(category)']) {
+for (const action of ['this.requestDisconnect()', 'this.toggleControlMenu(category)']) {
   assert(builder.includes(action), action);
 }
 assert(method('handleGlassMenuAction').includes('this.toggleRemoteKeyboard()'));

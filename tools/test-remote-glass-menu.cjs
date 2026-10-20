@@ -71,7 +71,8 @@ assert(segment.includes("!key.startsWith('mode-')"),'mouse and touch selection d
 assert(segment.includes("!key.startsWith('orientation-')"),'orientation selection does not show a checkmark');
 assert(widget.includes("this.state.category === 'orientation' && this.state.projection"),
  'only temporary projection orientation shows the session marker');
-assert(widget.includes('.height(this.metrics.footerHeight)'));
+assert(widget.includes('.constraintSize({ minHeight: this.metrics.footerHeight })'));
+assert(!widget.includes('.maxLines('), 'menu text can grow and scroll instead of being capped');
 assert(method(page,'getGlassMenuMetrics').includes('measureTextSize'),'orientation footer height follows translated text and font scale');
 const calls=[],pctx={exports:{},VIRTUAL_MODIFIER_CTRL:17,VIRTUAL_MODIFIER_ALT:18,VIRTUAL_MODIFIER_SHIFT:16,VIRTUAL_MODIFIER_META:91,
  MODIFIER_MASK_CTRL:2,MODIFIER_MASK_SHIFT:1,MODIFIER_MASK_ALT:4};

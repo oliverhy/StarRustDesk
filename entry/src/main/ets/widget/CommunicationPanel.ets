@@ -1,13 +1,15 @@
+import { readableInputHeight } from '../theme/ReadableLayout'
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { common } from '@kit.AbilityKit';
 import { CommunicationService, SessionChatMessage } from '../service/CommunicationService';
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier';
 
 // Controls visibility of the call actions without changing the call lifecycle.
 const VOICE_CALL_UI_ENABLED: boolean = true;
 
 @Component
 export struct CommunicationPanel {
+  @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('isDarkMode') isDarkMode: boolean = false;
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true;
@@ -71,30 +73,30 @@ export struct CommunicationPanel {
         Row() {
           Text(translate(VOICE_CALL_UI_ENABLED ? '聊天与通话' : '聊天', this.uiLanguage)).fontSize(19).fontWeight(FontWeight.Bold)
             .fontColor(this.isDarkMode ? '#F1F5F9' : '#17253D').layoutWeight(1);
-          Button(translate('关闭', this.uiLanguage)).height(36).fontSize(14).fontColor('#286BC2').backgroundColor('#DFEDFF')
+          Button(translate('关闭', this.uiLanguage)).constraintSize({ minHeight: 36 }).fontSize(14).fontColor('#286BC2').backgroundColor('#DFEDFF')
             .onClick(() => { this.onClose(); })
-            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
         }.width('100%');
         if (VOICE_CALL_UI_ENABLED) {
           Text(translate(this.statusText(), this.uiLanguage)).fontSize(13).fontColor(this.isDarkMode ? '#BFDBFE' : '#385D87').width('100%');
           Row({ space: 10 }) {
             if (this.state === 1 || this.state === 2) {
               if (this.state === 2) {
-                Button(translate(this.muted ? '开启麦克风' : '静音', this.uiLanguage)).height(38).fontSize(14)
+                Button(translate(this.muted ? '开启麦克风' : '静音', this.uiLanguage)).constraintSize({ minHeight: 38 }).fontSize(14)
                   .fontColor('#245FA5').backgroundColor(this.muted ? '#C7DFFF' : '#E5EFFF')
                   .onClick(() => { CommunicationService.toggleMute(); this.refresh(); })
-                  .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+                  .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
               }
-              Button(translate(this.state === 1 ? '取消呼叫' : '挂断', this.uiLanguage)).height(38).fontSize(14)
+              Button(translate(this.state === 1 ? '取消呼叫' : '挂断', this.uiLanguage)).constraintSize({ minHeight: 38 }).fontSize(14)
                 .fontColor('#B03040').backgroundColor('#FFE2E5')
                 .onClick(() => { CommunicationService.hangup(); this.refresh(); })
-                .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+                .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
             } else {
-              Button(translate('发起语音', this.uiLanguage)).height(38).fontSize(14).fontColor('#245FA5').backgroundColor('#DFEDFF')
+              Button(translate('发起语音', this.uiLanguage)).constraintSize({ minHeight: 38 }).fontSize(14).fontColor('#245FA5').backgroundColor('#DFEDFF')
                 .onClick(() => {
                   CommunicationService.call(this.getUIContext().getHostContext() as common.UIAbilityContext);
                 })
-                .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+                .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
             }
           }.width('100%');
         }
@@ -122,14 +124,14 @@ export struct CommunicationPanel {
           }.width('100%');
         }.width('100%').layoutWeight(1).scrollBar(BarState.Auto);
         Row({ space: 8 }) {
-          TextInput({ text: this.draft, placeholder: translate('输入聊天消息', this.uiLanguage) }).layoutWeight(1).height(42)
+          TextInput({ text: this.draft, placeholder: translate('输入聊天消息', this.uiLanguage) }).layoutWeight(1).height(readableInputHeight(42, this.uiFontScale, 18))
             .maxLength(1000).fontSize(15).fontColor(this.isDarkMode ? '#F1F5F9' : '#17253D')
             .backgroundColor(this.isDarkMode ? '#303E50' : '#EEF2F7')
             .enterKeyType(EnterKeyType.Send).onChange((text: string) => { this.draft = text; })
             .onSubmit(() => { this.send(); });
-          Button(translate('发送', this.uiLanguage)).height(42).width(64).fontSize(14).fontColor('#245FA5').backgroundColor('#D8E9FF')
+          Button(translate('发送', this.uiLanguage)).constraintSize({ minHeight: 42 }).width(64).fontSize(14).fontColor('#245FA5').backgroundColor('#D8E9FF')
             .enabled(this.draft.trim().length > 0).onClick(() => { this.send(); })
-            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule));
         }.width('100%');
         Text(translate(VOICE_CALL_UI_ENABLED ? '记录仅保留本次连接；已接通的语音在系统允许时可后台继续，挂断即停止采集，建议使用耳机。' : '聊天记录仅保留本次连接。', this.uiLanguage))
           .fontSize(11).fontColor(this.isDarkMode ? '#ABBBD0' : '#617089').width('100%');

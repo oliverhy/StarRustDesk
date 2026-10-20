@@ -174,7 +174,7 @@ test('compact connect has a small visual and preserves the 44vp touch target wit
   }
   const button = method('buildSavedConnectionConnectButton');
   assert(button.includes('.width(compact ? this.savedCompactConnectWidth() : 68)'));
-  assert(button.includes('.height(compact ? this.savedCompactConnectVisualHeight() : 32)'));
+  assert(button.includes('.constraintSize({ minHeight: compact ? this.savedCompactConnectVisualHeight() : 32 })'));
   assert(button.includes('.responseRegion({ x: 0, y: compact ? -(this.savedCompactActionHeight() - this.savedCompactConnectVisualHeight()) / 2 : 0,'));
   assert(button.includes("width: '100%', height: compact ? this.savedCompactActionHeight() : '100%'"));
 });
@@ -236,7 +236,7 @@ test('both views reuse the exact connect and more actions; compact rows are full
   assert(group.includes('${this.savedConnectionViewMode}'));
   const f = fixture(), calls = [], item = f.page.savedConnections[0];
   for (const name of ['connectSavedConnection', 'requestForSavedConnection', 'onConnect',
-    'openGroupPickerForConnection', 'openRenameConnectionDialog', 'editSavedConnection', 'deleteSavedConnection']) {
+    'showSavedConnectionDetails', 'openGroupPickerForConnection', 'openRenameConnectionDialog', 'editSavedConnection', 'deleteSavedConnection']) {
     f.page[name] = arg => calls.push([name, arg]);
   }
   f.context.item = item;
@@ -244,11 +244,11 @@ test('both views reuse the exact connect and more actions; compact rows are full
   vm.runInContext(`(function(){${click}}).call(page);`, Object.assign(f.context, { page: f.page }));
   const menu = method('buildSavedConnectionMoreButton').match(/\.bindMenu\((\[[\s\S]*?\]), \{ placement:/)[1];
   vm.runInContext(`globalThis.menu = (function(){return ${menu}}).call(page);`, f.context);
-  assert.equal(f.context.menu.length, 5);
+  assert.equal(f.context.menu.length, 6);
   f.context.menu.forEach(entry => entry.action());
-  assert.deepEqual(calls.map(([name]) => name), ['connectSavedConnection', 'requestForSavedConnection', 'onConnect',
+  assert.deepEqual(calls.map(([name]) => name), ['connectSavedConnection', 'showSavedConnectionDetails', 'requestForSavedConnection', 'onConnect',
     'openGroupPickerForConnection', 'openRenameConnectionDialog', 'editSavedConnection', 'deleteSavedConnection']);
-  assert.equal(calls[2][1], true); assert.equal(calls[3][1], item.id);
+  assert.equal(calls[1][1], item); assert.equal(calls[3][1], true); assert.equal(calls[4][1], item.id);
 });
 test('online dot respects the existing query switch and view never reloads cloud state', () => {
   assert.match(method('buildCompactSavedConnectionStatus'), /if \(this\.peerOnlineQueryEnabled\)/);

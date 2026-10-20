@@ -121,7 +121,7 @@ for(const name of ['buildToolbarButton','buildFullscreenButton','buildEdgeAutoPa
   assert(method(name).includes('.padding({ left: this.getControlActionPadding(), right: this.getControlActionPadding() })'));
 }
 assert(method('buildInputModeButton').includes('this.buildControlInputModeSelector()'));
-assert(method('buildControlInputModeChoice').includes('.height(this.getControlActionHeight())'));
+assert(method('buildControlInputModeChoice').includes('.constraintSize({ minHeight: this.getControlActionHeight() })'));
 assert(method('handleRemoteKeyboardHeightChange').includes('this.getUIContext().px2vp(height)'));
 assert(method('stopRemoteKeyboardTracking').includes('this.controlMenuKeyboardInset = 0'));
 console.log(`PASS compact control menus: ${cases} geometry/anchor combinations, fold/window/IME/font variants and production integration`);

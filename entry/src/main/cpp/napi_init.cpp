@@ -621,6 +621,7 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "stale receive loop ended",
         "receive loop ended",
         "peer transport interrupted",
+        "peer close reason class=",
         "file-operation ",
         "file-only session ",
         "skip stale peer command",
@@ -745,6 +746,18 @@ static void OnRustEvent(const char* message) {
     } else if (text == "file-only session ended") {
         if (g_connectionStatus.load() == 1 || g_connectionStatus.load() == 2 || g_connectionStatus.load() == 4) {
             SetLastConnectionMessage("文件连接结束，请检查远端文件权限、密码和网络");
+            g_connectionStatus.store(3);
+        }
+    } else if (text.rfind("peer close reason class=", 0) == 0) {
+        // Preserve terminal close reasons through EOF: never reconnect a peer
+        // that manually ended the session or rejected authentication.
+        if (g_connectionStatus.load() == 1 || g_connectionStatus.load() == 2 || g_connectionStatus.load() == 4) {
+            const std::string reason = text.substr(std::string("peer close reason class=").size());
+            SetLastConnectionMessage(reason == "offline" ? "远端设备已离线" :
+                reason == "manual" ? "远端已主动断开连接" :
+                reason == "rejected" ? "远端拒绝连接" : "远端已结束本次连接");
+            g_lastConnectionResult.store(-18);
+            g_connectionStartedAtMs.store(0);
             g_connectionStatus.store(3);
         }
     } else if (text == "peer transport interrupted") {

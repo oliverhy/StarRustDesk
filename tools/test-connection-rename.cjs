@@ -162,6 +162,6 @@ test('more menu and dialog dismiss/validation use the existing UI style', () => 
   assert(dialog.includes("text: this.connectionNameDraft"));
   assert(dialog.includes('this.connectionNameError'));
   assert(dialog.includes('this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD'));
-  assert.equal((dialog.match(/new ButtonShapeModifier/g) || []).length, 2);
+  assert.equal((dialog.match(/new ReadableButtonModifier/g) || []).length, 2);
 });
 console.log(`Saved connection rename: ${count} checks passed.`);

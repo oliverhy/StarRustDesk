@@ -1,6 +1,6 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier';
 import { KeyboardLayoutCapture } from '../model/PhysicalKeyboardLayout';
 
 @CustomDialog
@@ -55,7 +55,7 @@ export struct KeyboardLayoutCalibrationDialog {
         .fontColor(this.dark ? '#EFF4FB' : RustDeskTheme.TEXT_PRIMARY).width('100%')
       Scroll() {
         Column({ space: 12 }) {
-          Text(this.deviceName).fontSize(14).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.deviceName).fontSize(14).wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
             .fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
           Text(translate('只识别两个修饰键，不记录文字，也不会将校准按键发送到远端。取消不改变设置。', this.uiLanguage))
             .fontSize(12).fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
@@ -65,7 +65,7 @@ export struct KeyboardLayoutCalibrationDialog {
             .id('keyboardLayoutCapture').width('100%').constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
             .fontSize(14).focusable(true).focusOnTouch(true).onClick(() => { this.begin(); })
             .onKeyEvent((event: KeyEvent): boolean => { return this.handleKey(event); })
-            .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
           if (this.error) {
             Text(translate(this.error, this.uiLanguage)).fontSize(12).fontColor(RustDeskTheme.ERROR).width('100%')
           }
@@ -74,10 +74,10 @@ export struct KeyboardLayoutCalibrationDialog {
       Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.End, alignItems: ItemAlign.Center }) {
         Button(translate('取消', this.uiLanguage)).fontSize(14).margin({ right: 8, bottom: 4 })
           .constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
-          .onClick(() => { this.close(); }).attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+          .onClick(() => { this.close(); }).attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
         Button(translate('保存校准', this.uiLanguage)).fontSize(14).enabled(this.ready).margin({ bottom: 4 })
           .constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
-          .onClick(() => { this.save(); }).attributeModifier(new ButtonShapeModifier(this.roundedRectButtons))
+          .onClick(() => { this.save(); }).attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       }.width('100%')
     }.padding(20).width('92%').constraintSize({ maxWidth: 520, maxHeight: '90%' }).borderRadius(20)
       .backgroundColor(this.dark ? '#1E2A3A' : '#FFFFFF')

@@ -1,4 +1,5 @@
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
+import { readableInputHeight } from '../theme/ReadableLayout'
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { RustDeskNapi } from '../service/RustDeskNapi'
@@ -12,6 +13,7 @@ import { OperationDiagnostic } from '../service/OperationDiagnostic'
 
 @CustomDialog
 export struct ServerConfigDialog {
+  @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('isDarkMode') isDarkMode: boolean = false
@@ -68,10 +70,12 @@ export struct ServerConfigDialog {
   build() {
     Scroll() {
     Column({ space: 12 }) {
-      Button(translate(this.scanning ? '扫描中' : '扫码导入服务器配置', this.uiLanguage)).height(32).fontSize(13)
+      Button(translate(this.scanning ? '扫描中' : '扫码导入服务器配置', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
         .enabled(!this.scanning).onClick(() => { this.scanConfig() })
-      Button(translate(this.showQr ? '收起配置二维码' : '显示配置二维码', this.uiLanguage)).height(32).fontSize(13)
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+      Button(translate(this.showQr ? '收起配置二维码' : '显示配置二维码', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
         .enabled(this.idServer.trim().length > 0).onClick(() => { this.showQr = !this.showQr })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       if (this.showQr) {
         QRCode(new ServerConfigModel(this.idServer, this.relayServer, this.apiServer, this.serverKey).toQrPayload())
           .width(180).height(180).color(Color.Black).backgroundColor(Color.White)
@@ -88,7 +92,7 @@ export struct ServerConfigDialog {
           .textAlign(TextAlign.Start)
 
         Button(translate('导入', this.uiLanguage))
-          .height(30)
+          .constraintSize({ minHeight: 30 })
           .fontSize(12)
           .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
@@ -97,10 +101,10 @@ export struct ServerConfigDialog {
           .onClick(() => {
             this.importServerConfigFromClipboard()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
 
         Button(translate('导出', this.uiLanguage))
-          .height(30)
+          .constraintSize({ minHeight: 30 })
           .fontSize(12)
           .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
           .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
@@ -109,7 +113,7 @@ export struct ServerConfigDialog {
           .onClick(() => {
             this.exportServerConfigToClipboard()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width('100%')
 
@@ -172,7 +176,7 @@ export struct ServerConfigDialog {
               this.controller.close()
             }
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
 
         Button(translate('Test Connection', this.uiLanguage))
           .fontColor(Color.White)
@@ -183,7 +187,7 @@ export struct ServerConfigDialog {
           .onClick(() => {
             this.testConnection()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
 
         Button(translate('OK', this.uiLanguage))
           .fontColor(Color.White)
@@ -194,7 +198,7 @@ export struct ServerConfigDialog {
           .onClick(() => {
             this.saveConfig()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
       }
       .width('100%')
       .padding({ top: 8 })
@@ -294,7 +298,7 @@ export struct ServerConfigDialog {
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
       TextInput({ placeholder: translate(label, this.uiLanguage), text: value })
-        .height(44)
+        .height(readableInputHeight(44, this.uiFontScale, 18))
         .fontSize(14)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
         .placeholderColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)

@@ -1,3 +1,4 @@
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { SessionRecording } from '../service/SessionRecording';
 import { common } from '@kit.AbilityKit';
@@ -7,6 +8,7 @@ import { OperationDiagnostic } from '../service/OperationDiagnostic';
 @CustomDialog
 export struct RecordingDialog {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
+  @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   controller: CustomDialogController;
   @State files: string[] = [];
   @State message: string = '';
@@ -35,9 +37,11 @@ export struct RecordingDialog {
         Column({ space: 10 }) {
           ForEach(this.files, (name: string) => {
             Row({ space: 8 }) {
-              Text(translate(name, this.uiLanguage)).fontSize(12).layoutWeight(1).maxLines(2)
-              Button(translate('导出', this.uiLanguage)).height(34).fontSize(12).enabled(!this.busy).onClick(() => { this.exportFile(name); })
-              Button(translate('删除', this.uiLanguage)).height(34).fontSize(12).enabled(!this.busy).onClick(() => { this.remove(name); })
+              Text(name).fontSize(12).layoutWeight(1).wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
+              Button(translate('导出', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12).enabled(!this.busy).onClick(() => { this.exportFile(name); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+              Button(translate('删除', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12).enabled(!this.busy).onClick(() => { this.remove(name); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
             }.width('100%')
           }, (name: string) => name)
           if (!this.files.length) { Text(translate('暂无已结束的录像', this.uiLanguage)).fontSize(14) }
@@ -45,6 +49,7 @@ export struct RecordingDialog {
       }.layoutWeight(1).width('100%')
       Text(translate(this.message, this.uiLanguage)).fontSize(13)
       Button(translate('关闭', this.uiLanguage)).enabled(!this.busy).onClick(() => { this.controller.close(); })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     }.padding(20).width('94%').constraintSize({ maxWidth: 650 }).height('70%').borderRadius(20)
       .backgroundColor(this.dark ? '#1E2A3A' : '#FFFFFF').foregroundColor(this.dark ? '#EFF4FB' : '#17253D')
   }

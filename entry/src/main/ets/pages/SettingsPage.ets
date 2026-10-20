@@ -1,3 +1,5 @@
+import { readableInputHeight } from '../theme/ReadableLayout'
+import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 ﻿import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
@@ -172,7 +174,7 @@ export struct SettingsPage {
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
-      .height(this.pageWidth >= 820 ? 116 : 104)
+      .constraintSize({ minHeight: this.pageWidth >= 820 ? 116 : 104 })
       .padding({ left: this.pageWidth >= 820 ? 32 : 16, right: this.pageWidth >= 820 ? 32 : 16, top: 24, bottom: 18 })
 
       Scroll() {
@@ -214,10 +216,7 @@ export struct SettingsPage {
       Row({ space: 12 }) {
         Text(translate('Language', this.uiLanguage))
           .fontSize(17)
-          .minFontSize(13)
-          .maxFontSize(17)
-          .maxLines(1)
-          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .wordBreak(WordBreak.BREAK_ALL)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
           .layoutWeight(1)
@@ -225,10 +224,7 @@ export struct SettingsPage {
           Row({ space: 8 }) {
             Text(this.languagePreferenceLabel())
               .fontSize(14)
-              .minFontSize(11)
-              .maxFontSize(14)
-              .maxLines(2)
-              .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+              .wordBreak(WordBreak.BREAK_ALL)
               .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
               .layoutWeight(1)
             Text('▾')
@@ -626,7 +622,7 @@ export struct SettingsPage {
           .onClick(() => {
             this.syncCloudNow(false, false)
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
         Button(translate('从云端恢复', this.uiLanguage))
           .fontSize(14)
           .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
@@ -637,7 +633,7 @@ export struct SettingsPage {
           .onClick(() => {
             this.confirmCloudRestore()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
       }
       .width('100%')
       .padding({ top: 10, bottom: 6 })
@@ -1311,10 +1307,7 @@ export struct SettingsPage {
       Row({ space: 12 }) {
         Text(translate('按钮样式', this.uiLanguage))
           .fontSize(16)
-          .minFontSize(13)
-          .maxFontSize(16)
-          .maxLines(1)
-          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+          .wordBreak(WordBreak.BREAK_ALL)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
           .layoutWeight(1)
@@ -1322,10 +1315,7 @@ export struct SettingsPage {
           Row({ space: 8 }) {
             Text(this.buttonShapeLabel())
               .fontSize(14)
-              .minFontSize(11)
-              .maxFontSize(14)
-              .maxLines(2)
-              .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+              .wordBreak(WordBreak.BREAK_ALL)
               .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
               .layoutWeight(1)
             Text('▾')
@@ -1424,6 +1414,7 @@ export struct SettingsPage {
 
 @CustomDialog
 struct SettingsPasswordDialog {
+  @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('isDarkMode') isDarkMode: boolean = false
@@ -1454,7 +1445,7 @@ struct SettingsPasswordDialog {
       }
 
       TextInput({ placeholder: translate('Password', this.uiLanguage), text: this.password })
-        .height(40)
+        .height(readableInputHeight(40, this.uiFontScale, 18))
         .fontSize(14)
         .type(InputType.Password)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
@@ -1469,7 +1460,7 @@ struct SettingsPasswordDialog {
         })
 
       TextInput({ placeholder: translate('Confirm Password', this.uiLanguage), text: this.passwordConfirm })
-        .height(40)
+        .height(readableInputHeight(40, this.uiFontScale, 18))
         .fontSize(14)
         .type(InputType.Password)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
@@ -1502,7 +1493,7 @@ struct SettingsPasswordDialog {
             this.errorMsg = ''
             this.onCancel()
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
 
         Button(translate('Save', this.uiLanguage))
           .fontColor(Color.White)
@@ -1524,7 +1515,7 @@ struct SettingsPasswordDialog {
             this.errorMsg = ''
             this.onSave(password)
           })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }
       .width('100%')
       .padding({ top: 8 })

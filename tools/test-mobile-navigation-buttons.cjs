@@ -34,7 +34,7 @@ function Button(label) {
 }
 const context = vm.createContext({ exports: {}, RustDeskNapi: native, translate: key => key,
   hilog: { info() {}, warn() {} }, Button,
-  ButtonType: { Capsule: 1 }, ButtonShapeModifier: class {},
+  ButtonType: { Capsule: 1 }, ButtonShapeModifier: class {}, ReadableButtonModifier: class {},
   TextHeightAdaptivePolicy: { MAX_LINES_FIRST: 0 },
   LongPressGesture: options => ({ onAction: callback => ({ ...options, callback }) }),
   RustDeskTheme: { FONT_WEIGHT_SEMI_BOLD: 600 }
@@ -79,7 +79,7 @@ for (const vertical of [false, true]) {
         const button = buttons[0];
         assert.equal(button.label, label);
         assert.equal(button.width, vertical ? 96 : 48);
-        assert.equal(button.height, 38);
+        assert.equal(button.constraintSize.minHeight, 38, 'keycaps may grow when text requires more height');
         assert.equal(button.fontSize, 20);
         assert.equal(button.accessibilityText, accessible);
         assert.equal(button.focusable, false);
