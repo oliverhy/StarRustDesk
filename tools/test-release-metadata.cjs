@@ -9,7 +9,7 @@ const notes = read('entry/src/main/ets/widget/ReleaseNotesDialog.ets');
 const literal = name => notes.match(new RegExp(`export const ${name}: string = '([^']+)'`))[1];
 assert.equal(literal('RELEASE_NOTES_VERSION'), app.versionName);
 assert.equal(literal('RELEASE_NOTES_BUILD'), String(app.versionCode));
-assert(notes.includes('`${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`'),
+assert(notes.includes('`${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`'),
   'first-launch marker must change with the released version/build');
 const firstSection = notes.match(/this\.buildSection\('([^']+)'/)[1];
 assert(firstSection.startsWith(`${app.versionName}（${app.versionCode}）`),

@@ -1757,7 +1757,7 @@ struct RemotePage {
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly) {
         this.buildFloatingToolbar();
       }
-      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() && this.remoteToolbarCollapsed &&
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() &&
         !this.showGestureHelp && !this.showKeyboardSettings && !this.showMouseSettings && !this.showKeyboardCalibration &&
         !this.showRemoteFileBrowser && !this.showMobileActions &&
         !this.showToolbarOrderEditor && !this.showCommunicationPanel) {
@@ -4454,6 +4454,16 @@ struct RemotePage {
   }
 
   @Builder
+  buildVirtualMouseWheelIcon(direction: number) {
+    Image(direction < 0 ? $r('app.media.virtual_mouse_wheel_up') :
+      (direction > 0 ? $r('app.media.virtual_mouse_wheel_down') : $r('app.media.virtual_mouse_wheel_grip')))
+    .width(12)
+    .height(12)
+    .objectFit(ImageFit.Contain)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
   buildVirtualMouseOverlay() {
     Stack({ alignContent: Alignment.TopStart }) {
       Button('×')
@@ -4471,7 +4481,7 @@ struct RemotePage {
       Stack({ alignContent: Alignment.TopStart }) {
         Button(translate('左键', this.uiLanguage), { type: ButtonType.Normal })
           .width(29)
-          .constraintSize({ minHeight: 67 })
+          .height(67)
           .padding(0)
           .fontSize(9)
           .fontWeight(FontWeight.Medium)
@@ -4482,11 +4492,10 @@ struct RemotePage {
           .position({ x: 0, y: 0 })
           .onTouch((event: TouchEvent) => { this.handleVirtualMouseButtonTouch('left', event); })
           .onClick(() => { this.clickVirtualMouseButtonFallback('left'); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
 
         Button(translate('右键', this.uiLanguage), { type: ButtonType.Normal })
           .width(29)
-          .constraintSize({ minHeight: 67 })
+          .height(67)
           .padding(0)
           .fontSize(9)
           .fontWeight(FontWeight.Medium)
@@ -4497,31 +4506,43 @@ struct RemotePage {
           .position({ x: 51, y: 0 })
           .onTouch((event: TouchEvent) => { this.handleVirtualMouseButtonTouch('right', event); })
           .onClick(() => { this.clickVirtualMouseButtonFallback('right'); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
 
-        Column({ space: 1 }) {
-          Button('⌃')
-            .width(22).height(18).padding(0).fontSize(12).fontColor('#CCFFFFFF')
+        // Input surfaces keep their own geometry; text-button adaptation must not
+        // enlarge the wheel or push either arrow into the movement handle.
+        Stack({ alignContent: Alignment.TopStart }) {
+          Button({ type: ButtonType.Normal }) {
+            this.buildVirtualMouseWheelIcon(-1)
+          }
+            .width(22).height(18).padding(0).borderRadius(0)
+            .position({ x: 0, y: 1 })
             .backgroundColor(Color.Transparent)
+            .accessibilityText(translate('向上滚动', this.uiLanguage))
             .onClick(() => { this.sendVirtualMouseWheel(-VIRTUAL_MOUSE_WHEEL_BUTTON_STEP); })
-          Button('≡')
-            .width(22).constraintSize({ minHeight: 28 }).padding(0).fontSize(12).fontColor('#CCFFFFFF')
+          Button({ type: ButtonType.Normal }) {
+            this.buildVirtualMouseWheelIcon(0)
+          }
+            .width(22).height(29).padding(0).borderRadius(0)
+            .position({ x: 0, y: 19 })
             .backgroundColor(Color.Transparent)
+            .accessibilityText(translate('中键', this.uiLanguage))
             .onTouch((event: TouchEvent) => { this.handleVirtualMouseWheelTouch(event); })
             .onClick(() => { this.clickVirtualMouseButtonFallback('middle'); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-          Button('⌄')
-            .width(22).height(18).padding(0).fontSize(12).fontColor('#CCFFFFFF')
+          Button({ type: ButtonType.Normal }) {
+            this.buildVirtualMouseWheelIcon(1)
+          }
+            .width(22).height(18).padding(0).borderRadius(0)
+            .position({ x: 0, y: 48 })
             .backgroundColor(Color.Transparent)
+            .accessibilityText(translate('向下滚动', this.uiLanguage))
             .onClick(() => { this.sendVirtualMouseWheel(VIRTUAL_MOUSE_WHEEL_BUTTON_STEP); })
         }
         .width(22)
         .height(67)
-        .padding({ top: 1, bottom: 1 })
         .backgroundColor('#59202E42')
         .border({ width: 0.6, color: '#66DCEBFF' })
         .borderRadius(12)
         .position({ x: 29, y: 0 })
+        .clip(true)
         .zIndex(2)
 
         Button({ type: ButtonType.Normal }) {

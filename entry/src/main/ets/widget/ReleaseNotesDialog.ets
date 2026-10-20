@@ -4,7 +4,7 @@ import { RustDeskTheme } from '../theme/RustDeskTheme'
 
 export const RELEASE_NOTES_VERSION: string = '1.3.5'
 export const RELEASE_NOTES_BUILD: string = '1003005'
-export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
+export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}-r1`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
 @CustomDialog
@@ -48,7 +48,9 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
-          this.buildSection('1.3.5（1003005）· 重连保护与文字适配', [
+          this.buildSection('1.3.5（1003005）· 修订 r1：重连保护与操控优化', [
+            '修复虚拟鼠标滚轮上下箭头错位及中键图案不清晰的问题：滚轮改为固定三段布局与 SVG 图标，不随系统字体撑高；左右键保留独立尺寸，避免挤入下方移动区域。',
+            '手机和平板的独立键盘悬浮按钮在“控”展开和折叠时均保留，继续支持拖动和一键打开、收起软键盘；文件传输模式及设置、聊天等弹层的隐藏规则保持不变。',
             '已登录的远控会话遇到传输中断、登录切换期间临时离线或连接超时时，在约 30 秒窗口内按退避间隔尝试自动重连；认证失败、远端主动结束及安全条件变化不会自动重连。',
             '修复连接失败页“重试”反而退出远控的问题，改为保留当前页面重新连接；可取消等待中的重连，退出或切换账号、服务器后旧任务不能重新拉起连接，也不会自动沿用未加密连接授权。',
             '活动连接点击断开或返回退出时增加确认弹窗，降低误触退出概率；收起菜单、关闭键盘和退出全屏仍优先处理，不额外中断远控。',

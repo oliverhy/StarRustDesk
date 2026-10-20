@@ -41,6 +41,28 @@ assert(builder.includes('.accessibilityText('));
 assert(builder.includes('PanGesture('));
 assert(!builder.includes('remoteToolbarCollapsed') && !builder.includes('keyboardToolsCollapsed'));
 assert.match(source, /!this\.fileOnly && this\.isHandheldDevice\(\) &&[\s\S]*this\.buildKeyboardLauncher\(\)/);
+// Execute the actual rendering gate, not just the launcher's own builder.
+const call = source.indexOf('this.buildKeyboardLauncher();');
+const gateSource = source.slice(source.lastIndexOf('      if (', call), call);
+const expression = gateSource.slice(gateSource.indexOf('(') + 1, gateSource.lastIndexOf(') {'));
+const visible = new Function('ConnectionStatus', `return function () { return (${expression}); };`)({ CONNECTED: 2 });
+const gates = ['showGestureHelp', 'showKeyboardSettings', 'showMouseSettings', 'showKeyboardCalibration',
+  'showRemoteFileBrowser', 'showMobileActions', 'showToolbarOrderEditor', 'showCommunicationPanel'];
+function state() {
+  return { connectionStatus: 2, fileOnly: false, isHandheldDevice: () => true,
+    ...Object.fromEntries(gates.map(name => [name, false])) };
+}
+assert(!/remoteToolbarCollapsed|keyboardToolsCollapsed/.test(expression), 'visibility must not depend on either toolbar collapse state');
+for (const remoteToolbarCollapsed of [false, true]) for (const keyboardToolsCollapsed of [false, true]) {
+  for (const showKeyboardPanel of [false, true]) {
+    const p = { ...state(), remoteToolbarCollapsed, keyboardToolsCollapsed, showKeyboardPanel };
+    assert(visible.call(p), 'launcher stays mounted with controls expanded/collapsed and keyboard open/closed');
+    for (const name of gates) assert(!visible.call({ ...p, [name]: true }), `modal gate ${name} remains in force`);
+    assert(!visible.call({ ...p, fileOnly: true }), 'no keyboard launcher in file-only session');
+    assert(!visible.call({ ...p, isHandheldDevice: () => false }), 'desktop policy remains unchanged');
+    for (const connectionStatus of [0, 1, 3, 4]) assert(!visible.call({ ...p, connectionStatus }), 'only connected sessions show launcher');
+  }
+}
 const viewport = method('buildRemoteViewport');
 assert(viewport.includes('.focusOnTouch(!this.showKeyboardPanel)'));
 assert(viewport.includes('.focusable(!this.showKeyboardPanel)'));

@@ -83,7 +83,7 @@ expect(remotePage, /handleVirtualMouseWheelTouch[\s\S]*virtualMouseWheelTouchMov
   'the center wheel must distinguish scrolling from a middle click')
 expect(remotePage, /VIRTUAL_MOUSE_WHEEL_BUTTON_STEP:\s*number\s*=\s*3[\s\S]*sendVirtualMouseWheel/,
   'virtual wheel buttons must send a visible multi-step scroll')
-expect(remotePage, /Button\('⌄'\)[\s\S]*?\.position\(\{ x: 29, y: 0 \}\)[\s\S]*?\.zIndex\(2\)/,
+expect(remotePage, /buildVirtualMouseWheelIcon\(1\)[\s\S]*?\.position\(\{ x: 29, y: 0 \}\)[\s\S]*?\.zIndex\(2\)/,
   'virtual wheel controls must stay above the overlapping mouse drag body')
 expect(remotePage, /setKeyboardAvoidMode\(KeyboardAvoidMode\.RESIZE\)/,
   'the keyboard must resize the available area for floating controls')
