@@ -4,6 +4,7 @@ import { FullTextDialog } from '../widget/FullTextDialog'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { inputCompatibilityKey, selectedKeyboardMode, selectedCursorMode, shouldSuppressCursor } from '../model/InputCompatibility';
 import { PhysicalMouseDeduplicator, isTouchOnlyMouseEvent } from '../model/PhysicalMousePolicy';
+import { RemoteWheelNormalizer, RemoteWheelStep } from '../model/RemoteWheelNormalizer';
 import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavigationKeys } from '../model/RemoteNavigationKeys';
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
@@ -73,8 +74,6 @@ interface DownloadedFileCandidate {
   size: number;
 }
 
-const REMOTE_WHEEL_SCALE: number = 0.08;
-const TOUCH_SCROLL_SCALE: number = 0.12;
 const TOUCHPAD_POINTER_SPEED: number = 1.25;
 const TOUCH_MOVE_THRESHOLD: number = 12;
 const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 340;
@@ -102,7 +101,7 @@ const VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN: number = VIRTUAL_MOUSE_HEIGHT * 2 + 3
 const VIRTUAL_MOUSE_POINTER_HOT_X: number = 1;
 const VIRTUAL_MOUSE_POINTER_HOT_Y: number = 1;
 const VIRTUAL_MOUSE_BUTTON_DRAG_THRESHOLD: number = 8;
-const VIRTUAL_MOUSE_WHEEL_BUTTON_STEP: number = 3;
+const VIRTUAL_MOUSE_WHEEL_BUTTON_STEP: number = 1;
 const NATIVE_MOUSE_ACTION_PRESS: number = 1;
 const NATIVE_MOUSE_ACTION_RELEASE: number = 2;
 const NATIVE_MOUSE_ACTION_MOVE: number = 3;
@@ -483,9 +482,10 @@ struct RemotePage {
   private leftButtonHeldAt: number = 0;
   private preferAuthoritativeCursor: boolean = false;
   private lastPinchUpdateAt: number = 0;
-  private lastWheelSentAt: number = 0;
-  private wheelRemainderX: number = 0;
-  private wheelRemainderY: number = 0;
+  private remoteWheel: RemoteWheelNormalizer = new RemoteWheelNormalizer();
+  private wheelDiagnosticAt: number = 0;
+  private wheelDiagnosticEvents: number = 0;
+  private wheelDiagnosticLimited: number = 0;
   private lastDisplayPollAt: number = 0;
   // The remote peer reports its current display in the login response, but it
   // does not continuously acknowledge display switches. Keep the user's local
@@ -1058,6 +1058,10 @@ struct RemotePage {
   }
 
   resetRemoteViewportForSession(): void {
+    this.remoteWheel.reset();
+    this.wheelDiagnosticAt = 0;
+    this.wheelDiagnosticEvents = 0;
+    this.wheelDiagnosticLimited = 0;
     const mode: string = this.peerPreferences?.get('desktop-view-mode') ?? '';
     this.desktopViewMode = mode === 'original' || mode === 'custom' ? mode : 'adaptive';
     const percent: number = Number(this.peerPreferences?.get('desktop-custom-percent') || '100');
@@ -4428,12 +4432,14 @@ struct RemotePage {
   }
 
   sendVirtualMouseWheel(delta: number): void {
-    if (delta === 0) return;
+    if (!Number.isFinite(delta) || delta === 0 || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    const step: RemoteWheelStep = this.remoteWheel.convert(0, Math.sign(delta), 'virtual', -1, Date.now());
+    if (step.y === 0) return;
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.requestRemoteInputFocus();
-    ConnectionService.sendMouseWheel(0, delta);
-    RustDeskNapi.appendDiagnosticLog('input', `virtual_mouse_wheel delta=${delta}`);
+    ConnectionService.sendMouseWheel(0, step.y);
+    RustDeskNapi.appendDiagnosticLog('input', `virtual_mouse_wheel delta=${step.y}`);
   }
 
   virtualMouseOverlayX(): number {
@@ -6291,6 +6297,7 @@ struct RemotePage {
   }
 
   cancelActiveTouchGesture(): void {
+    this.remoteWheel.reset();
     this.discardViewportPanFrame();
     this.relativePointerSampleValid = false;
     this.stopEdgeAutoPan();
@@ -6953,55 +6960,34 @@ struct RemotePage {
       return;
     }
     if (event.action !== AxisAction.UPDATE && event.action !== AxisAction.BEGIN) {
+      this.remoteWheel.reset();
       return;
     }
     this.syncModifiersFromPointerEvent(event);
-
-    let deltaX: number = this.scaleRemoteWheelDeltaX(event.getHorizontalAxisValue());
-    let deltaY: number = this.scaleRemoteWheelDeltaY(event.getVerticalAxisValue());
-    if (Math.abs(deltaX) < 0.01 && Math.abs(deltaY) < 0.01) {
+    const rawX: number = event.getHorizontalAxisValue();
+    const rawY: number = event.getVerticalAxisValue();
+    const source: string = event.sourceTool === SourceTool.TOUCHPAD ? 'touchpad' : 'mouse';
+    const now: number = Date.now();
+    const step: RemoteWheelStep = this.remoteWheel.convert(rawX, -rawY, source, event.deviceId ?? -1, now);
+    this.wheelDiagnosticEvents++;
+    if (step.limited) this.wheelDiagnosticLimited++;
+    if (now - this.wheelDiagnosticAt >= 1000) {
+      RustDeskNapi.appendDiagnosticLog('input', `wheel_axis source=${source} tool=${event.sourceTool} ` +
+        `scroll_step=${event.scrollStep ?? 0} raw_x=${rawX} raw_y=${rawY} x=${step.x} y=${step.y} ` +
+        `events=${this.wheelDiagnosticEvents} limited=${this.wheelDiagnosticLimited}`);
+      this.wheelDiagnosticAt = now;
+      this.wheelDiagnosticEvents = 0;
+      this.wheelDiagnosticLimited = 0;
+    }
+    if (step.x === 0 && step.y === 0) {
       return;
     }
 
     this.stopEdgeAutoPan();
-    let now: number = Date.now();
-    if (now - this.lastWheelSentAt < 8) {
-      this.wheelRemainderX += deltaX;
-      this.wheelRemainderY += deltaY;
-      return;
-    }
-    this.lastWheelSentAt = now;
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.requestRemoteInputFocus();
-    ConnectionService.sendMouseWheel(deltaX, deltaY);
-  }
-
-  scaleRemoteWheelDeltaX(delta: number): number {
-    this.wheelRemainderX += delta * REMOTE_WHEEL_SCALE;
-    let step: number = this.takeWholeWheelStep(this.wheelRemainderX);
-    this.wheelRemainderX -= step;
-    return step;
-  }
-
-  scaleRemoteWheelDeltaY(delta: number): number {
-    this.wheelRemainderY += -delta * REMOTE_WHEEL_SCALE;
-    let step: number = this.takeWholeWheelStep(this.wheelRemainderY);
-    this.wheelRemainderY -= step;
-    return step;
-  }
-
-  takeWholeWheelStep(delta: number): number {
-    if (Math.abs(delta) < 0.01) {
-      return 0;
-    }
-    if (delta >= 1) {
-      return Math.floor(delta);
-    }
-    if (delta <= -1) {
-      return Math.ceil(delta);
-    }
-    return 0;
+    ConnectionService.sendMouseWheel(step.x, step.y);
   }
 
   mapMouseAction(event: MouseEvent): number {
@@ -7601,14 +7587,9 @@ struct RemotePage {
   }
 
   sendTouchScroll(deltaX: number, deltaY: number): void {
-    this.wheelRemainderX += -deltaX * TOUCH_SCROLL_SCALE;
-    this.wheelRemainderY += -deltaY * TOUCH_SCROLL_SCALE;
-    let stepX: number = this.takeWholeWheelStep(this.wheelRemainderX);
-    let stepY: number = this.takeWholeWheelStep(this.wheelRemainderY);
-    this.wheelRemainderX -= stepX;
-    this.wheelRemainderY -= stepY;
-    if (stepX !== 0 || stepY !== 0) {
-      ConnectionService.sendMouseWheel(stepX, stepY);
+    const step: RemoteWheelStep = this.remoteWheel.convert(-deltaX, -deltaY, 'touch', -1, Date.now());
+    if (step.x !== 0 || step.y !== 0) {
+      ConnectionService.sendMouseWheel(step.x, step.y);
     }
   }
 

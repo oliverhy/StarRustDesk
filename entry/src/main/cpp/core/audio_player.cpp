@@ -1,7 +1,9 @@
 #include "audio_player.h"
+#include "diagnostic_log.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <hilog/log.h>
 #include <ohaudio/native_audiostreambuilder.h>
 
@@ -25,7 +27,14 @@ AudioPlayer& AudioPlayer::instance() {
 }
 
 AudioPlayer::~AudioPlayer() {
-    stop();
+    // DiagnosticLog may already have been destroyed during static teardown.
+    OH_AudioRenderer* renderer = nullptr;
+    OpusDecoder* decoder = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        detachLocked(renderer, decoder);
+    }
+    releaseDetached(renderer, decoder);
 }
 
 int AudioPlayer::start(int sampleRate, int channels) {
@@ -43,9 +52,14 @@ int AudioPlayer::start(int sampleRate, int channels) {
 
     OH_AudioRenderer* oldRenderer = nullptr;
     OpusDecoder* oldDecoder = nullptr;
+    reportDiagnostics(true, "restart");
     {
         std::lock_guard<std::mutex> lock(mutex_);
         detachLocked(oldRenderer, oldDecoder);
+        health_ = {};
+        ++generation_;
+        healthStartedAt_ = NowMs();
+        lastReportAt_ = 0;
     }
     releaseDetached(oldRenderer, oldDecoder);
 
@@ -72,6 +86,8 @@ int AudioPlayer::start(int sampleRate, int channels) {
 
     OH_AudioRenderer_Callbacks callbacks {};
     callbacks.OH_AudioRenderer_OnWriteData = AudioPlayer::OnWriteData;
+    callbacks.OH_AudioRenderer_OnInterruptEvent = AudioPlayer::OnInterrupt;
+    callbacks.OH_AudioRenderer_OnError = AudioPlayer::OnError;
     OH_AudioStreamBuilder_SetRendererCallback(builder, callbacks, this);
 
     OH_AudioRenderer* renderer = nullptr;
@@ -119,6 +135,7 @@ int AudioPlayer::start(int sampleRate, int channels) {
 
 void AudioPlayer::stop() {
     std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+    reportDiagnostics(true, "stop");
     OH_AudioRenderer* renderer = nullptr;
     OpusDecoder* decoder = nullptr;
     {
@@ -129,25 +146,35 @@ void AudioPlayer::stop() {
 }
 
 void AudioPlayer::pushOpusFrame(const uint8_t* data, int length) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++health_.receivedFrames;
+    health_.lastPacketAt = NowMs();
     if (data == nullptr || length <= 0) {
+        ++health_.invalidDrops;
         return;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    health_.receivedBytes += static_cast<uint64_t>(length);
     if (!running_ || decoder_ == nullptr || decodeBuffer_.empty()) {
+        ++health_.inactiveDrops;
         return;
     }
 
     int frameSize = opus_decode(decoder_, data, length, decodeBuffer_.data(),
                                 static_cast<int>(decodeBuffer_.size() / channels_), 0);
     if (frameSize <= 0) {
+        ++health_.decodeErrors;
+        health_.lastDecodeError = frameSize;
         OH_LOG_WARN(LOG_APP, "opus decode failed result=%{public}d", frameSize);
         return;
     }
     int sampleCount = frameSize * channels_;
+    ++health_.decodedFrames;
+    health_.decodedSamples += static_cast<uint64_t>(sampleCount);
     queue_.insert(queue_.end(), decodeBuffer_.data(), decodeBuffer_.data() + sampleCount);
     lastFrameAtMs_ = NowMs();
     while (queue_.size() > MAX_BUFFERED_SAMPLES) {
         queue_.pop_front();
+        ++health_.overflowSamples;
     }
 }
 
@@ -161,7 +188,71 @@ bool AudioPlayer::hasRecentFrames(int64_t maxAgeMs) const {
     return running_ && lastFrameAtMs_ > 0 && NowMs() - lastFrameAtMs_ <= maxAgeMs;
 }
 
-int32_t AudioPlayer::OnWriteData(OH_AudioRenderer*, void* userData, void* buffer, int32_t length) {
+void AudioPlayer::noteMutedFrame() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++health_.mutedDrops;
+}
+
+void AudioPlayer::reportDiagnostics(bool force, const char* reason) {
+    std::string message;
+    bool warning = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int64_t now = NowMs();
+        if (!running_ && health_.receivedFrames == 0 && health_.mutedDrops == 0) return;
+        if (!force && lastReportAt_ != 0 && now - lastReportAt_ < 10000) return;
+        lastReportAt_ = now;
+        const char* phase = !running_ ? "inactive" : health_.receivedFrames == 0 ? "awaiting_packets" :
+            health_.decodedFrames == 0 ? "no_decoded_pcm" : health_.writeCallbacks == 0 ? "awaiting_callback" :
+            health_.renderedSamples == 0 ? "no_pcm_consumed" : "pcm_consumed";
+        warning = health_.decodeErrors > 0 || health_.rendererErrors > 0 ||
+            (running_ && now - healthStartedAt_ > 10000 && health_.receivedFrames == 0);
+        std::ostringstream out;
+        // Counters only: no encoded audio, PCM samples, waveform or content.
+        out << "health reason=" << reason << " generation=" << generation_ << " phase=" << phase
+            << " running=" << running_ << " sample_rate=" << sampleRate_ << " channels=" << channels_
+            << " received_frames=" << health_.receivedFrames << " received_bytes=" << health_.receivedBytes
+            << " decoded_frames=" << health_.decodedFrames << " decoded_samples=" << health_.decodedSamples
+            << " decode_errors=" << health_.decodeErrors << " decode_error=" << health_.lastDecodeError
+            << " inactive_drops=" << health_.inactiveDrops << " muted_drops=" << health_.mutedDrops
+            << " invalid_drops=" << health_.invalidDrops << " overflow_samples=" << health_.overflowSamples
+            << " write_callbacks=" << health_.writeCallbacks << " consumed_samples=" << health_.renderedSamples
+            << " silence_samples=" << health_.silenceSamples << " underruns=" << health_.underruns
+            << " queue_samples=" << queue_.size() << " interrupts=" << health_.interrupts
+            << " interrupt_type=" << health_.interruptType << " interrupt_hint=" << health_.interruptHint
+            << " renderer_errors=" << health_.rendererErrors << " renderer_error=" << health_.lastRendererError
+            << " packet_age_ms=" << (health_.lastPacketAt == 0 ? -1 : now - health_.lastPacketAt)
+            << " write_age_ms=" << (health_.lastWriteAt == 0 ? -1 : now - health_.lastWriteAt);
+        message = out.str();
+    }
+    DiagnosticLog::instance().append(warning ? "W" : "I", "audio", message);
+}
+
+int32_t AudioPlayer::OnInterrupt(OH_AudioRenderer* renderer, void* userData,
+    OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint) {
+    auto* player = static_cast<AudioPlayer*>(userData);
+    if (!player) return 0;
+    std::lock_guard<std::mutex> lock(player->mutex_);
+    if (player->renderer_ == renderer && player->running_) {
+        ++player->health_.interrupts;
+        player->health_.interruptType = static_cast<int>(type);
+        player->health_.interruptHint = static_cast<int>(hint);
+    }
+    return 0;
+}
+
+int32_t AudioPlayer::OnError(OH_AudioRenderer* renderer, void* userData, OH_AudioStream_Result error) {
+    auto* player = static_cast<AudioPlayer*>(userData);
+    if (!player) return 0;
+    std::lock_guard<std::mutex> lock(player->mutex_);
+    if (player->renderer_ == renderer && player->running_) {
+        ++player->health_.rendererErrors;
+        player->health_.lastRendererError = static_cast<int>(error);
+    }
+    return 0;
+}
+
+int32_t AudioPlayer::OnWriteData(OH_AudioRenderer* renderer, void* userData, void* buffer, int32_t length) {
     auto* player = static_cast<AudioPlayer*>(userData);
     if (player == nullptr) {
         if (buffer != nullptr && length > 0) {
@@ -169,23 +260,32 @@ int32_t AudioPlayer::OnWriteData(OH_AudioRenderer*, void* userData, void* buffer
         }
         return length;
     }
-    return player->fillBuffer(buffer, length);
+    return player->fillBuffer(renderer, buffer, length);
 }
 
-int32_t AudioPlayer::fillBuffer(void* buffer, int32_t length) {
+int32_t AudioPlayer::fillBuffer(OH_AudioRenderer* renderer, void* buffer, int32_t length) {
     if (buffer == nullptr || length <= 0) {
         return 0;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (renderer != renderer_ || !running_) {
+        std::memset(buffer, 0, static_cast<size_t>(length));
+        return length;
+    }
+    ++health_.writeCallbacks;
+    health_.lastWriteAt = NowMs();
     auto* out = static_cast<int16_t*>(buffer);
     int sampleCapacity = length / static_cast<int32_t>(sizeof(int16_t));
     int sampleCount = std::min(sampleCapacity, static_cast<int>(queue_.size()));
+    health_.renderedSamples += static_cast<uint64_t>(sampleCount);
+    health_.silenceSamples += static_cast<uint64_t>(sampleCapacity - sampleCount);
     for (int i = 0; i < sampleCount; ++i) {
         out[i] = queue_.front();
         queue_.pop_front();
     }
     if (sampleCount < sampleCapacity) {
+        ++health_.underruns;
         std::memset(out + sampleCount, 0, static_cast<size_t>(sampleCapacity - sampleCount) * sizeof(int16_t));
     }
     return length;

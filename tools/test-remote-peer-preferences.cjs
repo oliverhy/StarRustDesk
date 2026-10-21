@@ -143,7 +143,7 @@ function pageHarness(h, server, id, pc = false) {
     isPcDevice: () => pc, isHandheldLandscape: () => false, inputMode: 'mouse', relativeMouseEnabled: false,
     cancelActiveTouchGesture() {}, stopEdgeAutoPan() {}, ensurePointerInitialized() {}, updateSystemPointerVisibility() {},
     applyInputCompatibility() {}, startKeyboardLayout() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
-    physicalMouseDeduplicator: { clear() {} }, resetPointerDiagnostics() {},
+    physicalMouseDeduplicator: { clear() {} }, remoteWheel: { reset() {} }, resetPointerDiagnostics() {},
     virtualCtrlSelected: false, virtualShiftSelected: false
   });
 }

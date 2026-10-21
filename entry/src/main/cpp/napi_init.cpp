@@ -802,6 +802,8 @@ static void OnRustAudioStop() {
 static void OnRustAudioFrame(const unsigned char* data, int length) {
     if (g_remoteAudioEnabled.load()) {
         audio_player_push_opus_frame(data, length);
+    } else {
+        AudioPlayer::instance().noteMutedFrame();
     }
 }
 
@@ -1532,6 +1534,7 @@ static napi_value IsPeerAndroid(napi_env env, napi_callback_info info) {
 }
 
 static napi_value IsRemoteAudioActive(napi_env env, napi_callback_info info) {
+    AudioPlayer::instance().reportDiagnostics();
     napi_value ret;
     napi_get_boolean(env, AudioPlayer::instance().hasRecentFrames(6000), &ret);
     return ret;
@@ -1643,6 +1646,7 @@ static napi_value AppendDiagnosticLog(napi_env env, napi_callback_info info) {
 }
 
 static napi_value GetDiagnosticLog(napi_env env, napi_callback_info info) {
+    AudioPlayer::instance().reportDiagnostics(true, "export");
     std::string content = std::string("native_build=official-transports-20260911-r2 cpp=") + __DATE__ + " " + __TIME__ +
         " rust=" + rust_get_build_id() + " connection_policy=staged-login-v1\n" + DiagnosticLog::instance().exportText();
     napi_value ret;

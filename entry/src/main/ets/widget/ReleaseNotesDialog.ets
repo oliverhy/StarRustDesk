@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.6'
-export const RELEASE_NOTES_BUILD: string = '1003006'
+export const RELEASE_NOTES_VERSION: string = '1.3.7'
+export const RELEASE_NOTES_BUILD: string = '1003007'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.7（1003007）· 滚轮步进与音频诊断优化', [
+            '修复系统滚轮轴值被放大为大量滚动档位的问题，按鼠标、触控板及触屏来源分别换算，并限制单次输出和连续事件突发，减少远端滚动或缩放一下跳到最大、最小的情况。',
+            '虚拟鼠标滚轮上下按钮改为单档步进，保留滑动滚轮及中键点击；切换输入来源、设备或远控会话时清除残余滚动量，保留横向滚动及主动按住 Ctrl 等修饰键的操作。',
+            '补充滚轮输入来源、系统工具类型、原始轴值、实际发送档位及限幅次数诊断，便于区分虚拟滚轮、实体鼠标和触控板路径。',
+            '新增音频收包、解码、播放回调、缓冲不足、队列丢弃、静音和系统中断、错误诊断；定期汇总并在导出及停止时记录，不在实时播放回调中写日志，不记录声音内容。无声问题仍需结合新日志定位。'
+          ])
           this.buildSection('1.3.6（1003006）· 缩放按钮与一键复位修复', [
             '修复画面菜单“＋／−”缩成小点的问题，改用独立 SVG 图标，适配不同屏幕密度及深浅色主题，保留原有紧凑布局。',
             '缩放按钮改为按 25% 标准档位增减，双指缩放得到任意比例后也能准确经过 100%；例如 121% 缩小到 100%，96% 放大到 100%，不再持续跳过。',

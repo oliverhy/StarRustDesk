@@ -81,8 +81,8 @@ expect(remotePage, /clickVirtualMouseButtonFallback[\s\S]*virtualMouseLastTouchR
   'virtual mouse buttons must provide a deduplicated click fallback')
 expect(remotePage, /handleVirtualMouseWheelTouch[\s\S]*virtualMouseWheelTouchMoved[\s\S]*sendVirtualMouseWheel[\s\S]*clickVirtualMouseButton\('middle'\)/,
   'the center wheel must distinguish scrolling from a middle click')
-expect(remotePage, /VIRTUAL_MOUSE_WHEEL_BUTTON_STEP:\s*number\s*=\s*3[\s\S]*sendVirtualMouseWheel/,
-  'virtual wheel buttons must send a visible multi-step scroll')
+expect(remotePage, /VIRTUAL_MOUSE_WHEEL_BUTTON_STEP:\s*number\s*=\s*1[\s\S]*sendVirtualMouseWheel/,
+  'virtual wheel buttons must send a precise single detent, not a multi-step jump')
 expect(remotePage, /buildVirtualMouseWheelIcon\(1\)[\s\S]*?\.position\(\{ x: 29, y: 0 \}\)[\s\S]*?\.zIndex\(2\)/,
   'virtual wheel controls must stay above the overlapping mouse drag body')
 expect(remotePage, /setKeyboardAvoidMode\(KeyboardAvoidMode\.RESIZE\)/,
