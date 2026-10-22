@@ -20,6 +20,7 @@ function page(overrides={}) {
   const p = make(overrides);
   for (const name of methods) p[name] = context.Extra.prototype[name];
   Object.assign(p, { clearTapTimer(){}, discardViewportPanFrame(){}, updateSystemPointerVisibility(){},
+    keepRemoteKeyboardForPointer(){},
     finishViewportPan(){this.viewportPanActive=false;},
     queueViewportPanFrame(x,y){this.offsetX=this.clampHorizontalOffset(this.offsetX+x,this.zoomScale);
       this.offsetY=this.clampVerticalOffset(this.offsetY+y,this.zoomScale);},
@@ -112,5 +113,13 @@ test('fallback reconstructs viewport distances when window fields are absent',()
   const p=page({zoomScale:4,offsetX:70,offsetY:-20});
   const t=point(p,240,180);delete t.windowX;delete t.windowY;
   const result=p.touchGesturePoint(t);near(result.x,240);near(result.y,180);
+});
+test('IME translation is included exactly once in fallback window coordinates',()=>{
+  const p=page({zoomScale:4,offsetX:70,offsetY:-20,showKeyboardPanel:true});
+  p.getKeyboardCanvasShiftY=()=>-150;
+  const t=point(p,240,330);delete t.windowX;delete t.windowY;
+  const result=p.touchGesturePoint(t);near(result.x,240);near(result.y,180);
+  t.windowX=240;t.windowY=180;
+  near(p.touchGesturePoint(t).y,180);
 });
 console.log(`touch-window coordinates: ${passed} scenario groups passed`);

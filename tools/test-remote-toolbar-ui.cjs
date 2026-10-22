@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript')
 
 const root = path.resolve(__dirname, '..')
 const remotePage = fs.readFileSync(
@@ -101,8 +102,7 @@ require('node:assert/strict').equal(remotePage.includes('keyboardToolsCollapsed 
 // Execute production orientation/canvas logic: IME resize is not a rotation.
 const layoutMethods = remotePage.slice(remotePage.indexOf('  isHandheldLandscape():'),
   remotePage.indexOf('  startToolbarTimer():'))
-  .replace(/: number \| string|: boolean|: number|: void/g, '')
-const layout = new Function('RustDeskNapi', `return new class {${layoutMethods}}`)({ appendDiagnosticLog() {} })
+const layout = new Function('RustDeskNapi', ts.transpile(`class Layout {${layoutMethods}}; return new Layout();`))({ appendDiagnosticLog() {} })
 layout.isHandheldDevice = () => true
 Object.assign(layout, { pageWidth: 800, pageHeight: 400, showKeyboardPanel: false,
   keyboardLayoutHeight: 0, keyboardViewportHeight: 0, handheldLayoutInitialized: false,

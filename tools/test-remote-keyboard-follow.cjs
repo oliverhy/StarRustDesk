@@ -62,6 +62,7 @@ const names = ['isHandheldDevice', 'shouldFollowTouchMouse', 'touchMouseFollowBl
   'cancelRemoteKeyboardRefocus', 'requestRemoteInputFocus',
   'toggleRemoteKeyboard', 'openRemoteKeyboard', 'closeRemoteKeyboard',
   'snapshotRemoteKeyboardViewport', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
+  'getKeyboardAvoidance', 'selectKeyboardInputAnchor',
   'applyKeyboardResizeMode', 'restoreKeyboardAvoidMode', 'buildKeyboardCapture',
   'updateCenterFollowPointer', 'remotePointToVisual', 'getDisplayWidth', 'getDisplayHeight',
   'getDisplayLeft', 'getDisplayTop', 'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport'];
@@ -86,6 +87,7 @@ function page({ queryFails = false } = {}) {
     relativeMouseEnabled: false, isPanMode: false,
     getUIContext: () => ui, allowWaylandText: () => true, isHandheldLandscape: () => true,
     releaseRemoteNavigationKeys() {}, releaseVirtualModifiers() {}, resetKeyboardCaptureBuffer() {},
+    flushPendingTap() {},
     stopEdgeAutoPan() { this.panStops = (this.panStops || 0) + 1; },
     markLocalPointerInput() {}, ensurePointerInitialized() {}, updateCursorOverlayFromPosition() {},
     sendControlKey: key => sent.push(key),

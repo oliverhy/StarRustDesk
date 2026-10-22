@@ -144,6 +144,7 @@ function pageHarness(h, server, id, pc = false) {
     cancelActiveTouchGesture() {}, stopEdgeAutoPan() {}, ensurePointerInitialized() {}, updateSystemPointerVisibility() {},
     applyInputCompatibility() {}, startKeyboardLayout() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
     physicalMouseDeduplicator: { clear() {} }, remoteWheel: { reset() {} }, resetPointerDiagnostics() {},
+    clearKeyboardInputAnchor() {},
     virtualCtrlSelected: false, virtualShiftSelected: false
   });
 }

@@ -64,6 +64,23 @@ interface RemotePoint {
   y: number;
 }
 
+interface KeyboardInputAnchor extends RemotePoint {
+  width: number;
+  height: number;
+  display: number;
+  time: number;
+}
+
+interface KeyboardAvoidanceInfo {
+  shiftY: number;
+  visibleHeight: number;
+  hiddenHeight: number;
+  maxManualLift: number;
+  focusY: number;
+  source: string;
+  reason: string;
+}
+
 interface RemoteDownloadSelection extends FileDownloadRequest {
   key: string;
   size: number;
@@ -227,9 +244,13 @@ struct RemotePage {
   private keyboardLayoutHeight: number = 0;
   private keyboardWindowWidth: number = 0;
   private keyboardWindowHeight: number = 0;
-  private keyboardFocusAvailable: boolean = false;
-  private keyboardFocusRemoteX: number = 0;
-  private keyboardFocusRemoteY: number = 0;
+  @State keyboardFocusAvailable: boolean = false;
+  @State keyboardFocusRemoteX: number = 0;
+  @State keyboardFocusRemoteY: number = 0;
+  private keyboardFocusSource: string = 'visible_bottom';
+  private keyboardInputAnchor: KeyboardInputAnchor | undefined;
+  @State keyboardManualPan: boolean = false;
+  @State keyboardManualShiftY: number = 0;
   @State keyboardToolsCollapsed: boolean = true;
   @State keyboardToolsOffsetX: number = 0;
   @State keyboardToolsOffsetY: number = 0;
@@ -531,6 +552,7 @@ struct RemotePage {
   private viewportPanFrameGeneration: number = 0;
   private viewportPanTargetX: number = 0;
   private viewportPanTargetY: number = 0;
+  private viewportPanUsesKeyboardShift: boolean = false;
   private viewportPanLastX: number = 0;
   private viewportPanLastY: number = 0;
   private directKeyboardCommittedText: string = KEYBOARD_CAPTURE_SENTINEL;
@@ -994,6 +1016,7 @@ struct RemotePage {
           let previousHeight: number = this.remoteHeight;
           this.remoteWidth = frame.width;
           this.remoteHeight = frame.height;
+          this.clearKeyboardInputAnchor('remote_size_changed');
           this.pictureInPicture?.updateContentSize(frame.width, frame.height);
           this.resetViewportTransform();
           RustDeskNapi.appendDiagnosticLog('video-layout',
@@ -1058,6 +1081,10 @@ struct RemotePage {
   }
 
   resetRemoteViewportForSession(): void {
+    this.clearKeyboardInputAnchor('session_reset');
+    this.pointerInitialized = false;
+    this.lastAbsX = 0;
+    this.lastAbsY = 0;
     this.remoteWheel.reset();
     this.wheelDiagnosticAt = 0;
     this.wheelDiagnosticEvents = 0;
@@ -5686,13 +5713,9 @@ struct RemotePage {
     this.keyboardLayoutHeight = this.pageHeight;
     this.keyboardViewportHeight = this.isHandheldDevice() ?
       (this.componentHeight > 0 ? this.componentHeight : this.pageHeight) : 0;
-    // The last click is a useful input-area anchor, not a remote text/caret probe.
-    this.keyboardFocusAvailable = this.pointerInitialized && this.remoteWidth > 0 && this.remoteHeight > 0 &&
-      Number.isFinite(this.lastAbsX) && Number.isFinite(this.lastAbsY);
-    this.keyboardFocusRemoteX = this.keyboardFocusAvailable ?
-      Math.max(0, Math.min(this.remoteWidth - 1, this.lastAbsX)) : 0;
-    this.keyboardFocusRemoteY = this.keyboardFocusAvailable ?
-      Math.max(0, Math.min(this.remoteHeight - 1, this.lastAbsY)) : 0;
+    this.keyboardManualPan = false;
+    this.keyboardManualShiftY = 0;
+    this.selectKeyboardInputAnchor();
     this.keyboardWindowWidth = 0;
     this.keyboardWindowHeight = 0;
     try {
@@ -5720,20 +5743,98 @@ struct RemotePage {
     }
   }
 
-  getKeyboardCanvasShiftY(): number {
+  rememberKeyboardInputAnchor(remoteX: number, remoteY: number, completed: boolean): void {
+    // Store the actual dispatched click, independently of cursor echoes/hover.
+    // Relative input does not give us an authoritative absolute click position.
+    if (this.relativeMouseEnabled || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      !Number.isFinite(remoteX) || !Number.isFinite(remoteY) || remoteX < 0 || remoteY < 0 ||
+      remoteX >= this.remoteWidth || remoteY >= this.remoteHeight) return;
+    this.keyboardInputAnchor = { x: remoteX, y: remoteY, width: this.remoteWidth, height: this.remoteHeight,
+      display: this.currentDisplay, time: Date.now() };
+    // Never shift between down and up: the release must hit the same content.
+    if (completed && this.showKeyboardPanel) {
+      this.selectKeyboardInputAnchor();
+      this.keyboardManualPan = false;
+      this.traceRemoteKeyboardState('input_anchor_updated');
+    }
+  }
+
+  clearKeyboardInputAnchor(reason: string): void {
+    const hadAnchor: boolean = this.keyboardInputAnchor !== undefined || this.keyboardFocusAvailable;
+    this.keyboardInputAnchor = undefined;
+    this.keyboardFocusAvailable = false;
+    this.keyboardFocusSource = 'visible_bottom';
+    this.keyboardManualPan = false;
+    this.keyboardManualShiftY = 0;
+    if (this.viewportPanFramePending) this.discardViewportPanFrame();
+    if (hadAnchor) RustDeskNapi.appendDiagnosticLog('input-keyboard', `anchor_reset reason=${reason}`);
+  }
+
+  selectKeyboardInputAnchor(): void {
+    const anchor = this.keyboardInputAnchor;
+    const clicked: boolean = anchor !== undefined && anchor.width === this.remoteWidth &&
+      anchor.height === this.remoteHeight && anchor.display === this.currentDisplay;
+    const knownPointer: boolean = this.pointerInitialized &&
+      (this.hasAuthoritativeRemoteCursor || this.lastLocalPointerInputAt > 0) &&
+      Number.isFinite(this.lastAbsX) && Number.isFinite(this.lastAbsY) &&
+      this.lastAbsX >= 0 && this.lastAbsX < this.remoteWidth && this.lastAbsY >= 0 && this.lastAbsY < this.remoteHeight;
+    this.keyboardFocusAvailable = !this.relativeMouseEnabled && this.remoteWidth > 0 && this.remoteHeight > 0 &&
+      (clicked || knownPointer);
+    this.keyboardFocusSource = this.keyboardFocusAvailable ? (clicked ? 'last_click' : 'pointer') : 'visible_bottom';
+    this.keyboardFocusRemoteX = this.keyboardFocusAvailable ? Math.max(0, Math.min(this.remoteWidth - 1,
+      clicked && anchor ? anchor.x : this.lastAbsX)) : 0;
+    this.keyboardFocusRemoteY = this.keyboardFocusAvailable ? Math.max(0, Math.min(this.remoteHeight - 1,
+      clicked && anchor ? anchor.y : this.lastAbsY)) : 0;
+  }
+
+  getKeyboardAvoidance(): KeyboardAvoidanceInfo {
+    const result: KeyboardAvoidanceInfo = { shiftY: 0, visibleHeight: 0, hiddenHeight: 0, maxManualLift: 0, focusY: 0,
+      source: 'none', reason: 'inactive' };
     if (!this.showKeyboardPanel || !this.isHandheldDevice() || this.keyboardViewportHeight <= 0 ||
-      !Number.isFinite(this.qualityViewportHeight) || this.qualityViewportHeight <= 0) return 0;
+      !Number.isFinite(this.qualityViewportHeight) || this.qualityViewportHeight <= 0) return result;
     const visibleHeight: number = Math.min(this.qualityViewportHeight, this.getKeyboardViewportMaxHeight());
     const hiddenHeight: number = Math.max(0, this.keyboardViewportHeight - visibleHeight);
-    if (hiddenHeight <= 0.5) return 0;
-    const focusY: number = this.keyboardFocusAvailable ?
-      this.remotePointToVisual(this.keyboardFocusRemoteX, this.keyboardFocusRemoteY).y :
-      this.keyboardViewportHeight / 2;
-    if (!Number.isFinite(focusY)) return 0;
+    result.visibleHeight = visibleHeight;
+    result.hiddenHeight = hiddenHeight;
+    result.reason = 'no_occlusion';
+    if (hiddenHeight <= 0.5) return result;
+    const bottom: number = this.remotePointToVisual(0, this.remoteHeight).y;
+    // Manual adjustment must also reach content below the old viewport when
+    // zoomed, while remaining temporary and never moving below the original Y.
+    result.maxManualLift = Math.max(hiddenHeight, Number.isFinite(bottom) ? bottom - visibleHeight : 0);
+    if (this.keyboardManualPan) {
+      result.source = 'manual';
+      result.reason = 'user_pan';
+      result.shiftY = Math.max(-result.maxManualLift, Math.min(0, this.keyboardManualShiftY));
+      return result;
+    }
+    // Without an input anchor, reveal the bottom of the currently visible
+    // picture. Assuming the canvas centre was the caret produced only -11vp
+    // for the reported 742vp canvas / 334vp IME, leaving lower inputs hidden.
+    let focusY: number = Math.max(0, Math.min(this.keyboardViewportHeight, bottom));
+    result.source = 'visible_bottom';
+    result.reason = 'no_input_anchor';
+    if (this.keyboardFocusAvailable) {
+      const point = this.remotePointToVisual(this.keyboardFocusRemoteX, this.keyboardFocusRemoteY);
+      if (Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= this.componentWidth &&
+        point.y >= 0 && point.y <= this.keyboardViewportHeight) {
+        focusY = point.y;
+        result.source = this.keyboardFocusSource;
+        result.reason = 'input_anchor';
+      } else result.reason = 'anchor_outside_view';
+    }
+    if (!Number.isFinite(focusY)) { result.reason = 'invalid_geometry'; return result; }
+    result.focusY = focusY;
     const margin: number = Math.min(48, visibleHeight / 4);
     // The full-size canvas is top-aligned. Apply one absolute upward shift,
     // never an implicit half-height centering plus a second correction.
-    return Math.max(-hiddenHeight, Math.min(0, visibleHeight - margin - focusY));
+    result.shiftY = Math.max(-hiddenHeight, Math.min(0, visibleHeight - margin - focusY));
+    if (result.shiftY === 0) result.reason = 'already_visible';
+    return result;
+  }
+
+  getKeyboardCanvasShiftY(): number {
+    return this.getKeyboardAvoidance().shiftY;
   }
 
   getKeyboardViewportMaxHeight(): number {
@@ -6523,7 +6624,8 @@ struct RemotePage {
     const baseY: number = touch.y + (this.inputMode === INPUT_MODE_MOUSE ? 0 : this.getDisplayTop());
     return {
       x: centerX + (baseX - centerX) * this.zoomScale + this.offsetX,
-      y: centerY + (baseY - centerY) * this.zoomScale + this.offsetY
+      y: centerY + (baseY - centerY) * this.zoomScale + this.offsetY +
+        (this.showKeyboardPanel ? this.getKeyboardCanvasShiftY() : 0)
     };
   }
 
@@ -6743,6 +6845,7 @@ struct RemotePage {
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
+    this.rememberKeyboardInputAnchor(remoteX, remoteY, true);
   }
 
   sendLeftDown(remoteX: number, remoteY: number, showHoldIndicator: boolean = true): void {
@@ -6750,6 +6853,7 @@ struct RemotePage {
       return;
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
+    this.rememberKeyboardInputAnchor(remoteX, remoteY, false);
     this.leftButtonHeld = true;
     this.leftButtonHeldAt = Date.now();
     this.preferAuthoritativeCursor = false;
@@ -6762,10 +6866,12 @@ struct RemotePage {
     if (!this.leftButtonHeld && !force) {
       return;
     }
+    const hadPress: boolean = this.leftButtonHeld;
     ConnectionService.sendMouseEvent(remoteX, remoteY, 2);
     this.leftButtonHeld = false;
     this.leftButtonHeldAt = 0;
     this.showLeftButtonHoldIndicator = false;
+    if (hadPress) this.rememberKeyboardInputAnchor(remoteX, remoteY, true);
   }
 
   sendRightDown(remoteX: number, remoteY: number): void {
@@ -7787,7 +7893,8 @@ struct RemotePage {
 
   canPanViewport(): boolean {
     return this.getHorizontalPanLimit(this.zoomScale) > 0.5 ||
-      this.getVerticalPanLimit(this.zoomScale) > 0.5;
+      this.getVerticalPanLimit(this.zoomScale) > 0.5 ||
+      (this.showKeyboardPanel && this.getKeyboardAvoidance().hiddenHeight > 0.5);
   }
 
   setPanMode(enabled: boolean): void {
@@ -7817,6 +7924,7 @@ struct RemotePage {
       this.clearLongPressTimer();
       this.clearTapTimer();
       this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+      this.keepRemoteKeyboardForPointer();
       this.viewportPanActive = true;
       this.discardViewportPanFrame();
       this.viewportPanLastX = touch.x;
@@ -7839,11 +7947,13 @@ struct RemotePage {
   }
 
   finishViewportPan(): void {
+    const wasActive: boolean = this.viewportPanActive;
     this.flushViewportPanFrame();
     this.viewportPanActive = false;
     this.viewportPanLastX = 0;
     this.viewportPanLastY = 0;
     this.clampViewportOffset();
+    if (wasActive && this.showKeyboardPanel) this.traceRemoteKeyboardState('manual_pan_finished');
   }
 
   discardViewportPanFrame(): void {
@@ -7854,16 +7964,26 @@ struct RemotePage {
   flushViewportPanFrame(): void {
     if (!this.viewportPanFramePending) return;
     this.offsetX = this.clampHorizontalOffset(this.viewportPanTargetX, this.zoomScale);
-    this.offsetY = this.clampVerticalOffset(this.viewportPanTargetY, this.zoomScale);
+    if (this.viewportPanUsesKeyboardShift) {
+      this.keyboardManualShiftY = this.viewportPanTargetY;
+      this.keyboardManualPan = true;
+    } else {
+      this.offsetY = this.clampVerticalOffset(this.viewportPanTargetY, this.zoomScale);
+    }
     this.discardViewportPanFrame();
     this.syncVirtualMouseToCurrentPointer();
   }
 
   queueViewportPanFrame(deltaX: number, deltaY: number): void {
+    const avoidance = this.showKeyboardPanel ? this.getKeyboardAvoidance() : undefined;
+    const keyboardPan: boolean = avoidance !== undefined && avoidance.hiddenHeight > 0.5;
+    if (this.viewportPanFramePending && keyboardPan !== this.viewportPanUsesKeyboardShift) this.flushViewportPanFrame();
+    this.viewportPanUsesKeyboardShift = keyboardPan;
     this.viewportPanTargetX = this.clampHorizontalOffset(
       (this.viewportPanFramePending ? this.viewportPanTargetX : this.offsetX) + deltaX, this.zoomScale);
-    this.viewportPanTargetY = this.clampVerticalOffset(
-      (this.viewportPanFramePending ? this.viewportPanTargetY : this.offsetY) + deltaY, this.zoomScale);
+    this.viewportPanTargetY = keyboardPan && avoidance ? Math.max(-avoidance.maxManualLift, Math.min(0,
+      (this.viewportPanFramePending ? this.viewportPanTargetY : avoidance.shiftY) + deltaY)) :
+      this.clampVerticalOffset((this.viewportPanFramePending ? this.viewportPanTargetY : this.offsetY) + deltaY, this.zoomScale);
     if (this.viewportPanFramePending) return;
     this.viewportPanFramePending = true;
     const generation: number = this.viewportPanFrameGeneration;
@@ -8154,6 +8274,7 @@ struct RemotePage {
 
   handleRemoteKeyboardHeightChange(height: number): void {
     if (!this.remotePageVisible || !Number.isFinite(height) || height < 0) return;
+    const previousInset: number = this.controlMenuKeyboardInset;
     try {
       this.controlMenuKeyboardInset = height > 0 ? this.getUIContext().px2vp(height) : 0;
     } catch (_e) {
@@ -8167,7 +8288,7 @@ struct RemotePage {
       this.cancelRemoteKeyboardClose();
       this.stopEdgeAutoPan();
     }
-    if (!wasKnown || wasVisible !== this.remoteKeyboardVisible) {
+    if (!wasKnown || wasVisible !== this.remoteKeyboardVisible || Math.abs(previousInset - this.controlMenuKeyboardInset) > 0.5) {
       this.traceRemoteKeyboardState('height_changed');
     }
     // A zero-height seed or a hardware keyboard must not cancel a new request.
@@ -8242,6 +8363,8 @@ struct RemotePage {
   }
 
   traceRemoteKeyboardState(reason: string): void {
+    const avoidance = this.getKeyboardAvoidance();
+    const anchorAge: number = this.keyboardInputAnchor ? Math.max(0, Date.now() - this.keyboardInputAnchor.time) : -1;
     RustDeskNapi.appendDiagnosticLog('input-keyboard',
       `state reason=${reason} capture=${this.showKeyboardPanel} visible=${this.remoteKeyboardVisible} ` +
       `editing=${this.remoteKeyboardEditing} visibility_known=${this.remoteKeyboardVisibilityKnown} ` +
@@ -8251,7 +8374,11 @@ struct RemotePage {
       `canvas_h=${Math.round(this.keyboardViewportHeight)} visible_h=${Math.round(this.qualityViewportHeight)} ` +
       `ime_inset=${Math.round(this.controlMenuKeyboardInset)} clipped_h=${Math.round(this.getKeyboardViewportMaxHeight())} ` +
       `shortcuts_collapsed=${this.keyboardToolsCollapsed} ` +
-      `ime_shift_y=${Math.round(this.getKeyboardCanvasShiftY())} input_anchor=${this.keyboardFocusAvailable}`);
+      `ime_shift_y=${Math.round(avoidance.shiftY)} input_anchor=${this.keyboardFocusAvailable} ` +
+      `anchor_source=${avoidance.source} avoid_reason=${avoidance.reason} anchor_age_ms=${anchorAge} ` +
+      `anchor_visual_y=${Math.round(avoidance.focusY)} hidden_h=${Math.round(avoidance.hiddenHeight)} ` +
+      `avoid_visible_h=${Math.round(avoidance.visibleHeight)} display=${this.currentDisplay} ` +
+      `remote_size=${this.remoteWidth}x${this.remoteHeight} manual_pan=${this.keyboardManualPan}`);
   }
 
   openRemoteKeyboard(): void {
@@ -8265,6 +8392,8 @@ struct RemotePage {
     this.cancelRemoteKeyboardRefocus();
     this.remoteKeyboardPointerHandoffUntil = 0;
     if (!this.showKeyboardPanel) {
+      // A touchpad tap can still be waiting for its double-click timeout.
+      this.flushPendingTap();
       this.snapshotRemoteKeyboardViewport();
     }
     this.resetKeyboardCaptureBuffer();
@@ -8320,12 +8449,16 @@ struct RemotePage {
   }
 
   restoreKeyboardAvoidMode(): void {
+    if (this.viewportPanFramePending) this.discardViewportPanFrame();
+    this.keyboardManualPan = false;
+    this.keyboardManualShiftY = 0;
     this.keyboardViewportHeight = 0;
     this.keyboardLayoutWidth = 0;
     this.keyboardLayoutHeight = 0;
     this.keyboardWindowWidth = 0;
     this.keyboardWindowHeight = 0;
     this.keyboardFocusAvailable = false;
+    this.keyboardFocusSource = 'visible_bottom';
     this.keyboardFocusRemoteX = 0;
     this.keyboardFocusRemoteY = 0;
     if (!this.keyboardAvoidModeChanged) {
@@ -10074,6 +10207,7 @@ struct RemotePage {
     this.cancelActiveTouchGesture();
     this.stopEdgeAutoPan();
     this.currentDisplay = display;
+    this.clearKeyboardInputAnchor('display_changed');
     this.virtualMouseDragActive = false;
     this.virtualMouseInitialized = false;
     this.showCursor = false;

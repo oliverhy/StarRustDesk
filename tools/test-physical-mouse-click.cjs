@@ -63,6 +63,7 @@ const methods = [
   'handleNativeMouseInput', 'handleRemoteMouse', 'mapMouseAction',
   'handleRemoteTouch', 'handlePointerCompatibilityTouch', 'handleRemoteClickFallback',
   'sendLeftClick', 'sendLeftDown', 'sendLeftUp', 'sendRightDown', 'sendRightUp',
+  'rememberKeyboardInputAnchor', 'selectKeyboardInputAnchor',
   'releaseHeldMouseButtons', 'reconcilePhysicalMouseButtons',
   'updatePointerFromLocal', 'updateCursorOverlayFromPosition', 'markLocalPointerInput',
   'noteProjectedPhysicalPointer', 'resetPointerDiagnostics'
@@ -88,6 +89,7 @@ function page(overrides = {}) {
     suppressCompatibilityCursor: () => false,
     handleRemoteHover() {}, syncModifiersFromPointerEvent() {}, updateSystemPointerVisibility() {},
     clearLongPressTimer() {}, clearTapTimer() {}, requestRemoteInputFocus() {},
+    traceRemoteKeyboardState() {},
     updateEdgeAutoPan() {}, stopEdgeAutoPan() {}, ...overrides
   });
   p.resetPointerDiagnostics();
@@ -138,6 +140,8 @@ for (const keyboard of [false, true]) {
     ark(p, MouseAction.Press); now += 20; ark(p, MouseAction.Release); fallback(p);
     assert.deepEqual(sent, [1, 2]); assert.equal(p.leftButtonHeld, false);
     assert.equal(p.pointerFallbackClicks, 0);
+    assert.equal(p.keyboardInputAnchor.x, 100); assert.equal(p.keyboardInputAnchor.y, 100);
+    if (keyboard) assert.equal(p.keyboardFocusSource, 'last_click');
   });
   test(`ArkUI orphan release retains click fallback with keyboard=${keyboard}`, () => {
     const p = page({ showKeyboardPanel: keyboard });

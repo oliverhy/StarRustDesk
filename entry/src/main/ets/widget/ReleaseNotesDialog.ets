@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.7'
-export const RELEASE_NOTES_BUILD: string = '1003007'
+export const RELEASE_NOTES_VERSION: string = '1.3.8'
+export const RELEASE_NOTES_BUILD: string = '1003008'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.8（1003008）· 键盘避让与画面上移修复', [
+            '修复软键盘弹出后画面仅轻微上移、下方输入位置仍被遮挡的问题；优先按最近一次实际远端点击位置避让，缺少有效位置时按当前可见画面下沿计算。',
+            '键盘弹出时保持原画面比例和缩放，只向上移动画面；收起键盘后恢复原位置，改善连续开合键盘及放大画面下的避让一致性。',
+            '键盘打开时可通过“移动画面”手动调整可见区域；切换远端、显示器或分辨率时清除旧定位，修正上移后的触摸坐标，避免点击与画面错位。',
+            '补充避让依据、输入定位来源、键盘遮挡高度、可见高度、上移距离和手动调整状态诊断，便于定位不同手机、平板及折叠屏的避让问题，不记录输入内容。'
+          ])
           this.buildSection('1.3.7（1003007）· 滚轮步进与音频诊断优化', [
             '修复系统滚轮轴值被放大为大量滚动档位的问题，按鼠标、触控板及触屏来源分别换算，并限制单次输出和连续事件突发，减少远端滚动或缩放一下跳到最大、最小的情况。',
             '虚拟鼠标滚轮上下按钮改为单档步进，保留滑动滚轮及中键点击；切换输入来源、设备或远控会话时清除残余滚动量，保留横向滚动及主动按住 Ctrl 等修饰键的操作。',
