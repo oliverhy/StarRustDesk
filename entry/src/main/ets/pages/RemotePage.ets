@@ -482,6 +482,10 @@ struct RemotePage {
   private lastMouseEventAt: number = 0;
   private lastNativeMouseEventAt: number = 0;
   private physicalMouseDeduplicator: PhysicalMouseDeduplicator = new PhysicalMouseDeduplicator();
+  private lastMappedPhysicalLeftUpTimestamp: number = 0;
+  private lastMappedPhysicalLeftDownTimestamp: number = 0;
+  private lastFallbackClickTimestamp: number = 0;
+  private lastPhysicalLeftDownAt: number = 0;
   private pointerTraceAt: number = 0;
   private pointerNativeMoves: number = 0;
   private pointerArkMoves: number = 0;
@@ -685,6 +689,7 @@ struct RemotePage {
     this.restoreImmersiveWindowPreference();
     if (status === ConnectionStatus.WAITING_2FA) {
       this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
+      this.prepareTwoFactorInput();
     }
     this.startPolling();
     if (this.fileOnly) { this.showGestureHelp = false; return; }
@@ -884,6 +889,7 @@ struct RemotePage {
         status === ConnectionStatus.CONNECTED && this.remoteAudioEnabled && RustDeskNapi.isRemoteAudioActive(),
         this.connectedPeerId);
       if (status !== this.lastLoggedConnectionStatus) {
+        if (status === ConnectionStatus.WAITING_2FA) this.prepareTwoFactorInput();
         RustDeskNapi.appendDiagnosticLog('connection-ui', `status_changed from=${this.lastLoggedConnectionStatus} to=${status}`)
         this.lastLoggedConnectionStatus = status
       }
@@ -1100,6 +1106,10 @@ struct RemotePage {
     this.physicalMouseDeduplicator.clear();
     this.compatibilityLeftSequence = false;
     this.lastMappedPhysicalLeftUpAt = 0;
+    this.lastMappedPhysicalLeftUpTimestamp = 0;
+    this.lastMappedPhysicalLeftDownTimestamp = 0;
+    this.lastFallbackClickTimestamp = 0;
+    this.lastPhysicalLeftDownAt = 0;
     this.projectedPhysicalPointer = false;
     this.resetPointerDiagnostics();
     this.hasVideo = false;
@@ -1546,7 +1556,7 @@ struct RemotePage {
     }
     if (this.remoteExternalDisplay || pairedAction > 0) {
       if (this.physicalMouseDeduplicator.consumePointerDuplicate(
-        pairedAction, localX, localY, this.lastNativeMouseEventAt, 1)) {
+        pairedAction, localX, localY, this.lastNativeMouseEventAt, 1, true, event.timestamp)) {
         this.pointerDuplicateEvents++;
         if (pairedAction > 0) RustDeskNapi.appendDiagnosticLog('input',
           `physical_mouse_duplicate action=${pairedAction} origin=native`);
@@ -1582,12 +1592,16 @@ struct RemotePage {
     let forwardedAction: number = -1;
     if (event.button === NATIVE_MOUSE_BUTTON_LEFT) {
       if (event.action === NATIVE_MOUSE_ACTION_PRESS) {
+        this.lastMappedPhysicalLeftDownTimestamp = event.timestamp ?? 0;
         this.sendLeftDown(remotePoint.x, remotePoint.y, false);
         forwardedAction = 1;
       } else if (event.action === NATIVE_MOUSE_ACTION_RELEASE) {
         const hadLeftDown: boolean = this.leftButtonHeld;
         this.sendLeftUp(remotePoint.x, remotePoint.y, true);
-        if (hadLeftDown) this.lastMappedPhysicalLeftUpAt = this.lastNativeMouseEventAt;
+        if (hadLeftDown) {
+          this.lastMappedPhysicalLeftUpAt = this.lastNativeMouseEventAt;
+          this.lastMappedPhysicalLeftUpTimestamp = event.timestamp ?? 0;
+        }
         forwardedAction = 2;
       }
     } else if (event.button === NATIVE_MOUSE_BUTTON_RIGHT) {
@@ -1933,7 +1947,10 @@ struct RemotePage {
         .textAlign(TextAlign.Center)
         .width('100%');
       TextInput({ placeholder: translate('6 位验证码', this.uiLanguage), text: this.twoFaCode })
+        .id('remoteTwoFactorInput')
+        .defaultFocus(true)
         .type(InputType.Number)
+        .enterKeyType(EnterKeyType.Done)
         .maxLength(6)
         .fontSize(22)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
@@ -1948,7 +1965,10 @@ struct RemotePage {
         .onChange((value: string) => {
           this.twoFaCode = value.replace(/[^0-9]/g, '').slice(0, 6);
           this.twoFaError = '';
-        });
+        })
+        .onFocus(() => { RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_focus'); })
+        .onBlur(() => { RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_blur'); })
+        .onSubmit(() => { if (this.isTwoFactorCodeReady()) this.submitTwoFactor(); });
       if (this.twoFaError.length > 0) {
         Text(translate(this.twoFaError, this.uiLanguage))
           .fontSize(13)
@@ -2001,6 +2021,19 @@ struct RemotePage {
     .shadow({ radius: 18, color: '#22000000', offsetX: 0, offsetY: 6 });
   }
 
+  prepareTwoFactorInput(): void {
+    this.setControlMenu('');
+    this.closeRemoteKeyboard();
+    RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_ready remote_key_capture=false');
+    setTimeout(() => {
+      if (!this.remotePageVisible || this.connectionStatus !== ConnectionStatus.WAITING_2FA) return;
+      try {
+        this.getUIContext().getFocusController().requestFocus('remoteTwoFactorInput');
+        RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_focus_request requested');
+      } catch (_e) { RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_focus_request failed'); }
+    }, 80);
+  }
+
   isTwoFactorCodeReady(): boolean {
     return /^\d{6}$/.test(this.twoFaCode);
   }
@@ -2012,6 +2045,7 @@ struct RemotePage {
     }
     let result: number = ConnectionService.send2FA(
       this.twoFaCode, this.enableTrustedDevices && this.trustThisDevice);
+    RustDeskNapi.appendDiagnosticLog('input-2fa', `submit result=${result} trusted=${this.enableTrustedDevices && this.trustThisDevice}`);
     if (result === 0) {
       this.twoFaCode = '';
       this.twoFaError = '';
@@ -6555,11 +6589,14 @@ struct RemotePage {
     if (event.type === TouchType.Up || event.type === TouchType.Cancel) this.compatibilityLeftSequence = false;
     // Blur/hover cleanup may release early, but a matching Down still happened.
     // Its following onClick must not manufacture a second click.
-    if (completedSequence) this.lastMappedPhysicalLeftUpAt = Date.now();
+    if (completedSequence) {
+      this.lastMappedPhysicalLeftUpAt = Date.now();
+      this.lastMappedPhysicalLeftUpTimestamp = event.timestamp ?? 0;
+    }
     if (touchCount <= 0 && changedCount <= 0) {
       if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
         if (event.type === TouchType.Up && this.physicalMouseDeduplicator.consumePointerDuplicate(
-          2, 0, 0, Date.now(), 8, false)) {
+          2, 0, 0, Date.now(), 8, false, event.timestamp)) {
           this.pointerDuplicateEvents++;
           RustDeskNapi.appendDiagnosticLog('input', 'physical_mouse_duplicate action=2 origin=compatibility_empty');
           event.stopPropagation();
@@ -6580,7 +6617,7 @@ struct RemotePage {
     const pairedAction: number = event.type === TouchType.Down ? 1 :
       event.type === TouchType.Up ? 2 : event.type === TouchType.Move ? 0 : -1;
     if ((this.remoteExternalDisplay || pairedAction > 0) && this.physicalMouseDeduplicator.consumePointerDuplicate(
-      pairedAction, localX, localY, Date.now(), 8)) {
+      pairedAction, localX, localY, Date.now(), 8, true, event.timestamp)) {
       this.pointerDuplicateEvents++;
       if (pairedAction > 0) RustDeskNapi.appendDiagnosticLog('input',
         `physical_mouse_duplicate action=${pairedAction} origin=compatibility`);
@@ -6593,6 +6630,7 @@ struct RemotePage {
     this.handleRemoteHover(true);
     this.requestRemoteInputFocus();
     if (event.type === TouchType.Down) {
+      this.lastMappedPhysicalLeftDownTimestamp = event.timestamp ?? 0;
       this.sendLeftDown(remotePoint.x, remotePoint.y, false);
       RustDeskNapi.appendDiagnosticLog('input', 'pointer_touch_forwarded action=1');
     } else if (event.type === TouchType.Move) {
@@ -6853,6 +6891,11 @@ struct RemotePage {
       return;
     }
     ConnectionService.sendMouseEvent(remoteX, remoteY, 1);
+    const now: number = Date.now();
+    if (!showHoldIndicator) {
+      RustDeskNapi.appendDiagnosticLog('input-click', `left_down interval_ms=${this.lastPhysicalLeftDownAt > 0 ? now - this.lastPhysicalLeftDownAt : -1}`);
+      this.lastPhysicalLeftDownAt = now;
+    }
     this.rememberKeyboardInputAnchor(remoteX, remoteY, false);
     this.leftButtonHeld = true;
     this.leftButtonHeldAt = Date.now();
@@ -6939,8 +6982,23 @@ struct RemotePage {
     let now: number = Date.now();
     const physicalPointer: boolean = event.sourceTool === SourceTool.MOUSE || event.sourceTool === SourceTool.TOUCHPAD ||
       (event.source === SourceType.Mouse && event.sourceTool !== SourceTool.Finger && event.sourceTool !== SourceTool.Pen);
+    const timestamp: number = event.timestamp ?? 0;
+    // Consume the onClick paired with one completed pointer sequence. A later
+    // real click-only event must not be discarded by the old blanket 160ms guard.
+    const paired: boolean = this.lastMappedPhysicalLeftUpAt > 0 &&
+      (timestamp > 0 && this.lastMappedPhysicalLeftUpTimestamp > 0 ?
+        timestamp <= this.lastMappedPhysicalLeftUpTimestamp && timestamp >=
+          (this.lastMappedPhysicalLeftDownTimestamp > 0 ? this.lastMappedPhysicalLeftDownTimestamp : this.lastMappedPhysicalLeftUpTimestamp) :
+        now - this.lastMappedPhysicalLeftUpAt < 40);
+    if (paired || (timestamp > 0 && timestamp === this.lastFallbackClickTimestamp)) {
+      this.lastFallbackClickTimestamp = timestamp;
+      this.lastMappedPhysicalLeftUpAt = 0;
+      this.lastMappedPhysicalLeftUpTimestamp = 0;
+      RustDeskNapi.appendDiagnosticLog('input-click', `fallback_suppressed reason=${paired ? 'paired_release' : 'same_event'}`);
+      return;
+    }
     if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.isPanMode ||
-      (!physicalPointer && now - this.lastTouchEventAt < 320) || now - this.lastMappedPhysicalLeftUpAt < 160 ||
+      (!physicalPointer && now - this.lastTouchEventAt < 320) ||
       this.remoteWidth <= 0 || this.remoteHeight <= 0) {
       return;
     }
@@ -6953,6 +7011,7 @@ struct RemotePage {
       event.sourceTool === SourceTool.TOUCHPAD) this.noteProjectedPhysicalPointer();
     let remotePoint: RemotePoint = this.updatePointerFromLocal(localX, localY);
     this.sendLeftClick(remotePoint.x, remotePoint.y);
+    this.lastFallbackClickTimestamp = timestamp;
     this.pointerFallbackClicks++;
     RustDeskNapi.appendDiagnosticLog('input',
       `physical_mouse_click_fallback origin=${coordinatesFromSurface ? 'surface' : 'overlay'} ` +
@@ -6973,7 +7032,7 @@ struct RemotePage {
     if (event.action !== MouseAction.Move && event.action !== MouseAction.Hover) {
       RustDeskNapi.appendDiagnosticLog('input',
         `raw_mouse origin=${coordinatesFromViewport ? 'viewport' : coordinatesFromSurface ? 'surface' : 'overlay'} action=${event.action} ` +
-        `button=${event.button} source=${event.source} tool=${event.sourceTool}`);
+        `button=${event.button} source=${event.source} tool=${event.sourceTool} event_time=${event.timestamp ?? 0}`);
     }
     // ArkUI can emit compatibility mouse events for finger/stylus input. Those
     // events must stay on the touch path, otherwise absolute mouse coordinates
@@ -6999,7 +7058,7 @@ struct RemotePage {
     // across all button paths, while retaining the local movement policy.
     const duplicate: boolean = this.remoteExternalDisplay || action > 0 ?
       this.physicalMouseDeduplicator.consumePointerDuplicate(action, localX, localY, Date.now(),
-        coordinatesFromViewport ? 4 : 2) :
+        coordinatesFromViewport ? 4 : 2, true, event.timestamp) :
       this.physicalMouseDeduplicator.consumeDuplicate(action, localX, localY, Date.now());
     if (duplicate) {
       this.pointerDuplicateEvents++;
@@ -7037,11 +7096,15 @@ struct RemotePage {
       this.lastMoveSentAt = now;
     }
     if (action === 1) {
+      this.lastMappedPhysicalLeftDownTimestamp = event.timestamp ?? 0;
       this.sendLeftDown(remotePoint.x, remotePoint.y, false);
     } else if (action === 2) {
       const hadLeftDown: boolean = this.leftButtonHeld;
       this.sendLeftUp(remotePoint.x, remotePoint.y, true);
-      if (hadLeftDown) this.lastMappedPhysicalLeftUpAt = now;
+      if (hadLeftDown) {
+        this.lastMappedPhysicalLeftUpAt = now;
+        this.lastMappedPhysicalLeftUpTimestamp = event.timestamp ?? 0;
+      }
     } else if (action === 3) {
       this.sendRightDown(remotePoint.x, remotePoint.y);
     } else if (action === 4) {
@@ -7297,6 +7360,8 @@ struct RemotePage {
     if (this.showCommunicationPanel) return false;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return false;
     if (this.desktopWindowActive === false) return false;
+    // Local verification takes precedence over a stale remote menu.
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) return false;
     if (this.controlMenu) {
       if (event.type === KeyType.Down && this.mapControlKeyCode(event.keyCode) === 27) this.setControlMenu('');
       return true;
@@ -7424,6 +7489,7 @@ struct RemotePage {
     if (this.pipSurfaceOwned) return;
     if (this.showCommunicationPanel) return;
     if (this.desktopWindowActive === false) return;
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED) return;
     if (this.showKeyboardPanel) {
       this.keepRemoteKeyboardForPointer();
       return;

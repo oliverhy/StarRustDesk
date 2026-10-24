@@ -22,7 +22,7 @@ function fixture(initial,legacy={}) {
         disk.clear();for(const [key,value] of cache) disk.set(key,value);
       },
     };
-    const context={exports:{},preferences:{getPreferencesSync:(ability,options)=>{
+    const context={exports:{},SystemBarTheme:{setDark(){}},preferences:{getPreferencesSync:(ability,options)=>{
       assert.deepEqual(JSON.parse(JSON.stringify(options)),{name:'starrustdesk_theme'});
       if(failures.open) throw {code:801};return store;
     }},AppStorage:{get:key=>storage.get(key),setOrCreate:(key,value)=>storage.set(key,value)},
@@ -121,12 +121,13 @@ async function test(name,run){await run();count++;console.log('PASS '+name);}
   const method=name=>{const start=settings.indexOf('\n  async '+name+'(');return settings.slice(start,settings.indexOf('\n  }',start)+4);};
   const gates=[],toasts=[],uiContext={exports:{},translate:s=>s,promptAction:{showToast:arg=>toasts.push(arg)},
     ThemePreference:{setMode:mode=>{const d=deferred();gates.push([mode,d]);return d.promise;}}};
-  vm.runInNewContext(ts.transpile('class Settings {'+method('setDarkMode')+'} exports.Settings=Settings;'),uiContext);
+  vm.runInNewContext(ts.transpile('class Settings {'+method('setThemeMode')+'} exports.Settings=Settings;'),uiContext);
   const ui=Object.assign(new uiContext.exports.Settings(),{themePreferenceBusy:false,uiLanguage:'zh-Hans'});
-  const save=ui.setDarkMode(true);assert.equal(ui.themePreferenceBusy,true);
-  await ui.setDarkMode(false);assert.equal(gates.length,1,'busy switch ignores repeated events');
+  const save=ui.setThemeMode('dark');assert.equal(ui.themePreferenceBusy,true);
+  await ui.setThemeMode('system');assert.equal(gates.length,1,'busy selector ignores repeated events');
   gates[0][1].resolve(false);await save;assert.equal(ui.themePreferenceBusy,false);assert.equal(toasts.length,1);
-  assert(settings.includes('.id(\'darkModeToggle\')') && settings.includes('.enabled(!this.themePreferenceBusy)'));
+  assert(settings.includes('.id(\'themeModeSelector\')') && settings.includes('.enabled(!this.themePreferenceBusy)'));
+  for(const mode of ['system','light','dark']) assert(settings.includes(`this.setThemeMode('${mode}')`));
   assert(!source.includes('setOption(') && !/\bPersistentStorage\s*\./.test(source),'only the isolated theme preference file is written');
   console.log(`PASS theme preference: ${count} durable/cold-start/failure cases, startup ordering, partial configuration updates and controlled switch`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

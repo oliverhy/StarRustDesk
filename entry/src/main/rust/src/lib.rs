@@ -508,7 +508,7 @@ pub extern "C" fn rust_connect(
     };
     // Classify before contacting rendezvous. Malformed literals must not leak
     // to a public server as IDs.
-    let direct_addr = match direct_peer_addr(&peer) {
+    let direct_addr = match direct_peer_endpoint(&peer) {
         Ok(address) => address,
         Err(error) => {
             emit_event(error);
@@ -621,10 +621,11 @@ pub extern "C" fn rust_connect(
             // Upstream Client::_start selects the direct listener for literals,
             // even with force_relay. No rendezvous identity exists on this route.
             // This is never a fallback after an ID/signature validation failure.
-            let mut stream = match connect_ip_literal(address).await {
+            let mut stream = match connect_direct_endpoint(address).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    emit_event(&format!("IP direct connection failed: {error}"));
+                    let _ = error; // DNS errors may contain the user's hostname.
+                    emit_event("direct endpoint connection failed; see direct endpoint phase diagnostics");
                     return -14;
                 }
             };
@@ -2900,7 +2901,7 @@ async fn query_peer_online_states(
     // unknown status instead of leaking local addresses or inventing offline.
     let peers: Vec<_> = peers
         .into_iter()
-        .filter(|peer| matches!(direct_peer_addr(peer), Ok(None)))
+        .filter(|peer| matches!(direct_peer_endpoint(peer), Ok(None)))
         .collect();
     if peers.is_empty() {
         return Ok(Vec::new());
@@ -3080,6 +3081,37 @@ fn direct_peer_addr(peer: &str) -> Result<Option<SocketAddr>, &'static str> {
         return Err("invalid direct IP address or port");
     }
     Ok(None)
+}
+
+// Only explicit host:port is DNS direct access; bare dotted names remain IDs.
+fn direct_peer_endpoint(peer: &str) -> Result<Option<String>, &'static str> {
+    match direct_peer_addr(peer) {
+        Ok(address) => Ok(address.map(|value| value.to_string())),
+        Err(error) => {
+            let Some((host, port)) = peer.trim().split_once(':') else { return Err(error); };
+            let valid_host = host.len() <= 253 && !host.is_empty()
+                && host.bytes().any(|c| c.is_ascii_alphabetic())
+                && host.split('.').all(|part| !part.is_empty() && part.len() <= 63
+                    && !part.starts_with('-') && !part.ends_with('-')
+                    && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+            let valid_port = !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|value| value > 0);
+            if valid_host && valid_port { Ok(Some(format!("{host}:{port}"))) } else { Err(error) }
+        }
+    }
+}
+
+async fn connect_direct_endpoint(endpoint: String) -> hbb_common::ResultType<Stream> {
+    let started = Instant::now();
+    let kind = if endpoint.parse::<SocketAddr>().is_ok() { "ip" } else { "domain" };
+    emit_event(&format!("direct endpoint phase=resolve_connect_start kind={kind} timeout_ms={SERVER_CONNECT_TIMEOUT}"));
+    // Shared connector: one deadline for DNS and staggered IPv4/IPv6 attempts,
+    // without an ID-server handshake or a signature-validation bypass.
+    let result = tokio::time::timeout(Duration::from_millis(SERVER_CONNECT_TIMEOUT),
+        connect_tcp_local(endpoint, None, SERVER_CONNECT_TIMEOUT)).await;
+    let outcome = match &result { Ok(Ok(_)) => "connected", Ok(Err(_)) => "failed", Err(_) => "timeout" };
+    emit_event(&format!("direct endpoint phase=resolve_connect_result kind={kind} outcome={outcome} elapsed_ms={}", started.elapsed().as_millis()));
+    result?
 }
 
 async fn connect_ip_literal(address: SocketAddr) -> hbb_common::ResultType<Stream> {
@@ -4049,10 +4081,10 @@ async fn connect_direct_peer(
 }
 
 async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String> {
-    if let Some(address) = direct_peer_addr(&config.peer).map_err(str::to_string)? {
-        return connect_ip_literal(address)
+    if let Some(address) = direct_peer_endpoint(&config.peer).map_err(str::to_string)? {
+        return connect_direct_endpoint(address)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|_| "direct endpoint connection failed".to_string());
     }
     let mut rendezvous = connect_transport_endpoint(
         config.rendezvous_addr.clone(),

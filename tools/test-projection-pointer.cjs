@@ -76,10 +76,13 @@ test('projected delivery pairs work in either order and across three paths', () 
 test('same-origin events and real fast double-clicks are never suppressed', () => {
   d.clear();
   for (let i=0;i<2;i++) {
-    assert.equal(d.consumePointerDuplicate(1,50,60,1000+i*20,2),false);
-    assert.equal(d.consumePointerDuplicate(2,50,60,1005+i*20,2),false);
+    assert.equal(d.consumePointerDuplicate(1,50,60,1000+i*20,2,true,1000+i*20),false);
+    assert.equal(d.consumePointerDuplicate(2,50,60,1005+i*20,2,true,1005+i*20),false);
   }
-  for (const action of [1,2,1,2]) assert.equal(d.consumePointerDuplicate(action,50,60,1050,1),true);
+  // The queued native path retains each original timestamp even when a batch
+  // arrives after both complete ArkUI clicks. A new timestamp is a new click.
+  for (const [action,stamp] of [[1,1000],[2,1005],[1,1020],[2,1025]])
+    assert.equal(d.consumePointerDuplicate(action,50,60,1050,1,true,stamp),true);
   assert.equal(d.consumePointerDuplicate(0,50,60,1200,1),false);
   d.clear(); assert.equal(d.consumePointerDuplicate(2,50,60,1201,2),false);
 });

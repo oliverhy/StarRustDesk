@@ -7,6 +7,7 @@ interface PhysicalPointerDelivery {
   at: number;
   origins: number;
   hasPosition: boolean;
+  timestamp: number;
 }
 
 export class PhysicalMouseDeduplicator {
@@ -38,14 +39,22 @@ export class PhysicalMouseDeduplicator {
   // in either order, in local as well as projected windows. Match across
   // origins only: a second real click from the same path must never be dropped.
   consumePointerDuplicate(action: number, x: number, y: number, now: number, origin: number,
-    hasPosition: boolean = true): boolean {
+    hasPosition: boolean = true, timestamp: number = 0): boolean {
     if (action < 0 || (hasPosition && (!Number.isFinite(x) || !Number.isFinite(y)))) return false;
     // Some compatibility Up events have no touch coordinates. Only releases
     // may match without a position; never turn a missing Down/Move into input.
     if (!hasPosition && action !== 2 && action !== 4) return false;
     this.deliveries = this.deliveries.filter((sample: PhysicalPointerDelivery) =>
       now >= sample.at && now - sample.at < 80);
-    for (const sample of this.deliveries) {
+    for (let index: number = this.deliveries.length - 1; index >= 0; index--) {
+      const sample = this.deliveries[index];
+      const stamped: boolean = timestamp > 0 && sample.timestamp > 0;
+      if (stamped && timestamp !== sample.timestamp) continue;
+      // Without platform timestamps, a completed down/up cycle is a barrier:
+      // the next down (even from another route) begins a NEW physical click.
+      const opposite: number = action === 1 ? 2 : action === 2 ? 1 : action === 3 ? 4 : action === 4 ? 3 : -1;
+      if (!stamped && opposite > 0 && this.deliveries.slice(index + 1).some(
+        (later: PhysicalPointerDelivery) => later.action === opposite)) continue;
       if (sample.action === action && (sample.origins & origin) === 0 &&
         (!hasPosition || !sample.hasPosition ||
           (Math.abs(sample.x - x) <= 0.5 && Math.abs(sample.y - y) <= 0.5))) {
@@ -58,7 +67,7 @@ export class PhysicalMouseDeduplicator {
         return true;
       }
     }
-    this.deliveries.push({ action, x, y, at: now, origins: origin, hasPosition });
+    this.deliveries.push({ action, x, y, at: now, origins: origin, hasPosition, timestamp });
     if (this.deliveries.length > 32) this.deliveries.shift();
     return false;
   }

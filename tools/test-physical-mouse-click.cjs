@@ -306,6 +306,38 @@ test('single-route fast clicks and dragging still forward all real presses and r
   assert.equal(p.leftButtonHeld, false);
 });
 
+test('second real click from another route survives the old 80ms duplicate window', () => {
+  const p = page(); ark(p, MouseAction.Press); now += 5; ark(p, MouseAction.Release);
+  now += 45; native(p, 1); now += 5; native(p, 2);
+  assert.deepEqual(sent, [1, 2, 1, 2]);
+});
+
+test('click-only second click survives the old 160ms release guard', () => {
+  const p = page(); ark(p, MouseAction.Press); now += 10;
+  ark(p, MouseAction.Release, MouseButton.Left, { timestamp: 100 });
+  now += 120; fallback(p, { timestamp: 200 });
+  assert.deepEqual(sent, [1, 2, 1, 2]);
+});
+
+test('stamped delayed duplicate delivery after a complete click is still suppressed', () => {
+  const p = page(); ark(p, MouseAction.Press, MouseButton.Left, { timestamp: 100 });
+  now += 10; ark(p, MouseAction.Release, MouseButton.Left, { timestamp: 110 });
+  now += 10;
+  p.handleNativeMouseInput({x:50,y:50,action:1,button:1,hover:-1,timestamp:100,modifierValid:false});
+  p.handleNativeMouseInput({x:50,y:50,action:2,button:1,hover:-1,timestamp:110,modifierValid:false});
+  fallback(p, { timestamp: 110 });
+  assert.deepEqual(sent, [1, 2]);
+});
+
+test('onClick can carry either endpoint timestamp of the same completed pointer sequence', () => {
+  for (const timestamp of [100, 110]) {
+    const p=page();ark(p,MouseAction.Press,MouseButton.Left,{timestamp:100});now+=10;
+    ark(p,MouseAction.Release,MouseButton.Left,{timestamp:110});now+=1;
+    fallback(p,{timestamp});fallback(p,{timestamp});
+    assert.deepEqual(sent,[1,2]);
+  }
+});
+
 test('ordinary physical presses do not show the simulated drag hint', () => {
   for (const route of [p => ark(p, MouseAction.Press), p => touch(p, TouchType.Down), p => native(p, 1),
     p => ark(p, MouseAction.Move, MouseButton.None, { pressedButtons: [MouseButton.Left] })]) {

@@ -142,7 +142,7 @@ export class RemoteFullscreenPolicy {
   }
 
   private static async setWindowState(main: window.Window, enabled: boolean): Promise<void> {
-    if (RemoteFullscreenPolicy.isPc()) {
+    if (RemoteFullscreenPolicy.pcRestoreStatus !== undefined || RemoteFullscreenPolicy.isDesktopWindow(main)) {
       if (enabled) {
         if (RemoteFullscreenPolicy.pcRestoreStatus === undefined) {
           const status = main.getWindowStatus();
@@ -155,9 +155,20 @@ export class RemoteFullscreenPolicy {
         }
         await main.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
         RemoteFullscreenPolicy.pcImmersiveEntered = true;
+        await RemoteFullscreenPolicy.setDockHover(main, false);
+        const status = main.getWindowStatus();
+        const properties = main.getWindowProperties();
+        let immersive: boolean = false;
+        try { immersive = main.getImmersiveModeEnabledState(); } catch (_e) {}
+        RustDeskNapi.appendDiagnosticLog('fullscreen',
+          `desktop_verify device=${deviceInfo.deviceType} status=${status} full=${properties.isFullScreen} immersive=${immersive}`);
+        if (status !== window.WindowStatusType.FULL_SCREEN && !properties.isFullScreen && !immersive) {
+          throw new Error('Desktop immersive fullscreen was not applied');
+        }
         RustDeskNapi.appendDiagnosticLog('fullscreen',
           `pc_immersive_entered previous_status=${RemoteFullscreenPolicy.pcRestoreStatus}`);
       } else if (RemoteFullscreenPolicy.pcRestoreStatus !== undefined) {
+        await RemoteFullscreenPolicy.setDockHover(main, true);
         const previousStatus = RemoteFullscreenPolicy.pcRestoreStatus;
         const currentStatus = main.getWindowStatus();
         if ((RemoteFullscreenPolicy.pcImmersiveEntered || currentStatus !== previousStatus) &&
@@ -203,5 +214,24 @@ export class RemoteFullscreenPolicy {
   private static isPc(): boolean {
     return deviceInfo.deviceType === '2in1' || deviceInfo.deviceType === 'pc' ||
       deviceInfo.deviceType === 'desktop';
+  }
+
+  private static isDesktopWindow(main: window.Window): boolean {
+    if (RemoteFullscreenPolicy.isPc()) return true;
+    try { if (main.isInFreeWindowMode()) return true; } catch (_e) {}
+    try {
+      const status = main.getWindowStatus();
+      return status === window.WindowStatusType.FLOATING || status === window.WindowStatusType.MAXIMIZE;
+    } catch (_e) { return false; }
+  }
+
+  private static async setDockHover(main: window.Window, visible: boolean): Promise<void> {
+    try {
+      await main.setTitleAndDockHoverShown(visible, visible);
+      RustDeskNapi.appendDiagnosticLog('fullscreen', `desktop_dock_hover visible=${visible} result=ok`);
+    } catch (_e) {
+      // Older systems implement the maximize presentation but not this API.
+      RustDeskNapi.appendDiagnosticLog('fullscreen', `desktop_dock_hover visible=${visible} result=unsupported`);
+    }
   }
 }

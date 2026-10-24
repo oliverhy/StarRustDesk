@@ -94,10 +94,10 @@ function windowHarness(originalDecor = true, deviceType = 'pc') {
     }
   });
   await test('open menus stop native and ArkUI input; Escape dismisses locally', () => {
-    const context = { exports: {}, KeyType: { Down: 0, Up: 1 } };
+    const context = { exports: {}, ConnectionStatus: { CONNECTED: 2 }, KeyType: { Down: 0, Up: 1 } };
     const names = ['syncHardwareKeyState', 'handleNativeMouseInput', 'handleNativeKeyInput', 'handleRemoteMouse', 'handleRemoteAxis', 'handleRemoteTouch', 'handleRemoteKey'];
     vm.runInNewContext(ts.transpile('class Page {' + names.map(method).join('\n') + '} exports.Page = Page;'), context);
-    const page = Object.assign(new context.exports.Page(), { controlMenu: 'view', pipSurfaceOwned: false,
+    const page = Object.assign(new context.exports.Page(), { connectionStatus: 2, controlMenu: 'view', pipSurfaceOwned: false,
       mapControlKeyCode: k => k, setControlMenu(value) { this.controlMenu = value; } });
     // Any accidental forwarding touches an unstubbed API and fails this test.
     for (const name of names.filter(k => k !== 'handleRemoteKey')) page[name]({});

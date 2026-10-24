@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { RustDeskNapi } from './RustDeskNapi';
+import { SystemBarTheme } from './SystemBarTheme';
 
 const THEME_STORE: string = 'starrustdesk_theme';
 const THEME_KEY: string = 'mode';
@@ -104,8 +105,10 @@ export class ThemePreference {
   }
 
   private static apply(): void {
+    AppStorage.setOrCreate('themeMode', ThemePreference.mode);
     AppStorage.setOrCreate('isDarkModeManual', ThemePreference.mode !== 'system');
     AppStorage.setOrCreate('isDarkMode', ThemePreference.isDark());
+    SystemBarTheme.setDark(ThemePreference.isDark());
   }
 
   private static log(message: string): void {

@@ -14,6 +14,7 @@ import { SystemFaultDiagnostic } from '../service/SystemFaultDiagnostic';
 import { LanguageService } from '../utils/LanguageService';
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference';
 import { ThemePreference } from '../service/ThemePreference';
+import { SystemBarTheme } from '../service/SystemBarTheme';
 
 const DOMAIN = 0x0000;
 
@@ -65,6 +66,7 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
     try { RemoteDisplayPolicy.attach(windowStage.getMainWindowSync()); } catch (_e) {}
+    try { SystemBarTheme.attach(windowStage.getMainWindowSync()); } catch (_e) {}
     RustDeskNapi.appendDiagnosticLog('app', 'window_stage_create')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
     windowStage.loadContent('pages/HomePage', (err) => {
@@ -79,6 +81,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageDestroy(): void {
+    SystemBarTheme.detach();
     RemoteDisplayPolicy.detach();
     RustDeskNapi.appendDiagnosticLog('app', 'window_stage_destroy')
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageDestroy');
@@ -93,6 +96,7 @@ export default class EntryAbility extends UIAbility {
   onForeground(): void {
     LanguageService.refreshSystemLanguage();
     RemoteDisplayPolicy.refresh();
+    SystemBarTheme.refresh();
     this.updateColorMode(this.context.config.colorMode);
     this.updateFontScale(this.context.config.fontSizeScale);
     RemoteSessionBackgroundTask.setAppBackground(false)

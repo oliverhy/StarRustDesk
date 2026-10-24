@@ -68,11 +68,13 @@ function pageHarness(overrides = {}) {
   };
   return { page, timers, calls, logs, windows, navigationPackets, runTimer, target: id => { target = id; } };
 }
-function policyHarness(deviceType = 'phone', initialStatus = 4) {
-  const calls = [], logs = [];
+function policyHarness(deviceType = 'phone', initialStatus = (deviceType === 'phone' || deviceType === 'tablet') ? 1 : 4) {
+  const calls = [], logs = [], dockCalls = [];
   let layoutGate, barGate, maximizeGate, failLayout = 0, failBars = 0, failMaximize = 0;
-  let status = initialStatus;
+  let status = initialStatus, ignoreMaximize = false, freeWindow = false;
   const main = {
+    isInFreeWindowMode: () => freeWindow,
+    async setTitleAndDockHoverShown(title, dock) { dockCalls.push([title, dock]); },
     getWindowStatus: () => status,
     getWindowProperties: () => ({ isLayoutFullScreen: false, isFullScreen: false,
       windowRect: { width: 2800, height: 1840 } }),
@@ -80,7 +82,7 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
       calls.push(['maximize', presentation]);
       if (failMaximize-- > 0) throw Object.assign(new Error('maximize'), { code: 1300003 });
       if (maximizeGate) { const gate = maximizeGate; maximizeGate = undefined; await gate.promise; }
-      status = presentation === 1 ? 2 : 1;
+      if (!ignoreMaximize) status = presentation === 1 ? 2 : 1;
     },
     async recover() { calls.push(['recover']); status = 4; },
     async setWindowLayoutFullScreen(enabled) {
@@ -104,11 +106,12 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     RustDeskNapi: { appendDiagnosticLog: (c, m) => logs.push([c, m]) }
   });
   vm.runInContext(ts.transpile(policySource.replace(/^import .*;\r?\n/gm, '')), context);
-  return { policy: context.exports.RemoteFullscreenPolicy, calls, logs,
+  return { policy: context.exports.RemoteFullscreenPolicy, calls, logs, dockCalls,
     failLayout: n => { failLayout = n; }, failBars: n => { failBars = n; },
     failMaximize: n => { failMaximize = n; },
     gateLayout: d => { layoutGate = d; }, gateBars: d => { barGate = d; },
     gateMaximize: d => { maximizeGate = d; }, status: () => status, setStatus: value => { status = value; },
+    ignoreMaximize: () => { ignoreMaximize = true; }, freeWindow: () => { freeWindow = true; },
     detach: () => { attached = undefined; } };
 }
 
@@ -318,7 +321,16 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     await h.policy.apply(false);
     assert.deepEqual(h.calls, [['maximize', 3], ['recover']]);
     assert.equal(h.status(), 4);
+    assert.deepEqual(h.dockCalls, [[false, false], [true, true]]);
     assert(h.logs.some(([, message]) => message.includes('pc_window_restored')));
+  });
+  await test('tablet and phone computer-mode windows use immersive maximize, not only mobile bars', async () => {
+    for (const type of ['tablet', 'phone']) {
+      const h = policyHarness(type, 4);
+      await h.policy.apply(true); assert.deepEqual(h.calls, [['maximize', 3]]);
+      await h.policy.apply(false); assert.deepEqual(h.calls.at(-1), ['recover']);
+      assert.deepEqual(h.dockCalls, [[false, false], [true, true]]);
+    }
   });
   await test('PC previously maximized window stays maximized after exit', async () => {
     const h = policyHarness('pc', 2);
@@ -326,6 +338,17 @@ function policyHarness(deviceType = 'phone', initialStatus = 4) {
     await h.policy.apply(false);
     assert.deepEqual(h.calls, [['maximize', 3], ['maximize', 1]]);
     assert.equal(h.status(), 2);
+  });
+  await test('fullscreen success is rejected when the window remains floating', async () => {
+    const h = policyHarness('2in1'); h.ignoreMaximize();
+    await assert.rejects(h.policy.apply(true), /not applied/);
+    assert.equal(h.status(), 4);
+    assert(h.logs.some(([,m]) => m.includes('desktop_verify') && m.includes('status=4')));
+  });
+  await test('free-window capability selects desktop fullscreen even on a tablet with full-screen status', async () => {
+    const h = policyHarness('tablet', 1); h.freeWindow();
+    await h.policy.apply(true); assert.deepEqual(h.calls[0], ['maximize', 3]);
+    await h.policy.apply(false); assert.deepEqual(h.calls.at(-1), ['maximize', 2]);
   });
   await test('PC manual floating-window restore does not trigger a repeated recover', async () => {
     const h = policyHarness('2in1');

@@ -310,7 +310,11 @@ export struct ApiAccountDialog {
             Text(translate(this.challenge === 'email' ? '请输入邮箱验证码' : '请输入身份验证器验证码', this.uiLanguage))
               .fontSize(14).fontColor(this.textColor());
             TextInput({ text: this.code, placeholder: translate('6 位验证码', this.uiLanguage) }).maxLength(6).type(InputType.Number)
-              .enabled(!this.busy).onChange((value: string) => { this.code = value; });
+              .id('apiAccountTwoFactorInput').defaultFocus(true).enterKeyType(EnterKeyType.Done)
+              .enabled(!this.busy)
+              .onFocus(() => { RustDeskNapi.appendDiagnosticLog('input-2fa', 'api_local_input_focus'); })
+              .onChange((value: string) => { this.code = value.replace(/[^0-9]/g, '').slice(0, 6); })
+              .onSubmit(() => { if (!this.busy && /^\d{6}$/.test(this.code)) this.login(); });
             Row({ space: 8 }) {
               ApiAccountAction({ label: '验证', selected: true, isEnabled: !this.busy, onAction: () => { this.login(); } });
               ApiAccountAction({ label: '重新登录', isEnabled: !this.busy, onAction: () => { this.api.cancel(); this.challenge = ''; this.code = ''; } });

@@ -61,6 +61,21 @@ fn malformed_literals_never_become_rendezvous_ids() {
 }
 
 #[test]
+fn domain_ports_are_direct_but_custom_ids_and_invalid_endpoints_remain_distinct() {
+    for peer in ["example.org:21118", "localhost:32001", "NAS.local:1", "xn--example-9d0b.com:65535"] {
+        assert_eq!(direct_peer_endpoint(peer).unwrap(), Some(peer.to_string()));
+    }
+    for peer in ["example.org", "Custom.ID", "123456789"] {
+        assert_eq!(direct_peer_endpoint(peer).unwrap(), None);
+    }
+    for peer in ["example.org:0", "example.org:65536", "example.org:abc", "example.org:-1",
+        "-bad.test:1", "bad-.test:1", "bad..test:1", "http://example.org:1", "999.1.2.3:1", "[bad]:1"] {
+        assert!(direct_peer_endpoint(peer).is_err(), "{peer}");
+    }
+    assert_eq!(direct_peer_endpoint("[::1]:21118").unwrap(), Some("[::1]:21118".to_string()));
+}
+
+#[test]
 fn retry_guard_endpoint_forms_never_select_id_rendezvous() {
     // Matches the service/page exclusion guard, not just valid IP parsing.
     for endpoint in [
@@ -382,7 +397,7 @@ fn public_bootstrap_and_online_port_match_upstream_without_overriding_custom_ser
     }
 }
 
-async fn check_direct_listener(host: &str, file_session: bool) {
+async fn check_direct_listener(host: &str, file_session: bool, domain: bool) {
     let listener = match tokio::net::TcpListener::bind(host).await {
         Ok(listener) => listener,
         Err(error) if host.starts_with('[') => {
@@ -392,10 +407,11 @@ async fn check_direct_listener(host: &str, file_session: bool) {
         Err(error) => panic!("loopback bind failed: {error}"),
     };
     let address = listener.local_addr().unwrap();
+    let endpoint = if domain { format!("localhost:{}", address.port()) } else { address.to_string() };
     let mut client = if file_session {
         let config = ConnectionConfig {
             public_server: false,
-            peer: address.to_string(),
+            peer: endpoint.clone(),
             password: String::new(),
             // These must never be resolved/contacted for a literal peer.
             rendezvous_addr: "invalid-rendezvous.invalid:1".into(),
@@ -407,7 +423,7 @@ async fn check_direct_listener(host: &str, file_session: bool) {
         };
         connect_file_stream(&config).await.unwrap()
     } else {
-        connect_ip_literal(address).await.unwrap()
+        connect_direct_endpoint(direct_peer_endpoint(&endpoint).unwrap().unwrap()).await.unwrap()
     };
     let (socket, address) = listener.accept().await.unwrap();
     let mut peer = Stream::from(socket, address);
@@ -434,8 +450,10 @@ async fn check_direct_listener(host: &str, file_session: bool) {
 fn direct_ipv4_ipv6_and_file_sessions_preserve_login_challenge() {
     runtime().block_on(async {
         for host in ["127.0.0.1:0", "[::1]:0"] {
-            check_direct_listener(host, false).await;
-            check_direct_listener(host, true).await;
+            check_direct_listener(host, false, false).await;
+            check_direct_listener(host, true, false).await;
+            check_direct_listener(host, false, true).await;
+            check_direct_listener(host, true, true).await;
         }
     });
 }

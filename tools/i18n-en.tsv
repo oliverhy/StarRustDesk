@@ -1,4 +1,14 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+1.3.9（1003009）· 域名直连与操控体验修复	1.3.9 (1003009) · Domain direct connections and input fixes
+新增“域名＋端口”直连支持，可在远端 ID / IP 中输入域名:端口，兼容 IPv4 与 IPv6；被控端需开启直接 IP 访问，未指定端口的自定义 ID 保留原有连接方式。	Added direct connections using domain:port in the Remote ID / IP field, with IPv4 and IPv6 support. Direct IP access must be enabled on the remote device. Custom IDs without an explicit port retain their existing connection behavior.
+优化鸿蒙 PC 及手机、平板电脑模式下的沉浸全屏，改善全屏后任务栏仍显示的问题；增加实际窗口状态检查，退出全屏时恢复原窗口状态。	Improved immersive fullscreen on HarmonyOS PCs and phones or tablets in desktop mode to address taskbars remaining visible. The actual window state is checked, and leaving fullscreen restores the previous window state.
+修复本地二次验证（2FA）输入框被旧远控菜单拦截按键的问题，优化验证码框焦点与数字输入，支持回车提交，兼顾服务器账号验证与远端连接验证。	Fixed stale remote menus intercepting keyboard input in local two-factor authentication fields. Improved focus and numeric entry, with Enter to submit for both server account and remote connection verification.
+外观新增“跟随系统、浅色、深色”三种选项，状态栏与导航栏同步配色；远控时保持深色背景，退出远控后恢复当前外观，避免恢复过期颜色。	Appearance now offers System, Light and Dark modes, with matching status and navigation bar colors. Remote sessions keep a dark background; leaving restores the current appearance instead of outdated colors.
+修复部分场景下鼠标双击的第二击被误过滤的问题，按事件时间戳及按下、松开序列去重，改善文件夹双击打开体验，减少误进入重命名的情况。	Fixed the second click of a double-click being incorrectly filtered in some cases. Deduplication now uses event timestamps and press/release sequences to improve opening folders and reduce accidental renaming.
+完善域名连接、全屏状态、2FA 焦点、系统栏主题和鼠标点击诊断，新增日志不记录验证码、密码或输入文字。	Improved diagnostics for domain connections, fullscreen state, 2FA focus, system bar appearance and mouse clicks. New diagnostics do not record verification codes, passwords or entered text.
+外观	Appearance
+深色	Dark
+浅色	Light
 1.3.8（1003008）· 键盘避让与画面上移修复	1.3.8 (1003008) · Keyboard avoidance and viewport movement fixes
 修复软键盘弹出后画面仅轻微上移、下方输入位置仍被遮挡的问题；优先按最近一次实际远端点击位置避让，缺少有效位置时按当前可见画面下沿计算。	Fixed the picture moving up too little when the software keyboard opens, leaving lower input areas covered. Avoidance uses the most recent actual remote click when available, or the bottom of the currently visible picture otherwise.
 键盘弹出时保持原画面比例和缩放，只向上移动画面；收起键盘后恢复原位置，改善连续开合键盘及放大画面下的避让一致性。	The original aspect ratio and zoom are preserved when the keyboard opens; only the picture's vertical position changes. Closing the keyboard restores the original position, including after repeated keyboard opening and closing or while zoomed in.
