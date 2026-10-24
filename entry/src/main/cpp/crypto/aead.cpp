@@ -176,13 +176,25 @@ void AEAD::deriveKey(const uint8_t* password, int passwordLen,
     while (pos < 64) {
         state[pos++] = 0;
     }
-    // Multiple rounds of ChaCha20 mixing
+    // PBKDF2-style iterated KDF: chain the derived key through the
+    // ChaCha20 PRF many times. The large iteration count makes
+    // brute-force/dictionary attacks computationally expensive, matching
+    // the work-factor goal of PBKDF2 (RFC 8018) in the absence of a
+    // bundled Argon2/PBKDF2 implementation.
+    static const int KDF_ITERATIONS = 200000;
     ChaCha20 mixer;
     mixer.setKey(state);
     mixer.setNonce(state + 32);
     mixer.encrypt(key, key, KEY_SIZE);
-    // Second round with derived key as input
-    mixer.setKey(key);
-    mixer.setNonce(key + 20);
-    mixer.encrypt(key, key, KEY_SIZE);
+
+    uint8_t kdfNonce[ChaCha20::NONCE_SIZE];
+    memset(kdfNonce, 0, sizeof(kdfNonce));
+    int nonceCopyLen = saltLen < ChaCha20::NONCE_SIZE ? saltLen : ChaCha20::NONCE_SIZE;
+    memcpy(kdfNonce, salt, nonceCopyLen);
+    for (int round = 0; round < KDF_ITERATIONS; round++) {
+        mixer.setKey(key);
+        mixer.setNonce(kdfNonce);
+        mixer.setCounter((uint32_t)round);
+        mixer.encrypt(key, key, KEY_SIZE);
+    }
 }
