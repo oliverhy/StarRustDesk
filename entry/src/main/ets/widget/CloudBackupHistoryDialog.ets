@@ -20,7 +20,7 @@ export struct CloudBackupHistoryDialog {
     Column({ space: 12 }) {
       Text(translate('云端历史备份', this.uiLanguage))
         .fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.primaryColor()).width('100%')
-      Text(translate('按时间降序排列。选择后先预览，不会立即覆盖本机；历史文件不会删除。', this.uiLanguage))
+      Text(translate('云端最多保留最近 5 份备份，成功同步后自动清理更早备份。选择后先预览，不会立即覆盖本机。', this.uiLanguage))
         .fontSize(13).fontColor(this.secondaryColor()).width('100%')
       List({ space: 8 }) {
         ForEach(this.backups, (backup: CloudBackupSummary) => {

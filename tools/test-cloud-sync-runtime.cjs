@@ -85,7 +85,7 @@ function environment(config = {}) {
       if (to.startsWith('/cloud/') && files.has(to)) throw { code: 13900020 }
       files.set(to, files.get(from)); files.delete(from); if (to.startsWith('/cloud/')) cloudWrites++
     },
-    unlinkSync(p) { fail('unlink', p); files.delete(p) }
+    unlinkSync(p) { fail('unlink', p); config.beforeUnlink?.(p); files.delete(p) }
   }
   const sandbox = vm.createContext({ exports: {}, console, Promise, Error, Number, String, JSON, ArrayBuffer, Uint8Array,
     Date: class extends Date { constructor(v) { super(v === undefined ? clock.now : v) } static now() { return clock.now } },
@@ -147,7 +147,12 @@ function environment(config = {}) {
 }
 
 let passed = 0
-async function test(name, fn) { await fn(); console.log(`PASS ${name}`); passed++ }
+let currentTest = ''
+const watchdog = setTimeout(() => {
+  console.error(`FAIL cloud runtime stalled: ${currentTest}`)
+  process.exitCode = 1
+}, 60000)
+async function test(name, fn) { currentTest = name; await fn(); console.log(`PASS ${name}`); passed++ }
 async function confirmLatest(e) {
   const previewTask = e.service.restore(e.context)
   await e.tick(100)
@@ -500,7 +505,12 @@ async function confirmLatest(e) {
       performancePreset: 'smooth', groupId: 'group' })), includesPasswords: false,
     serverConfig: { idServer: 'PRIVATE_SERVER', relayServer: '', apiServer: '', serverKey: '' } })
   const fresh = extra => environment({ ...extra, options: { 'cloud-sync-baseline-established': '0', ...extra?.options } })
-  const complete = async (e, p) => { await e.tick(100); return await p }
+  const complete = async (e, p) => {
+    // Integrity checks may queue a separate deletion-sync phase after the initial
+    // virtual time slice. Drive that phase too; do not silently exit on a pending promise.
+    for (let i = 0; i < 6; i++) await e.tick(100)
+    return await p
+  }
   await test('reinstall never publishes empty data, even after password/privacy preference edits', async () => {
     for (const changed of [false, true]) {
       const e = fresh()
@@ -782,5 +792,133 @@ async function confirmLatest(e) {
     assert.ok(e.logs.some(l => l.includes('stage=restore_cancelled')))
     assert.ok(e.logs.every(l => !l.includes('PRIVATE_')))
   })
+  async function seedRetention(e, count = 8) {
+    const trace = new e.sandbox.CloudSyncTrace('sync')
+    for (let i = 0; i < count; i++) {
+      const time = e.clock.now - 10000 + i
+      await e.sandbox.CloudSyncSnapshotStore.publish('/cloud/StarRustDesk', JSON.stringify(payload(time, ['kept'])),
+        time, trace, () => {})
+    }
+    e.options.set('cloud-sync-local-changed-at', String(e.clock.now - 10000 + count - 1))
+    e.options.set('saved-connections', JSON.stringify(payload(e.clock.now, ['LOCAL_CONNECTION']).connections))
+    e.options.set('saved-connection-groups', JSON.stringify([{ id: 'local-group', name: 'LOCAL_GROUP' }]))
+    return [...e.cloudSnapshots()]
+  }
+  const deletions = e => e.operations.filter(o => o.operation === 'unlink' && !o.path.endsWith('.pending'))
+  await test('successful no-change sync retains newest five including legacy; unrelated and mirror files survive', async () => {
+    const e = environment(), snapshots = await seedRetention(e)
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 20000, ['legacy']))))
+    e.files.set('/cloud/StarRustDesk/keep.txt', Buffer.from('PRIVATE_UNRELATED'))
+    e.files.set('/cloud/StarRustDesk/unpublished.srdsync.pending', Buffer.from('PRIVATE_PENDING'))
+    e.files.set('/local/cloud_backup/cloud-sync-v1.srdsync', Buffer.from('PRIVATE_MIRROR'))
+    const before = [...e.options.entries()]
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.success, true); assert.equal(result.uploaded, false); assert.equal(result.restored, false)
+    assert.deepEqual(e.cloudSnapshots(), snapshots.slice(-5)); assert.equal(e.files.has(e.cloudPath), false)
+    for (const [key, value] of before.filter(([key]) => !key.startsWith('cloud-sync-'))) assert.equal(e.options.get(key), value)
+    for (const name of ['keep.txt', 'unpublished.srdsync.pending']) assert.ok(e.files.has('/cloud/StarRustDesk/' + name))
+    assert.equal(e.files.get('/local/cloud_backup/cloud-sync-v1.srdsync').toString(), 'PRIVATE_MIRROR')
+    assert.equal(e.stats().starts, 2, 'deletions need a separate system completion')
+    assert.ok(e.logs.some(l => l.includes('stage=retention_verified') && l.includes('remaining_count=5')))
+    assert.ok(e.logs.every(l => !l.includes('PRIVATE_') && !l.includes('/cloud/') && !l.includes('.srdsync')))
+  })
+  await test('retention waits for upload completion, then for deletion completion before success', async () => {
+    const e = environment({ manual: true }); await seedRetention(e, 5)
+    e.service.markLocalChanged()
+    let settled = false
+    const task = e.service.syncNow(e.context).then(r => { settled = true; return r })
+    await e.tick(100)
+    e.drivers[0].emit(0); e.drivers[0].emit(4); await e.tick(100)
+    assert.equal(e.cloudSnapshots().length, 6); assert.equal(deletions(e).length, 0)
+    assert.equal(settled, false)
+    e.drivers[1].emit(0); e.drivers[1].emit(4); await e.tick(100)
+    assert.equal(e.cloudSnapshots().length, 5); assert.equal(deletions(e).length, 1)
+    assert.equal(settled, false, 'local deletion is not a confirmed cloud deletion')
+    e.drivers[2].emit(0); e.drivers[2].emit(4); await e.tick(100)
+    const result = await task
+    assert.equal(result.success, true); assert.equal(result.uploaded, true)
+  })
+  await test('failed new upload never prunes the prior five backups', async () => {
+    const e = environment({ manual: true }), old = await seedRetention(e, 5)
+    e.service.markLocalChanged()
+    const task = e.service.syncNow(e.context); await e.tick(100)
+    e.drivers[0].emit(0); e.drivers[0].emit(4); await e.tick(100)
+    e.drivers[1].emit(1, 8); await e.tick(100)
+    const result = await task
+    assert.equal(result.success, false); assert.equal(deletions(e).length, 0)
+    for (const p of old) assert.ok(e.files.has(p))
+  })
+  await test('an invalid retained backup blocks all deletion; five or fewer need no cleanup sync', async () => {
+    const e = environment(), old = await seedRetention(e)
+    e.files.set(old.at(-3), Buffer.from('{'))
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.success, false); assert.equal(result.pending, true)
+    assert.equal(result.stage, 'retention'); assert.equal(result.code, -1005)
+    assert.equal(deletions(e).length, 0); assert.equal(e.cloudSnapshots().length, 8)
+    const f = environment(); await seedRetention(f, 5)
+    assert.equal((await complete(f, f.service.syncNow(f.context))).success, true)
+    assert.equal(deletions(f).length, 0); assert.equal(f.stats().starts, 1)
+  })
+  await test('partial deletion and failed deletion acknowledgement stay pending without touching newest five', async () => {
+    const e = environment(), snapshots = await seedRetention(e)
+    let removed = 0
+    e.config.beforeUnlink = () => { if (++removed === 2) throw { code: 13900012, message: 'PRIVATE_ERROR' } }
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.success, false); assert.equal(result.pending, true); assert.equal(result.code, 13900012)
+    assert.equal(e.cloudSnapshots().length, 7); assert.equal(e.stats().starts, 2)
+    for (const p of snapshots.slice(-5)) assert.ok(e.files.has(p))
+    delete e.config.beforeUnlink
+    assert.equal((await complete(e, e.service.syncNow(e.context))).success, true)
+    assert.equal(e.cloudSnapshots().length, 5)
+    const f = environment({ manual: true }); await seedRetention(f)
+    const task = f.service.syncNow(f.context); await f.tick(100)
+    f.drivers[0].emit(0); f.drivers[0].emit(4); await f.tick(100)
+    f.drivers[1].emit(1, 1); await f.tick(100)
+    const failed = await task
+    assert.equal(failed.success, false); assert.equal(failed.pending, true); assert.equal(failed.stage, 'retention')
+  })
+  await test('concurrent inventory changes and cancellation stop pruning conservatively', async () => {
+    const e = environment(), snapshots = await seedRetention(e)
+    const f = environment(); await seedRetention(f, 9)
+    const additional = f.cloudSnapshots().at(-1)
+    let checks = 0
+    const changed = await e.sandbox.CloudSyncSnapshotStore.retainLatest('/cloud/StarRustDesk', e.cloudPath,
+      new e.sandbox.CloudSyncTrace('sync'), raw => Date.parse(JSON.parse(raw).exportedAt), () => {
+        if (++checks === 2) e.files.set(additional, f.files.get(additional))
+      })
+    assert.equal(changed.code, -1011); assert.equal(deletions(e).length, 0)
+    const g = environment(); await seedRetention(g)
+    let n = 0
+    await assert.rejects(() => g.sandbox.CloudSyncSnapshotStore.retainLatest('/cloud/StarRustDesk', g.cloudPath,
+      new g.sandbox.CloudSyncTrace('sync'), raw => Date.parse(JSON.parse(raw).exportedAt), () => {
+        if (++n === 3) throw { code: -1002 }
+      }))
+    assert.equal(deletions(g).length, 0)
+    const h = environment(); await seedRetention(h)
+    h.config.beforeUnlink = () => h.service.setEnabled(false)
+    const result = await complete(h, h.service.syncNow(h.context))
+    assert.equal(result.success, false); assert.equal(result.pending, true)
+    assert.equal(deletions(h).length, 1)
+    for (const p of snapshots.slice(-5)) assert.ok(h.files.has(p))
+  })
+  await test('clock skew cannot prune this operation newly uploaded snapshot', async () => {
+    const e = environment(), snapshots = await seedRetention(e)
+    const result = await e.sandbox.CloudSyncSnapshotStore.retainLatest('/cloud/StarRustDesk', e.cloudPath,
+      new e.sandbox.CloudSyncTrace('sync'), raw => Date.parse(JSON.parse(raw).exportedAt), () => {},
+      snapshots[0].split('/').at(-1)).catch(x => x)
+    assert.equal(result.code, -1011); assert.equal(deletions(e).length, 0)
+  })
+  await test('history browsing, preview and explicit restore do not delete; encrypted sync retains five', async () => {
+    const e = environment(), snapshots = await seedRetention(e)
+    const history = await complete(e, e.service.listBackups(e.context))
+    assert.equal(history.backups.length, 8)
+    const preview = await complete(e, e.service.previewRestore(e.context, history.backups[0].id))
+    const result = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    assert.equal(result.restored, true); assert.deepEqual(e.cloudSnapshots(), snapshots)
+    assert.equal(deletions(e).length, 0)
+    const f = environment({ encrypted: true }); await seedRetention(f)
+    const synced = await complete(f, f.service.syncNow(f.context))
+    assert.equal(synced.success, true); assert.equal(f.cloudSnapshots().length, 5)
+  })
   console.log(`cloud-sync runtime: ${passed} scenario groups passed`)
-})().catch(error => { console.error(error); process.exitCode = 1 })
+})().catch(error => { console.error(error); process.exitCode = 1 }).finally(() => clearTimeout(watchdog))

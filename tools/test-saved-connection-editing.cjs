@@ -205,6 +205,7 @@ async function test(name,fn){await fn();count++;console.log('PASS '+name);}
    assert(!method(source,'editSavedConnection').includes('this.applySavedConnection'));
    assert(method(source,'editSavedConnection').includes("password: '', passwordMode: 'keep'"));
    assert(editor.includes("this.createNew ? 'new' : 'update'"));assert(!editor.includes('确认替换原连接'));assert(!editor.includes('替换原连接（需要确认）'));
+   assert(editor.includes('.selected(this.presetIndex()).value(this.presetLabel())'),'collapsed connection-mode selector shows its current label');
  });
  await test('independent add dialog starts empty and never inherits homepage secrets/settings',()=>{
    const f=fixture();Object.assign(f.p,{remoteId:'123456',connectionName:'Quick draft',password:'quick-secret',osPasswordDraft:'quick-os',privacyMode:true});

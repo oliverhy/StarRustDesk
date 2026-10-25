@@ -89,6 +89,28 @@ const count=calls.length;for(const key of ['F0','F13','password','not-a-key'])p.
 p.canSendCtrlAltDel=false;p.sendGlassMenuKey('Ctrl+Alt+Del');assert.equal(calls.length,count);
 p.controlMenu='view';p.sendGlassMenuKey('Enter');assert.equal(calls.length,count);
 assert(widget.includes('.fontFamily(Style.FONT)'));assert(widget.includes('.selectedColor(Style.BLUE)'));
+const scrollHint=method(widget,'scrollHint');
+assert(scrollHint.includes("Image($r('app.media.glass_chevron'))")&&scrollHint.includes('up ? 270 : 90'),
+ 'overflowing secondary menus show direction-aware chevron hints');
+assert(!/\bText\(/.test(scrollHint),'the scroll affordance has no visible text');
+assert(scrollHint.includes('.backgroundColor(Color.Transparent)')&&!scrollHint.includes('.border('),
+ 'scroll chevrons have no visible background or border');
+assert(widget.includes('this.keyboardScrollY > 0.5')&&widget.includes('!this.keyboardScrollAtEnd'),
+ 'the keyboard menu shows up/down arrows according to its scroll position');
+assert(widget.includes('this.menuScrollY > 0.5')&&widget.includes('!this.menuScrollAtEnd'),
+ 'other secondary menus show up/down arrows according to their scroll position');
+const keyboardMenu=method(widget,'keyboard');
+assert(!keyboardMenu.includes('Stack({ alignContent: Alignment.Center })')&&
+ keyboardMenu.includes('this.keyboardScrollHint(true)')&&keyboardMenu.includes('this.keyboardScrollHint(false)'),
+ 'scroll hints stay outside the keyboard scroll viewport and cannot intercept vertical swipes');
+assert(method(widget,'keyboardScrollHint').includes("height(18)")&&
+ method(widget,'menuScrollHint').includes("height(18)"),
+ 'scroll hints occupy only their transparent edge rows');
+assert(widget.includes('this.metrics.contentHeight > this.metrics.bodyHeight + 1'),'the hint is limited to vertically overflowing menus');
+const overflow=(new Function(method(widget,'hasVerticalOverflow').replace(/^\s*hasVerticalOverflow\(\): boolean\s*/, '')));
+assert.equal(overflow.call({state:{category:'view',keyboardTab:'more'},metrics:{contentHeight:220,bodyHeight:180}}),true);
+assert.equal(overflow.call({state:{category:'view',keyboardTab:'more'},metrics:{contentHeight:180,bodyHeight:180}}),false);
+for(const keyboardTab of ['function','more'])assert.equal(overflow.call({state:{category:'keyboard',keyboardTab},metrics:{contentHeight:180,bodyHeight:180}}),true);
 assert(!widget.includes('ButtonShapeModifier')&&!widget.includes('BarState.Auto'));
 assert(method(page,'buildControlMenuOverlay').includes('backgroundColor(Color.Transparent)'));
 assert(method(page,'buildControlMenuOverlay').includes('BlurStyle.COMPONENT_ULTRA_THIN'));

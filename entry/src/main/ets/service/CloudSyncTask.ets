@@ -64,6 +64,8 @@ STAGES.push('request_state', 'request_disabled', 'request_waiting_confirmation',
   'system_completed_timestamp', 'history_open', 'history_close', 'restore_confirmed', 'restore_cancelled',
   'password_save_requested', 'password_save_verified', 'password_save_failed', 'local_changed',
   'home_reload_start', 'home_reload_empty', 'home_reload_complete', 'home_reload_stale', 'home_reload_failed')
+STAGES.push('retention_list', 'retention_inventory', 'retention_validate', 'retention_delete',
+  'retention_wait', 'retention_verified', 'retention_failed')
 
 // Only fixed numeric/boolean metadata can cross this boundary. Neither strings
 // nor arbitrary dictionaries are accepted, including filenames, tickets or hashes.
@@ -106,6 +108,9 @@ export interface CloudSyncTraceDetails {
   loadGeneration?: number
   cloudRevision?: number
   parentOpId?: number
+  retentionLimit?: number
+  deletedCount?: number
+  remainingCount?: number
 }
 
 interface SafeTraceField {
@@ -147,7 +152,9 @@ export class CloudSyncTrace {
         { key: 'has_more', value: details.hasMore }, { key: 'last_sync_time', value: details.lastSyncTime },
         { key: 'requested_at', value: details.requestedAt }, { key: 'active_seen', value: details.activeSeen },
         { key: 'last_state', value: details.systemState }, { key: 'load_generation', value: details.loadGeneration },
-        { key: 'cloud_revision', value: details.cloudRevision }, { key: 'parent_op_id', value: details.parentOpId }
+        { key: 'cloud_revision', value: details.cloudRevision }, { key: 'parent_op_id', value: details.parentOpId },
+        { key: 'retention_limit', value: details.retentionLimit }, { key: 'deleted_count', value: details.deletedCount },
+        { key: 'remaining_count', value: details.remainingCount }
       ]
       let suffix = ''
       for (const field of fields) {

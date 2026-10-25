@@ -1186,6 +1186,17 @@ Ctrl 与 Win/Cmd 互换	Swap Ctrl and Win/Cmd
 确认恢复此备份	Confirm restoring this backup
 云端历史备份	Cloud backup history
 按时间降序排列。选择后先预览，不会立即覆盖本机；历史文件不会删除。	Newest first. Selecting a backup opens a preview without replacing local data. Historical backups are retained.
+云端最多保留最近 5 份备份，成功同步后自动清理更早备份。选择后先预览，不会立即覆盖本机。	Keep up to the 5 newest cloud backups. Older backups are removed after successful sync. Selecting a backup opens a preview without replacing local data.
+同步数据已处理，但历史备份清理尚未确认完成，请稍后再次同步（错误码 {0}）	Data sync was processed, but backup cleanup is not yet confirmed. Sync again later (error {0}).
+历史备份清理尚未完成	Historical backup cleanup is not complete yet.
+备份版本已变化，历史清理尚未完成	The backup inventory changed; historical cleanup is not complete yet.
+备份版本已变化，已暂停历史清理，请再次同步	The backup inventory changed. Historical cleanup was paused; sync again.
+1.3.10（1003010）· 云备份与菜单交互优化	1.3.10 (1003010) · Cloud backup and menu interaction improvements
+华为云空间最多保留最近 5 份有效备份；仅在新备份成功同步并完成校验后清理更早版本，保留无关文件并在清理未确认时提示稍后重试。	Huawei Cloud keeps up to the 5 newest valid backups. Older versions are removed only after a new backup is synced and verified; unrelated files are preserved, and unconfirmed cleanup asks you to retry later.
+修复新增和修改连接时“连接模式”下拉框不显示当前选项的问题，稳定、高帧率、高流畅、高丝滑及保留当前设置均可正确回显。	Fixed the Connection mode selector not showing its current value when adding or editing a connection. Stable, High frame rate, Smooth, Silky and Keep current settings are now displayed correctly.
+远控二级菜单增加透明的上下滚动箭头：顶部仅提示向下，滚动后显示向上，到达边界后自动隐藏对应箭头，不再显示文字提示。	Added transparent up and down scroll arrows to remote-control submenus. Only the down arrow appears at the top; the up arrow appears after scrolling, and each arrow hides automatically at its boundary. Text hints are no longer shown.
+修复滚动箭头提示层拦截手势、导致功能键和其他较长菜单不能上下滑动的问题；已在手机上验证功能键可在 F1 至 F12 之间双向滚动。	Fixed the scroll-arrow hint layer intercepting gestures and preventing function-key and other long menus from scrolling. Function keys were verified on a phone to scroll both ways between F1 and F12.
+补充云备份保留数量、清理结果及异常阶段诊断；日志不记录连接密码、令牌或备份内容。	Added diagnostics for cloud-backup retention counts, cleanup results and failure stages. Logs do not record connection passwords, tokens or backup contents.
 预览并恢复	Preview and restore
 加载中…	Loading...
 显示更早备份	Show earlier backups
@@ -1359,6 +1370,7 @@ PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连�
 完善连接诊断，区分通道就绪、首包、密码挑战、请求入队和实际写出，记录等待阶段与超时原因；日志不包含密码、挑战内容或令牌。	Connection diagnostics distinguish transport readiness, first packet, password challenge, request queueing and actual network writes, and record waiting phases and timeout causes without passwords, challenge contents or tokens.
 向上滚动	Scroll up
 向下滚动	Scroll down
+上滑查看更多	Swipe up for more
 中键	Middle button
 等待远端确认	Waiting for remote confirmation
 正在准备传输	Preparing transfer

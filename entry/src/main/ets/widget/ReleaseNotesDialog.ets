@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.9'
-export const RELEASE_NOTES_BUILD: string = '1003009'
+export const RELEASE_NOTES_VERSION: string = '1.3.10'
+export const RELEASE_NOTES_BUILD: string = '1003010'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.10（1003010）· 云备份与菜单交互优化', [
+            '华为云空间最多保留最近 5 份有效备份；仅在新备份成功同步并完成校验后清理更早版本，保留无关文件并在清理未确认时提示稍后重试。',
+            '修复新增和修改连接时“连接模式”下拉框不显示当前选项的问题，稳定、高帧率、高流畅、高丝滑及保留当前设置均可正确回显。',
+            '远控二级菜单增加透明的上下滚动箭头：顶部仅提示向下，滚动后显示向上，到达边界后自动隐藏对应箭头，不再显示文字提示。',
+            '修复滚动箭头提示层拦截手势、导致功能键和其他较长菜单不能上下滑动的问题；已在手机上验证功能键可在 F1 至 F12 之间双向滚动。',
+            '补充云备份保留数量、清理结果及异常阶段诊断；日志不记录连接密码、令牌或备份内容。'
+          ])
           this.buildSection('1.3.9（1003009）· 域名直连与操控体验修复', [
             '新增“域名＋端口”直连支持，可在远端 ID / IP 中输入域名:端口，兼容 IPv4 与 IPv6；被控端需开启直接 IP 访问，未指定端口的自定义 ID 保留原有连接方式。',
             '优化鸿蒙 PC 及手机、平板电脑模式下的沉浸全屏，改善全屏后任务栏仍显示的问题；增加实际窗口状态检查，退出全屏时恢复原窗口状态。',

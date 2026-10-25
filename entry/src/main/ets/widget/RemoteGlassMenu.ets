@@ -10,8 +10,14 @@ export struct RemoteGlassMenu {
     bodyHeight: 274, padding: 12, headerHeight: 26, segmentHeight: 40, screenHeight: 62, displayWidth: 70, footerHeight: 18, stacked: false };
   @Prop dark: boolean = false;
   @Prop language: string = 'zh-Hans';
+  @State keyboardScrollY: number = 0;
+  @State keyboardScrollAtEnd: boolean = false;
+  @State menuScrollY: number = 0;
+  @State menuScrollAtEnd: boolean = false;
   onAction: (action: string) => void = () => {};
   onOrderEdit: (key: string) => void = () => {};
+  private keyboardScroller: Scroller = new Scroller();
+  private menuScroller: Scroller = new Scroller();
 
   textColor(): string { return this.dark ? Style.TEXT_DARK : Style.TEXT; }
   blue(): string { return this.dark ? Style.BLUE_DARK : Style.BLUE; }
@@ -140,6 +146,38 @@ export struct RemoteGlassMenu {
     switch (key) { case 'Left': return '←'; case 'Up': return '↑'; case 'Down': return '↓'; case 'Right': return '→'; default: return key; }
   }
 
+  hasVerticalOverflow(): boolean {
+    // The function/more key grids intentionally keep the approved compact
+    // viewport and expose their remaining rows by scrolling. Their calculated
+    // content height can equal the outer menu height even though the fixed tab
+    // strip reduces the grid viewport, so keep the affordance explicit.
+    if (this.state.category === 'keyboard' &&
+      (this.state.keyboardTab === 'function' || this.state.keyboardTab === 'more')) return true;
+    return this.metrics.contentHeight > this.metrics.bodyHeight + 1;
+  }
+
+  updateKeyboardScroll(): void {
+    const offset: OffsetResult = this.keyboardScroller.currentOffset();
+    this.keyboardScrollY = Math.abs(offset.yOffset);
+    this.keyboardScrollAtEnd = this.keyboardScroller.isAtEnd();
+  }
+
+  updateMenuScroll(): void {
+    const offset: OffsetResult = this.menuScroller.currentOffset();
+    this.menuScrollY = Math.abs(offset.yOffset);
+    this.menuScrollAtEnd = this.menuScroller.isAtEnd();
+  }
+
+  updateKeyboardScrollEdge(side: Edge): void {
+    if (side === Edge.Top) { this.keyboardScrollY = 0; this.keyboardScrollAtEnd = false; }
+    else if (side === Edge.Bottom) { this.keyboardScrollY = Math.max(1, this.keyboardScrollY); this.keyboardScrollAtEnd = true; }
+  }
+
+  updateMenuScrollEdge(side: Edge): void {
+    if (side === Edge.Top) { this.menuScrollY = 0; this.menuScrollAtEnd = false; }
+    else if (side === Edge.Bottom) { this.menuScrollY = Math.max(1, this.menuScrollY); this.menuScrollAtEnd = true; }
+  }
+
   verticalSegment(key: string): boolean {
     return this.metrics.stacked && (key.startsWith('mode-') || key.startsWith('orientation-'));
   }
@@ -153,6 +191,38 @@ export struct RemoteGlassMenu {
 
   @Builder
   divider() { Divider().height(1).color(Style.DIVIDER).margin({ top: 4, bottom: 4 }) }
+
+  @Builder
+  scrollHint(up: boolean) {
+    Row() {
+      Image($r('app.media.glass_chevron')).width(13).height(13).fillColor(this.blue())
+        .rotate({ angle: up ? 270 : 90 }).hitTestBehavior(HitTestMode.None)
+        .accessibilityText(translate('上滑查看更多', this.language))
+    }.width(30).height(18).justifyContent(FlexAlign.Center)
+      .backgroundColor(Color.Transparent).hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  keyboardScrollHint(up: boolean) {
+    Row() {
+      if ((up && this.keyboardScrollY > 0.5) || (!up && !this.keyboardScrollAtEnd)) {
+        this.scrollHint(up)
+      } else {
+        Blank().width(30).height(18)
+      }
+    }.width('100%').height(18).justifyContent(FlexAlign.Center)
+  }
+
+  @Builder
+  menuScrollHint(up: boolean) {
+    Row() {
+      if ((up && this.menuScrollY > 0.5) || (!up && !this.menuScrollAtEnd)) {
+        this.scrollHint(up)
+      } else {
+        Blank().width(30).height(18)
+      }
+    }.width('100%').height(18).justifyContent(FlexAlign.Center)
+  }
 
   @Builder
   text(label: string, secondary: boolean = false) {
@@ -379,28 +449,35 @@ export struct RemoteGlassMenu {
 
   @Builder
   keyboard() {
-    Scroll() {
-      Column() {
-        ForEach(this.gridRows(), (row: number) => {
-          Row({ space: 5 }) {
-            ForEach(this.rowKeys(row), (key: string) => { this.keyCap(key) }, (key: string) => key)
-            if (this.rowKeys(row).length < (this.metrics.stacked ? 2 : 3)) { Blank().layoutWeight(1) }
-          }.width('100%').margin({ bottom: 4 })
-        }, (row: number) => `row-${row}-${this.state.keyboardTab}`)
-        this.divider()
-        if (this.state.keyboardTab === 'more') {
-          ForEach(this.shortcutKeys(), (key: string) => {
-            Row() { this.keyCap(key) }.width('100%').margin({ bottom: 4 })
-          }, (key: string) => key)
-          if (this.extraKeys().length > 0) {
-            this.divider()
-            ForEach(this.extraKeys(), (key: string) => {
+    Column() {
+      if (this.hasVerticalOverflow()) { this.keyboardScrollHint(true) }
+      Scroll(this.keyboardScroller) {
+        Column() {
+          ForEach(this.gridRows(), (row: number) => {
+            Row({ space: 5 }) {
+              ForEach(this.rowKeys(row), (key: string) => { this.keyCap(key) }, (key: string) => key)
+              if (this.rowKeys(row).length < (this.metrics.stacked ? 2 : 3)) { Blank().layoutWeight(1) }
+            }.width('100%').margin({ bottom: 4 })
+          }, (row: number) => `row-${row}-${this.state.keyboardTab}`)
+          this.divider()
+          if (this.state.keyboardTab === 'more') {
+            ForEach(this.shortcutKeys(), (key: string) => {
               Row() { this.keyCap(key) }.width('100%').margin({ bottom: 4 })
             }, (key: string) => key)
-          }
-        } else if (this.state.keyboardTab === 'modifiers') { this.action('softKeyboard') }
-      }.width('100%')
-    }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
+            if (this.extraKeys().length > 0) {
+              this.divider()
+              ForEach(this.extraKeys(), (key: string) => {
+                Row() { this.keyCap(key) }.width('100%').margin({ bottom: 4 })
+              }, (key: string) => key)
+            }
+          } else if (this.state.keyboardTab === 'modifiers') { this.action('softKeyboard') }
+        }
+      }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
+        .onScroll(() => { this.updateKeyboardScroll(); })
+        .onScrollStop(() => { this.updateKeyboardScroll(); })
+        .onScrollEdge((side: Edge) => { this.updateKeyboardScrollEdge(side); })
+      if (this.hasVerticalOverflow()) { this.keyboardScrollHint(false) }
+    }.width('100%').layoutWeight(1)
     Row({ space: 0 }) {
       this.segment('tab-modifiers', '修饰键', this.state.keyboardTab === 'modifiers')
       this.segment('tab-function', '功能键', this.state.keyboardTab === 'function')
@@ -467,7 +544,8 @@ export struct RemoteGlassMenu {
         }.width('100%').constraintSize({ minHeight: this.metrics.headerHeight })
         if (this.state.category === 'keyboard') { this.keyboard() }
         else {
-          Scroll() {
+          if (this.hasVerticalOverflow()) { this.menuScrollHint(true) }
+          Scroll(this.menuScroller) {
             Column() {
               if (this.state.category === 'screens') { this.screens() }
               else if (this.state.category === 'input') { this.input() }
@@ -476,6 +554,10 @@ export struct RemoteGlassMenu {
               else if (this.state.category === 'orientation') { this.orientation() }
             }.width('100%').alignItems(HorizontalAlign.Start).justifyContent(FlexAlign.Start)
           }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
+            .onScroll(() => { this.updateMenuScroll(); })
+            .onScrollStop(() => { this.updateMenuScroll(); })
+            .onScrollEdge((side: Edge) => { this.updateMenuScrollEdge(side); })
+          if (this.hasVerticalOverflow()) { this.menuScrollHint(false) }
         }
     }.width('100%').height(this.metrics.bodyHeight).alignItems(HorizontalAlign.Start).justifyContent(FlexAlign.Start)
   }

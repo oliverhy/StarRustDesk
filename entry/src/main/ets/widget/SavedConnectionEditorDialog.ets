@@ -178,7 +178,7 @@ export struct SavedConnectionEditorDialog {
           Select([{ value: translate('稳定', this.uiLanguage) }, { value: translate('高帧率', this.uiLanguage) },
             { value: translate('高流畅', this.uiLanguage) }, { value: translate('高丝滑', this.uiLanguage) },
             { value: translate('保留当前设置', this.uiLanguage) }])
-            .selected(this.presetIndex()).width('100%').enabled(!this.busy)
+            .selected(this.presetIndex()).value(this.presetLabel()).width('100%').enabled(!this.busy)
             .onSelect((index: number) => { this.performancePreset = index === 4 ? this.initial.performancePreset :
               ['stable', 'high_fps', 'smooth', 'silky'][index] })
           this.option('断开后锁屏', this.lockAfterDisconnect, (value: boolean) => {
@@ -239,6 +239,10 @@ export struct SavedConnectionEditorDialog {
   private presetIndex(): number {
     const index = ['stable', 'high_fps', 'smooth', 'silky'].indexOf(this.performancePreset)
     return index < 0 ? 4 : index
+  }
+  private presetLabel(): string {
+    const labels: string[] = ['稳定', '高帧率', '高流畅', '高丝滑', '保留当前设置']
+    return translate(labels[this.presetIndex()], this.uiLanguage)
   }
   private groupOptions(): SelectOption[] {
     const options: SelectOption[] = [{ value: translate('未分组', this.uiLanguage) }]

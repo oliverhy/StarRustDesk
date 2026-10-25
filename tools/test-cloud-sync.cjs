@@ -15,6 +15,8 @@ const settings = read('entry/src/main/ets/pages/SettingsPage.ets')
 const connectionPage = read('entry/src/main/ets/pages/ConnectionPage.ets')
 const serverDialog = read('entry/src/main/ets/widget/ServerConfigDialog.ets')
 const entryAbility = read('entry/src/main/ets/entryability/EntryAbility.ets')
+const snapshotStore = read('entry/src/main/ets/service/CloudSyncSnapshotStore.ets')
+const historyDialog = read('entry/src/main/ets/widget/CloudBackupHistoryDialog.ets')
 
 assert(appConfig.app.cloudFileSyncEnabled === true, 'cloud file sync must be enabled in app config')
 assert(backupConfig.allowToBackupRestore === true, 'system backup fallback must be enabled')
@@ -39,5 +41,11 @@ assert(entryAbility.includes('CloudSyncService.syncNow(this.context)'),
   'foreground must trigger cloud reconciliation')
 assert(entryAbility.includes('CloudSyncService.upload(this.context)'),
   'background must flush local changes to cloud')
+assert(snapshotStore.includes('static readonly MAX_BACKUPS: number = 5'),
+  'cloud retention must use a single five-backup limit')
+assert(cloudService.includes("result.success && (action === 'sync' || action === 'upload')"),
+  'failed sync, history browsing and explicit restore must not prune snapshots')
+assert(historyDialog.includes('最多保留最近 5 份备份'), 'history UI must disclose the retention limit')
+assert(!historyDialog.includes('历史文件不会删除'), 'history UI must not promise unlimited retention')
 
 console.log('cloud-sync checks passed')

@@ -20,10 +20,17 @@ export interface CloudSnapshotReference {
   time: number
 }
 
+export interface CloudRetentionResult {
+  deletedCount: number
+  remainingCount: number
+  code: number
+}
+
 // CloudDisk must not be treated as a local POSIX filesystem: replacing an
 // existing name through rename can return EINVAL. Publish immutable snapshots
-// under new UUID names, keeping all earlier backups (including the v1 file).
+// under new UUID names. Retention is a separate operation after confirmed sync.
 export class CloudSyncSnapshotStore {
+  static readonly MAX_BACKUPS: number = 5
   static async readLatest(folder: string, legacyPath: string, trace: CloudSyncTrace,
     readTime: (raw: string) => number): Promise<string | undefined> {
     trace.event('cloud_list')
@@ -118,7 +125,7 @@ export class CloudSyncSnapshotStore {
   }
 
   static async publish(folder: string, content: string, contentTime: number, trace: CloudSyncTrace,
-    assertCurrent: () => void): Promise<void> {
+    assertCurrent: () => void): Promise<string> {
     trace.event('cloud_digest')
     if (!Number.isSafeInteger(contentTime) || contentTime <= 0 ||
       new util.TextEncoder().encodeInto(content).byteLength > MAX_FILE_BYTES) {
@@ -171,6 +178,7 @@ export class CloudSyncSnapshotStore {
       if (fileIo.accessSync(target)) throw new CloudSyncFailure(13900015, 'snapshot_collision', '云快照名称冲突，原备份已保留，请重试')
       fileIo.renameSync(temporary, target) // New name only; never replace v1 or another snapshot.
       created = false
+      return target.substring(folder.length + 1)
     } finally {
       if (file !== undefined) CloudSyncSnapshotStore.cleanupClose(file, trace)
       if (created) {
@@ -180,6 +188,56 @@ export class CloudSyncSnapshotStore {
         } catch (error) { trace.event('cleanup_pending', CloudSyncFailure.from(error as Object).code) }
       }
     }
+  }
+
+  static async retainLatest(folder: string, legacyPath: string, trace: CloudSyncTrace,
+    readTime: (raw: string) => number, assertCurrent: () => void,
+    uploadedSnapshotId: string = ''): Promise<CloudRetentionResult> {
+    assertCurrent()
+    trace.event('retention_list')
+    let candidates = CloudSyncSnapshotStore.listCandidates(folder, legacyPath, trace, readTime)
+    const result: CloudRetentionResult = { deletedCount: 0, remainingCount: candidates.length, code: 0 }
+    trace.detail('retention_inventory', { backupCount: candidates.length, retentionLimit: CloudSyncSnapshotStore.MAX_BACKUPS })
+    if (candidates.length <= CloudSyncSnapshotStore.MAX_BACKUPS) return result
+    const retained = candidates.slice(0, CloudSyncSnapshotStore.MAX_BACKUPS)
+    // Clock skew or a concurrent writer must not make us delete this operation's
+    // newly uploaded snapshot. Retry with a reconciled inventory instead.
+    if (uploadedSnapshotId.length > 0 && !retained.some((item: CloudSnapshotReference) => item.id === uploadedSnapshotId)) {
+      throw new CloudSyncFailure(-1011, 'retention_changed', '备份版本已变化，已暂停历史清理，请再次同步')
+    }
+    trace.event('retention_validate')
+    for (const item of retained) {
+      await CloudSyncSnapshotStore.readSelected(folder, legacyPath, item.id, trace, readTime)
+      assertCurrent()
+    }
+    // Validate every retained snapshot BEFORE the first deletion. Only recognized
+    // backup names are candidates; pending files, unrelated files and mirrors stay.
+    const obsolete = candidates.slice(CloudSyncSnapshotStore.MAX_BACKUPS).reverse()
+    for (const item of obsolete) {
+      try {
+        assertCurrent()
+        const current = CloudSyncSnapshotStore.listCandidates(folder, legacyPath, trace, readTime)
+        if (!CloudSyncSnapshotStore.sameInventory(candidates, current)) {
+          throw new CloudSyncFailure(-1011, 'retention_changed', '备份版本已变化，已暂停历史清理，请再次同步')
+        }
+        trace.event('retention_delete')
+        fileIo.unlinkSync(item.id === 'legacy' ? legacyPath : `${folder}/${item.id}`)
+        result.deletedCount++
+        candidates = candidates.filter((candidate: CloudSnapshotReference) => candidate.id !== item.id)
+        result.remainingCount = candidates.length
+      } catch (error) {
+        result.code = CloudSyncFailure.from(error as Object).code || -1011
+        trace.detail('retention_failed', { deletedCount: result.deletedCount,
+          remainingCount: result.remainingCount, retentionLimit: CloudSyncSnapshotStore.MAX_BACKUPS }, result.code)
+        break
+      }
+    }
+    return result
+  }
+
+  private static sameInventory(left: CloudSnapshotReference[], right: CloudSnapshotReference[]): boolean {
+    return left.length === right.length && left.every((item: CloudSnapshotReference, index: number) =>
+      item.id === right[index].id && item.time === right[index].time)
   }
 
   private static async digest(content: string): Promise<string> {

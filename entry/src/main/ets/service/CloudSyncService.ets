@@ -89,6 +89,7 @@ interface PreparedCloudRestore {
 }
 
 type CloudAction = 'sync' | 'upload' | 'restore' | 'history' | 'preview'
+interface CloudOperationState { uploadedSnapshotId: string }
 export type CloudSyncUiEvent = 'history_open' | 'history_close' | 'restore_confirmed' | 'restore_cancelled' |
   'password_save_requested' | 'password_save_verified' | 'password_save_failed' | 'local_changed' |
   'home_reload_start' | 'home_reload_empty' | 'home_reload_complete' | 'home_reload_stale' | 'home_reload_failed'
@@ -253,8 +254,12 @@ export class CloudSyncService {
     const revision = CloudSyncService.localRevision
     CloudSyncService.inFlightAction = actionKey
     CloudSyncService.inFlightOperationId = trace.id
-    const operation = CloudSyncService.perform(context, action, selection, trace, epoch, revision)
-      .then((result: CloudSyncResult): CloudSyncResult => {
+    const state: CloudOperationState = { uploadedSnapshotId: '' }
+    const operation = CloudSyncService.perform(context, action, selection, trace, epoch, revision, state)
+      .then(async (result: CloudSyncResult): Promise<CloudSyncResult> => {
+        if (result.success && (action === 'sync' || action === 'upload')) {
+          result = await CloudSyncService.enforceBackupLimit(context, result, trace, epoch, revision, state.uploadedSnapshotId)
+        }
         trace.detail('result', { success: result.success, restored: result.restored, uploaded: result.uploaded,
           needsPassword: result.needsPassword, pending: result.pending ?? false, connections: result.connectionCount,
           groups: result.groupCount }, result.code ?? 0)
@@ -286,7 +291,7 @@ export class CloudSyncService {
   }
 
   private static async perform(context: common.UIAbilityContext, action: CloudAction, selection: string, trace: CloudSyncTrace,
-    epoch: number, revision: number): Promise<CloudSyncResult> {
+    epoch: number, revision: number, state: CloudOperationState): Promise<CloudSyncResult> {
     try {
       CloudSyncService.ensureFolders(context, trace)
       trace.event('preflight')
@@ -322,7 +327,7 @@ export class CloudSyncService {
           trace.event('empty_upload_blocked')
           return CloudSyncService.paused('本机暂无数据，已暂停上传空备份；请稍后重试或查看历史备份')
         }
-        return await CloudSyncService.uploadSnapshot(context, trace, epoch, revision)
+        return await CloudSyncService.uploadSnapshot(context, trace, epoch, revision, state)
       }
       trace.event('cloud_parse')
       let cloudTime: number = CloudSyncService.readContentTime(raw)
@@ -344,7 +349,7 @@ export class CloudSyncService {
       }
       if (localChanged > cloudTime) {
         trace.detail('decision_upload_local_newer', { cloudTime: cloudTime, localChangedAt: localChanged })
-        return await CloudSyncService.uploadSnapshot(context, trace, epoch, revision)
+        return await CloudSyncService.uploadSnapshot(context, trace, epoch, revision, state)
       }
       let syncTime: number = Date.now()
       trace.detail('decision_no_change', { cloudTime: cloudTime, localChangedAt: localChanged })
@@ -450,7 +455,7 @@ export class CloudSyncService {
   }
 
   private static async uploadSnapshot(context: common.UIAbilityContext, trace: CloudSyncTrace,
-    epoch: number, revision: number): Promise<CloudSyncResult> {
+    epoch: number, revision: number, state: CloudOperationState): Promise<CloudSyncResult> {
     let includesSecrets: boolean = CloudSyncService.includesSecrets()
     let password: string = ''
     if (includesSecrets) {
@@ -473,7 +478,7 @@ export class CloudSyncService {
     trace.event('mirror_write')
     CloudSyncService.writeText(CloudSyncService.mirrorPath(context), content)
     trace.event('cloud_write')
-    await CloudSyncSnapshotStore.publish(`${context.cloudFileDir}/${CLOUD_FOLDER_NAME}`, content,
+    state.uploadedSnapshotId = await CloudSyncSnapshotStore.publish(`${context.cloudFileDir}/${CLOUD_FOLDER_NAME}`, content,
       CloudSyncService.payloadTime(payload), trace, () => CloudSyncService.assertCurrent(epoch, revision))
     trace.event('upload_wait')
     await CloudSyncService.waitForSystem(trace, epoch)
@@ -491,6 +496,42 @@ export class CloudSyncService {
       return pending
     }
     return CloudSyncService.result(true, false, true, false, '已同步到华为云空间', syncTime)
+  }
+
+  private static async enforceBackupLimit(context: common.UIAbilityContext, result: CloudSyncResult,
+    trace: CloudSyncTrace, epoch: number, revision: number, uploadedSnapshotId: string): Promise<CloudSyncResult> {
+    try {
+      const folder = `${context.cloudFileDir}/${CLOUD_FOLDER_NAME}`
+      const legacyPath = CloudSyncService.cloudPath(context)
+      const retention = await CloudSyncSnapshotStore.retainLatest(folder, legacyPath, trace,
+        (raw: string) => CloudSyncService.readContentTime(raw), () => CloudSyncService.assertCurrent(epoch, revision), uploadedSnapshotId)
+      if (retention.deletedCount > 0) {
+        trace.event('retention_wait')
+        await CloudSyncService.waitForSystem(trace, epoch)
+      }
+      CloudSyncService.assertCurrent(epoch, revision)
+      if (retention.code !== 0) {
+        throw new CloudSyncFailure(retention.code, 'retention_incomplete', '历史备份清理尚未完成')
+      }
+      const current = CloudSyncSnapshotStore.listCandidates(folder, legacyPath, trace,
+        (raw: string) => CloudSyncService.readContentTime(raw))
+      if (current.length > CloudSyncSnapshotStore.MAX_BACKUPS ||
+        (uploadedSnapshotId.length > 0 && !current.some((item: CloudSnapshotReference) => item.id === uploadedSnapshotId))) {
+        throw new CloudSyncFailure(-1011, 'retention_changed', '备份版本已变化，历史清理尚未完成')
+      }
+      trace.detail('retention_verified', { deletedCount: retention.deletedCount, remainingCount: current.length,
+        retentionLimit: CloudSyncSnapshotStore.MAX_BACKUPS, verified: true })
+      return result
+    } catch (error) {
+      const failure = CloudSyncFailure.from(error as Object)
+      trace.detail('retention_failed', { verified: false, retentionLimit: CloudSyncSnapshotStore.MAX_BACKUPS }, failure.code)
+      result.success = false
+      result.pending = true
+      result.code = failure.code || -1011
+      result.stage = 'retention'
+      result.message = `同步数据已处理，但历史备份清理尚未确认完成，请稍后再次同步（错误码 ${result.code}）`
+      return result
+    }
   }
 
   private static async buildPayload(includesSecrets: boolean): Promise<ConnectionBackupPayload> {
