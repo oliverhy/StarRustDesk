@@ -66,7 +66,10 @@ const service = context.exports.CommunicationService;
   const page = read('entry/src/main/ets/pages/RemotePage.ets');
   for (const method of ['handleNativeKeyInput', 'handleNativeMouseInput', 'syncHardwareKeyState', 'handleRemoteKey', 'requestRemoteInputFocus']) {
     const pos = page.indexOf(`  ${method}(`);
-    assert(pos >= 0 && page.slice(pos, pos + 180).includes('if (this.showCommunicationPanel) return'), `${method} must not route chat input to remote`);
+    // Inspect the method, not an arbitrary character window: another early
+    // safety guard (for a screen transition) may precede chat isolation.
+    const body = page.slice(pos, page.indexOf('\n  }', pos));
+    assert(pos >= 0 && body.includes('if (this.showCommunicationPanel) return'), `${method} must not route chat input to remote`);
   }
   const rust = read('entry/src/main/rust/src/communication.rs');
   assert.match(rust, /MAX_VOICE_QUEUED: usize = 10/);

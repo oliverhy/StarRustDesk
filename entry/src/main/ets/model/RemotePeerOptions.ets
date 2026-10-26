@@ -7,7 +7,7 @@ export const REMOTE_PEER_OPTION_NAMES: string[] = [
   'remote-keyboard-toolbar-order', 'remote-keyboard-more-order', 'remote-toolbar-position-v1',
   'keyboard-toolbar-position-v1', 'remote-toolbar-collapsed', 'keyboard-tools-collapsed',
   'pc-toolbar-pinned', 'pc-immersive-window', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1',
-  'keyboard-layout-mode'
+  'keyboard-layout-mode', 'three-finger-display-swipe'
 ];
 
 export function remotePeerPreferenceKey(server: string, peer: string): string {

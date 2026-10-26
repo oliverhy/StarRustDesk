@@ -6,6 +6,7 @@ export class RemoteGlassMenuState {
   keyboardItems: string[] = [];
   displayCount: number = 1;
   currentDisplay: number = 0;
+  displaySwipe: boolean = true;
   inputMode: string = 'mouse';
   virtualMouse: boolean = false;
   clipboard: boolean = false;
@@ -73,7 +74,7 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   const displayWidth = Math.ceil(70 + 50 * (scale - 1));
   const footerHeight = Math.ceil(Math.max(18 * scale,
     Number.isFinite(measuredFooterHeight) ? measuredFooterHeight : 0));
-  let preferredWidth = state.category === 'screens' ? Math.min(3, Math.max(1, state.displayCount)) * 76 + 24 :
+  let preferredWidth = state.category === 'screens' ? Math.max(224, Math.min(3, Math.max(1, state.displayCount)) * 76 + 24) :
     state.category === 'more' ? 204 : state.category === 'orientation' ? 244 : 224;
   preferredWidth += Math.max(0, scale - 1) * 74;
   if (state.desktop && state.category === 'view') preferredWidth = Math.max(248, preferredWidth);
@@ -82,7 +83,7 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   const stacked = menuWidth - padding * 2 < (state.category === 'orientation' ? 150 : 162) * scale;
   let content = headerHeight;
   switch (state.category) {
-    case 'screens': content += screenHeight + 8; break;
+    case 'screens': content += screenHeight + 8 + rowHeight; break;
     case 'input': content += (stacked ? segmentHeight * 2 + 4 : segmentHeight) + 8 +
       Math.max(0, state.items.length - 1) * rowHeight + 2 * rowHeight + 9; break;
     case 'view': content += (state.items.length - (state.items.includes('zoomOut') ? 1 : 0)) * rowHeight + 9;

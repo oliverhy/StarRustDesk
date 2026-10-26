@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.10'
-export const RELEASE_NOTES_BUILD: string = '1003010'
+export const RELEASE_NOTES_VERSION: string = '1.3.11'
+export const RELEASE_NOTES_BUILD: string = '1003011'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.11（1003011）· 三指切屏与滑动过渡优化', [
+            '新增触控屏三指左右滑动切换远端显示器，支持首尾循环；可在“控 → 屏幕”中开启或关闭，默认开启并按远端独立保存。触控板或系统拦截手势时仍可使用屏幕按钮切换。',
+            '切屏增加与手势方向一致的横向滑动过渡：左滑时旧屏向左移出、新屏从右侧进入，右滑相反；功能栏保持原位，保留当前缩放比例。',
+            '修复切屏时先闪一下、过渡动画不播放的问题，调整旧画面覆盖、新画面就绪和动画交接顺序，修正图片回调匹配及繁忙画面下的帧等待。',
+            '完善手势冲突和切屏保护，避免误触点击、重复切换及过期回调干扰；保留双指滚动、捏合缩放和全屏三指上滑打开键盘，动画不可用时安全切回实时画面。',
+            '补充切屏方向、图片准备、动画开始与结束、超时和取消阶段诊断；遵循诊断开关，不记录画面内容、密码或输入文字。'
+          ])
           this.buildSection('1.3.10（1003010）· 云备份与菜单交互优化', [
             '华为云空间最多保留最近 5 份有效备份；仅在新备份成功同步并完成校验后清理更早版本，保留无关文件并在清理未确认时提示稍后重试。',
             '修复新增和修改连接时“连接模式”下拉框不显示当前选项的问题，稳定、高帧率、高流畅、高丝滑及保留当前设置均可正确回显。',

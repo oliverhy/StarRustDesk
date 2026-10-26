@@ -69,7 +69,7 @@ test('legacy defaults are inherited; A changes never mutate B or any global defa
 test('a fresh runtime restores all whitelisted option types without pressed-input state', () => {
   const h = harness(), p = h.make('srv', 'A');
   const values = { 'input-mode': 'touch', 'keyboard-compat': '2', 'relative-mouse': '0', 'cursor-compat': 'separate',
-    'edge-auto-pan-enabled': '1', 'remote-control-toolbar-order': 'input,keyboard,disconnect',
+    'edge-auto-pan-enabled': '1', 'three-finger-display-swipe': '0', 'remote-control-toolbar-order': 'input,keyboard,disconnect',
     'remote-keyboard-toolbar-order': 'ctrl,shift,alt', 'remote-keyboard-more-order': 'Up,Down,Esc',
     'remote-toolbar-position-v1': '{"x":0.8,"y":0.4}', 'keyboard-toolbar-position-v1': '{"x":0.2,"y":0.1}',
     'remote-toolbar-collapsed': '1', 'keyboard-tools-collapsed': '0', 'pc-toolbar-pinned': '1', 'pc-immersive-window': '1',
@@ -82,6 +82,24 @@ test('a fresh runtime restores all whitelisted option types without pressed-inpu
   for (const name of ['password', 'clipboard', 'Ctrl', 'virtualShiftSelected', 'leftButtonHeld', 'fullscreen', 'showKeyboardPanel']) {
     assert.equal(p.set(name, '1'), false); assert.equal(restored.has(name), false);
   }
+});
+
+test('display swipe preference defaults on and is isolated by remote and server', () => {
+  const h = harness(), a = h.make('srv', 'A');
+  assert.equal(a.get('three-finger-display-swipe'), '');
+  assert(a.set('three-finger-display-swipe', '0')); a.dispose();
+  assert.equal(h.make('srv', 'A').get('three-finger-display-swipe'), '0');
+  assert.equal(h.make('srv', 'B').get('three-finger-display-swipe'), '');
+  assert.equal(h.make('other', 'A').get('three-finger-display-swipe'), '');
+  assert(!h.make('srv', 'A').set('three-finger-display-swipe', 'maybe'));
+  const page = read('entry/src/main/ets/pages/RemotePage.ets');
+  const start = page.indexOf('\n  loadDisplaySwipePreference(');
+  const method = page.slice(start, page.indexOf('\n  }', start) + 4);
+  const c = { RustDeskNapi: h.context.RustDeskNapi };
+  vm.runInNewContext(ts.transpile('class Page {' + method + '}globalThis.Page = Page;'), c);
+  const p = Object.assign(new c.Page(), { peerPreferences: h.make('srv', 'B') });
+  p.loadDisplaySwipePreference(); assert.equal(p.displaySwipeEnabled, true);
+  p.peerPreferences = h.make('srv', 'A'); p.loadDisplaySwipePreference(); assert.equal(p.displaySwipeEnabled, false);
 });
 test('sliders batch updates; disposal flushes the latest value once and rejects stale writes', () => {
   const h = harness(), a = h.make('srv', 'A');

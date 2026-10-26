@@ -5,6 +5,7 @@ import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { inputCompatibilityKey, selectedKeyboardMode, selectedCursorMode, shouldSuppressCursor } from '../model/InputCompatibility';
 import { PhysicalMouseDeduplicator, isTouchOnlyMouseEvent } from '../model/PhysicalMousePolicy';
 import { RemoteWheelNormalizer, RemoteWheelStep } from '../model/RemoteWheelNormalizer';
+import { RemoteDisplaySwipe, DisplaySwipePoint, adjacentRemoteDisplay } from '../model/RemoteDisplaySwipe';
 import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavigationKeys } from '../model/RemoteNavigationKeys';
 ﻿import { router } from '@kit.ArkUI';
 import { RustDeskTheme } from '../theme/RustDeskTheme';
@@ -57,11 +58,66 @@ class ViewportFrameCallback extends FrameCallback {
   onFrame(_frameTimeInNano: number): void { this.apply(); }
 }
 
+// Two successive frame callbacks form a UI submission boundary. Do NOT depend
+// on onIdle: continuous video may leave <1 ms idle time, indefinitely delaying
+// that optional callback and turning every transition into a timeout fallback.
+class DisplaySwitchPaintCallback extends FrameCallback {
+  private apply: () => void;
+  private completed: boolean = false;
+  constructor(apply: () => void) { super(); this.apply = apply; }
+  onFrame(_frameTimeInNano: number): void {
+    if (this.completed) return;
+    this.completed = true;
+    this.apply();
+  }
+}
+
 interface UploadQueueItem { path: string; name: string; size: number; }
 interface FileOperationResult { id: number; ok: boolean; }
 interface RemotePoint {
   x: number;
   y: number;
+}
+
+// A memory-only copy of the outgoing video. Geometry is frozen independently
+// of the incoming display, whose aspect ratio may be different.
+class DisplaySwitchImage {
+  epoch: number;
+  outgoing: boolean;
+  pixelMap: image.PixelMap;
+  width: number;
+  height: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  zoom: number;
+  x: number;
+  y: number;
+  constructor(pixelMap: image.PixelMap, width: number, height: number, canvasWidth: number,
+    canvasHeight: number, zoom: number, x: number, y: number, epoch: number, outgoing: boolean) {
+    this.epoch = epoch; this.outgoing = outgoing;
+    this.pixelMap = pixelMap; this.width = width; this.height = height;
+    this.canvasWidth = canvasWidth; this.canvasHeight = canvasHeight;
+    this.zoom = zoom; this.x = x; this.y = y;
+  }
+}
+
+class DisplaySwitchRequest {
+  epoch: number;
+  from: number;
+  target: number;
+  sign: number;
+  width: number;
+  height: number;
+  phase: string = 'capture_old';
+  committed: boolean = false;
+  started: number = 0;
+  rendered: number = 0;
+  received: number = 0;
+  generation: number = 0;
+  constructor(epoch: number, from: number, target: number, sign: number, width: number, height: number) {
+    this.epoch = epoch; this.from = from; this.target = target; this.sign = sign;
+    this.width = width; this.height = height;
+  }
 }
 
 interface KeyboardInputAnchor extends RemotePoint {
@@ -98,9 +154,6 @@ const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 40;
 const TOUCHPAD_DRAG_START_THRESHOLD: number = 18;
 const MULTI_TOUCH_MOVE_THRESHOLD: number = 8;
 const PINCH_DISTANCE_THRESHOLD: number = 12;
-const THREE_FINGER_SWIPE_THRESHOLD: number = 70;
-const THREE_FINGER_HORIZONTAL_LIMIT: number = 120;
-const THREE_FINGER_MAX_DURATION: number = 1500;
 // RustDesk's controlled side suppresses cursor-position echoes to the input
 // origin for roughly 300 ms. Keep the locally predicted cursor during that
 // window so touchpad and physical-mouse movement remain visually responsive.
@@ -353,6 +406,20 @@ struct RemotePage {
   @State showRemoteSurface: boolean = true;
   @State displayCount: number = 1;
   @State currentDisplay: number = 0;
+  @State displaySwipeEnabled: boolean = true;
+  @State displaySwitchHint: string = '';
+  @State displaySwitchActive: boolean = false;
+  @State displaySwitchImage: DisplaySwitchImage | undefined = undefined;
+  @State displaySwitchIncomingImage: DisplaySwitchImage | undefined = undefined;
+  @State displaySwitchImageReady: boolean = false;
+  @State displaySwitchOutgoingX: number = 0;
+  @State displaySwitchIncomingX: number = 0;
+  private displaySwitchAnimationEpoch: number = 0;
+  private displaySwitchTimer: number = -1;
+  private displaySwitchCaptureBusy: boolean = false;
+  private displaySwitchRequest: DisplaySwitchRequest | undefined = undefined;
+  private displaySwitchHintTimer: number = -1;
+  private lastDisplaySwipeAt: number = -1;
   @State fpsText: string = '0 fps';
   @State speedText: string = '0 KB/s';
   @State delayText: string = '-';
@@ -546,11 +613,9 @@ struct RemotePage {
   private multiTouchRemoteX: number = 0;
   private multiTouchRemoteY: number = 0;
   private threeFingerGestureActive: boolean = false;
-  private threeFingerStartedAt: number = 0;
-  private threeFingerStartCenterX: number = 0;
-  private threeFingerStartCenterY: number = 0;
-  private threeFingerLastCenterX: number = 0;
-  private threeFingerLastCenterY: number = 0;
+  private displaySwipe: RemoteDisplaySwipe = new RemoteDisplaySwipe();
+  private threeFingerDisplayAtStart: number = 0;
+  private threeFingerDisplayCountAtStart: number = 1;
   private viewportPanActive: boolean = false;
   private viewportPanFramePending: boolean = false;
   private viewportPanFrameGeneration: number = 0;
@@ -655,6 +720,7 @@ struct RemotePage {
     this.pictureInPicture = new RemotePictureInPicture((phase: RemotePiPPhase) => {
       this.pipPhase = phase;
       this.pipSurfaceOwned = phase !== 'idle';
+      if (this.pipSurfaceOwned) this.clearDisplaySwitchTransition();
     }, () => { this.restoreSurfaceAfterPictureInPicture(); }, (stage: string, _code: number) => {
       if (this.remotePageVisible && !this.isLeavingAfterDisconnect) {
         this.showFileToast(stage === 'unsupported' ? '当前设备不支持系统画中画' :
@@ -676,6 +742,7 @@ struct RemotePage {
     this.loadInputMode();
     this.loadLocalCursorPreference();
     this.loadEdgeAutoPanPreference();
+    this.loadDisplaySwipePreference();
     this.loadVirtualMousePreference();
     this.loadToolbarOrderPreferences();
     this.loadRemoteToolbarPosition();
@@ -708,6 +775,8 @@ struct RemotePage {
     this.navigationBarPolicy.leave();
     this.fullTextController?.close();
     this.remotePageVisible = false;
+    this.clearDisplaySwitchHint();
+    this.clearDisplaySwitchTransition();
     this.retryRequestGeneration++;
     this.disconnectConfirmationEpoch++;
     this.disconnectConfirmationVisible = false;
@@ -867,6 +936,9 @@ struct RemotePage {
         }
       }
       this.connectionStatus = status as ConnectionStatus;
+      if (status !== ConnectionStatus.CONNECTED && this.displaySwitchActive) {
+        this.clearDisplaySwitchTransition();
+      }
       if (status === ConnectionStatus.CONNECTED) this.restoreImmersiveWindowPreference();
       else this.immersivePreferenceRestored = false;
       if (status !== ConnectionStatus.CONNECTED && this.showOrientationDialog) this.closeOrientationMenu();
@@ -1520,6 +1592,7 @@ struct RemotePage {
   }
 
   handleNativeMouseInput(event: NativeMouseInputEvent): void {
+    if (this.displaySwitchActive) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
@@ -1834,6 +1907,15 @@ struct RemotePage {
       }
       if (this.showCommunicationPanel) {
         CommunicationPanel({ onClose: () => { this.closeCommunication(); } });
+      }
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && this.displaySwitchHint.length > 0 && !this.pipSurfaceOwned) {
+        Text(translate(this.displaySwitchHint, this.uiLanguage))
+          .fontSize(14).fontColor('#FFFFFF').textAlign(TextAlign.Center)
+          .padding({ left: 18, right: 18, top: 10, bottom: 10 })
+          .constraintSize({ maxWidth: Math.max(1, this.pageWidth - 32) })
+          .backgroundColor('#B31B2638').borderRadius(20)
+          .hitTestBehavior(HitTestMode.None).zIndex(110)
+          .transition(TransitionEffect.OPACITY.animation({ duration: 160, curve: Curve.EaseOut }))
       }
     }
     .width('100%')
@@ -2219,6 +2301,7 @@ struct RemotePage {
     if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
       if (this.desktopWindowActive) this.desktopReturnInputFocus = this.pointerOverRemoteViewport || this.pointerCaptureFocused;
       this.desktopWindowActive = false;
+      if (this.displaySwitchActive) this.clearDisplaySwitchTransition();
       this.finishRemoteToolbarDrag();
       this.cancelPcToolbarAutoCollapse();
       this.cancelRemoteKeyboardRefocus();
@@ -2723,10 +2806,21 @@ struct RemotePage {
       // Keep the canvas and both cursor layers at their pre-IME size on all
       // handheld aspect ratios, including square/portrait foldable inner screens.
       Stack({ alignContent: Alignment.TopEnd }) {
-        this.buildRemoteViewport();
-        if (this.showVirtualMouse && this.isHandheldDevice() && !this.pipSurfaceOwned) {
+        // The native Surface stays in place for the entire transition. Only
+        // memory-only overlays move; loading an Image cannot expose a hole.
+        Stack() { this.buildRemoteViewport(); }
+          .width('100%').height('100%')
+        if (this.displaySwitchIncomingImage) this.buildDisplaySwitchImage(this.displaySwitchIncomingImage, false);
+        if (this.displaySwitchImage) this.buildDisplaySwitchImage(this.displaySwitchImage, true);
+        if (this.showVirtualMouse && this.isHandheldDevice() && !this.pipSurfaceOwned && !this.displaySwitchActive) {
           this.buildVirtualMousePointer();
           this.buildVirtualMouseOverlay();
+        }
+        if (this.displaySwitchActive) {
+          Column() {}
+            .width('100%').height('100%')
+            .hitTestBehavior(HitTestMode.Block)
+            .accessibilityLevel('no')
         }
       }
       .width('100%')
@@ -2752,6 +2846,35 @@ struct RemotePage {
         this.traceRemoteKeyboardState('visible_viewport_changed');
       }
     })
+  }
+
+  @Builder
+  buildDisplaySwitchImage(snapshot: DisplaySwitchImage, outgoing: boolean) {
+    Stack({ alignContent: Alignment.Center }) {
+      Stack({ alignContent: Alignment.Center }) {
+        Image(snapshot.pixelMap)
+          .width(snapshot.width).height(snapshot.height)
+          .objectFit(ImageFit.Fill)
+          .draggable(false)
+          .onComplete((event) => {
+            this.traceDisplaySwitch(`image_event role=${outgoing ? 'old' : 'new'} status=${event?.loadingStatus ?? -1}`);
+            if (event?.loadingStatus === 1) this.onDisplaySwitchImageReady(snapshot, outgoing);
+          })
+          .onError(() => { this.onDisplaySwitchImageError(snapshot, outgoing); })
+      }
+      .width(snapshot.canvasWidth).height(snapshot.canvasHeight)
+      .backgroundColor(!outgoing || this.displaySwitchImageReady ? '#090D14' : Color.Transparent)
+      .clip(true)
+      .translate({ x: snapshot.x, y: snapshot.y })
+      .scale({ x: snapshot.zoom, y: snapshot.zoom })
+    }
+    .id(outgoing ? 'displaySwitchOutgoingImage' : 'displaySwitchIncomingImage')
+    .width('100%').height('100%')
+    .backgroundColor(!outgoing || this.displaySwitchImageReady ? '#090D14' : Color.Transparent)
+    .clip(true)
+    .translate({ x: outgoing ? this.displaySwitchOutgoingX : this.displaySwitchIncomingX })
+    .hitTestBehavior(HitTestMode.None)
+    .accessibilityLevel('no')
   }
 
   @Builder
@@ -2910,6 +3033,7 @@ struct RemotePage {
         this.keyboardViewportHeight : newValue.height as number;
       if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
         Math.abs(this.componentHeight - previousHeight) > 0.5) {
+        if (this.displaySwitchActive) this.clearDisplaySwitchTransition();
         this.stopEdgeAutoPan();
         this.syncDesktopViewScale();
         this.clampViewportOffset();
@@ -3284,6 +3408,7 @@ struct RemotePage {
     state.keyboardItems = this.keyboardMoreOrder.join('|') === KEYBOARD_MORE_DEFAULT_ORDER.join('|') ? prototypeKeys :
       this.keyboardMoreOrder.includes('Enter') ? this.keyboardMoreOrder.slice() : this.keyboardMoreOrder.concat(['Enter']);
     state.displayCount = this.displayCount; state.currentDisplay = this.currentDisplay;
+    state.displaySwipe = this.displaySwipeEnabled;
     state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
     state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
     state.zoom = this.isPcDevice() ? this.getDesktopDisplayedPercent() : Math.round(this.zoomScale * 100);
@@ -3350,7 +3475,7 @@ struct RemotePage {
     if (action.startsWith('display-')) {
       const display = Number(action.substring(8));
       if (Number.isInteger(display) && display >= 0 && display < this.displayCount) {
-        this.setControlMenu(''); this.switchDisplay(display);
+        this.setControlMenu(''); this.requestDisplaySwitch(display);
       }
       return;
     }
@@ -3369,6 +3494,7 @@ struct RemotePage {
       this.applyGlassOrientationAction(action); return;
     }
     switch (action) {
+      case 'displaySwipe': this.setDisplaySwipeEnabled(!this.displaySwipeEnabled); return;
       case 'virtualMouse': this.setVirtualMouseEnabled(!this.showVirtualMouse); return;
       case 'clipboard': this.toggleClipboardSync(); return;
       case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
@@ -3493,7 +3619,7 @@ struct RemotePage {
             .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
               this.openToolbarOrderEditor('control', 'displays');
             }))
-            .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
+            .onClick(() => { this.setControlMenu(''); this.requestDisplaySwitch(display); })
             .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
         }, (display: number) => `compact-display-${display}`)
       }
@@ -3552,7 +3678,7 @@ struct RemotePage {
           .gesture(LongPressGesture({ repeat: false, duration: 550 }).onAction(() => {
             this.openToolbarOrderEditor('control', 'displays');
           }))
-          .onClick(() => { this.setControlMenu(''); this.switchDisplay(display); })
+          .onClick(() => { this.setControlMenu(''); this.requestDisplaySwitch(display); })
         .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
       }, (display: number) => `${display}-${this.currentDisplay}`)
     } else if (item === 'input') {
@@ -4782,6 +4908,8 @@ struct RemotePage {
             .width('100%')
         }
 
+        this.buildGestureHelpSection('三指切屏',
+          '在“控 → 屏幕”中设置“三指切屏”，默认开启，按远端独立保存。远端有多个屏幕时，在远控画面上三指左滑切换下一屏、右滑切换上一屏，首尾循环。每次抬手只切换一次；双指滚动、捏合缩放和全屏三指上滑打开键盘保持不变。\n适用于触控屏。系统可能接管平板或电脑的多指手势；触控板三指事件未开放给应用时，请使用“控 → 屏幕”按钮切换。')
         this.buildGestureHelpSection('手机 / 平板单独投屏',
           '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。')
         this.buildGestureHelpSection('拖拽与框选',
@@ -5706,7 +5834,7 @@ struct RemotePage {
             })
             .borderRadius(17)
             .onClick(() => {
-              this.switchDisplay(display);
+              this.requestDisplaySwitch(display);
             })
         .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 17, ButtonType.Capsule))
         })
@@ -5941,6 +6069,353 @@ struct RemotePage {
   loadEdgeAutoPanPreference(): void {
     this.edgeAutoPanEnabled = (this.peerPreferences?.get('edge-auto-pan-enabled', 'edge-auto-pan-enabled') ??
       RustDeskNapi.getOption('edge-auto-pan-enabled')) === '1';
+  }
+
+  loadDisplaySwipePreference(): void {
+    this.displaySwipeEnabled = this.peerPreferences?.get('three-finger-display-swipe') !== '0';
+    this.lastDisplaySwipeAt = -1;
+    RustDeskNapi.appendDiagnosticLog('display-swipe', `restored enabled=${this.displaySwipeEnabled} source=touchscreen`);
+  }
+
+  setDisplaySwipeEnabled(enabled: boolean): void {
+    if (!this.peerPreferences?.set('three-finger-display-swipe', enabled ? '1' : '0')) {
+      this.showFileToast('保存三指切屏设置失败，请重试'); return;
+    }
+    this.cancelActiveTouchGesture();
+    this.displaySwipeEnabled = enabled;
+    RustDeskNapi.appendDiagnosticLog('display-swipe', `preference enabled=${enabled}`);
+  }
+
+  canSwipeRemoteDisplays(): boolean {
+    return !this.displaySwitchActive && this.displaySwipeEnabled && this.displayCount > 1 && this.remotePageVisible &&
+      this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
+      this.desktopWindowActive !== false && !this.pipSurfaceOwned && !this.controlMenu &&
+      !this.showGestureHelp && !this.showRemoteFileBrowser && !this.showCommunicationPanel &&
+      !this.showToolbarOrderEditor && !this.showMobileActions && !this.disconnectConfirmationVisible &&
+      !this.showKeyboardSettings && !this.showMouseSettings && !this.showOrientationDialog &&
+      !this.showKeyboardMappingDialog && !this.showKeyboardCalibration;
+  }
+
+  clearDisplaySwitchHint(): void {
+    if (this.displaySwitchHintTimer !== -1) clearTimeout(this.displaySwitchHintTimer);
+    this.displaySwitchHintTimer = -1;
+    this.displaySwitchHint = '';
+  }
+
+  clearDisplaySwitchTransition(): void {
+    if (this.displaySwitchRequest) {
+      this.traceDisplaySwitch(`clear target=${this.displaySwitchRequest.target} phase=${this.displaySwitchRequest.phase}`);
+    }
+    this.displaySwitchAnimationEpoch++;
+    if (this.displaySwitchTimer !== -1) clearTimeout(this.displaySwitchTimer);
+    this.displaySwitchTimer = -1;
+    const snapshot: DisplaySwitchImage | undefined = this.displaySwitchImage;
+    const incoming: DisplaySwitchImage | undefined = this.displaySwitchIncomingImage;
+    this.displaySwitchRequest = undefined;
+    this.displaySwitchImage = undefined;
+    this.displaySwitchIncomingImage = undefined;
+    this.displaySwitchImageReady = false;
+    this.displaySwitchOutgoingX = 0;
+    this.displaySwitchIncomingX = 0;
+    this.displaySwitchActive = false;
+    // Detach the Image before releasing the underlying pixel memory.
+    if (snapshot) setTimeout(() => { this.releaseDisplaySwitchImage(snapshot.pixelMap); }, 64);
+    if (incoming) setTimeout(() => { this.releaseDisplaySwitchImage(incoming.pixelMap); }, 64);
+  }
+
+  canAnimateDisplaySwitch(): boolean {
+    return this.remotePageVisible && this.hasVideo && !this.fileOnly && !this.pipSurfaceOwned &&
+      this.componentWidth > 0 && this.componentHeight > 0 && this.desktopWindowActive !== false &&
+      this.connectionStatus === ConnectionStatus.CONNECTED && !RemoteSessionBackgroundTask.isAppBackground();
+  }
+
+  traceDisplaySwitch(message: string): void {
+    // Only bounded transition metadata, never screenshots, peer IDs or content.
+    // Mirror opt-in diagnostics to HiLog so device acceptance can inspect a
+    // live session without disconnecting just to reach the export page.
+    try {
+      RustDeskNapi.appendDiagnosticLog('display-switch-animation', message);
+      if (RustDeskNapi.getOption('diagnostic-log-enabled') === '1') {
+        hilog.info(LOG_DOMAIN, 'StarRustDesk', 'display-switch-animation %{public}s', message);
+      }
+    } catch (_error) {}
+  }
+
+  releaseDisplaySwitchImage(pixelMap: image.PixelMap): void {
+    try { pixelMap.release().catch(() => {}); } catch (_error) {}
+  }
+
+  captureDisplaySwitchImage(epoch: number): Promise<image.PixelMap | undefined> {
+    const width: number = Math.round(this.remoteWidth);
+    const height: number = Math.round(this.remoteHeight);
+    const surface: string = this.readCurrentSurfaceId();
+    // Bound memory and never queue multiple expensive captures. This is a
+    // visual enhancement: unsupported/protected/HDR surfaces may reject it.
+    if (this.displaySwitchCaptureBusy || !surface || !Number.isFinite(width * height) ||
+      width < 1 || height < 1 || width * height > 9000000) {
+      this.traceDisplaySwitch(`capture_skipped busy=${this.displaySwitchCaptureBusy} surface=${surface.length > 0} size=${width}x${height}`);
+      return Promise.resolve(undefined);
+    }
+    const started: number = Date.now();
+    this.displaySwitchCaptureBusy = true;
+    return new Promise((resolve: (value: image.PixelMap | undefined) => void) => {
+      let settled: boolean = false;
+      const timeout: number = setTimeout(() => {
+        settled = true;
+        this.traceDisplaySwitch(`capture_timeout elapsed_ms=${Date.now() - started}`);
+        resolve(undefined);
+      }, 160);
+      try {
+        image.createPixelMapFromSurface(surface, { x: 0, y: 0, size: { width: width, height: height } })
+          .then((pixelMap: image.PixelMap) => {
+            this.displaySwitchCaptureBusy = false;
+            clearTimeout(timeout);
+            if (settled || epoch !== this.displaySwitchAnimationEpoch) {
+              this.releaseDisplaySwitchImage(pixelMap);
+              if (!settled) resolve(undefined);
+              return;
+            }
+            settled = true;
+            this.traceDisplaySwitch(`capture_ready elapsed_ms=${Date.now() - started}`);
+            resolve(pixelMap);
+          }).catch((error: BusinessError) => {
+            this.displaySwitchCaptureBusy = false;
+            clearTimeout(timeout);
+            this.traceDisplaySwitch(`capture_failed code=${error.code ?? -1} elapsed_ms=${Date.now() - started}`);
+            if (!settled) { settled = true; resolve(undefined); }
+          });
+      } catch (_error) {
+        this.displaySwitchCaptureBusy = false;
+        clearTimeout(timeout); settled = true; resolve(undefined);
+      }
+    });
+  }
+
+  async requestDisplaySwitch(display: number, direction: string = ''): Promise<void> {
+    if (this.displaySwitchActive || !this.remotePageVisible ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED || this.pipSurfaceOwned ||
+      !Number.isInteger(display) || display < 0 || display >= this.displayCount || display === this.currentDisplay) return;
+    if (!this.canAnimateDisplaySwitch()) {
+      this.traceDisplaySwitch(`skip target=${display} phase=preflight reason=viewport_unavailable video=${this.hasVideo} ` +
+        `size=${this.componentWidth}x${this.componentHeight} active=${this.desktopWindowActive !== false} ` +
+        `background=${RemoteSessionBackgroundTask.isAppBackground()}`);
+      if (!this.switchDisplay(display)) this.showFileToast('屏幕切换失败，请重试');
+      return;
+    }
+    this.clearDisplaySwitchTransition();
+    const sign: number = direction === 'left' ? -1 : direction === 'right' ? 1 : display > this.currentDisplay ? -1 : 1;
+    const request: DisplaySwitchRequest = new DisplaySwitchRequest(this.displaySwitchAnimationEpoch,
+      this.currentDisplay, display, sign, this.componentWidth, this.componentHeight);
+    this.displaySwitchRequest = request;
+    this.traceDisplaySwitch(`prepare from=${request.from} target=${request.target} direction=${request.sign < 0 ? 'left' : 'right'}`);
+    const displayWidth: number = this.getDisplayWidth();
+    const displayHeight: number = this.getDisplayHeight();
+    const zoom: number = this.zoomScale;
+    const x: number = this.offsetX;
+    const y: number = this.offsetY;
+    this.cancelActiveTouchGesture();
+    this.releaseVirtualMouseButtons();
+    this.stopEdgeAutoPan();
+    this.displaySwitchActive = true;
+    const pixelMap: image.PixelMap | undefined = await this.captureDisplaySwitchImage(request.epoch);
+    if (!this.validateDisplaySwitchRequest(request) || this.currentDisplay !== request.from) {
+      if (pixelMap) this.releaseDisplaySwitchImage(pixelMap);
+      if (this.displaySwitchRequest === request) this.clearDisplaySwitchTransition();
+      return;
+    }
+    if (!pixelMap) { this.fallbackDisplaySwitch(request, 'old_capture_unavailable'); return; }
+    request.phase = 'load_old';
+    // Keep native video unmoved and visible while Image decodes. The copy has
+    // no opaque background until onComplete confirms its pixels are ready.
+    this.displaySwitchImage = new DisplaySwitchImage(pixelMap, displayWidth, displayHeight,
+      request.width, request.height, zoom, x, y, request.epoch, true);
+    this.setDisplaySwitchDeadline(request, 600, 'old_image_not_ready');
+  }
+
+  validateDisplaySwitchRequest(request: DisplaySwitchRequest): boolean {
+    if (this.displaySwitchRequest !== request || request.epoch !== this.displaySwitchAnimationEpoch) return false;
+    if (!this.canAnimateDisplaySwitch() || Math.abs(request.width - this.componentWidth) >= 1 ||
+      Math.abs(request.height - this.componentHeight) >= 1) {
+      this.clearDisplaySwitchTransition(); return false;
+    }
+    return true;
+  }
+
+  setDisplaySwitchDeadline(request: DisplaySwitchRequest, duration: number, reason: string): void {
+    if (this.displaySwitchTimer !== -1) clearTimeout(this.displaySwitchTimer);
+    this.displaySwitchTimer = setTimeout(() => {
+      this.displaySwitchTimer = -1;
+      if (this.validateDisplaySwitchRequest(request)) this.fallbackDisplaySwitch(request, reason);
+    }, duration);
+  }
+
+  fallbackDisplaySwitch(request: DisplaySwitchRequest, reason: string): void {
+    if (!this.validateDisplaySwitchRequest(request)) return;
+    const commit: boolean = !request.committed && this.currentDisplay === request.from;
+    this.traceDisplaySwitch(`skip target=${request.target} phase=${request.phase} reason=${reason}`);
+    this.clearDisplaySwitchTransition();
+    // Failure before the old copy is painted is a direct switch, never a
+    // delayed slide. A failure after switching must not send a second request.
+    if (commit && !this.switchDisplay(request.target)) this.showFileToast('屏幕切换失败，请重试');
+  }
+
+  afterDisplaySwitchPaint(request: DisplaySwitchRequest, apply: () => void): void {
+    try {
+      // Image onComplete means decoded, not presented. The first frame consumes
+      // pending UI updates; the second starts after that frame was submitted.
+      // This does not wait for idle time or claim a hardware-present fence.
+      this.getUIContext().postFrameCallback(new DisplaySwitchPaintCallback(() => {
+        if (!this.validateDisplaySwitchRequest(request)) return;
+        try {
+          this.getUIContext().postFrameCallback(new DisplaySwitchPaintCallback(() => {
+            if (!this.validateDisplaySwitchRequest(request)) return;
+            this.traceDisplaySwitch(`frames_submitted target=${request.target} phase=${request.phase}`);
+            apply();
+          }));
+        } catch (_error) { this.fallbackDisplaySwitch(request, 'frame_callback_unavailable'); }
+      }));
+    } catch (_error) { this.fallbackDisplaySwitch(request, 'frame_callback_unavailable'); }
+  }
+
+  matchesDisplaySwitchImage(snapshot: DisplaySwitchImage, outgoing: boolean, request: DisplaySwitchRequest): boolean {
+    const current: DisplaySwitchImage | undefined = outgoing ? this.displaySwitchImage : this.displaySwitchIncomingImage;
+    // ArkUI wraps @State objects (and @Builder parameters); a callback can
+    // refer to the same snapshot through a different proxy. Never use ===
+    // here. One snapshot per role per epoch gives a stable, stale-safe token.
+    return current !== undefined && snapshot.epoch === request.epoch && current.epoch === request.epoch &&
+      snapshot.outgoing === outgoing && current.outgoing === outgoing;
+  }
+
+  onDisplaySwitchImageReady(snapshot: DisplaySwitchImage, outgoing: boolean): void {
+    const request: DisplaySwitchRequest | undefined = this.displaySwitchRequest;
+    if (!request || !this.validateDisplaySwitchRequest(request)) return;
+    const matches: boolean = this.matchesDisplaySwitchImage(snapshot, outgoing, request);
+    this.traceDisplaySwitch(`image_callback target=${request.target} role=${outgoing ? 'old' : 'new'} ` +
+      `phase=${request.phase} matches=${matches} epoch=${snapshot.epoch} expected_epoch=${request.epoch}`);
+    if (!matches) return;
+    if (outgoing) {
+      if (request.phase !== 'load_old') return;
+      request.phase = 'paint_old';
+      this.displaySwitchImageReady = true;
+      this.traceDisplaySwitch(`image_ready target=${request.target} role=old`);
+      this.afterDisplaySwitchPaint(request, () => { this.commitDisplaySwitchTransition(request); });
+    } else {
+      if (request.phase !== 'load_new') return;
+      request.phase = 'paint_new';
+      // The incoming copy loaded at x=0 behind the opaque old copy, avoiding
+      // offscreen culling of Image readiness callbacks. Only this copy moves.
+      this.displaySwitchIncomingX = -request.sign * request.width;
+      this.traceDisplaySwitch(`image_ready target=${request.target} role=new`);
+      this.afterDisplaySwitchPaint(request, () => { this.startDisplaySwitchTransition(request); });
+    }
+  }
+
+  onDisplaySwitchImageError(snapshot: DisplaySwitchImage, outgoing: boolean): void {
+    const request: DisplaySwitchRequest | undefined = this.displaySwitchRequest;
+    if (!request || !this.matchesDisplaySwitchImage(snapshot, outgoing, request)) return;
+    this.fallbackDisplaySwitch(request, outgoing ? 'old_image_error' : 'new_image_error');
+  }
+
+  commitDisplaySwitchTransition(request: DisplaySwitchRequest): void {
+    if (!this.validateDisplaySwitchRequest(request) || request.phase !== 'paint_old') return;
+    if (this.currentDisplay !== request.from) { this.clearDisplaySwitchTransition(); return; }
+    const frame: VideoFrameInfo = RustDeskNapi.getVideoFrame();
+    request.rendered = frame.renderedFrames ?? 0;
+    request.received = frame.totalFrames ?? 0;
+    request.generation = frame.generation ?? 0;
+    if (this.displaySwitchTimer !== -1) clearTimeout(this.displaySwitchTimer);
+    this.displaySwitchTimer = -1;
+    this.traceDisplaySwitch(`cover_committed target=${request.target}`);
+    if (!this.switchDisplay(request.target)) {
+      this.clearDisplaySwitchTransition(); this.showFileToast('屏幕切换失败，请重试'); return;
+    }
+    request.committed = true;
+    request.phase = 'wait_video';
+    request.started = Date.now();
+    this.touchSequenceDraining = true;
+    this.ignoreTouchUntilNextDown = true;
+    this.waitDisplaySwitchFrame(request);
+  }
+
+  waitDisplaySwitchFrame(request: DisplaySwitchRequest): void {
+    if (!this.validateDisplaySwitchRequest(request) || request.phase !== 'wait_video') return;
+    if (this.currentDisplay !== request.target) { this.clearDisplaySwitchTransition(); return; }
+    const frame: VideoFrameInfo = RustDeskNapi.getVideoFrame();
+    if ((frame.generation ?? 0) !== request.generation) { this.clearDisplaySwitchTransition(); return; }
+    const elapsed: number = Date.now() - request.started;
+    const layoutReady: boolean = frame.width === this.remoteWidth && frame.height === this.remoteHeight &&
+      this.surfaceRebindTimer === -1;
+    if (!layoutReady) request.rendered = frame.renderedFrames ?? 0;
+    // Receive AND presentation progress are required. These are visual
+    // readiness signals, not a protocol acknowledgement of the selected display.
+    if (layoutReady && frame.hasFrame && (frame.totalFrames ?? 0) > request.received &&
+      (frame.renderedFrames ?? 0) > request.rendered) {
+      this.traceDisplaySwitch(`video_ready target=${request.target} wait_ms=${elapsed}`);
+      this.prepareIncomingDisplaySwitchImage(request);
+      return;
+    }
+    if (elapsed >= 1200) { this.fallbackDisplaySwitch(request, 'frame_wait_timeout'); return; }
+    this.displaySwitchTimer = setTimeout(() => {
+      this.displaySwitchTimer = -1;
+      this.waitDisplaySwitchFrame(request);
+    }, 40);
+  }
+
+  async prepareIncomingDisplaySwitchImage(request: DisplaySwitchRequest): Promise<void> {
+    if (!this.validateDisplaySwitchRequest(request) || request.phase !== 'wait_video') return;
+    request.phase = 'capture_new';
+    const displayWidth: number = this.getDisplayWidth();
+    const displayHeight: number = this.getDisplayHeight();
+    const remoteWidth: number = this.remoteWidth;
+    const remoteHeight: number = this.remoteHeight;
+    const zoom: number = this.zoomScale;
+    const x: number = this.offsetX;
+    const y: number = this.offsetY;
+    const pixelMap: image.PixelMap | undefined = await this.captureDisplaySwitchImage(request.epoch);
+    if (!this.validateDisplaySwitchRequest(request)) {
+      if (pixelMap) this.releaseDisplaySwitchImage(pixelMap);
+      return;
+    }
+    if (!pixelMap || this.currentDisplay !== request.target || this.remoteWidth !== remoteWidth ||
+      this.remoteHeight !== remoteHeight || this.surfaceRebindTimer !== -1) {
+      if (pixelMap) this.releaseDisplaySwitchImage(pixelMap);
+      this.fallbackDisplaySwitch(request, 'new_capture_unavailable'); return;
+    }
+    request.phase = 'load_new';
+    this.displaySwitchIncomingImage = new DisplaySwitchImage(pixelMap, displayWidth, displayHeight,
+      request.width, request.height, zoom, x, y, request.epoch, false);
+    this.setDisplaySwitchDeadline(request, 600, 'new_image_not_ready');
+  }
+
+  startDisplaySwitchTransition(request: DisplaySwitchRequest): void {
+    if (!this.validateDisplaySwitchRequest(request) || request.phase !== 'paint_new') return;
+    request.phase = 'animating';
+    this.traceDisplaySwitch(`begin target=${request.target} direction=${request.sign < 0 ? 'left' : 'right'} duration_ms=300 style=snapshot_slide`);
+    this.setDisplaySwitchDeadline(request, 500, 'animation_completion_timeout');
+    try {
+      this.getUIContext().animateTo({ duration: 300, curve: Curve.EaseInOut, onFinish: () => {
+        if (!this.validateDisplaySwitchRequest(request)) return;
+        request.phase = 'handoff';
+        // Keep the full incoming copy until its final position is painted.
+        // Removing both layers then reveals the unmoved live Surface below it.
+        this.afterDisplaySwitchPaint(request, () => {
+          this.traceDisplaySwitch(`end target=${request.target}`);
+          this.clearDisplaySwitchTransition();
+        });
+      } }, () => {
+        this.displaySwitchOutgoingX = request.sign * request.width;
+        this.displaySwitchIncomingX = 0;
+      });
+    } catch (_error) { this.fallbackDisplaySwitch(request, 'animation_unavailable'); }
+  }
+
+  showDisplaySwitchHint(display: number): void {
+    this.clearDisplaySwitchHint();
+    this.displaySwitchHint = `屏幕 ${display + 1} / ${this.displayCount}`;
+    this.displaySwitchHintTimer = setTimeout(() => {
+      this.displaySwitchHintTimer = -1;
+      this.displaySwitchHint = '';
+    }, 1200);
   }
 
   compatibilityOptionKey(name: string): string {
@@ -6445,11 +6920,7 @@ struct RemotePage {
     this.multiTouchStartedAt = 0;
     this.multiTouchMoved = false;
     this.threeFingerGestureActive = false;
-    this.threeFingerStartedAt = 0;
-    this.threeFingerStartCenterX = 0;
-    this.threeFingerStartCenterY = 0;
-    this.threeFingerLastCenterX = 0;
-    this.threeFingerLastCenterY = 0;
+    this.displaySwipe.reset();
     this.isPinching = false;
     this.pinchStartDistance = 0;
     this.touchMoved = false;
@@ -6463,6 +6934,7 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
+    if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.controlMenu) return;
@@ -6505,16 +6977,20 @@ struct RemotePage {
 
     if (this.threeFingerGestureActive) {
       this.stopEdgeAutoPan();
-      if (event.touches.length < 3) {
-        this.finishThreeFingerGesture();
-      } else {
-        this.handleThreeFingerGesture(event);
-      }
+      this.handleThreeFingerGesture(event);
       return;
     }
 
-    if (this.isFullScreen && event.touches.length >= 3) {
+    if (event.touches.length >= 3 && (this.isFullScreen || this.canSwipeRemoteDisplays())) {
       this.stopEdgeAutoPan();
+      // Never turn a scroll/pinch already in progress into a display switch.
+      if (event.type !== TouchType.Down || event.touches.length !== 3 ||
+        this.touchSequenceMaxFingers !== 3 || this.multiTouchMoved || this.isPinching) {
+        RustDeskNapi.appendDiagnosticLog('display-swipe', 'ignored reason=existing_gesture_or_fingers');
+        this.cancelActiveTouchGesture();
+        this.touchSequenceDraining = true;
+        return;
+      }
       this.handleThreeFingerGesture(event);
       return;
     }
@@ -6976,6 +7452,7 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
+    if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
@@ -7020,6 +7497,7 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
+    if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
@@ -7121,6 +7599,7 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
+    if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (this.pipSurfaceOwned) return;
@@ -8968,64 +9447,74 @@ struct RemotePage {
 
   handleThreeFingerGesture(event: TouchEvent): void {
     if (!this.threeFingerGestureActive) {
+      // Discard queued taps and balance held buttons. Do not flush a pending
+      // single click into the remote desktop when a multi-finger gesture wins.
+      this.cancelActiveTouchGesture();
       this.threeFingerGestureActive = true;
-      RustDeskNapi.appendDiagnosticLog('gesture', 'three_begin');
-      this.threeFingerStartedAt = Date.now();
-      this.multiTouchActive = false;
-      this.multiTouchGesture = 0;
-      this.multiTouchMoved = false;
-      this.isPinching = false;
-      this.clearLongPressTimer();
-      this.flushPendingTap();
-      this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+      this.threeFingerDisplayAtStart = this.currentDisplay;
+      this.threeFingerDisplayCountAtStart = this.displayCount;
+      this.displaySwipe.begin(this.displaySwipePoints(event.touches), Date.now());
+      RustDeskNapi.appendDiagnosticLog('display-swipe', `begin source=touchscreen displays=${this.displayCount} enabled=${this.displaySwipeEnabled}`);
+      return;
     }
 
-    let count: number = Math.min(3, event.touches.length);
-    let centerX: number = 0;
-    let centerY: number = 0;
-    for (let index: number = 0; index < count; index++) {
-      const point = this.touchGesturePoint(event.touches[index]);
-      centerX += point.x;
-      centerY += point.y;
+    if (event.touches.length > 3 || event.type === TouchType.Down) {
+      RustDeskNapi.appendDiagnosticLog('display-swipe', 'cancel reason=fingers_changed');
+      this.cancelActiveTouchGesture();
+      this.touchSequenceDraining = true;
+      return;
     }
-    centerX /= Math.max(1, count);
-    centerY /= Math.max(1, count);
-
-    if (this.threeFingerStartCenterY === 0) {
-      this.threeFingerStartCenterX = centerX;
-      this.threeFingerStartCenterY = centerY;
+    if (event.type === TouchType.Up) {
+      // HarmonyOS may include or exclude released contacts in touches. Merge
+      // the changed set by id so the final distance is independent of that.
+      const points: TouchObject[] = event.touches.slice();
+      for (const changed of event.changedTouches) {
+        const index = points.findIndex((p: TouchObject) => p.id === changed.id);
+        if (index < 0) points.push(changed); else points[index] = changed;
+      }
+      if (points.length === 3) this.displaySwipe.update(this.displaySwipePoints(points));
+      this.finishThreeFingerGesture();
+      return;
     }
-    this.threeFingerLastCenterX = centerX;
-    this.threeFingerLastCenterY = centerY;
-
-    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+    this.displaySwipe.update(this.displaySwipePoints(event.touches));
+    if (event.touches.length !== 3) {
       this.finishThreeFingerGesture();
     }
   }
 
+  displaySwipePoints(touches: TouchObject[]): DisplaySwipePoint[] {
+    return touches.map((touch: TouchObject): DisplaySwipePoint => {
+      const point = this.touchGesturePoint(touch);
+      return { id: touch.id, x: point.x, y: point.y };
+    });
+  }
+
   finishThreeFingerGesture(): void {
-    if (!this.threeFingerGestureActive) {
-      return;
-    }
-    let moveX: number = this.threeFingerLastCenterX - this.threeFingerStartCenterX;
-    let moveY: number = this.threeFingerLastCenterY - this.threeFingerStartCenterY;
-    let duration: number = Date.now() - this.threeFingerStartedAt;
-    let shouldOpenKeyboard: boolean = moveY <= -THREE_FINGER_SWIPE_THRESHOLD &&
-      Math.abs(moveX) <= THREE_FINGER_HORIZONTAL_LIMIT && duration <= THREE_FINGER_MAX_DURATION;
-    RustDeskNapi.appendDiagnosticLog('gesture', `three_end duration_ms=${duration} keyboard=${shouldOpenKeyboard}`);
-
+    if (!this.threeFingerGestureActive) return;
+    const now = Date.now();
+    const result = this.displaySwipe.finish(now);
+    const stableDisplay: boolean = this.currentDisplay === this.threeFingerDisplayAtStart &&
+      this.displayCount === this.threeFingerDisplayCountAtStart;
+    const canSwitch: boolean = this.canSwipeRemoteDisplays() && stableDisplay &&
+      (this.lastDisplaySwipeAt < 0 || now - this.lastDisplaySwipeAt >= 400);
+    const target = canSwitch ? adjacentRemoteDisplay(this.currentDisplay, this.displayCount, result.action) : -1;
+    const keyboard: boolean = result.action === 'up' && this.isFullScreen && this.remotePageVisible &&
+      this.connectionStatus === ConnectionStatus.CONNECTED && !this.pipSurfaceOwned &&
+      !this.showRemoteFileBrowser && !this.showCommunicationPanel && !this.showGestureHelp;
     this.threeFingerGestureActive = false;
-    this.touchSequenceDraining = true;
-    this.threeFingerStartedAt = 0;
-    this.threeFingerStartCenterX = 0;
-    this.threeFingerStartCenterY = 0;
-    this.threeFingerLastCenterX = 0;
-    this.threeFingerLastCenterY = 0;
-    this.ignoreTouchUntilNextDown = true;
-
-    if (shouldOpenKeyboard) {
+    RustDeskNapi.appendDiagnosticLog('display-swipe', `end action=${result.action} reason=${result.reason} ` +
+      `duration_ms=${result.duration} dx=${Math.round(result.dx)} dy=${Math.round(result.dy)} ` +
+      `eligible=${canSwitch} stable=${stableDisplay} target=${target} keyboard=${keyboard}`);
+    if (target >= 0) {
+      this.lastDisplaySwipeAt = now;
+      this.requestDisplaySwitch(target, result.action);
+    } else if (keyboard) {
       this.openRemoteKeyboard();
     }
+    // switchDisplay also cancels touch state. Set these AFTER it so staggered
+    // lifts cannot click/scroll on the new display or reopen the keyboard.
+    this.touchSequenceDraining = true;
+    this.ignoreTouchUntilNextDown = true;
   }
 
   sendManualClipboardText(text: string): void {
@@ -10264,15 +10753,16 @@ struct RemotePage {
     return displays;
   }
 
-  switchDisplay(display: number): void {
+  switchDisplay(display: number): boolean {
     this.relativePointerSampleValid = false;
     this.physicalMouseDeduplicator.clear();
     if (display < 0 || display >= this.displayCount || display === this.currentDisplay) {
-      return;
+      return false;
     }
     this.cancelActiveTouchGesture();
+    this.touchSequenceDraining = true;
+    this.ignoreTouchUntilNextDown = true;
     this.stopEdgeAutoPan();
-    this.currentDisplay = display;
     this.clearKeyboardInputAnchor('display_changed');
     this.virtualMouseDragActive = false;
     this.virtualMouseInitialized = false;
@@ -10293,16 +10783,20 @@ struct RemotePage {
     this.lastStatsTime = 0;
     RustDeskNapi.appendDiagnosticLog('input', `display_cursor_state_reset display=${display}`);
     const result = RustDeskNapi.switchDisplay(display);
+    RustDeskNapi.appendDiagnosticLog('display-swipe', `request from=${this.currentDisplay} target=${display} result=${result}`);
     if (result !== 0) {
       hilog.error(LOG_DOMAIN, 'StarRustDesk', `Switch display failed display=${display} result=${result}`);
-      return;
+      return false;
     }
+    this.currentDisplay = display;
+    this.showDisplaySwitchHint(display);
     // The cached position belongs to the previous display until a fresh peer
     // position or display acknowledgement advances the sequence.
     const cachedCursor: RemoteCursorPosition = RustDeskNapi.getRemoteCursorPosition();
     this.lastRemoteCursorSequence = cachedCursor.sequence;
     RustDeskNapi.refreshVideo();
     this.bindSurfaceIfReady();
+    return true;
   }
 
   getDisplayLeft(): number {

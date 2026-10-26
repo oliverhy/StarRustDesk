@@ -60,6 +60,7 @@ export struct RemoteGlassMenu {
       case 'gestureHelp': return '手势说明';
       case 'keyboardSettings': return '键盘设置';
       case 'mouseSettings': return '鼠标设置';
+      case 'displaySwipe': return '三指切屏';
       case 'pan': return '移动画面';
       case 'edgePan': return '边缘跟随';
       case 'fullscreen': return this.state.fullscreen ? '退出全屏' : '全屏';
@@ -83,7 +84,7 @@ export struct RemoteGlassMenu {
     }
   }
   isToggle(key: string): boolean {
-    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor'].includes(key);
+    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor', 'displaySwipe'].includes(key);
   }
   isOn(key: string): boolean {
     switch (key) {
@@ -93,6 +94,7 @@ export struct RemoteGlassMenu {
       case 'edgePan': return this.state.edgePan;
       case 'privacy': return this.state.privacy;
       case 'monitor': return this.state.monitor;
+      case 'displaySwipe': return this.state.displaySwipe;
       default: return false;
     }
   }
@@ -339,6 +341,7 @@ export struct RemoteGlassMenu {
         }, (display: number) => `display-${display}`)
       }
     }.width('100%').height(this.metrics.screenHeight + 8).scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+    this.action('displaySwipe')
   }
 
   @Builder

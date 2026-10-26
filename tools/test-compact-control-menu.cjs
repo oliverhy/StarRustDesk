@@ -110,7 +110,7 @@ assert(!overlay.includes('BarState.Auto'));
 assert(glass.includes('.align(Alignment.TopStart)') && glass.includes('.justifyContent(FlexAlign.Start)'),
   'spare viewport space is not split above and below the content');
 const display=method('buildCompactDisplayMenu');
-assert(display.includes('ScrollDirection.Horizontal') && display.includes('this.switchDisplay(display)'));
+assert(display.includes('ScrollDirection.Horizontal') && display.includes('this.requestDisplaySwitch(display)'));
 assert(display.includes('.height(this.getControlMenuMetrics().bodyHeight)') && display.includes('BarState.Off'));
 assert(!display.includes('BarState.Auto') && !display.includes('padding({ bottom: 6 })'));
 assert(display.includes('this.controlSelectedBackgroundColor()') && display.includes('openToolbarOrderEditor'));

@@ -64,20 +64,28 @@ let now=1000, output=[];
 const TouchType={Down:0,Move:1,Up:2,Cancel:3};
 const gc=vm.createContext({Date:{now:()=>now},Math,TouchType,SourceType:{Mouse:99},
  SourceTool:{MOUSE:99,TOUCHPAD:98},INPUT_MODE_MOUSE:0,INPUT_MODE_TOUCH:1,
+ exports:{},ConnectionStatus:{CONNECTED:1},
  PINCH_DISTANCE_THRESHOLD:10,MULTI_TOUCH_MOVE_THRESHOLD:8,THREE_FINGER_SWIPE_THRESHOLD:40,
  THREE_FINGER_HORIZONTAL_LIMIT:80,THREE_FINGER_MAX_DURATION:1200,RustDeskNapi:napi,
  ConnectionService:{sendMouseEvent:(x,y,a)=>output.push(a===3?'right_down':'right_up')}});
+vm.runInContext(ts.transpile(read('entry/src/main/ets/model/RemoteDisplaySwipe.ets')),gc);
+Object.assign(gc,gc.exports);
 vm.runInContext(ts.transpile('class Gesture {'+['touchGesturePoint','handleRemoteTouch','handleMultiTouch','finishMultiTouchGesture',
- 'handleThreeFingerGesture','finishThreeFingerGesture'].map(method).join('\n')+'};globalThis.Gesture=Gesture;'),gc);
+ 'canSwipeRemoteDisplays','displaySwipePoints','handleThreeFingerGesture','finishThreeFingerGesture'].map(method).join('\n')+'};globalThis.Gesture=Gesture;'),gc);
 function make(full=false){
   now=1000;output=[];
   const p=Object.assign(new gc.Gesture(),{isFullScreen:full,inputMode:0,multiTouchActive:false,
     threeFingerGestureActive:false,zoomScale:1,lastAbsX:100,lastAbsY:100,lastPinchEndedAt:0,
-    touchSequenceDraining:false,touchSequenceMaxFingers:0,threeFingerStartCenterY:0});
+    touchSequenceDraining:false,touchSequenceMaxFingers:0,displaySwipe:new gc.RemoteDisplaySwipe(),
+    displayCount:1,currentDisplay:0,displaySwipeEnabled:true,remotePageVisible:true,connectionStatus:1,lastDisplaySwipeAt:-1});
   for(const n of ['stopEdgeAutoPan','endLocalPointerGesture','clearLongPressTimer','flushPendingTap','sendLeftUp',
     'ensurePointerInitialized','clampViewportOffset','finishSingleTouch','handleTouchpadTouch','applyPinchTransform'])p[n]=()=>{};
-  p.cancelActiveTouchGesture=()=>{p.multiTouchActive=false;p.threeFingerGestureActive=false;};
+  p.cancelActiveTouchGesture=()=>{p.multiTouchActive=false;p.multiTouchMoved=false;p.isPinching=false;
+    p.threeFingerGestureActive=false;p.displaySwipe.reset();p.ignoreTouchUntilNextDown=false;};
   p.openRemoteKeyboard=()=>output.push('keyboard');p.sendTouchScroll=()=>output.push('scroll');
+  p.switchDisplay=target=>{p.cancelActiveTouchGesture();p.currentDisplay=target;output.push(`display:${target}`);return true;};
+  p.requestDisplaySwitch=target=>{if(!p.switchDisplay(target))p.showFileToast();};
+  p.showDisplaySwitchHint=()=>{};p.showFileToast=()=>output.push('error');
   return p;
 }
 function send(p,type,n,y=20){now+=25;const touches=Array.from({length:n},(_,i)=>({id:i,x:20+i*30,y,windowX:20+i*30,windowY:y}));
@@ -106,6 +114,80 @@ test('new two-finger tap works after completed scroll',()=>{
 });
 test('release event cannot initialize a multi-touch tap',()=>{
   const p=make();send(p,2,2);send(p,2,1);assert.deepEqual(output,[]);
+});
+function swipe(p,dx,dy=0,finish=true){
+  send(p,0,1,200);send(p,0,3,200);
+  const touches=Array.from({length:3},(_,id)=>({id,x:20+id*30+dx,y:200+dy,windowX:20+id*30+dx,windowY:200+dy}));
+  now+=100;p.handleRemoteTouch({type:1,touches,changedTouches:touches});
+  if(finish){now+=25;p.handleRemoteTouch({type:2,touches,changedTouches:[touches[2]]});
+    p.handleRemoteTouch({type:2,touches:touches.slice(0,2),changedTouches:[touches[1]]});
+    p.handleRemoteTouch({type:2,touches:touches.slice(0,1),changedTouches:[touches[0]]});}
+}
+test('left/right swipes cycle displays in both windowed and fullscreen views, once per lift',()=>{
+ for(const full of [false,true]){
+  const p=make(full);p.displayCount=3;swipe(p,-100);assert.equal(p.currentDisplay,1);
+  now+=500;swipe(p,100);assert.equal(p.currentDisplay,0);
+  now+=500;swipe(p,100);assert.equal(p.currentDisplay,2);
+  now+=500;swipe(p,-100);assert.equal(p.currentDisplay,0);
+  assert.deepEqual(output,['display:1','display:0','display:2','display:0']);
+ }
+});
+test('keyboard swipe stays vertical and fullscreen-only with multiple displays',()=>{
+ const p=make(true);p.displayCount=3;swipe(p,0,-100);assert.deepEqual(output,['keyboard']);
+ const q=make(false);q.displayCount=3;swipe(q,0,-100);assert.deepEqual(output,[]);
+});
+test('disabled switch does not steal keyboard swipe; one display never switches',()=>{
+ const p=make(true);p.displaySwipeEnabled=false;p.displayCount=3;swipe(p,-100);assert.deepEqual(output,[]);
+ swipe(p,0,-100);assert.deepEqual(output,['keyboard']);
+ const q=make(true);swipe(q,-100);assert.deepEqual(output,[]);
+});
+test('three-finger pinch, short motion and diagonal movement do not switch or click',()=>{
+ for(const [x,y] of [[30,0],[-80,-80],[100,100]]){
+  const p=make(true);p.displayCount=3;swipe(p,x,y);assert.deepEqual(output,[]);
+ }
+ const p=make(true);p.displayCount=3;send(p,0,1);send(p,0,3);
+ const touches=[{id:0,x:-200,y:20,windowX:-200,windowY:20},
+   {id:1,x:50,y:20,windowX:50,windowY:20},{id:2,x:300,y:20,windowX:300,windowY:20}];
+ p.handleRemoteTouch({type:1,touches,changedTouches:touches});p.handleRemoteTouch({type:2,touches,changedTouches:[touches[2]]});
+ assert.deepEqual(output,[]);
+});
+test('fourth finger and system cancel suppress all residual events',()=>{
+ for(const extra of [true,false]){
+  const p=make(true);p.displayCount=3;swipe(p,-100,0,false);
+  send(p,extra?0:3,extra?4:3,200);lift(p,extra?4:3,200);assert.deepEqual(output,[]);
+ }
+});
+test('adding a third finger to a running two-finger scroll does not switch',()=>{
+ const p=make();p.displayCount=3;send(p,0,1);send(p,0,2);send(p,1,2,60);
+ send(p,0,3,60);send(p,1,3,180);lift(p,3,180);assert.deepEqual(output,['scroll']);
+});
+test('first lift excluding the released finger still recognizes the final displacement',()=>{
+ const p=make(true);p.displayCount=3;send(p,0,1,200);send(p,0,3,200);
+ const touches=Array.from({length:3},(_,id)=>({id,x:-80+id*30,y:200,windowX:-80+id*30,windowY:200}));
+ p.handleRemoteTouch({type:2,touches:touches.slice(0,2),changedTouches:[touches[2]]});
+ assert.deepEqual(output,['display:1']);assert(p.touchSequenceDraining);
+});
+test('second rapid swipe is ignored; a later deliberate swipe works',()=>{
+ const p=make(true);p.displayCount=3;swipe(p,-100);swipe(p,-100);
+ assert.deepEqual(output,['display:1']);now+=500;swipe(p,-100);assert.deepEqual(output,['display:1','display:2']);
+});
+test('display topology change, background and disconnect cannot complete a switch',()=>{
+ for(const change of [p=>p.displayCount=2,p=>p.currentDisplay=2,p=>p.remotePageVisible=false,
+   p=>p.connectionStatus=0,p=>p.pipSurfaceOwned=true,p=>p.showRemoteFileBrowser=true]){
+  const p=make(true);p.displayCount=3;swipe(p,-100,0,false);change(p);lift(p,3,200);
+  assert.deepEqual(output,[]);
+ }
+});
+test('physical mouse and touchpad compatibility events never enter display swipe recognition',()=>{
+ for(const sourceTool of [99,98]){
+  const p=make(true);p.displayCount=3;let forwarded=0;p.handlePointerCompatibilityTouch=()=>forwarded++;
+  for(const type of [0,1,2])p.handleRemoteTouch({type,sourceTool,touches:[{id:0},{id:1},{id:2}],changedTouches:[]});
+  assert.equal(forwarded,3);assert(!p.threeFingerGestureActive);assert.deepEqual(output,[]);
+ }
+});
+test('switch request failure reports failure and still drains remaining fingers',()=>{
+ const p=make(true);p.displayCount=3;p.switchDisplay=()=>false;swipe(p,-100);
+ assert.deepEqual(output,['error']);assert.equal(p.currentDisplay,0);
 });
 const ordered=[];
 const dc=vm.createContext({RustDeskNapi:{takeNativeInputEvents:()=>[
