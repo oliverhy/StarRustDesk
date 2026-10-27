@@ -35,7 +35,7 @@ const names = ['touchGesturePoint', 'isHandheldDevice', 'shouldFollowTouchMouse'
   'updateVirtualMouseMove', 'beginVirtualMouseMove', 'finishVirtualMouseMove',
   'updatePointerFromVirtualMouse', 'syncVirtualMouseToCurrentPointer',
   'virtualMouseOverlayX', 'virtualMouseOverlayY', 'virtualMousePointerX', 'virtualMousePointerY'];
-const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCHPAD_DRAG_START_THRESHOLD',
+const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCHPAD_DRAG_START_THRESHOLD', 'TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS',
   'VIRTUAL_MOUSE_POINTER_HOT_X', 'VIRTUAL_MOUSE_POINTER_HOT_Y',
   'VIRTUAL_MOUSE_WIDTH', 'VIRTUAL_MOUSE_HEIGHT', 'VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN',
   'VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN'].map(name => {
@@ -52,7 +52,7 @@ function make(overrides = {}) {
     pointerInitialized: true, edgeAutoPanEnabled: true, inputMode: 0, relativeMouseEnabled: false,
     isPanMode: false, showKeyboardPanel: false, remoteKeyboardVisible: false,
     remoteKeyboardEditing: false, remoteKeyboardVisibilityKnown: true, connectionStatus: 2, showVirtualMouse: false,
-    leftButtonHeld: false, touchpadDragCandidate: false, tapTimer: -1, lastMoveSentAt: 0,
+    leftButtonHeld: false, touchpadDragCandidate: false, tapTimer: -1, lastMoveSentAt: 0, touchpadLastTapAt: 0,
     virtualMouseDragActive: false, hasAuthoritativeRemoteCursor: false,
     stopEdgeAutoPan() { this.stops = (this.stops || 0) + 1; },
     updateEdgeAutoPan() { this.edgeCalls = (this.edgeCalls || 0) + 1; },

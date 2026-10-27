@@ -1394,6 +1394,39 @@ PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连�
 增加文件传输停滞、等待确认超时和连接中断处理，避免任务无限等待；确认超时时提示文件可能已送达，请检查远端后重试，取消后保留正确方向和进度。	Added handling for stalled transfers, acknowledgement timeouts and disconnected sessions to prevent endless waiting. A confirmation timeout warns that the file may already have arrived; check the remote device before retrying. Cancellation preserves the correct direction and progress.
 补充文件传输诊断：记录任务编号、上传或取回方向、字节数、确认阶段、停滞时长及失败原因；仍由诊断开关控制，新增日志不记录文件内容、密码或完整路径。	Added file transfer diagnostics for task IDs, upload or download direction, byte counts, confirmation stages, idle duration and failure reasons. Logging still follows the diagnostic switch, and the new logs do not record file contents, passwords or full paths.
 三指切屏	Three-finger display swipe
+手势操作指南	Touch gesture guide
+仅切换说明预览，不改变当前输入模式	Previewing instructions does not change the active input mode.
+单指滑动	Swipe with one finger
+移动鼠标	Move pointer
+单指轻点	Tap with one finger
+左键单击	Left click
+单指双击	Double-tap with one finger
+左键双击	Left double-click
+轻点一次，再按住移动	Tap once, then press and move
+左键拖拽	Left-button drag
+单指长按	Press and hold
+右键单击	Right click
+单指点按目标	Tap the target
+单指双击目标	Double-tap the target
+按住目标后立即移动	Press the target and move immediately
+双指轻点	Tap with two fingers
+双指平行滑动	Swipe with two fingers together
+滚动画面内容	Scroll remote content
+双指捏合	Pinch with two fingers
+缩放画面	Zoom the view
+三指左右滑动	Swipe left or right with three fingers
+切换远端屏幕	Switch remote displays
+全屏三指上滑	Swipe up with three fingers in fullscreen
+虚拟鼠标与画面跟随	Virtual mouse and view following
+在“控 → 输入”中开启虚拟鼠标：左右键用于点击，中间为向上滚动、中键和向下滚动，底部移动区用于移动远端指针。放大画面后，单指拖动鼠标以外的区域可平移视野。\n开启边缘跟随后，手机和平板上的触屏指针靠近画面中心时视野随手势平移；停手即停，抬手再滑无需等待。实体鼠标靠近画面边缘并短暂停留后平移。	Enable the virtual mouse in Controls > Input. The left and right buttons click; the center controls scroll up, middle-click and scroll down. Drag its bottom movement area to move the remote pointer. When zoomed in, drag outside the mouse to pan the view.\nWith edge follow enabled, the view follows touch pointer movement near its center on phones and tablets. It stops immediately when you stop and resumes without delay when you swipe again. A physical mouse pans after pausing near the edge.
+移动放大画面	Move the zoomed view
+放大后可开启“移动画面”，按钮变为淡蓝色；单指平移视野而不点击远端，双指滚动和捏合缩放仍可使用。	When zoomed in, enable Move view; its button turns light blue. Pan with one finger without clicking the remote device. Two-finger scrolling and pinch zoom remain available.
+在“控 → 输入”中开启	Enable in Controls > Input
+按住底部移动区：移动鼠标	Drag the bottom area to move the pointer
+1.3.12（1003012）· 拖拽与手势说明优化	1.3.12 (1003012) · Dragging and gesture guide improvements
+优化鼠标模式下轻点一次、再次按住移动的拖拽识别，减少误触右键，并保持双击和长按右键操作。	Improved tap-then-hold dragging in mouse mode to reduce accidental right clicks while preserving double-click and long-press right-click gestures.
+手势说明改为图文卡片，补充鼠标、触摸、虚拟鼠标及投屏、键盘等操作说明，支持浏览不同模式而不改变当前操控模式。	The gesture guide now uses illustrated cards for mouse, touch, virtual mouse, projection and keyboard operations. Browse modes without changing the current control mode.
+补充拖拽识别和长按来源诊断，遵循诊断开关，不记录输入文字或画面内容。	Added drag recognition and long-press source diagnostics, respecting the diagnostics setting and excluding typed text and screen content.
 1.3.11（1003011）· 三指切屏与滑动过渡优化	1.3.11 (1003011) · Three-finger display switching and slide transitions
 新增触控屏三指左右滑动切换远端显示器，支持首尾循环；可在“控 → 屏幕”中开启或关闭，默认开启并按远端独立保存。触控板或系统拦截手势时仍可使用屏幕按钮切换。	Added three-finger left/right touchscreen swipes to cycle through remote displays. Enable or disable this in Controls > Displays; it is on by default and saved per remote device. Use the display buttons if touchpad gestures are unavailable or intercepted by the system.
 切屏增加与手势方向一致的横向滑动过渡：左滑时旧屏向左移出、新屏从右侧进入，右滑相反；功能栏保持原位，保留当前缩放比例。	Display changes now slide in the gesture direction: a left swipe moves the old display out to the left and brings the new one in from the right, and vice versa. Toolbars stay in place and the current zoom is preserved.

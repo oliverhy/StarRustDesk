@@ -149,8 +149,8 @@ interface DownloadedFileCandidate {
 
 const TOUCHPAD_POINTER_SPEED: number = 1.25;
 const TOUCH_MOVE_THRESHOLD: number = 12;
-const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 340;
-const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 40;
+const TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS: number = 450;
+const TOUCHPAD_DOUBLE_TAP_DISTANCE: number = 48;
 const TOUCHPAD_DRAG_START_THRESHOLD: number = 18;
 const MULTI_TOUCH_MOVE_THRESHOLD: number = 8;
 const PINCH_DISTANCE_THRESHOLD: number = 12;
@@ -369,6 +369,7 @@ struct RemotePage {
   private relativePointerX: number = 0;
   private relativePointerY: number = 0;
   @State showGestureHelp: boolean = false;
+  @State gestureHelpView: string = INPUT_MODE_MOUSE;
   @State showKeyboardSettings: boolean = false;
   @State showOrientationDialog: boolean = false;
   private orientationMenuDisplayId: number = -1;
@@ -523,6 +524,10 @@ struct RemotePage {
   private pendingTapLocalX: number = 0;
   private pendingTapLocalY: number = 0;
   private touchpadDragCandidate: boolean = false;
+  private touchpadDragOriginX: number = 0;
+  private touchpadDragOriginY: number = 0;
+  private touchpadLastTapAt: number = 0;
+  private touchpadDragStartedAt: number = 0;
   private pinchStartDistance: number = 0;
   private pinchStartScale: number = 1.0;
   private lastPinchCenterX: number = 0;
@@ -1206,6 +1211,7 @@ struct RemotePage {
     this.preferAuthoritativeCursor = false;
     this.showLeftButtonHoldIndicator = false;
     this.touchpadDragCandidate = false;
+    this.touchpadLastTapAt = 0;
     this.virtualMouseDragActive = false;
     this.virtualMouseInitialized = false;
     this.decoderHealthInitialized = false;
@@ -4805,7 +4811,7 @@ struct RemotePage {
   buildGestureHelpOverlay(mouseSettings: boolean = false) {
     Stack({ alignContent: Alignment.Center }) {
       Column({ space: 14 }) {
-        Text(translate(mouseSettings ? '鼠标设置' : '触屏操作方式', this.uiLanguage))
+        Text(translate(mouseSettings ? '鼠标设置' : '手势操作指南', this.uiLanguage))
           .fontSize(20)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
           .fontColor(this.primaryTextColor())
@@ -4894,35 +4900,53 @@ struct RemotePage {
         .padding({ left: 2, right: 2, top: 2, bottom: 2 })
 
         } else {
-        if (this.inputMode === INPUT_MODE_MOUSE) {
-          Text(translate('适合控制电脑：\n• 单指滑动：移动鼠标\n• 单击：左键\n• 轻点一次，第二次按住并移动：拖拽，松手结束\n• 长按或双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 虚拟鼠标：左右键、中键和滚轮与实体鼠标一致，按住鼠标拖动区即可移动远端指针\n• 虚拟鼠标开启且画面放大后：单指拖动画面其他区域直接平移视野\n• 边缘跟随开启后：手机/平板放大画面，手指移动鼠标到可视区域中心附近，视野立即跟随；停手即停，抬手再滑无需等待\n• 虚拟鼠标拖动区同样支持中心跟随；到达远端桌面边界后，鼠标继续移动\n• 实体鼠标：靠近画面边缘并短暂停留后自动平移，越靠边越快\n• 全屏三指上滑：调出系统键盘，输入直达远端', this.uiLanguage))
-            .fontSize(14)
-            .lineHeight('24fp')
-            .fontColor(this.secondaryTextColor())
-            .width('100%')
+        Row({ space: 8 }) {
+          this.buildGestureGuideMode(INPUT_MODE_MOUSE, '鼠标模式')
+          this.buildGestureGuideMode(INPUT_MODE_TOUCH, '触摸模式')
+        }.width('100%')
+        Text(translate('仅切换说明预览，不改变当前输入模式', this.uiLanguage))
+          .fontSize(12).fontColor(this.secondaryTextColor()).width('100%')
+        if (this.gestureHelpView === INPUT_MODE_MOUSE) {
+          this.buildVirtualMouseGuide()
+          this.buildGestureGuideCard('单指滑动', '移动鼠标', $r('app.media.guide_drag'), $r('app.media.glass_mouse'))
+          this.buildGestureGuideCard('单指轻点', '左键单击', $r('app.media.guide_tap'), $r('app.media.guide_mouse_left'))
+          this.buildGestureGuideCard('单指双击', '左键双击', $r('app.media.guide_double_tap'), $r('app.media.guide_mouse_double'))
+          this.buildGestureGuideCard('轻点一次，再按住移动', '左键拖拽', $r('app.media.guide_drag'), $r('app.media.glass_folder'))
+          this.buildGestureGuideCard('单指长按', '右键单击', $r('app.media.guide_hold'), $r('app.media.guide_mouse_right'))
         } else {
-          Text(translate('适合直接点按：\n• 点按位置：左键\n• 按住移动：拖拽\n• 双指轻点：右键\n• 双指平行滑动：滚动\n• 双指捏合：缩放画面\n• 放大后点“移动画面”：按钮变为淡蓝色，单指平移视野且不点击远端\n• 移动画面模式下，双指滚动和捏合缩放仍可使用\n• 全屏三指上滑：调出系统键盘，输入直达远端', this.uiLanguage))
-            .fontSize(14)
-            .lineHeight('24fp')
-            .fontColor(this.secondaryTextColor())
-            .width('100%')
+          this.buildGestureGuideCard('单指点按目标', '左键单击', $r('app.media.guide_tap'), $r('app.media.guide_mouse_left'))
+          this.buildGestureGuideCard('单指双击目标', '左键双击', $r('app.media.guide_double_tap'), $r('app.media.guide_mouse_double'))
+          this.buildGestureGuideCard('按住目标后立即移动', '左键拖拽', $r('app.media.guide_drag'), $r('app.media.glass_folder'))
+          this.buildGestureGuideCard('单指长按', '右键单击', $r('app.media.guide_hold'), $r('app.media.guide_mouse_right'))
+        }
+        this.buildGestureGuideCard('双指轻点', '右键单击', $r('app.media.guide_two_finger'), $r('app.media.guide_mouse_right'))
+        this.buildGestureGuideCard('双指平行滑动', '滚动画面内容', $r('app.media.guide_two_scroll'), $r('app.media.guide_scroll'))
+        this.buildGestureGuideCard('双指捏合', '缩放画面', $r('app.media.guide_pinch'), $r('app.media.glass_zoom_plus'))
+        this.buildGestureGuideCard('三指左右滑动', '切换远端屏幕', $r('app.media.guide_three_finger'), $r('app.media.remote_menu_screens'))
+        this.buildGestureGuideCard('全屏三指上滑', '打开键盘', $r('app.media.guide_three_up'), $r('app.media.keyboard_launcher'))
+        if (this.gestureHelpView === INPUT_MODE_MOUSE) {
+          this.buildGestureHelpSection('虚拟鼠标与画面跟随', $r('app.media.guide_follow'),
+            '在“控 → 输入”中开启虚拟鼠标：左右键用于点击，中间为向上滚动、中键和向下滚动，底部移动区用于移动远端指针。放大画面后，单指拖动鼠标以外的区域可平移视野。\n开启边缘跟随后，手机和平板上的触屏指针靠近画面中心时视野随手势平移；停手即停，抬手再滑无需等待。实体鼠标靠近画面边缘并短暂停留后平移。')
+        } else {
+          this.buildGestureHelpSection('移动放大画面', $r('app.media.guide_pan'),
+            '放大后可开启“移动画面”，按钮变为淡蓝色；单指平移视野而不点击远端，双指滚动和捏合缩放仍可使用。')
         }
 
-        this.buildGestureHelpSection('三指切屏',
+        this.buildGestureHelpSection('三指切屏', $r('app.media.guide_three_finger'),
           '在“控 → 屏幕”中设置“三指切屏”，默认开启，按远端独立保存。远端有多个屏幕时，在远控画面上三指左滑切换下一屏、右滑切换上一屏，首尾循环。每次抬手只切换一次；双指滚动、捏合缩放和全屏三指上滑打开键盘保持不变。\n适用于触控屏。系统可能接管平板或电脑的多指手势；触控板三指事件未开放给应用时，请使用“控 → 屏幕”按钮切换。')
-        this.buildGestureHelpSection('手机 / 平板单独投屏',
+        this.buildGestureHelpSection('手机 / 平板单独投屏', $r('app.media.guide_projection'),
           '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。')
-        this.buildGestureHelpSection('拖拽与框选',
+        this.buildGestureHelpSection('拖拽与框选', $r('app.media.guide_drag'),
           '鼠标模式：先将远端指针移到起点，轻点一次，第二次按住并拖动，松手结束。框选文件时请从文件列表或桌面的空白处开始；从文件上开始通常是拖动文件。\n触摸模式：在目标位置按住并移动，松手结束。')
-        this.buildGestureHelpSection('组合键与本地键盘',
+        this.buildGestureHelpSection('组合键与本地键盘', $r('app.media.guide_shortcuts'),
           '连接后默认显示折叠的“键”按钮，点击展开；“键”和“控”及其拖动柄均可移动到屏幕任意位置。\n横屏时“键”默认位于左上角，“控”默认位于右上角，两个面板都向下展开。长按任意功能按钮可调整排序。\nCtrl、Alt、Shift、Win/Cmd：点一下选中，相当于按住；再点一下释放，不需要手指一直按着。可以同时选中多个。\n例如 Ctrl+C：点亮 Ctrl，再输入 C，最后再次点击 Ctrl 取消选中。Mac 常用 Cmd+C。Ctrl/Shift 也可配合鼠标多选文件，用完记得释放。\nCtrl+Shift+Esc 等完整组合键按钮：点一次发送整组按键，不会自动弹出本地键盘。\n打开软键盘时保留画面当前比例，按可见区域上移，不会整体缩小。')
-        this.buildGestureHelpSection('连续输入与键盘悬浮按钮',
+        this.buildGestureHelpSection('连续输入与键盘悬浮按钮', $r('app.media.keyboard_launcher'),
           '手机和平板连接后显示独立键盘悬浮按钮，不用展开“控”；可拖到顺手的位置。点一下打开本地键盘，再点一下收起。\n键盘开启后可继续点击远端其他输入框，输入仍直接传给远端，不因点按画面而收起；点击收起按钮、系统返回或输入法收起即可结束。\n全屏三指上滑仍可打开键盘。实体键盘和完整组合键不会自动唤起软键盘。远端输入框没有可靠的焦点通知，需要用户主动打开键盘。')
-        this.buildGestureHelpSection('自定义实体键盘映射',
+        this.buildGestureHelpSection('自定义实体键盘映射', $r('app.media.guide_keymap'),
           '在“控 → 输入 → 键盘设置”中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。')
-        this.buildGestureHelpSection('实体键盘布局与校准',
+        this.buildGestureHelpSection('实体键盘布局与校准', $r('app.media.guide_calibration'),
           '在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘同时连接时暂停布局修正。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。')
-        this.buildGestureHelpSection('悬浮功能栏与移动画面',
+        this.buildGestureHelpSection('悬浮功能栏与移动画面', $r('app.media.guide_toolbar'),
           '竖屏时“控”保持底部横向工具栏；横屏时默认移动到右上角并向下展开。点击收起后保留“控”按钮。\n未开启虚拟鼠标时，画面放大后可使用“移动画面”模式；开启虚拟鼠标后，直接单指拖动画面空白区域即可平移，鼠标本体专门控制远端指针。\n全屏三指上滑用于打开本地键盘，不是滚动手势；滚动请使用双指平行滑动。')
         }
           }
@@ -4958,6 +4982,7 @@ struct RemotePage {
     .height('100%')
     .backgroundColor('#99000000')
     .zIndex(100)
+    .onAppear(() => { if (!mouseSettings) this.gestureHelpView = this.inputMode; })
     .onClick(() => {})
     .onHover((isHovering: boolean) => {
       this.handleNonRemoteHover(isHovering);
@@ -4965,20 +4990,104 @@ struct RemotePage {
   }
 
   @Builder
-  buildGestureHelpSection(title: string, details: string) {
-    Column({ space: 6 }) {
+  buildGestureGuideMode(mode: string, label: string) {
+    Button(translate(label, this.uiLanguage))
+      .layoutWeight(1)
+      .constraintSize({ minHeight: 42 })
+      .fontSize(14)
+      .fontWeight(this.gestureHelpView === mode ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.gestureHelpView === mode ? (this.isDarkMode ? '#A8D0FF' : RustDeskTheme.ACCENT) : this.primaryTextColor())
+      .backgroundColor(this.gestureHelpView === mode ? (this.isDarkMode ? '#23466F' : '#DCEBFF') :
+        (this.isDarkMode ? '#202E42' : '#F3F7FD'))
+      .borderRadius(12)
+      .accessibilityText(translate(label, this.uiLanguage))
+      .onClick(() => { this.gestureHelpView = mode; })
+      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+  }
+
+  @Builder
+  buildGestureGuideCard(action: string, result: string, gestureIcon: Resource, resultIcon: Resource) {
+    Row({ space: 8 }) {
+      Column({ space: 5 }) {
+        Image(gestureIcon).width(48).height(48).objectFit(ImageFit.Contain)
+          .backgroundColor('#E8F0FF').borderRadius(12).accessibilityLevel('no')
+        Text(translate(action, this.uiLanguage)).fontSize(13).fontColor(this.primaryTextColor())
+          .textAlign(TextAlign.Center).width('100%')
+      }.layoutWeight(1)
+      Text('→').fontSize(20).fontColor(this.secondaryTextColor()).accessibilityLevel('no')
+      Column({ space: 5 }) {
+        Image(resultIcon).width(48).height(48).objectFit(ImageFit.Contain)
+          .padding(4).backgroundColor('#E8F0FF').borderRadius(12).accessibilityLevel('no')
+        Text(translate(result, this.uiLanguage)).fontSize(13).fontColor(this.primaryTextColor())
+          .textAlign(TextAlign.Center).width('100%')
+      }.layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10, top: 10, bottom: 10 })
+    .backgroundColor(this.isDarkMode ? '#26364E' : '#F3F7FD')
+    .borderRadius(14)
+    .accessibilityText(`${translate(action, this.uiLanguage)}，${translate(result, this.uiLanguage)}`)
+  }
+
+  @Builder
+  buildVirtualMouseGuide() {
+    Column({ space: 8 }) {
+      Text(translate('虚拟鼠标', this.uiLanguage)).fontSize(15)
+        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD).fontColor(this.primaryTextColor()).width('100%')
+      Text(translate('在“控 → 输入”中开启', this.uiLanguage))
+        .fontSize(12).fontColor(this.secondaryTextColor()).width('100%')
+      Row({ space: 6 }) {
+        Column() { this.buildVirtualMouseGuidePart('左键') }.layoutWeight(1)
+        Column({ space: 2 }) {
+          this.buildVirtualMouseGuidePart('向上滚动')
+          this.buildVirtualMouseGuidePart('中键')
+          this.buildVirtualMouseGuidePart('向下滚动')
+        }.layoutWeight(1)
+        Column() { this.buildVirtualMouseGuidePart('右键') }.layoutWeight(1)
+      }.width('100%').alignItems(VerticalAlign.Center)
+      Text(translate('按住底部移动区：移动鼠标', this.uiLanguage))
+        .fontSize(12).fontColor(this.primaryTextColor()).textAlign(TextAlign.Center)
+        .width('100%').padding(8).backgroundColor(this.isDarkMode ? '#324967' : '#DCEBFF').borderRadius(9)
+    }
+    .width('100%').padding(12).backgroundColor(this.isDarkMode ? '#26364E' : '#F3F7FD').borderRadius(14)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  buildVirtualMouseGuidePart(label: string) {
+    Text(translate(label, this.uiLanguage)).fontSize(12).fontColor(this.primaryTextColor())
+      .textAlign(TextAlign.Center).width('100%')
+      .padding({ left: 4, right: 4, top: 7, bottom: 7 })
+      .backgroundColor(this.isDarkMode ? '#324967' : '#DCEBFF').borderRadius(8)
+  }
+
+  @Builder
+  buildGestureHelpSection(title: string, icon: Resource, details: string) {
+    Column({ space: 8 }) {
       Text(translate(title, this.uiLanguage))
         .fontSize(15)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
         .fontColor(this.primaryTextColor())
         .width('100%')
-      Text(translate(details, this.uiLanguage))
-        .fontSize(13)
-        .lineHeight('22fp')
-        .fontColor(this.secondaryTextColor())
+      ForEach(translate(details, this.uiLanguage).split('\n'), (paragraph: string) => {
+        Row({ space: 10 }) {
+          Image(icon).width(38).height(38).padding(4).objectFit(ImageFit.Contain)
+            .backgroundColor('#E8F0FF').borderRadius(10).accessibilityLevel('no')
+          Text(paragraph)
+            .fontSize(13)
+            .fontColor(this.primaryTextColor())
+            .layoutWeight(1)
+        }
         .width('100%')
+        .padding(10)
+        .alignItems(VerticalAlign.Top)
+        .backgroundColor(this.isDarkMode ? '#26364E' : '#F3F7FD')
+        .borderRadius(14)
+        .accessibilityText(paragraph)
+      }, (paragraph: string, index: number) => `${index}-${paragraph}`)
     }
     .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   sendMobileAction(action: number, label: string): void {
@@ -7157,10 +7266,18 @@ struct RemotePage {
       this.lastTouchY = touch.y;
       this.touchMoved = false;
       this.longPressTriggered = false;
+      const pending: boolean = this.tapTimer !== -1;
+      const age: number = this.touchpadLastTapAt > 0 ? Math.max(0, Date.now() - this.touchpadLastTapAt) : -1;
+      const distance: number = pending ? Math.hypot(touch.x - this.pendingTapLocalX, touch.y - this.pendingTapLocalY) : -1;
       const secondTap: boolean = this.isSecondTapNear(touch.x, touch.y);
       this.touchpadDragCandidate = secondTap;
+      this.touchpadDragOriginX = this.lastAbsX;
+      this.touchpadDragOriginY = this.lastAbsY;
+      this.touchpadDragStartedAt = Date.now();
       RustDeskNapi.appendDiagnosticLog('input',
         `touchpad_down second_tap=${secondTap ? 1 : 0} pending=${this.tapTimer !== -1 ? 1 : 0} ` +
+        `reason=${secondTap ? 'matched' : pending ? 'too_far' : age >= TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS ? 'window_expired' : 'no_pending'} ` +
+        `age_ms=${age} distance_vp=${distance >= 0 ? distance.toFixed(1) : '-1'} ` +
         `zoom=${this.zoomScale.toFixed(2)} distance_space=window_vp ` +
         `follow_reason=${this.touchMouseFollowBlockReason()} keyboard_capture=${this.showKeyboardPanel} ` +
         `keyboard_visible=${this.remoteKeyboardVisible}`);
@@ -7168,21 +7285,28 @@ struct RemotePage {
         this.clearTapTimer();
       } else {
         this.flushPendingTap();
-        this.startRightClickTimer(this.lastAbsX, this.lastAbsY);
+        this.startRightClickTimer(this.lastAbsX, this.lastAbsY, 'touchpad');
       }
       this.showToolbar = true;
       this.resetToolbarTimer();
     } else if (event.type === TouchType.Move) {
       let movedX: number = touch.x - this.touchStartX;
       let movedY: number = touch.y - this.touchStartY;
+      let dragStarted: boolean = false;
       if (Math.sqrt(movedX * movedX + movedY * movedY) >= TOUCHPAD_DRAG_START_THRESHOLD) {
         this.touchMoved = true;
         this.clearLongPressTimer();
         if (this.touchpadDragCandidate && !this.leftButtonHeld) {
-          this.sendLeftDown(this.lastAbsX, this.lastAbsY);
-          RustDeskNapi.appendDiagnosticLog('input', 'touchpad_drag confirmed left_down');
+          this.sendLeftDown(this.touchpadDragOriginX, this.touchpadDragOriginY);
+          dragStarted = true;
+          RustDeskNapi.appendDiagnosticLog('input', `touchpad_drag confirmed left_down ` +
+            `elapsed_ms=${Math.max(0, Date.now() - this.touchpadDragStartedAt)} distance_vp=${Math.hypot(movedX, movedY).toFixed(1)}`);
         }
       }
+      // Until the candidate is confirmed, keep both the local and remote
+      // pointer at the original position. The threshold-crossing sample then
+      // applies the complete delta after left-down, so no displacement is lost.
+      if (this.touchpadDragCandidate && !this.leftButtonHeld) return;
       let deltaX: number = touch.x - this.lastTouchX;
       let deltaY: number = touch.y - this.lastTouchY;
       this.lastTouchX = touch.x;
@@ -7194,7 +7318,7 @@ struct RemotePage {
           deltaY / Math.max(0.01, this.zoomScale));
       if (!follow) this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, true);
       let now: number = Date.now();
-      if (now - this.lastMoveSentAt > 16) {
+      if (dragStarted || now - this.lastMoveSentAt > 16) {
         this.lastMoveSentAt = now;
         ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
       }
@@ -7221,7 +7345,7 @@ struct RemotePage {
       this.pendingTapRemoteY = remotePoint.y;
       this.touchMoved = false;
       this.longPressTriggered = false;
-      this.startRightClickTimer(remotePoint.x, remotePoint.y);
+      this.startRightClickTimer(remotePoint.x, remotePoint.y, 'direct_touch');
       this.showToolbar = true;
       this.resetToolbarTimer();
     } else if (event.type === TouchType.Move) {
@@ -7307,10 +7431,11 @@ struct RemotePage {
     return Math.sqrt(dx * dx + dy * dy) <= TOUCHPAD_DOUBLE_TAP_DISTANCE;
   }
 
-  startRightClickTimer(remoteX: number, remoteY: number): void {
+  startRightClickTimer(remoteX: number, remoteY: number, source: string = 'unknown'): void {
     this.clearLongPressTimer();
     this.longPressTimer = setTimeout(() => {
       this.longPressTriggered = true;
+      RustDeskNapi.appendDiagnosticLog('input', `right_click reason=long_press source=${source} delay_ms=600`);
       ConnectionService.sendMouseEvent(remoteX, remoteY, 3);
       ConnectionService.sendMouseEvent(remoteX, remoteY, 4);
       this.longPressTimer = -1;
@@ -7330,6 +7455,7 @@ struct RemotePage {
     this.pendingTapRemoteY = remoteY;
     this.pendingTapLocalX = localX;
     this.pendingTapLocalY = localY;
+    this.touchpadLastTapAt = Date.now();
     this.tapTimer = setTimeout(() => {
       this.sendLeftClick(this.pendingTapRemoteX, this.pendingTapRemoteY);
       this.tapTimer = -1;

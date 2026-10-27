@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.11'
-export const RELEASE_NOTES_BUILD: string = '1003011'
+export const RELEASE_NOTES_VERSION: string = '1.3.12'
+export const RELEASE_NOTES_BUILD: string = '1003012'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.12（1003012）· 拖拽与手势说明优化', [
+            '优化鼠标模式下轻点一次、再次按住移动的拖拽识别，减少误触右键，并保持双击和长按右键操作。',
+            '手势说明改为图文卡片，补充鼠标、触摸、虚拟鼠标及投屏、键盘等操作说明，支持浏览不同模式而不改变当前操控模式。',
+            '补充拖拽识别和长按来源诊断，遵循诊断开关，不记录输入文字或画面内容。'
+          ])
           this.buildSection('1.3.11（1003011）· 三指切屏与滑动过渡优化', [
             '新增触控屏三指左右滑动切换远端显示器，支持首尾循环；可在“控 → 屏幕”中开启或关闭，默认开启并按远端独立保存。触控板或系统拦截手势时仍可使用屏幕按钮切换。',
             '切屏增加与手势方向一致的横向滑动过渡：左滑时旧屏向左移出、新屏从右侧进入，右滑相反；功能栏保持原位，保留当前缩放比例。',
