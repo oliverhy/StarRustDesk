@@ -84,7 +84,7 @@ void DiagnosticLog::append(const char* level, const char* component, const std::
 std::string DiagnosticLog::exportText() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream output;
-    output << "StarRustDesk diagnostic log\n"
+    output << "芝麻远控 diagnostic log\n"
            << "Passwords, verification codes, clipboard content and cryptographic secrets are not recorded.\n";
     if (!previousPath_.empty()) {
         std::string previous = readFile(previousPath_);

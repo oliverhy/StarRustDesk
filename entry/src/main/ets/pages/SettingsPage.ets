@@ -639,7 +639,7 @@ export struct SettingsPage {
       .width('100%')
       .padding({ top: 10, bottom: 6 })
 
-      Text(translate('还需在系统“设置 > 华为账号 > 云空间”中允许 StarRustDesk 同步。', this.uiLanguage))
+      Text(translate('还需在系统“设置 > 华为账号 > 云空间”中允许 芝麻远控 同步。', this.uiLanguage))
         .fontSize(11)
         .lineHeight(17)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
@@ -1003,7 +1003,7 @@ export struct SettingsPage {
       content += await SystemFaultDiagnostic.exportText()
       let context = getContext(this) as common.UIAbilityContext
       let documentPicker = new picker.DocumentViewPicker(context)
-      let fileName: string = `StarRustDesk-diagnostic-${this.diagnosticTimestamp()}.txt`
+      let fileName: string = `芝麻远控-diagnostic-${this.diagnosticTimestamp()}.txt`
       let saveUris: string[] = await documentPicker.save({ newFileNames: [fileName] })
       if (saveUris.length <= 0) {
         return

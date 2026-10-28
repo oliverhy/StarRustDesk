@@ -74,6 +74,9 @@ assert(logs.every(entry => entry[0] === 'language' && /^preference_changed value
 assert.equal(translate('Connect', 'zh-Hans'), '连接');
 assert.equal(translate('Connect', 'zh-Hant'), '連線');
 assert.equal(translate('Connect', 'en'), 'Connect');
+assert.equal(translate('App Name', 'zh-Hans'), '芝麻远控');
+assert.equal(translate('App Name', 'zh-Hant'), '芝麻遠控');
+assert.equal(translate('App Name', 'en'), '芝麻远控');
 assert.equal(translate('连接超时', 'en'), 'Connection timed out');
 assert.equal(translate('ID 服务器密钥不匹配', 'en'), 'ID server key mismatch');
 assert.equal(translate('屏3', 'en'), 'Display 3');
@@ -97,7 +100,10 @@ for (const [key, value] of Object.entries(ENGLISH)) {
   assert.equal(slots(value), slots(key), 'English placeholders: ' + key);
   assert.equal(slots(TRADITIONAL[key]), slots(key), 'Traditional placeholders: ' + key);
   if (!['简体中文', '繁體中文', '浙ICP备2026058556号-2A'].includes(key)) {
-    assert.doesNotMatch(value, /[\u4e00-\u9fff]/, 'English UI must not contain untranslated Chinese: ' + key);
+    // The approved product name remains Chinese in English UI; descriptive text
+    // must still be translated. Do not invent a separate English brand name.
+    assert.doesNotMatch(value.replaceAll('芝麻远控', ''), /[\u4e00-\u9fff]/,
+      'English UI must not contain untranslated Chinese: ' + key);
   }
 }
 assert(DYNAMIC_KEYS.includes('连接失败（错误码：{0}）'));

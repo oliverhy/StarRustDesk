@@ -6,7 +6,7 @@
     },
     {
       "name": "module_desc",
-      "value": "StarRustDesk - Remote Desktop Client"
+      "value": "芝麻远控 - Remote Desktop Client"
     },
     {
       "name": "EntryAbility_desc",
@@ -14,11 +14,11 @@
     },
     {
       "name": "EntryAbility_label",
-      "value": "StarRustDesk"
+      "value": "芝麻远控"
     },
     {
       "name": "app_name",
-      "value": "StarRustDesk"
+      "value": "芝麻远控"
     },
     {
       "name": "tab_connection",

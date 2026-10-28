@@ -18,7 +18,7 @@ fn uint(id: &[u8], value: u64) -> Vec<u8> {
 fn header(codec: u8, width: i32, height: i32) -> Vec<u8> {
     let ebml = [uint(&[0x42,0x86], 1), uint(&[0x42,0xF7], 1), uint(&[0x42,0xF2], 4), uint(&[0x42,0xF3], 8),
         element(&[0x42,0x82], b"webm"), uint(&[0x42,0x87], 4), uint(&[0x42,0x85], 2)].concat();
-    let info = [uint(&[0x2A,0xD7,0xB1], 1_000_000), element(&[0x4D,0x80], b"StarRustDesk"), element(&[0x57,0x41], b"StarRustDesk")].concat();
+    let info = [uint(&[0x2A,0xD7,0xB1], 1_000_000), element(&[0x4D,0x80], "芝麻远控".as_bytes()), element(&[0x57,0x41], "芝麻远控".as_bytes())].concat();
     let video = [uint(&[0xB0], width as u64), uint(&[0xBA], height as u64)].concat();
     let track = [uint(&[0xD7], 1), uint(&[0x73,0xC5], 1), uint(&[0x83], 1), uint(&[0x9C], 0),
         element(&[0x86], if codec == b'V' { b"V_VP9" } else { b"V_VP8" }), element(&[0xE0], &video)].concat();

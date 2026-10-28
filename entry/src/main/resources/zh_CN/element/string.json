@@ -6,7 +6,7 @@
     },
     {
       "name": "module_desc",
-      "value": "StarRustDesk - 远程桌面客户端"
+      "value": "芝麻远控 - 远程桌面客户端"
     },
     {
       "name": "EntryAbility_desc",
@@ -14,11 +14,11 @@
     },
     {
       "name": "EntryAbility_label",
-      "value": "StarRustDesk"
+      "value": "芝麻远控"
     },
     {
       "name": "app_name",
-      "value": "StarRustDesk"
+      "value": "芝麻远控"
     },
     {
       "name": "tab_connection",

@@ -65,7 +65,7 @@ const translations: Record<string, string> = {
   'Approval Required': '需要审批',
   'Active Sessions': '活跃会话',
   'No active sessions': '暂无活跃会话',
-  'App Name': 'StarRustDesk',
+  'App Name': '芝麻远控',
   'ID/Relay Server': 'ID/中继服务器',
   'Configure custom server': '配置自定义服务器',
   'ID Server': 'ID服务器',

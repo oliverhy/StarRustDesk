@@ -1,0 +1,22 @@
+芝麻远控 1.3.13（1003013）更新说明
+
+1. StarRustDesk 更名为“芝麻远控”，原应用持续更新。
+2. 更新应用、启动页及窗口图标，统一新版品牌形象。
+3. 保持原包名、签名和数据格式，覆盖升级继续保留连接、密码、设置及云备份，无需卸载。
+4. 新导出的备份和诊断文件使用新名称，旧备份继续兼容。
+
+【繁體中文】
+芝麻遠控 1.3.13（1003013）更新說明
+
+1. StarRustDesk 更名為「芝麻遠控」，原應用程式持續更新。
+2. 更新應用程式、啟動畫面及視窗圖示，統一新版品牌形象。
+3. 保持原套件名稱、簽章及資料格式，覆蓋升級繼續保留連線、密碼、設定與雲端備份，無需解除安裝。
+4. 新匯出的備份與診斷檔案使用新名稱，舊備份仍然相容。
+
+【English】
+芝麻远控 1.3.13 (1003013) — What's new
+
+1. StarRustDesk is now 芝麻远控, continuing as the same app.
+2. Updated launcher, startup and window icons with the new branding.
+3. The package name, signing identity and data formats are unchanged. Update over the existing installation to retain connections, passwords, settings and cloud backups; do not uninstall.
+4. Newly exported backups and diagnostic files use the new name. Existing backups remain compatible.

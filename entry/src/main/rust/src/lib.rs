@@ -2587,7 +2587,7 @@ async fn send_file_login(
         username: config.peer.clone(),
         password: response_password.into(),
         my_id: config.client_id.clone(),
-        my_name: "StarRustDesk HarmonyOS".to_string(),
+        my_name: "芝麻远控 HarmonyOS".to_string(),
         my_platform: "HarmonyOS".to_string(),
         session_id: PROTOCOL_SESSION_ID.load(Ordering::SeqCst),
         version: "1.2.0".to_string(),
@@ -5604,7 +5604,7 @@ async fn send_login(hash: Hash) {
         username: peer_id,
         password: response_password.into(),
         my_id: client_id,
-        my_name: "StarRustDesk HarmonyOS".to_string(),
+        my_name: "芝麻远控 HarmonyOS".to_string(),
         my_platform: "HarmonyOS".to_string(),
         option: MessageField::some(OptionMessage {
             lock_after_session_end: if LOCK_AFTER_DISCONNECT.load(Ordering::SeqCst) {

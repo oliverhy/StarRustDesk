@@ -15,7 +15,7 @@ export class CloudSyncFailure extends Error {
     if (error instanceof CloudSyncFailure) return error
     const code = OperationDiagnostic.errorCode(error)
     switch (code) {
-      case 22400001: return new CloudSyncFailure(code, 'cloud_not_ready', '系统云同步服务尚未就绪；若 StarRustDesk 专用开关已开启，请稍后重试')
+      case 22400001: return new CloudSyncFailure(code, 'cloud_not_ready', '系统云同步服务尚未就绪；若 芝麻远控 专用开关已开启，请稍后重试')
       case 22400002: return new CloudSyncFailure(code, 'network', '云同步网络不可用，请检查网络或云空间的移动数据限制')
       case 22400003: return new CloudSyncFailure(code, 'battery', '电量过低，系统暂停云同步，请充电后重试')
       case 13600001: return new CloudSyncFailure(code, 'ipc', '暂时无法连接系统云同步服务，请稍后重试')

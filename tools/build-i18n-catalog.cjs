@@ -60,7 +60,7 @@ const resourceFile = path.join(root, 'entry/src/main/resources/base/element/stri
 const resources = JSON.parse(fs.readFileSync(resourceFile, 'utf8'));
 const resourceChinese = {
   permission_voice_call_reason: '用于您主动发起并经远端接听的语音通话；通话期间可在后台继续采集，挂断或后台任务被系统停止后结束采集',
-  module_desc: 'StarRustDesk - 远程桌面客户端', EntryAbility_desc: '远程桌面应用',
+  module_desc: '芝麻远控 - 远程桌面客户端', EntryAbility_desc: '远程桌面应用',
   permission_microphone_reason: '用于您主动发起并经远端接听的语音通话',
   permission_background_remote_session_reason: '用于息屏或切到后台时保持正在进行的远程桌面连接'
 };
@@ -79,4 +79,13 @@ for (const folder of ['base', 'en', 'zh_CN', 'zh_Hant']) {
   const target = path.join(root, 'entry/src/main/resources', folder, 'element');
   fs.mkdirSync(target, { recursive: true });
   fs.writeFileSync(path.join(target, 'string.json'), emit(output) + '\n');
+}
+
+// Launcher/system app labels follow the same approved localized brand as the
+// ability label, without changing the bundle name or resource identifiers.
+for (const folder of ['base', 'en', 'zh_CN', 'zh_Hant']) {
+  const target = path.join(root, 'AppScope/resources', folder, 'element');
+  fs.mkdirSync(target, { recursive: true });
+  const name = folder === 'zh_Hant' ? '芝麻遠控' : '芝麻远控';
+  fs.writeFileSync(path.join(target, 'string.json'), emit({ string: [{ name: 'app_name', value: name }] }) + '\n');
 }

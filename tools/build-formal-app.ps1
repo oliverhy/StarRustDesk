@@ -9,7 +9,10 @@ $signer = Join-Path $DevEcoPath 'sdk\default\openharmony\toolchains\lib\hap-sign
 if (-not $env:STARRUSTDESK_SIGN_PASSWORD) { throw 'Set STARRUSTDESK_SIGN_PASSWORD for this process before signing.' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $metadata = Get-Content (Join-Path $root 'AppScope\app.json5') -Raw | ConvertFrom-Json
-$prefix = "StarRustDesk-v$($metadata.app.versionName)-$($metadata.app.versionCode)"
+$displayResources = Get-Content -LiteralPath (Join-Path $root 'AppScope\resources\base\element\string.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$displayName = ($displayResources.string | Where-Object { $_.name -eq 'app_name' }).value
+if (-not $displayName -or $displayName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw 'Invalid public app name.' }
+$prefix = "$displayName-v$($metadata.app.versionName)-$($metadata.app.versionCode)"
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force $output | Out-Null
 $unsignedHap = Join-Path $output "$prefix-unsigned.hap"

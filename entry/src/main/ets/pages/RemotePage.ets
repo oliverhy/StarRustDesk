@@ -729,7 +729,7 @@ struct RemotePage {
     }, () => { this.restoreSurfaceAfterPictureInPicture(); }, (stage: string, _code: number) => {
       if (this.remotePageVisible && !this.isLeavingAfterDisconnect) {
         this.showFileToast(stage === 'unsupported' ? '当前设备不支持系统画中画' :
-          stage === 'disabled' ? '请在系统设置中允许 StarRustDesk 使用画中画' :
+          stage === 'disabled' ? '请在系统设置中允许 芝麻远控 使用画中画' :
           stage === 'stop' ? '画中画关闭失败，请重试或使用小窗关闭按钮' : '画中画启动失败，请稍后重试');
       }
     });
@@ -1978,7 +1978,7 @@ struct RemotePage {
   @Builder
   buildDisconnectedView() {
     Column({ space: 12 }) {
-      Text('StarRustDesk')
+      Text(translate('App Name', this.uiLanguage))
         .fontSize(28)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
         .fontColor(this.primaryTextColor());
@@ -2447,7 +2447,7 @@ struct RemotePage {
     Row({ space: 4 }) {
       Row({ space: 6 }) {
         Text('⠿').fontSize(17).fontColor(this.secondaryTextColor())
-        Text('StarRustDesk').fontSize(12).fontColor(this.primaryTextColor()).maxLines(1)
+        Text(translate('App Name', this.uiLanguage)).fontSize(12).fontColor(this.primaryTextColor()).maxLines(1)
       }.height(34).layoutWeight(1).onTouch((event: TouchEvent) => { this.moveImmersiveWindow(event); })
         .accessibilityText(translate('拖动窗口', this.uiLanguage))
       Button('−', { type: ButtonType.Normal }).width(30).height(30).fontSize(20).padding(0)
@@ -4935,7 +4935,7 @@ struct RemotePage {
         this.buildGestureHelpSection('三指切屏', $r('app.media.guide_three_finger'),
           '在“控 → 屏幕”中设置“三指切屏”，默认开启，按远端独立保存。远端有多个屏幕时，在远控画面上三指左滑切换下一屏、右滑切换上一屏，首尾循环。每次抬手只切换一次；双指滚动、捏合缩放和全屏三指上滑打开键盘保持不变。\n适用于触控屏。系统可能接管平板或电脑的多指手势；触控板三指事件未开放给应用时，请使用“控 → 屏幕”按钮切换。')
         this.buildGestureHelpSection('手机 / 平板单独投屏', $r('app.media.guide_projection'),
-          '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。')
+          '先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 芝麻远控 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。')
         this.buildGestureHelpSection('拖拽与框选', $r('app.media.guide_drag'),
           '鼠标模式：先将远端指针移到起点，轻点一次，第二次按住并拖动，松手结束。框选文件时请从文件列表或桌面的空白处开始；从文件上开始通常是拖动文件。\n触摸模式：在目标位置按住并移动，松手结束。')
         this.buildGestureHelpSection('组合键与本地键盘', $r('app.media.guide_shortcuts'),
@@ -10147,7 +10147,7 @@ struct RemotePage {
       let singleFile: boolean = requests.length === 1 && !requests[0].isDirectory;
       let asArchive: boolean = !singleFile;
       let archiveName: string = requests.length === 1 ?
-        `${requests[0].localName}.zip` : `StarRustDesk-批量取回-${this.downloadTimestamp()}.zip`;
+        `${requests[0].localName}.zip` : `芝麻远控-批量取回-${this.downloadTimestamp()}.zip`;
       if (singleFile) {
         options.newFileNames = [requests[0].localName];
       } else {

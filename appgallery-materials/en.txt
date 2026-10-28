@@ -1,13 +1,13 @@
-StarRustDesk — English AppGallery Listing
+芝麻远控 — English AppGallery Listing
 
 [App name]
-StarRustDesk
+芝麻远控
 
 [Brief introduction]
 Remote desktop control and file transfer for HarmonyOS.
 
 [Full introduction]
-StarRustDesk is a remote control client for HarmonyOS phones, tablets and computers. Connect to devices running a compatible RustDesk host to view the remote desktop, use applications and transfer files. Designed for remote work, personal device management and remote assistance.
+芝麻远控 (previously StarRustDesk) is a remote control client for HarmonyOS phones, tablets and computers. Connect to devices running a compatible RustDesk host to view the remote desktop, use applications and transfer files. Designed for remote work, personal device management and remote assistance.
 
 Key features
 
@@ -34,13 +34,13 @@ Choose Simplified Chinese, Traditional Chinese or English. The interface follows
 
 Before you connect
 This app acts as a controller only; it does not allow this HarmonyOS device to be remotely controlled. The remote device must run an enabled, compatible client. Some features require remote support and permission. Connection behavior depends on your network, device system and remote configuration.
-Only connect to devices you own or have permission to access. StarRustDesk is independently developed and is not an official RustDesk app.
+Only connect to devices you own or have permission to access. 芝麻远控 is independently developed and is not an official RustDesk app.
 
 [New features]
-1. Added Simplified Chinese, Traditional Chinese and English interfaces, with system-language selection by default.
-2. Added manual language selection that is retained after restarting the app.
-3. Localized interface text, dialogs, error messages, gesture help and release notes.
-4. Improved text layout for longer English button labels and shortcut bars.
+1. StarRustDesk is now named 芝麻远控. This is a brand update of the same app.
+2. Updated the app, startup and window icons with the new artwork.
+3. Existing connections, passwords, settings and cloud backups are retained when updating the same signed app without uninstalling it.
+4. Existing backup files remain compatible; only the default names of newly exported files have changed.
 
 [Screenshot captions]
 Screenshot 1

@@ -1,4 +1,4 @@
-export const APP_NAME: string = 'StarRustDesk'
+export const APP_NAME: string = '芝麻远控'
 export const DEFAULT_REMOTE_ID: string = ''
 export const CONNECTION_TIMEOUT_MS: number = 10000
 export const TOOLBAR_AUTO_HIDE_MS: number = 5000

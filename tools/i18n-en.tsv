@@ -66,7 +66,7 @@
 无法打开屏幕方向设置，请重试	Unable to open orientation settings. Please retry.
 屏幕方向（仅本次）	Screen orientation (this session)
 投屏方向（仅本次）	Projection orientation (this session)
-先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。	Connect wireless projection in Control Center, then use the projection capsule to project StarRustDesk separately. Availability depends on the device, OS and receiver.\nUnder Controls > View > Screen orientation, Follow system rotation respects the system rotation lock. Turn it off to choose Auto rotate, Lock portrait or Lock landscape. Both the switch and independent orientation are saved locally and retained after restarting the app. Leaving remote control restores the original orientation.\nProjection keeps a separate policy: landscape external screens are fitted automatically, or you can lock portrait/landscape manually. Returning to the phone restores its local policy. This changes only the local window, not remote resolution.
+先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 芝麻远控 单独投屏。是否提供该入口取决于设备、系统版本和接收端。\n在“控 → 画面 → 屏幕方向”中开启“跟随系统旋转”时遵循系统旋转锁；关闭后可选择自动旋转、固定竖屏或固定横屏。开关和独立方向都保存在本机，重启 App 后仍有效；退出远控恢复原方向。\n单独投屏时方向仍独立设置：默认适配横向外接屏，也可手动固定竖屏或横屏；返回手机后恢复本屏策略。这里只调整本地窗口，不更改远端分辨率。	Connect wireless projection in Control Center, then use the projection capsule to project 芝麻远控 separately. Availability depends on the device, OS and receiver.\nUnder Controls > View > Screen orientation, Follow system rotation respects the system rotation lock. Turn it off to choose Auto rotate, Lock portrait or Lock landscape. Both the switch and independent orientation are saved locally and retained after restarting the app. Leaving remote control restores the original orientation.\nProjection keeps a separate policy: landscape external screens are fitted automatically, or you can lock portrait/landscape manually. Returning to the phone restores its local policy. This changes only the local window, not remote resolution.
 连接	Connect
 简体中文	简体中文
 繁體中文	繁體中文
@@ -294,7 +294,7 @@ Fn 功能键	Function keys
 放大后，手指移动鼠标到可视区域中心附近，画面即随手势平移，停手即停；实体鼠标仍在边缘停留后自动平移	When zoomed, move the cursor near the view center to pan with your gesture; stop to pause. Physical mice pan after hovering at an edge.
 仅在鼠标模式下生效	Available in mouse mode only
 手机 / 平板单独投屏	Phone / tablet app-only projection
-先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 StarRustDesk 单独投屏。是否提供该入口取决于设备、系统版本和接收端。	Connect wireless projection in Control Center, then use the projection capsule to project StarRustDesk separately. Availability depends on the device, OS and receiver.
+先通过系统控制中心连接无线投屏，再打开顶部投屏胶囊，按系统提示将 芝麻远控 单独投屏。是否提供该入口取决于设备、系统版本和接收端。	Connect wireless projection in Control Center, then use the projection capsule to project 芝麻远控 separately. Availability depends on the device, OS and receiver.
 投屏后画面仍竖向时，可在“控”中点“横屏”；点“自动旋转”恢复默认策略。横向外接屏被识别后会自动采用横屏。这里只调整本地窗口，不更改远端 Windows 分辨率。	If projection stays portrait, choose Landscape under Controls. Auto rotate restores the default. Detected landscape displays use landscape automatically. This changes the local window, not remote resolution.
 拖拽与框选	Drag and select
 鼠标模式：先将远端指针移到起点，轻点一次，第二次按住并拖动，松手结束。框选文件时请从文件列表或桌面的空白处开始；从文件上开始通常是拖动文件。	Mouse mode: move the cursor to the start, tap once, then hold the second tap and drag. Release to finish. To box-select files, start on empty space; starting on a file usually drags it.
@@ -486,7 +486,7 @@ API 登录与地址簿	API login and address book
 同步中…	Syncing…
 立即同步	Sync now
 从云端恢复	Restore from cloud
-还需在系统“设置 > 华为账号 > 云空间”中允许 StarRustDesk 同步。	Also enable StarRustDesk sync in system Settings > HUAWEI ID > Cloud.
+还需在系统“设置 > 华为账号 > 云空间”中允许 芝麻远控 同步。	Also enable 芝麻远控 sync in system Settings > HUAWEI ID > Cloud.
 已关闭	Off
 等待首次同步	Waiting for first sync
 无法读取本机云备份密码，请稍后重试	Cannot read local cloud backup password; retry later
@@ -662,7 +662,7 @@ IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:
 其他云同步任务正在进行，请完成后再试	Another cloud sync task is running; retry after it finishes
 云同步设置已改变，本次结果不再应用	Cloud settings changed; this result will not be applied
 本机配置在同步期间已修改，已保留修改，请再次同步	Local configuration changed during sync and was retained. Sync again.
-云端暂无 StarRustDesk 备份，本机数据未改动	No StarRustDesk cloud backup; local data unchanged
+云端暂无 芝麻远控 备份，本机数据未改动	No 芝麻远控 cloud backup; local data unchanged
 云端备份格式异常，已保留原文件，未进行覆盖	Invalid cloud backup format; original file retained without replacement
 云端与本机已是最新	Cloud and local data are up to date
 {0}（错误码 {1}）	{0} (error {1})
@@ -672,7 +672,7 @@ IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:
 该云备份已加密，请输入备份密码	Encrypted cloud backup; enter backup password
 备份密码错误或云备份已损坏	Incorrect password or damaged cloud backup
 已从华为云空间恢复	Restored from HUAWEI Cloud
-系统尚未提供云同步目录；若 StarRustDesk 专用开关已开启，请稍后重试	Cloud directory is unavailable. If StarRustDesk sync is enabled in system settings, retry later.
+系统尚未提供云同步目录；若 芝麻远控 专用开关已开启，请稍后重试	Cloud directory is unavailable. If 芝麻远控 sync is enabled in system settings, retry later.
 云备份未完整写入，原备份已保留	Cloud backup write incomplete; original backup retained
 无法创建独立云快照，原备份已保留，请重试	Cannot create cloud snapshot; original retained. Retry.
 云快照未完整写入，原备份已保留	Cloud snapshot write incomplete; original retained
@@ -680,7 +680,7 @@ IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:
 云快照名称冲突，原备份已保留，请重试	Cloud snapshot name conflict; original retained. Retry.
 云快照未完整读取，请等待下载完成后重试；原备份已保留	Cloud snapshot read incomplete. Wait for download and retry; original retained.
 云备份不完整或校验失败，请稍后重试；已保留全部备份，本机配置未改动	Cloud backup incomplete or verification failed. Retry later; backups retained and local settings unchanged.
-系统云同步服务尚未就绪；若 StarRustDesk 专用开关已开启，请稍后重试	Cloud sync service is not ready. If StarRustDesk sync is enabled in system settings, retry later.
+系统云同步服务尚未就绪；若 芝麻远控 专用开关已开启，请稍后重试	Cloud sync service is not ready. If 芝麻远控 sync is enabled in system settings, retry later.
 云同步网络不可用，请检查网络或云空间的移动数据限制	Cloud sync network unavailable; check network and mobile data restrictions
 电量过低，系统暂停云同步，请充电后重试	Battery too low; cloud sync paused. Charge and retry.
 暂时无法连接系统云同步服务，请稍后重试	Cannot connect to cloud sync service; retry later
@@ -828,7 +828,13 @@ ID 服务器连接中断，请重试；如持续失败，请导出诊断日志	I
 远端已主动断开连接	Remote closed the connection
 远端登录失败，请检查远端设备并导出诊断日志	Remote login failed; check remote device and export diagnostics
 本次更新内容	What's new
-StarRustDesk 已更新	StarRustDesk updated
+芝麻远控	芝麻远控
+芝麻远控备份文件	芝麻远控 backup
+芝麻远控连接备份-{0}.json	芝麻远控-connections-{0}.json
+芝麻远控加密备份-{0}.srdbak	芝麻远控-encrypted-backup-{0}.srdbak
+芝麻远控-批量取回-{0}.zip	芝麻远控-download-{0}.zip
+芝麻远控-diagnostic-{0}.txt	芝麻远控-diagnostic-{0}.txt
+芝麻远控 已更新	芝麻远控 updated
 1.2.19（1002019）· 实体鼠标、画面跟随与大字体适配	1.2.19 (1002019) · Physical mouse, tracking and large fonts
 修复远端光标图层可能遮挡实体鼠标点击的问题；优化鼠标与触摸兼容事件的识别及点击去重，避免左右键被误拦截。	Fixed cursor overlays blocking physical mouse clicks; improved mouse/touch classification and click deduplication.
 修复输入 Windows 登录密码后，本地键盘已收起但放大画面的鼠标跟随仍被阻止的问题；按实际键盘可见性和编辑状态恢复跟随，保留缩放比例与画面位置。	Restores zoomed-view tracking after the Windows login keyboard closes, using actual visibility and editing state while preserving zoom and position.
@@ -1089,7 +1095,7 @@ H264 解码无画面时自动请求关键帧，并支持切换 VP9 恢复画面�
 画中画	Picture in picture
 关闭小窗	Close PiP
 当前设备不支持系统画中画	System picture in picture is unavailable on this device
-请在系统设置中允许 StarRustDesk 使用画中画	Allow StarRustDesk to use picture in picture in system settings
+请在系统设置中允许 芝麻远控 使用画中画	Allow 芝麻远控 to use picture in picture in system settings
 画中画关闭失败，请重试或使用小窗关闭按钮	Could not close picture in picture; retry or use the window's close button
 画中画启动失败，请稍后重试	Could not start picture in picture; please retry
 远端画面正在画中画中显示	The remote desktop is shown in picture in picture
@@ -1423,6 +1429,11 @@ PC 的“沉浸窗口”开关按服务器与远端设备独立保存，重连�
 放大后可开启“移动画面”，按钮变为淡蓝色；单指平移视野而不点击远端，双指滚动和捏合缩放仍可使用。	When zoomed in, enable Move view; its button turns light blue. Pan with one finger without clicking the remote device. Two-finger scrolling and pinch zoom remain available.
 在“控 → 输入”中开启	Enable in Controls > Input
 按住底部移动区：移动鼠标	Drag the bottom area to move the pointer
+1.3.13（1003013）· 芝麻远控品牌更新	1.3.13 (1003013) · 芝麻远控 branding update
+StarRustDesk 正式更名为“芝麻远控”，更新应用名称、远控窗口、系统媒体信息及相关引导文案。	StarRustDesk is now 芝麻远控. Updated the app name, remote window titles, system media information and related guidance.
+更新桌面、启动页和窗口图标，统一新版品牌形象；同步简体中文、繁体中文和英文介绍。	Updated launcher, startup and window icons, along with the Simplified Chinese, Traditional Chinese and English descriptions.
+保持原包名、应用标识、签名和数据格式，覆盖升级继续沿用现有连接、密码、设置与云备份，无需卸载或迁移。	The package name, app identity, signing identity and data formats are unchanged. Update over the existing installation to retain connections, passwords, settings and cloud backups; no uninstall or migration is needed.
+新导出的备份与诊断文件使用新名称，旧备份仍可导入，内部备份标识、加密方式和云目录保持不变。	Newly exported backups and diagnostic files use the new name. Existing backups remain importable; internal backup identifiers, encryption and the cloud folder are unchanged.
 1.3.12（1003012）· 拖拽与手势说明优化	1.3.12 (1003012) · Dragging and gesture guide improvements
 优化鼠标模式下轻点一次、再次按住移动的拖拽识别，减少误触右键，并保持双击和长按右键操作。	Improved tap-then-hold dragging in mouse mode to reduce accidental right clicks while preserving double-click and long-press right-click gestures.
 手势说明改为图文卡片，补充鼠标、触摸、虚拟鼠标及投屏、键盘等操作说明，支持浏览不同模式而不改变当前操控模式。	The gesture guide now uses illustrated cards for mouse, touch, virtual mouse, projection and keyboard operations. Browse modes without changing the current control mode.

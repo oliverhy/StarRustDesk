@@ -69,7 +69,7 @@ export class RemoteAudioSession {
         assetId: 'starrustdesk-remote-audio',
         title: RemoteAudioSession.peerId.length > 0 ?
           `远端设备 ${RemoteAudioSession.peerId}` : '远端设备声音',
-        artist: 'StarRustDesk',
+        artist: '芝麻远控',
       })
       await session.activate()
       await session.setAVPlaybackState({

@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.12'
-export const RELEASE_NOTES_BUILD: string = '1003012'
+export const RELEASE_NOTES_VERSION: string = '1.3.13'
+export const RELEASE_NOTES_BUILD: string = '1003013'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -24,7 +24,7 @@ export struct ReleaseNotesDialog {
             .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
             .width('100%')
-          Text(translate('StarRustDesk 已更新', this.uiLanguage))
+          Text(translate('芝麻远控 已更新', this.uiLanguage))
             .fontSize(13)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
             .width('100%')
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.13（1003013）· 芝麻远控品牌更新', [
+            'StarRustDesk 正式更名为“芝麻远控”，更新应用名称、远控窗口、系统媒体信息及相关引导文案。',
+            '更新桌面、启动页和窗口图标，统一新版品牌形象；同步简体中文、繁体中文和英文介绍。',
+            '保持原包名、应用标识、签名和数据格式，覆盖升级继续沿用现有连接、密码、设置与云备份，无需卸载或迁移。',
+            '新导出的备份与诊断文件使用新名称，旧备份仍可导入，内部备份标识、加密方式和云目录保持不变。'
+          ])
           this.buildSection('1.3.12（1003012）· 拖拽与手势说明优化', [
             '优化鼠标模式下轻点一次、再次按住移动的拖拽识别，减少误触右键，并保持双击和长按右键操作。',
             '手势说明改为图文卡片，补充鼠标、触摸、虚拟鼠标及投屏、键盘等操作说明，支持浏览不同模式而不改变当前操控模式。',

@@ -553,7 +553,7 @@ export struct ConnectionPage {
   buildPageHeader() {
     Row() {
       Column({ space: 4 }) {
-        Text('StarRustDesk')
+        Text(translate('App Name', this.uiLanguage))
           .fontSize(this.pageWidth >= 820 ? 34 : 30)
           .wordBreak(WordBreak.BREAK_ALL)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
@@ -2991,7 +2991,7 @@ export struct ConnectionPage {
     try {
       let payload: ConnectionBackupPayload = this.buildBackupPayload(false)
       let content: string = ConnectionBackupService.createPlainText(payload)
-      await this.saveBackupFile(content, `StarRustDesk连接备份-${this.backupTimestamp()}.json`)
+      await this.saveBackupFile(content, `芝麻远控连接备份-${this.backupTimestamp()}.json`)
       promptAction.showToast({ message: translate('连接已导出，备份中不包含密码', this.uiLanguage) })
     } catch (_error) {
       promptAction.showToast({ message: translate('导出失败，请重新选择保存位置', this.uiLanguage) })
@@ -3019,7 +3019,7 @@ export struct ConnectionPage {
       try {
         let payload: ConnectionBackupPayload = this.buildBackupPayload(true)
         let content: string = await ConnectionBackupService.encrypt(payload, password)
-        await this.saveBackupFile(content, `StarRustDesk加密备份-${this.backupTimestamp()}.srdbak`)
+        await this.saveBackupFile(content, `芝麻远控加密备份-${this.backupTimestamp()}.srdbak`)
         this.backupBusy = false
         this.closeBackupDialogs()
         promptAction.showToast({ message: translate('加密备份导出成功，请妥善保管备份密码', this.uiLanguage) })
@@ -3057,7 +3057,7 @@ export struct ConnectionPage {
       let documentPicker = new picker.DocumentViewPicker(context)
       let options = new picker.DocumentSelectOptions()
       options.maxSelectNumber = 1
-      options.fileSuffixFilters = ['StarRustDesk backup (*.json;*.srdbak)|.json,.srdbak']
+      options.fileSuffixFilters = [translate('芝麻远控备份文件', this.uiLanguage) + ' (*.json;*.srdbak)|.json,.srdbak']
       let uris: string[] = await documentPicker.select(options)
       if (uris.length <= 0) {
         return

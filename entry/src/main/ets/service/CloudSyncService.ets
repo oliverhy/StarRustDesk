@@ -322,7 +322,7 @@ export class CloudSyncService {
       CloudSyncService.assertCurrent(epoch, revision)
       if (raw === undefined) {
         trace.detail('decision_no_cloud', { backupCount: 0 })
-        if (action === 'restore') return CloudSyncService.result(false, false, false, false, '云端暂无 StarRustDesk 备份，本机数据未改动', 0)
+        if (action === 'restore') return CloudSyncService.result(false, false, false, false, '云端暂无 芝麻远控 备份，本机数据未改动', 0)
         if (!CloudSyncService.hasBaseline() && !CloudSyncService.hasLocalContent()) {
           trace.event('empty_upload_blocked')
           return CloudSyncService.paused('本机暂无数据，已暂停上传空备份；请稍后重试或查看历史备份')
@@ -414,7 +414,7 @@ export class CloudSyncService {
     }
     CloudSyncService.assertCurrent(epoch, revision)
     const result = CloudSyncService.result(true, false, false, false,
-      backups.length > 0 ? '请选择要恢复的云备份' : '云端暂无 StarRustDesk 备份，本机数据未改动', 0)
+      backups.length > 0 ? '请选择要恢复的云备份' : '云端暂无 芝麻远控 备份，本机数据未改动', 0)
     result.backups = backups
     result.nextOffset = start + backups.length
     result.hasMore = result.nextOffset < candidates.length
@@ -754,7 +754,7 @@ export class CloudSyncService {
   private static ensureFolders(context: common.UIAbilityContext, trace: CloudSyncTrace): void {
     trace.event('cloud_directory')
     if (!context.cloudFileDir || !context.cloudFileDir.startsWith('/')) {
-      throw new CloudSyncFailure(22400001, 'cloud_not_ready', '系统尚未提供云同步目录；若 StarRustDesk 专用开关已开启，请稍后重试')
+      throw new CloudSyncFailure(22400001, 'cloud_not_ready', '系统尚未提供云同步目录；若 芝麻远控 专用开关已开启，请稍后重试')
     }
     let cloudFolder: string = `${context.cloudFileDir}/${CLOUD_FOLDER_NAME}`
     let mirrorFolder: string = `${context.filesDir}/${BACKUP_MIRROR_FOLDER}`
