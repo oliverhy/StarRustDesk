@@ -6,7 +6,7 @@ const core = fs.readFileSync(path.join(root, 'entry/src/main/rust/src/lib.rs'), 
 const account = fs.readFileSync(path.join(root, 'entry/src/main/rust/src/api_account.rs'), 'utf8');
 const native = fs.readFileSync(path.join(root, 'entry/src/main/cpp/napi_init.cpp'), 'utf8');
 const allowlist = native.slice(native.indexOf('static bool IsSafeRustLifecycleEvent'), native.indexOf('static void OnRustEvent'));
-for (const prefix of ['connection auth config ', 'account auth selection ', 'account rendezvous encryption ',
+for (const prefix of ['rv_diag ', 'connection auth config ', 'account auth selection ', 'account rendezvous encryption ',
   'file account rendezvous encryption ', 'file punch request sent ', 'relay request sent ', 'rendezvous rejected',
   'webrtc offer ', 'rendezvous receive ']) {
   assert(allowlist.includes(`"${prefix}"`), `exported diagnostic log must allow ${prefix}`);
@@ -30,4 +30,12 @@ assert(!core.includes('webrtc local endpoint unavailable: {error}'));
 assert(core.includes('webrtc offer fallback reconnected elapsed_ms='));
 assert(core.includes('webrtc offer fallback failed elapsed_ms='));
 assert(core.includes('"timeout" } else { "handshake_failed"'));
+assert(core.includes('RendezvousPhase::Punch'));
+assert(core.includes('action=ignore_unsupported_trickle'));
+assert(core.includes('MAX_IGNORED_PUNCH_ICE'));
+assert(core.includes('unknown_fields={}'));
+const observation = core.slice(core.indexOf('fn log_rendezvous_observation('), core.indexOf('async fn next_rendezvous_with_updates('));
+for (const field of ['candidate', 'session_key', 'password', 'token', 'other_failure', 'refuse_reason']) {
+  assert(!observation.includes(field), `rendezvous diagnostics must not serialize ${field}`);
+}
 console.log('PASS auth diagnostics cover all refusal paths, config/token metadata, and redact raw server errors');

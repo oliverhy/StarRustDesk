@@ -1,5 +1,5 @@
 use super::*;
-use hbb_common::rendezvous_proto::{ConfigUpdate, OnlineResponse};
+use hbb_common::rendezvous_proto::{ConfigUpdate, IceCandidate, OnlineResponse, PunchHoleResponse};
 
 #[test]
 fn multi_display_frames_only_reach_the_selected_surface() {
@@ -542,6 +542,157 @@ fn skipped_rendezvous_messages_do_not_restart_read_deadline() {
         writer.abort();
         let _ = writer.await;
         assert!(result.unwrap().is_none());
+    });
+}
+
+#[test]
+fn punch_waits_for_response_after_heartbeat_and_ice_without_disclosing_values() {
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    extern "C" fn capture(message: *const c_char) {
+        if !message.is_null() {
+            let value = unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned();
+            EVENTS.lock().unwrap().push(value);
+        }
+    }
+    struct RestoreCallback(Option<EventCallback>);
+    impl Drop for RestoreCallback {
+        fn drop(&mut self) { *EVENT_CALLBACK.lock().unwrap() = self.0; }
+    }
+    EVENTS.lock().unwrap().clear();
+    let previous = EVENT_CALLBACK.lock().unwrap().replace(capture);
+    let _restore = RestoreCallback(previous);
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = connect_tcp(listener.local_addr().unwrap(), 1000).await.unwrap();
+        let (socket, address) = listener.accept().await.unwrap();
+        let responder = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, address);
+            let request = RendezvousMessage::parse_from_bytes(&peer.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request.punch_hole_request().token, "TEST_TOKEN_DO_NOT_LOG");
+            peer.send_raw(Vec::new()).await.unwrap();
+            let mut candidate = RendezvousMessage::new();
+            candidate.set_ice_candidate(IceCandidate {
+                id: "TEST_PEER_DO_NOT_LOG".into(),
+                session_key: "TEST_SESSION_KEY_DO_NOT_LOG".into(),
+                candidate: "TEST_CANDIDATE_DO_NOT_LOG".into(),
+                ..Default::default()
+            });
+            peer.send(&candidate).await.unwrap();
+            let mut reply = RendezvousMessage::new();
+            reply.set_punch_hole_response(PunchHoleResponse {
+                other_failure: "TEST_RAW_RESPONSE_DO_NOT_LOG TEST_PASSWORD_DO_NOT_LOG".into(),
+                ..Default::default()
+            });
+            peer.send(&reply).await.unwrap();
+            let mut unknown = RendezvousMessage::new();
+            unknown.special_fields.mut_unknown_fields().add_length_delimited(99, b"TEST_RAW_UNKNOWN_DO_NOT_LOG".to_vec());
+            peer.send(&unknown).await.unwrap();
+        });
+        let mut request = punch_hole_request("TEST_PEER_DO_NOT_LOG", "TEST_KEY_DO_NOT_LOG",
+            ConnType::DEFAULT_CONN, false, NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        request.mut_punch_hole_request().token = "TEST_TOKEN_DO_NOT_LOG".into();
+        let response = send_punch_request(&mut client, &request, false).await.unwrap().unwrap();
+        let Some(rendezvous_message::Union::PunchHoleResponse(reply)) = response.union else {
+            panic!("expected punch response after side-band messages");
+        };
+        assert_eq!(reply.other_failure, "TEST_RAW_RESPONSE_DO_NOT_LOG TEST_PASSWORD_DO_NOT_LOG", "server refusals must remain intact for safe classification");
+        let unknown = next_punch_response(&mut client, 1000, false).await.unwrap().unwrap();
+        assert!(unknown.union.is_none());
+        responder.await.unwrap();
+    });
+    let events = EVENTS.lock().unwrap();
+    let diagnostic: Vec<&str> = events.iter().map(String::as_str).filter(|s| s.starts_with("rv_diag ")).collect();
+    assert!(diagnostic.iter().any(|s| s.contains("phase=punch kind=heartbeat action=skip")));
+    assert!(diagnostic.iter().any(|s| s.contains("phase=punch kind=ice_candidate action=ignore_unsupported_trickle")));
+    assert!(diagnostic.iter().any(|s| s.contains("phase=punch kind=punch_hole_response action=deliver")));
+    assert!(diagnostic.iter().any(|s| s.contains("phase=punch kind=none action=deliver unknown_fields=true")));
+    for event in events.iter() {
+        for secret in ["TEST_TOKEN_DO_NOT_LOG", "TEST_KEY_DO_NOT_LOG", "TEST_PEER_DO_NOT_LOG",
+            "TEST_SESSION_KEY_DO_NOT_LOG", "TEST_CANDIDATE_DO_NOT_LOG", "TEST_RAW_RESPONSE_DO_NOT_LOG",
+            "TEST_RAW_UNKNOWN_DO_NOT_LOG", "TEST_PASSWORD_DO_NOT_LOG"] {
+            assert!(!event.contains(secret), "diagnostics exposed a remote value");
+        }
+    }
+}
+
+#[test]
+fn rendezvous_diagnostics_use_fixed_stage_labels() {
+    for (phase, expected) in [
+        (RendezvousPhase::Punch, "punch"), (RendezvousPhase::FilePunch, "file_punch"),
+        (RendezvousPhase::Relay, "relay"), (RendezvousPhase::Online, "online"),
+        (RendezvousPhase::Nat, "nat"), (RendezvousPhase::Generic, "generic"),
+    ] {
+        assert_eq!(phase.as_str(), expected);
+    }
+}
+
+#[test]
+fn punch_sideband_preserves_the_existing_encrypted_stream() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = connect_tcp(listener.local_addr().unwrap(), 1000).await.unwrap();
+        let (socket, address) = listener.accept().await.unwrap();
+        let key = secretbox::Key([42u8; 32]);
+        client.set_key(key.clone());
+        let responder = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, address);
+            peer.set_key(key);
+            let mut ice = RendezvousMessage::new();
+            ice.set_ice_candidate(IceCandidate::new());
+            peer.send(&ice).await.unwrap();
+            let mut response = RendezvousMessage::new();
+            response.set_punch_hole_response(PunchHoleResponse::new());
+            peer.send(&response).await.unwrap();
+        });
+        let response = next_punch_response(&mut client, 1000, false).await.unwrap().unwrap();
+        assert!(client.is_secured(), "side-band handling must never downgrade encryption");
+        assert!(matches!(response.union, Some(rendezvous_message::Union::PunchHoleResponse(_))));
+        responder.await.unwrap();
+    });
+}
+
+#[test]
+fn unknown_rendezvous_payload_is_not_silently_ignored() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = connect_tcp(listener.local_addr().unwrap(), 1000).await.unwrap();
+        let (socket, address) = listener.accept().await.unwrap();
+        let responder = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, address);
+            let mut unknown = RendezvousMessage::new();
+            unknown.special_fields.mut_unknown_fields().add_length_delimited(99, b"TEST_PRIVATE_RESPONSE".to_vec());
+            peer.send(&unknown).await.unwrap();
+        });
+        let message = next_punch_response(&mut client, 1000, false).await.unwrap().unwrap();
+        assert!(message.union.is_none());
+        assert!(message.special_fields().unknown_fields().iter().next().is_some());
+        responder.await.unwrap();
+    });
+}
+
+#[test]
+fn trickle_candidates_do_not_extend_punch_deadline_or_allow_unbounded_floods() {
+    runtime().block_on(async {
+        for flood in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = connect_tcp(listener.local_addr().unwrap(), 1000).await.unwrap();
+            let (socket, address) = listener.accept().await.unwrap();
+            let sender = tokio::spawn(async move {
+                let mut peer = Stream::from(socket, address);
+                let mut message = RendezvousMessage::new();
+                message.set_ice_candidate(IceCandidate::new());
+                loop {
+                    if peer.send(&message).await.is_err() { break; }
+                    if !flood { tokio::time::sleep(Duration::from_millis(5)).await; }
+                }
+            });
+            let result = tokio::time::timeout(Duration::from_secs(2),
+                next_punch_response(&mut client, if flood { 1000 } else { 40 }, false)).await.unwrap();
+            sender.abort();
+            let _ = sender.await;
+            if flood { assert!(matches!(result, Err(-5))); }
+            else { assert!(matches!(result, Ok(None))); }
+        }
     });
 }
 

@@ -166,6 +166,11 @@ const ONLINE_QUERY_DEADLINE: Duration = Duration::from_secs(10);
 // RustDesk wire-protocol compatibility version, not the HarmonyOS package version.
 const RUSTDESK_PROTOCOL_VERSION: &str = "1.5.0";
 const PUNCH_REPLY_TIMEOUTS: [u64; 3] = [1_500, 2_500, 4_000];
+// ICE trickle messages are side-band, not the punch result. This client uses
+// non-trickle SDP and cannot authenticate/apply them yet; bound how many it
+// will ignore while waiting for the actual response.
+const MAX_IGNORED_PUNCH_ICE: usize = 128;
+const MAX_RENDEZVOUS_DIAGNOSTIC_EVENTS: usize = 8;
 const NAT_PROBE_TIMEOUT: u64 = 1_500;
 const PEER_ROUTE_HISTORY_OPTION: &str = "peer-route-history-v1";
 const PEER_ROUTE_HISTORY_TTL_MS: u64 = 30 * 60 * 1_000;
@@ -2939,7 +2944,7 @@ async fn query_peer_online_states(
         .await
         .map_err(|error| format!("send failed: {error}"))?;
     online_query_phase(query_id, started, "send_complete_wait_response");
-    let response = next_rendezvous(&mut connection, RENDEZVOUS_REPLY_TIMEOUT)
+    let response = next_rendezvous_for_phase(&mut connection, RENDEZVOUS_REPLY_TIMEOUT, false, RendezvousPhase::Online)
         .await
         .ok_or_else(|| "response timeout".to_string())?;
     online_query_phase(query_id, started, "response_decoded");
@@ -3649,13 +3654,50 @@ async fn send_punch_request(
             "punch request sent attempt={attempt}/{} token_attached={}",
             PUNCH_REPLY_TIMEOUTS.len(), !request.punch_hole_request().token.is_empty()
         ));
-        if let Some(response) =
-            next_rendezvous_checked(conn, reply_timeout, allow_config_updates).await.map_err(|_| -28)?
-        {
+        emit_event(&format!("rv_diag phase=punch action=wait_response attempt={attempt}"));
+        if let Some(response) = next_punch_response(conn, reply_timeout, allow_config_updates).await? {
             return Ok(Some(response));
         }
     }
     Ok(None)
+}
+
+// Keep the original per-attempt deadline while consuming known side-band ICE
+// messages. Never treat a candidate (or its untrusted contents) as a punch
+// response, and never downgrade authentication or encryption to recover.
+async fn next_punch_response(
+    conn: &mut Stream,
+    timeout_ms: u64,
+    allow_config_updates: bool,
+) -> Result<Option<RendezvousMessage>, i32> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut ignored_ice = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            emit_event("rv_diag phase=punch action=deadline");
+            return Ok(None);
+        }
+        let remaining_ms = remaining.as_millis().clamp(1, u64::MAX as u128) as u64;
+        let response = next_rendezvous_checked(
+            conn, remaining_ms, allow_config_updates, RendezvousPhase::Punch,
+        ).await.map_err(|_| -28)?;
+        let Some(message) = response else { return Ok(None); };
+        if matches!(&message.union, Some(rendezvous_message::Union::IceCandidate(_))) {
+            ignored_ice += 1;
+            if ignored_ice <= MAX_RENDEZVOUS_DIAGNOSTIC_EVENTS {
+                emit_event("rv_diag phase=punch kind=ice_candidate action=ignore_unsupported_trickle");
+            } else if ignored_ice == MAX_RENDEZVOUS_DIAGNOSTIC_EVENTS + 1 {
+                emit_event("rv_diag phase=punch kind=ice_candidate action=further_logs_suppressed");
+            }
+            if ignored_ice >= MAX_IGNORED_PUNCH_ICE {
+                emit_event("rv_diag phase=punch kind=ice_candidate action=limit_exceeded");
+                return Err(-5);
+            }
+            continue;
+        }
+        return Ok(Some(message));
+    }
 }
 
 async fn detect_nat_type(server: &str, public_server: bool) -> NatType {
@@ -3685,7 +3727,7 @@ async fn detect_nat_type(server: &str, public_server: bool) -> NatType {
         if socket.send(&request).await.is_err() {
             return NatType::UNKNOWN_NAT;
         }
-        let Some(response) = next_rendezvous(&mut socket, NAT_PROBE_TIMEOUT).await else {
+        let Some(response) = next_rendezvous_for_phase(&mut socket, NAT_PROBE_TIMEOUT, false, RendezvousPhase::Nat).await else {
             return NatType::UNKNOWN_NAT;
         };
         let Some(rendezvous_message::Union::TestNatResponse(response)) = response.union else {
@@ -3971,6 +4013,7 @@ fn rendezvous_message_kind(union: &Option<rendezvous_message::Union>) -> &'stati
         Some(rendezvous_message::Union::Hc(_)) => "hc",
         Some(rendezvous_message::Union::HttpProxyRequest(_)) => "http_proxy_request",
         Some(rendezvous_message::Union::HttpProxyResponse(_)) => "http_proxy_response",
+        Some(rendezvous_message::Union::IceCandidate(_)) => "ice_candidate",
         Some(_) => "unknown",
         None => "none",
     }
@@ -3989,39 +4032,86 @@ async fn next_rendezvous(conn: &mut Stream, timeout: u64) -> Option<RendezvousMe
     next_rendezvous_with_updates(conn, timeout, false).await
 }
 
+#[derive(Clone, Copy)]
+enum RendezvousPhase { Generic, Punch, FilePunch, Relay, Online, Nat }
+
+impl RendezvousPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Punch => "punch",
+            Self::FilePunch => "file_punch",
+            Self::Relay => "relay",
+            Self::Online => "online",
+            Self::Nat => "nat",
+        }
+    }
+}
+
+// Only fixed enum-derived names and boolean/count metadata enter exported logs.
+// In particular, never format the protobuf object or a remote field value here.
+fn log_rendezvous_observation(
+    phase: RendezvousPhase, kind: &'static str, action: &'static str,
+    unknown_fields: bool, observed: &mut usize,
+) {
+    if action == "deliver" || *observed < MAX_RENDEZVOUS_DIAGNOSTIC_EVENTS {
+        emit_event(&format!("rv_diag phase={} kind={} action={} unknown_fields={}",
+            phase.as_str(), kind, action, unknown_fields));
+    } else if *observed == MAX_RENDEZVOUS_DIAGNOSTIC_EVENTS {
+        emit_event(&format!("rv_diag phase={} action=further_logs_suppressed", phase.as_str()));
+    }
+    *observed = observed.saturating_add(1);
+}
+
 async fn next_rendezvous_with_updates(
     conn: &mut Stream,
     timeout: u64,
     allow_config_updates: bool,
 ) -> Option<RendezvousMessage> {
-    next_rendezvous_checked(conn, timeout, allow_config_updates).await.ok().flatten()
+    next_rendezvous_for_phase(conn, timeout, allow_config_updates, RendezvousPhase::Generic).await
+}
+
+async fn next_rendezvous_for_phase(
+    conn: &mut Stream, timeout: u64, allow_config_updates: bool, phase: RendezvousPhase,
+) -> Option<RendezvousMessage> {
+    next_rendezvous_checked(conn, timeout, allow_config_updates, phase).await.ok().flatten()
 }
 
 async fn next_rendezvous_checked(
     conn: &mut Stream,
     timeout: u64,
     allow_config_updates: bool,
+    phase: RendezvousPhase,
 ) -> Result<Option<RendezvousMessage>, ()> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
+    let mut observed = 0usize;
     match tokio::time::timeout_at(deadline, async {
         loop {
             let bytes = match conn.next().await {
                 Some(Ok(bytes)) => bytes,
                 Some(Err(error)) => {
                     emit_event(&format!("rendezvous receive failed kind={:?} raw_redacted=true", error.kind()));
+                    emit_event(&format!("rv_diag phase={} action=receive_error", phase.as_str()));
                     return Err(());
                 }
                 None => {
                     emit_event("rendezvous receive failed kind=eof raw_redacted=true");
+                    emit_event(&format!("rv_diag phase={} action=eof", phase.as_str()));
                     return Err(());
                 }
             };
+            if bytes.is_empty() {
+                log_rendezvous_observation(phase, "heartbeat", "skip", false, &mut observed);
+                continue;
+            }
             match RendezvousMessage::parse_from_bytes(&bytes) {
                 Ok(msg) => {
                     let kind = rendezvous_message_kind(&msg.union);
+                    let unknown_fields = msg.special_fields().unknown_fields().iter().next().is_some();
                     if let Some(rendezvous_message::Union::ConfigureUpdate(update)) =
                         msg.union.as_ref()
                     {
+                        log_rendezvous_observation(phase, kind, "skip", unknown_fields, &mut observed);
                         if allow_config_updates {
                             apply_rendezvous_config_update(update);
                         } else {
@@ -4030,13 +4120,21 @@ async fn next_rendezvous_checked(
                         continue;
                     }
                     if should_skip_rendezvous_message(&msg.union) {
+                        log_rendezvous_observation(phase, kind, "skip", unknown_fields, &mut observed);
                         emit_event(&format!("skip rendezvous message kind={kind}"));
                         continue;
+                    }
+                    // Punch ICE is logged, with its own aggregate limit, by the
+                    // side-band handler rather than once more for every packet.
+                    if !matches!((phase, &msg.union),
+                        (RendezvousPhase::Punch, Some(rendezvous_message::Union::IceCandidate(_)))) {
+                        log_rendezvous_observation(phase, kind, "deliver", unknown_fields, &mut observed);
                     }
                     emit_event(&format!("rendezvous message kind={kind}"));
                     return Ok(Some(msg));
                 }
                 Err(_) => {
+                    log_rendezvous_observation(phase, "parse_error", "skip", false, &mut observed);
                     emit_event(&format!(
                         "rendezvous parse failed len={} raw_redacted=true",
                         bytes.len()
@@ -4048,6 +4146,7 @@ async fn next_rendezvous_checked(
         Ok(result) => result,
         Err(_) => {
             emit_event("rendezvous receive timeout");
+            emit_event(&format!("rv_diag phase={} action=timeout", phase.as_str()));
             Ok(None)
         }
     }
@@ -4116,7 +4215,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         .map_err(|error| error.to_string())?;
     emit_event(&format!("file punch request sent token_attached={}", !account_token.is_empty()));
     let local_addr = rendezvous.local_addr();
-    let response = next_rendezvous(&mut rendezvous, RENDEZVOUS_REPLY_TIMEOUT)
+    let response = next_rendezvous_for_phase(&mut rendezvous, RENDEZVOUS_REPLY_TIMEOUT, false, RendezvousPhase::FilePunch)
         .await
         .ok_or_else(|| "文件传输连接超时".to_string())?;
     let mut peer_addr = None;
@@ -4306,7 +4405,7 @@ async fn request_relay_with_type(
         rv_conn.send(&req).await?;
         emit_event(&format!("relay request sent attempt={attempt}/3 token_attached={}", !token.is_empty()));
 
-        match next_rendezvous(&mut rv_conn, RENDEZVOUS_REPLY_TIMEOUT).await {
+        match next_rendezvous_for_phase(&mut rv_conn, RENDEZVOUS_REPLY_TIMEOUT, false, RendezvousPhase::Relay).await {
             Some(msg) => match msg.union {
                 Some(rendezvous_message::Union::RelayResponse(resp))
                     if resp.refuse_reason.is_empty() =>

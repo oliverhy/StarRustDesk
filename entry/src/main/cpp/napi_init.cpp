@@ -565,6 +565,9 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "rendezvous configuration updated",
         "rendezvous rejected",
         "rendezvous receive ",
+        // Rust emits only fixed phase/type/action labels and boolean metadata
+        // under this prefix; no protobuf fields or credentials are included.
+        "rv_diag ",
         "connection auth config ",
         "account auth selection ",
         "account rendezvous encryption ",

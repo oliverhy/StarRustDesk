@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.13'
-export const RELEASE_NOTES_BUILD: string = '1003013'
+export const RELEASE_NOTES_VERSION: string = '1.3.14'
+export const RELEASE_NOTES_BUILD: string = '1003014'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('1.3.14（1003014）· 连接响应兼容性优化', [
+            '修复等待远端连接响应时，已知 WebRTC 候选消息或空心跳先到可能导致连接提前报错的问题；在原有超时时间内继续等待有效响应。',
+            '保持账号认证和加密校验，未知响应仍按错误处理；本次不包含完整的 WebRTC 增量候选支持。',
+            '补充连接阶段、响应类型及处理结果的诊断日志，不记录令牌、密码、候选内容或原始响应。'
+          ])
           this.buildSection('1.3.13（1003013）· 芝麻远控品牌更新', [
             'StarRustDesk 正式更名为“芝麻远控”，更新应用名称、远控窗口、系统媒体信息及相关引导文案。',
             '更新桌面、启动页和窗口图标，统一新版品牌形象；同步简体中文、繁体中文和英文介绍。',
