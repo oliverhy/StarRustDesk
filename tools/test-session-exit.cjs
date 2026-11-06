@@ -18,7 +18,7 @@ function fixture(){
   controlMenu:'',connectionError:'',getUIContext:()=>({showAlertDialog:options=>{if(failUI)throw Error('unavailable');shows++;dialog=options;}}),
   disconnectSession:()=>{exits++;p.isLeavingAfterDisconnect=true;},
   releaseHeldMouseButtons:()=>events.push('mouse-release'),releaseRemoteNavigationKeys:()=>events.push('keys-release'),
-  resetRemoteViewportForSession:()=>events.push('reset-viewport'),
+  resetRemoteViewportForSession:()=>events.push('reset-viewport'),rememberDisplayForReconnect:()=>events.push('remember-display'),
   closeOrientationMenu:()=>events.push('orientation'),closeInputSettings:()=>events.push('input-settings'),setControlMenu:value=>{p.controlMenu=value;events.push('menu');},
   closeCommunication:()=>events.push('chat'),closeRemoteKeyboard:()=>events.push('keyboard'),closeRemoteFileBrowser:()=>events.push('files'),exitFullScreen:()=>events.push('fullscreen')});
  return {p,logs,events,dialog:()=>dialog,shows:()=>shows,exits:()=>exits,reconnecting:value=>{reconnecting=value;},failUI:()=>{failUI=true;},request:fn=>{request=fn;}};

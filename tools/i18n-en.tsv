@@ -1,4 +1,134 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+正在连接扩展画面…	Connecting extended display…
+正在切换扩展画面…	Switching extended display…
+当前编码暂不支持扩展显示，可选择本次请求 VP9。	The current codec cannot be used for the extended display. You can request VP9 for this session.
+无法开启扩展画面，请检查远端多屏和设备支持情况。	Cannot open the extended display. Check remote multi-monitor and device support.
+无法请求 VP9 编码。	Cannot request VP9.
+正在请求 VP9 编码…	Requesting VP9…
+远端未切换到 VP9，无法开启扩展画面。	The remote device did not switch to VP9. Cannot open the extended display.
+远端编码暂不支持扩展显示。	The remote codec is not supported for the extended display.
+扩展画面解码失败，设备可能不支持同时解码该格式。	Extended display decoding failed. This device may not support simultaneous decoding of this format.
+扩展画面已停止。	Extended display stopped.
+未收到扩展画面，请确认远端支持多屏；也可尝试 VP9。	No extended video was received. Check remote multi-monitor support or try VP9.
+远端屏幕 {0}	Remote display {0}
+关闭扩展	Close extended display
+将请求本次连接使用 VP9，主画面也会受影响，可能降低流畅度；重新连接后恢复原设置。	Request VP9 for this session. This also affects the main display and may reduce smoothness. Reconnect to restore the original settings.
+本次请求 VP9	Request VP9 for this session
+已关闭扩展画面	Extended display closed
+无法启动扩展窗口	Cannot start the extended window
+无法启动扩展窗口，请检查扩展屏连接	Cannot start the extended window. Check the extended display connection.
+游戏	Game
+当前方案没有屏幕按键，请先编辑并添加	This layout has no screen buttons. Edit it to add buttons.
+隐藏屏幕按键	Hide screen buttons
+显示屏幕按键	Show screen buttons
+编辑屏幕按键	Edit screen buttons
+关闭相对鼠标	Disable relative mouse
+开启相对鼠标	Enable relative mouse
+当前远端不支持相对鼠标	This remote device does not support relative mouse
+相对鼠标灵敏度 {0}%	Relative mouse sensitivity {0}%
+拖动按键调整位置，点击按键后修改	Drag buttons to move them. Tap a button to edit it.
+方案名称	Layout name
+方案 {0}	Layout {0}
+添加按键	Add button
+按键功能	Button action
+大小 {0}	Size {0}
+不透明度 {0}%	Opacity {0}%
+屏幕按键保存失败，请重试	Could not save screen buttons. Try again.
+每个方案最多 12 个屏幕按键	Each layout supports up to 12 screen buttons
+屏幕按键状态未保存	Screen button state was not saved
+扩展显示	Extend display
+验证码	Verification code
+错误	Error
+无效	Invalid
+过期	Expired
+不正确	Incorrect
+2.0.0（2000000）· 多屏扩展与账号登录升级	2.0.0 (2000000) · Extended displays and account sign-in
+新增鸿蒙 PC 扩展屏显示：检测本地扩展屏和兼容的远端多屏，可将另一块远端屏幕独立显示到扩展屏；支持触摸、触控板、实体键盘及 VP9、H.264、H.265，实际能力取决于设备和远端。	Added extended displays on HarmonyOS PCs: show another remote monitor in a separate extended-display window when supported. Touch, trackpad, physical keyboard, VP9, H.264 and H.265 availability depends on the device and remote host.
+账号登录拆分为官方公共服务器、自建 Server Pro、第三方 rustdesk-api；官方地址固定并自动加载登录方式，切换选项保留自建配置，不自动更改 ID、中继服务器或密钥。	Separate sign-in options for the official public server, self-hosted Server Pro and third-party rustdesk-api. The official endpoint is fixed and sign-in methods load automatically. Switching preserves custom settings without changing ID/relay servers or keys.
+修复身份验证器验证码被误判为邮箱验证码的问题；网页登录遇到临时网络故障时限时重试，完善取消、超时、错误分类及第三方登录界面。	Fixed authenticator codes being treated as email codes. Web sign-in now retries temporary network failures within a time limit, with improved cancellation, timeout, error categories and provider buttons.
+新增游戏模式与高性能优先设置，可在连接前后配置；兼容条件下优先尝试 UDP，失败或持续异常时回退，不跳过加密与认证，不保证实际码率、帧率或延迟。	Added game mode and performance priority before or during a session. UDP is preferred when compatible, with fallback on failure or sustained issues. Authentication and encryption remain enforced; bitrate, frame rate and latency are not guaranteed.
+新增实体与虚拟手柄的键鼠映射、游戏悬浮控制台及可编辑屏幕按键，按远端保存；这不是原生手柄透传，实体手柄依赖设备和系统支持。	Added physical and virtual controller keyboard/mouse mapping, a floating game console and editable screen buttons saved per remote device. This is not native controller passthrough. Physical controllers require compatible hardware and system support.
+优化官方格式服务器配置导入和连接安全提示；未加密连接的七天免提醒需用户主动同意，仅对指定远端、服务器及风险类型生效。	Improved official-format server configuration import and security prompts. Seven-day unencrypted-connection consent requires explicit approval and is scoped to the remote device, server and risk type.
+完善多路解码、切屏、窗口尺寸与输入释放处理；补充连接、账号和扩展屏诊断，不记录密码、令牌、验证码或原始响应。	Improved multi-stream decoding, monitor switching, window sizing and input release. Expanded connection, account and extended-display diagnostics without passwords, tokens, verification codes or raw responses.
+官方公共服务器	Official public server
+自建 Server Pro	Self-hosted Server Pro
+官方账号登录不会修改当前自建 ID/中继服务器配置；账号登录与远控网络选择相互独立。	Signing in to the official account does not change your custom ID/relay configuration. Account sign-in and remote network selection are independent.
+自建 API 地址需由服务器提供；自动推算的地址不代表已部署账号服务。账号密码不是远端设备密码。	Your server must provide an account API. An inferred address does not mean the service is deployed. The account password is not the remote device password.
+继续使用	Continue with
+第三方账号登录	Third-party sign-in
+将在浏览器中安全完成登录	Continue securely in your browser
+正在获取登录方式…	Loading sign-in options…
+获取登录方式	Load sign-in options
+重新获取登录方式	Retry sign-in options
+官方公共服务器请使用第三方账号登录	Use a third-party account for the official public server
+暂未获取到第三方登录方式，请检查网络后刷新	No third-party sign-in options were found. Check the network and refresh.
+服务器没有提供第三方登录方式；如果服务器支持，可使用账号密码登录	No third-party sign-in options are available. Use an account and password if your server supports them.
+登录确认遇到临时网络问题，正在重试；请检查网络和 HTTPS 证书	A temporary network error occurred while confirming sign-in. Retrying; check your network and HTTPS certificate.
+验证码不正确或已过期，请检查后重试	The verification code is incorrect or expired. Check it and try again.
+账号或密码不正确，请检查后重试	The account or password is incorrect. Check it and try again.
+账号已被禁用，请联系服务器管理员	This account is disabled. Contact the server administrator.
+服务器拒绝了权限请求，请联系服务器管理员	The server denied permission. Contact the server administrator.
+服务器拒绝了地址簿请求，请检查账号权限和服务器策略	The server rejected the address book request. Check account permissions and server policy.
+服务器拒绝了登录请求，请检查登录方式和服务器策略	The server rejected sign-in. Check the sign-in method and server policy.
+登录已过期，请重新登录	Your session has expired. Sign in again.
+服务器未通过登录验证，请检查账号或登录方式	The server rejected authentication. Check the account or sign-in method.
+登录请求过于频繁，请稍后重试	Too many sign-in requests. Try again later.
+服务器拒绝了访问权限，请联系管理员	The server denied access. Contact the administrator.
+API 接口不存在，请检查 API 地址和服务器版本	The API endpoint was not found. Check the API address and server version.
+网页登录选项格式不兼容，请检查 API 地址和服务器版本	The sign-in options format is incompatible. Check the API address and server version.
+服务器响应格式无效，请检查 API 地址和服务器版本	The server response is invalid. Check the API address and server version.
+服务器返回了不支持的二次验证方式，请更新客户端或联系服务器管理员	The server requested an unsupported verification method. Update the client or contact the administrator.
+已登录，但未能清除旧的本机登录信息，请退出账号后重试	Signed in, but an old local session could not be removed. Sign out and try again.
+API 服务器暂时不可用（HTTP {0}），请稍后重试	The API server is temporarily unavailable (HTTP {0}). Try again later.
+游戏模式	Game mode
+游戏目标帧率	Game FPS target
+游戏模式已开启	Game mode enabled
+画质和输入优化已生效。UDP 优先需要重新连接，可能需要再次登录或验证。	Quality and input optimizations are active. UDP preference requires reconnection and may require signing in or verification again.
+下次连接生效	Apply next connection
+立即重新连接	Reconnect now
+当前会话不适合重新连接，请稍后再试	Cannot reconnect this session now. Please try again later.
+连接已保存，但游戏模式设置未保存	Connection saved, but game mode could not be saved.
+游戏链路策略	Game transport policy
+UDP 优先	UDP preferred
+已回退，优先 TCP	Fallback: TCP preferred
+IP 直连（TCP）	IP direct (TCP)
+UDP 直连失败，准备重新协商 TCP	UDP direct failed; preparing to renegotiate TCP
+UDP 直连失败，正在尝试 TCP 或中继	UDP direct failed; trying TCP or relay
+游戏模式已开启，下次连接优先尝试 UDP	Game mode enabled. UDP will be preferred on the next connection.
+UDP 延迟持续过高，正在尝试 TCP 或中继	UDP latency stayed high; trying TCP or relay.
+游戏模式切换失败，请重试	Could not change game mode. Please try again.
+游戏模式已切换，但设置未保存	Game mode changed, but the setting could not be saved.
+游戏模式已开启，实际帧率取决于远端和网络	Game mode on. Actual FPS depends on the remote device and network.
+游戏模式已关闭，恢复原画质设置	Game mode off. Previous quality settings restored.
+高性能优先	Performance priority
+高性能模式切换失败，请重试	Could not change performance priority. Please try again.
+高性能模式已切换，但设置未保存	Performance priority changed, but the setting could not be saved.
+高性能优先已开启，实际画质受远端和网络影响	Performance priority is on. Actual quality depends on the remote device and network.
+已恢复自动画质策略	Automatic quality policy restored.
+公共中继仍按原有规则限制码率和帧率	Public relay limits on bitrate and frame rate still apply.
+画面接收速率	Video receive rate
+实际帧率	Actual frame rate
+请求帧率	Requested frame rate
+请求码率比例	Requested bitrate ratio
+远端目标码率	Remote target bitrate
+实体手柄映射	Physical controller mapping
+虚拟手柄	Virtual controller
+手柄映射设置	Controller mapping
+不映射	Unassigned
+手柄按键映射为远端键鼠；不支持只识别原生手柄的游戏。	Controller inputs are mapped to the remote keyboard and mouse. Games that require a native controller are not supported.
+左摇杆	Left stick
+右摇杆	Right stick
+方向键	Arrow keys
+鼠标移动	Mouse movement
+摇杆死区：{0}%	Stick dead zone: {0}%
+鼠标灵敏度：{0}%	Mouse sensitivity: {0}%
+存在重复按键映射，请确认是否符合游戏操作习惯。	Several controls share a mapping; confirm this suits the game.
+手柄设置保存失败，请重试	Could not save controller settings. Please try again.
+手柄模式已切换，但设置未保存	Controller mode changed, but the setting could not be saved.
+当前系统无法使用实体手柄，虚拟手柄仍可使用	The physical controller is unavailable on this system. The virtual controller is still available.
+无法打开手柄设置，请重试	Could not open controller settings. Please try again.
+窗口过小，请放大窗口以使用虚拟手柄	Enlarge the window to use the virtual controller.
+恢复默认	Restore defaults
 1.3.9（1003009）· 域名直连与操控体验修复	1.3.9 (1003009) · Domain direct connections and input fixes
 新增“域名＋端口”直连支持，可在远端 ID / IP 中输入域名:端口，兼容 IPv4 与 IPv6；被控端需开启直接 IP 访问，未指定端口的自定义 ID 保留原有连接方式。	Added direct connections using domain:port in the Remote ID / IP field, with IPv4 and IPv6 support. Direct IP access must be enabled on the remote device. Custom IDs without an explicit port retain their existing connection behavior.
 优化鸿蒙 PC 及手机、平板电脑模式下的沉浸全屏，改善全屏后任务栏仍显示的问题；增加实际窗口状态检查，退出全屏时恢复原窗口状态。	Improved immersive fullscreen on HarmonyOS PCs and phones or tablets in desktop mode to address taskbars remaining visible. The actual window state is checked, and leaving fullscreen restores the previous window state.
@@ -397,6 +527,28 @@ ZIP 压缩包	ZIP archive
 文件传输已取消	File transfer cancelled
 服务器密钥不正确	Server key is incorrect
 无法验证自建服务器密钥。降级后，本次连接将不再验证远端身份，可能存在被冒充或窃听的风险。是否仅对本次连接使用未加密模式？	Cannot verify the custom server key. Continuing without encryption will not verify the remote identity and risks impersonation or eavesdropping. Continue unencrypted for this attempt only?
+直连未加密	Direct connection is unencrypted
+7天内不再提醒	Do not ask for 7 days
+未选中	Not selected
+继续并记住7天	Continue for 7 days
+免提醒保存失败，本次仍可继续	Could not save the preference; this connection can still continue once
+勾选并继续后，7天内仅对此远端、服务器及相同风险自动继续未加密连接。可在设置中清除。	If selected and continued, only this remote device, server and risk will automatically continue unencrypted for 7 days. You can clear this in Settings.
+未加密连接免提醒	Unencrypted connection reminders
+清除本机7天免提醒授权，不影响连接、密码和服务器设置	Clear this device's 7-day permissions without changing connections, passwords or server settings
+清除未加密连接免提醒	Clear unencrypted connection permissions
+清除后，本机所有远端将在下次遇到未加密连接时重新提示。不会删除连接、密码或服务器设置。	After clearing, this device will ask again for all unencrypted connections. Connections, passwords and server settings will not be deleted.
+免提醒授权已清除	Reminder permissions cleared
+清除免提醒授权失败，请重试	Could not clear reminder permissions. Try again.
+直接通过 IP 或域名连接无法验证远端身份，且连接未加密。屏幕、输入和文件可能被窃听或篡改。仅在信任网络及远端设备时继续。	Direct IP or domain connections cannot verify the remote identity and are unencrypted. Screen content, input and files may be intercepted or altered. Continue only if you trust the network and device.
+本次连接未获取到远端身份签名，无法建立加密连接。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。	This connection did not receive a remote identity signature and cannot establish encryption. Continuing will not verify the remote identity; screen content, input and files may be intercepted or altered.
+无法验证自建服务器密钥。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。	The custom server key cannot be verified. Continuing will not verify the remote identity; screen content, input and files may be intercepted or altered.
+无法验证远端身份	Cannot verify the remote identity
+远端身份签名缺失，无法建立加密连接	Remote identity signature is missing; an encrypted connection cannot be established
+直连无法验证远端身份，连接未加密	Direct connections cannot verify the remote identity and are unencrypted
+文件连接缺少远端身份签名，未建立未加密连接	The file connection lacks a remote identity signature; no unencrypted connection was established
+文件连接无法验证服务器密钥	The file connection cannot verify the server key
+直接通过 IP 或域名连接无法验证远端身份，且连接未加密。屏幕、输入和文件可能被窃听或篡改。仅在信任网络及远端设备时继续，是否仅本次继续？	Direct IP or domain connections cannot verify the remote identity and are unencrypted. Screen content, input and files may be intercepted or altered. Continue only if you trust the network and remote device. Continue for this attempt only?
+本次连接未获取到远端身份签名，无法建立加密连接。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。是否仅本次使用未加密连接？	This connection did not receive a remote identity signature, so an encrypted connection cannot be established. Continuing will not verify the remote identity; screen content, input and files may be intercepted or altered. Continue unencrypted for this attempt only?
 取消连接	Cancel connection
 仅本次继续	Continue once
 远控连接已断开	Remote connection disconnected
@@ -643,6 +795,8 @@ IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:
 服务器配置已导出到剪贴板	Server configuration copied to clipboard
 导出失败，请重试	Export failed; retry
 剪贴板为空，请先复制服务器配置	Clipboard is empty; copy server configuration first
+无法读取剪贴板，请检查系统权限后重试	Cannot read the clipboard; check system permissions and try again
+导入失败，请重试	Import failed; please try again
 服务器配置无效	Invalid server configuration
 服务器配置已导入并生效	Server configuration imported and applied
 请先选择要导入的设备	Select devices to import
@@ -818,6 +972,11 @@ ID 服务器拒绝了连接请求	ID server rejected the connection request
 服务器账号登录已过期或令牌无效，请到设置中的 API 账号重新登录	Server login expired or token invalid. Sign in again under Settings > Server account.
 服务器拒绝访问，请检查账号的远控权限	Server denied access; check account remote-control permissions
 ID 服务器连接中断，请重试；如持续失败，请导出诊断日志	ID server connection interrupted. Retry; export diagnostics if it persists.
+ID 服务器账号安全握手超时，令牌未发送，请检查网络或服务器	The ID server account handshake timed out. No token was sent; check the network or server.
+ID 服务器账号安全握手时连接已关闭，令牌未发送	The ID server closed the connection during the account handshake. No token was sent.
+ID 服务器账号安全握手通信失败，令牌未发送，请检查网络	The ID server account handshake failed due to a communication error. No token was sent; check the network.
+ID 服务器账号安全握手响应异常，令牌未发送，请检查服务器兼容性	The ID server returned an unexpected account handshake response. No token was sent; check server compatibility.
+ID 服务器安全握手校验失败，令牌未发送，请检查服务器密钥	The ID server handshake verification failed. No token was sent; check the server key.
 连接失败（错误码：	Connection failed (error: 
 连接失败（错误码：{0}）	Connection failed (error: {0})
 远端密码错误	Incorrect remote password

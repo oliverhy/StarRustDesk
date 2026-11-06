@@ -2,7 +2,7 @@ import { readableInputHeight } from '../theme/ReadableLayout'
 import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
-import { RustDeskNapi } from '../service/RustDeskNapi'
+import { ClipboardImportReadResult, RustDeskNapi } from '../service/RustDeskNapi'
 import { ServerConfigModel } from '../model/ServerConfigModel'
 import { CloudSyncService } from '../service/CloudSyncService'
 import { promptAction } from '@kit.ArkUI'
@@ -26,14 +26,16 @@ export struct ServerConfigDialog {
   @State testResult: string = ''
   controller?: CustomDialogController
   @State scanning: boolean = false
+  @State importing: boolean = false
   @State showQr: boolean = false
   private alive: boolean = true
   private scanGeneration: number = 0
+  private importGeneration: number = 0
 
-  aboutToDisappear(): void { this.alive = false; this.scanGeneration++ }
+  aboutToDisappear(): void { this.alive = false; this.scanGeneration++; this.importGeneration++ }
 
   async scanConfig(): Promise<void> {
-    if (this.scanning) return
+    if (this.scanning || this.importing) return
     this.scanning = true
     const generation = ++this.scanGeneration
     const trace = new OperationDiagnostic('server-config', 'qr_scan')
@@ -43,7 +45,7 @@ export struct ServerConfigDialog {
       if (!this.alive || generation !== this.scanGeneration) { trace.end('stale'); return }
       trace.event('decode')
       const config = ServerConfigModel.decode(result.originalValue)
-      if (!config.isValid()) { trace.end('rejected'); this.errorMsg = '二维码不是有效的 RustDesk 服务器配置'; return }
+      if (!config.isValidImport()) { trace.end('rejected'); this.errorMsg = '二维码不是有效的 RustDesk 服务器配置'; return }
       this.idServer = config.idServer
       this.relayServer = config.relayServer
       this.apiServer = config.apiServer
@@ -61,6 +63,7 @@ export struct ServerConfigDialog {
   aboutToAppear(): void {
     this.alive = true
     this.scanning = false
+    this.importing = false
     this.idServer = RustDeskNapi.getOption('custom-rendezvous-server')
     this.relayServer = RustDeskNapi.getOption('relay-server')
     this.apiServer = RustDeskNapi.getOption('api-server')
@@ -71,7 +74,7 @@ export struct ServerConfigDialog {
     Scroll() {
     Column({ space: 12 }) {
       Button(translate(this.scanning ? '扫描中' : '扫码导入服务器配置', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
-        .enabled(!this.scanning).onClick(() => { this.scanConfig() })
+        .enabled(!this.scanning && !this.importing).onClick(() => { this.scanConfig() })
       .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
       Button(translate(this.showQr ? '收起配置二维码' : '显示配置二维码', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
         .enabled(this.idServer.trim().length > 0).onClick(() => { this.showQr = !this.showQr })
@@ -91,17 +94,23 @@ export struct ServerConfigDialog {
           .layoutWeight(1)
           .textAlign(TextAlign.Start)
 
-        Button(translate('导入', this.uiLanguage))
-          .constraintSize({ minHeight: 30 })
-          .fontSize(12)
-          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+        // The system security component grants temporary clipboard access only
+        // after the user taps it; a normal Button cannot grant that access.
+        PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
+          .fontSize(14)
+          .fontColor(this.isDarkMode ? '#E0ECFF' : '#175AB3')
+          .backgroundColor(this.isDarkMode ? '#293F60' : '#E3EFFF')
           .borderRadius(8)
-          .padding({ left: 10, right: 10 })
-          .onClick(() => {
-            this.importServerConfigFromClipboard()
+          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+          .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+            if (result === PasteButtonOnClickResult.SUCCESS) {
+              this.importServerConfigFromClipboard()
+            } else {
+              const trace = new OperationDiagnostic('server-config', 'clipboard_import')
+              trace.end('rejected', { kind: 3 })
+              promptAction.showToast({ message: translate('无法读取剪贴板，请检查系统权限后重试', this.uiLanguage) })
+            }
           })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
 
         Button(translate('导出', this.uiLanguage))
           .constraintSize({ minHeight: 30 })
@@ -271,23 +280,50 @@ export struct ServerConfigDialog {
   }
 
   async importServerConfigFromClipboard(): Promise<void> {
-    const source: string = await RustDeskNapi.getClipboardTextAsync()
-    if (source.trim().length === 0) {
-      promptAction.showToast({ message: translate('剪贴板为空，请先复制服务器配置', this.uiLanguage) })
-      return
+    if (this.importing || this.scanning) return
+    this.importing = true
+    const generation: number = ++this.importGeneration
+    const trace = new OperationDiagnostic('server-config', 'clipboard_import')
+    try {
+      trace.event('read_local')
+      const result: ClipboardImportReadResult = await RustDeskNapi.getClipboardTextForImportAsync()
+      if (!this.alive || generation !== this.importGeneration) { trace.end('stale'); return }
+      if (result.failed) {
+        trace.end('failed', { code: result.code })
+        promptAction.showToast({ message: translate('无法读取剪贴板，请检查系统权限后重试', this.uiLanguage) })
+        return
+      }
+      if (result.text.trim().length === 0) {
+        trace.end('rejected', { kind: 1 })
+        promptAction.showToast({ message: translate('剪贴板为空，请先复制服务器配置', this.uiLanguage) })
+        return
+      }
+      trace.event('decode')
+      const config: ServerConfigModel = ServerConfigModel.decode(result.text)
+      if (!config.isValidImport()) {
+        trace.end('rejected', { kind: 2 })
+        promptAction.showToast({ message: translate('服务器配置无效', this.uiLanguage) })
+        return
+      }
+      // Preserve the existing one-tap import behaviour, but never apply an
+      // unreadable or invalid configuration to the current network.
+      this.applyConfig(config.idServer, config.relayServer, config.apiServer, config.serverKey)
+      this.idServer = config.idServer
+      this.relayServer = config.relayServer
+      this.apiServer = config.apiServer
+      this.serverKey = config.serverKey
+      this.errorMsg = ''
+      trace.end('completed')
+      RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_imported')
+      promptAction.showToast({ message: translate('服务器配置已导入并生效', this.uiLanguage) })
+    } catch (error) {
+      trace.fail(error as Object)
+      if (this.alive && generation === this.importGeneration) {
+        promptAction.showToast({ message: translate('导入失败，请重试', this.uiLanguage) })
+      }
+    } finally {
+      if (this.alive && generation === this.importGeneration) this.importing = false
     }
-    const config: ServerConfigModel = ServerConfigModel.decode(source)
-    if (!config.isValid()) {
-      promptAction.showToast({ message: translate('服务器配置无效', this.uiLanguage) })
-      return
-    }
-    this.idServer = config.idServer
-    this.relayServer = config.relayServer
-    this.apiServer = config.apiServer
-    this.serverKey = config.serverKey
-    this.applyConfig(this.idServer, this.relayServer, this.apiServer, this.serverKey)
-    RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_imported')
-    promptAction.showToast({ message: translate('服务器配置已导入并生效', this.uiLanguage) })
   }
 
   @Builder

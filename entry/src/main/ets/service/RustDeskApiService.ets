@@ -39,7 +39,11 @@ interface OidcRequest { op: string; id: string; uuid: string; deviceInfo: LoginD
 
 export class ApiFailure extends Error {
   status: number;
-  constructor(message: string, status: number = 0) { super(message); this.status = status; }
+  kind: string;
+  retryable: boolean;
+  constructor(message: string, status: number = 0, kind: string = 'other', retryable: boolean = false) {
+    super(message); this.status = status; this.kind = kind; this.retryable = retryable;
+  }
 }
 
 export class AccountSession {
@@ -116,6 +120,26 @@ export class RustDeskApiService {
       const port = value.port ? Number(value.port) - 2 : 21114;
       if (port < 1 || port > 65535) return '';
       return `http://${value.hostname}:${port}`;
+    } catch (_e) { return ''; }
+  }
+
+  static isPublicServer(value: string): boolean {
+    try { return RustDeskApiService.normalizeServer(value, false) === RustDeskApiService.PUBLIC_API; }
+    catch (_e) { return false; }
+  }
+
+  static defaultCustomServer(provider: string): string {
+    const saved = RustDeskNapi.getOption(provider === 'thirdParty' ? 'api-custom-third-party-server' : 'api-custom-pro-server').trim();
+    if (saved && !RustDeskApiService.isPublicServer(saved)) return saved;
+    const currentProvider = RustDeskNapi.getOption('api-account-provider') === 'thirdParty' ? 'thirdParty' : 'official';
+    const current = RustDeskNapi.getOption('api-server').trim();
+    if (current && currentProvider === provider && !RustDeskApiService.isPublicServer(current)) return current;
+    const custom = RustDeskNapi.getOption('custom-rendezvous-server').trim();
+    if (!custom) return '';
+    try {
+      const address = new url.URL(custom.includes('://') ? custom : `http://${custom}`);
+      const port = address.port ? Number(address.port) - 2 : 21114;
+      return port >= 1 && port <= 65535 ? `http://${address.hostname}:${port}` : '';
     } catch (_e) { return ''; }
   }
 
@@ -322,9 +346,7 @@ export class RustDeskApiService {
     this.token = ''; this.secret = ''; this.challenge = '';
     RustDeskNapi.setApiAccountContext('');
     this.bindTransport(authorizeConnections);
-    const epoch = this.epoch;
-    await ApiAccountStore.clear();
-    if (epoch !== this.epoch) throw new ApiFailure('请求已取消');
+    // Keep an existing remembered session intact until the new login succeeds.
     this.remember = remember;
     this.username = username.trim();
     const identity = this.identity();
@@ -350,6 +372,7 @@ export class RustDeskApiService {
   }
 
   async loginOptions(): Promise<ApiLoginOption[]> {
+    this.trace('web_options_start');
     const reply = await this.request('/api/login-options', 'GET', undefined, false);
     const result: ApiLoginOption[] = [];
     for (const option of reply.loginOptions || []) {
@@ -377,9 +400,6 @@ export class RustDeskApiService {
     RustDeskNapi.setApiAccountContext('');
     this.bindTransport(authorizeConnections);
     this.remember = remember;
-    const epoch = this.epoch;
-    await ApiAccountStore.clear();
-    if (epoch !== this.epoch) throw new ApiFailure('请求已取消');
     const identity = this.identity();
     const body: OidcRequest = { op: op, id: identity.id, uuid: identity.uuid, apiDomain: this.server,
       deviceInfo: { name: RustDeskNapi.getDeviceName(), os: 'HarmonyOS', type: 'client' } };
@@ -417,11 +437,32 @@ export class RustDeskApiService {
     return accepted;
   }
 
+  // Only a fixed allowlist of categories and bounded numeric metadata are logged.
+  recordWebRetry(error: ApiFailure, attempt: number, delayMs: number): void {
+    const kind = ['network', 'server_busy', 'rate_limited'].includes(error.kind) ? error.kind : 'temporary';
+    const count = Math.max(1, Math.min(9999, Math.floor(attempt)));
+    const delay = Math.max(0, Math.min(10000, Math.floor(delayMs)));
+    this.trace(`web_retry kind=${kind} attempt=${count} delay_ms=${delay}`);
+  }
+
+  recordWebRecovery(attempt: number): void {
+    this.trace(`web_retry_recovered attempts=${Math.max(1, Math.min(9999, Math.floor(attempt)))}`);
+  }
+
   private async acceptLogin(reply: ApiReply): Promise<boolean> {
+    const resultKind = reply.type === 'access_token' ? 'token' : reply.type === 'email_check' ? 'email_check' :
+      reply.type === 'tfa_check' ? 'tfa_check' : 'unknown';
+    this.trace(`login_response kind=${resultKind}`);
     if (reply.type === 'email_check' || reply.type === 'tfa_check') {
       if (typeof reply.secret !== 'string' || !reply.secret || reply.secret.length > 16384) throw new ApiFailure('二次验证响应无效');
+      const tfaType: string = typeof reply.tfa_type === 'string' ? reply.tfa_type.toLowerCase() : '';
+      if (tfaType && !['email', 'email_check', 'tfa_check', 'totp'].includes(tfaType)) {
+        this.trace('login_rejected reason=unsupported_challenge');
+        throw new ApiFailure('服务器返回了不支持的二次验证方式，请更新客户端或联系服务器管理员', 0, 'unsupported_challenge');
+      }
       this.secret = reply.secret;
-      this.challenge = reply.type === 'email_check' || reply.tfa_type === 'email' ? 'email' : 'totp';
+      this.challenge = tfaType === 'tfa_check' || tfaType === 'totp' || (!tfaType && reply.type === 'tfa_check')
+        ? 'totp' : 'email';
       this.trace(`login_challenge type=${this.challenge}`);
       if (reply.user && typeof reply.user.name === 'string') this.username = reply.user.name;
       return false;
@@ -433,6 +474,16 @@ export class RustDeskApiService {
     }
     this.token = reply.access_token; this.secret = ''; this.challenge = '';
     if (reply.user && typeof reply.user.name === 'string') this.username = reply.user.name;
+    // Preserve the custom API independently before a successful public login
+    // changes the active account endpoint. Never change ID/relay/key options.
+    const previous = RustDeskNapi.getOption('api-server').trim();
+    if (previous && !RustDeskApiService.isPublicServer(previous)) {
+      const previousProvider = RustDeskNapi.getOption('api-account-provider');
+      RustDeskNapi.setOption(previousProvider === 'thirdParty' ? 'api-custom-third-party-server' : 'api-custom-pro-server', previous);
+    }
+    if (!RustDeskApiService.isPublicServer(this.server)) {
+      RustDeskNapi.setOption(this.provider === 'thirdParty' ? 'api-custom-third-party-server' : 'api-custom-pro-server', this.server);
+    }
     RustDeskNapi.setOption('api-server', this.server);
     RustDeskNapi.setOption('api-account-provider', this.provider);
     this.publishTransport();
@@ -441,6 +492,14 @@ export class RustDeskApiService {
         username: this.username, allowHttp: this.allowHttp, boundRendezvous: this.boundRendezvous, boundKey: this.boundKey };
       try { await ApiAccountStore.save(saved); this.trace('credential_save_complete'); }
       catch (_e) { this.trace('credential_save_failed raw_redacted=true'); this.warning = '已登录，但安全存储失败；退出应用后需要重新登录'; }
+    } else {
+      // On a successful non-remembered login, do not restore an older session
+      // after restart. A failed or cancelled attempt does not remove it.
+      try { await ApiAccountStore.clear(); this.trace('credential_clear_complete reason=login_not_remembered'); }
+      catch (_e) {
+        this.trace('credential_clear_failed reason=login_not_remembered raw_redacted=true');
+        this.warning = '已登录，但未能清除旧的本机登录信息，请退出账号后重试';
+      }
     }
     this.trace(`login_complete remember=${this.remember} warning_present=${this.warning.length > 0}`);
     return true;
@@ -646,6 +705,30 @@ export class RustDeskApiService {
     await this.request('/api/ab', 'POST', JSON.stringify({ data: JSON.stringify(document) }));
   }
 
+  private serverFailure(operation: string, value: string): ApiFailure {
+    // Classify known errors locally; never display or log server-supplied text.
+    const error = value.toLowerCase();
+    if (((error.includes('verification') || error.includes('tfa') || error.includes('otp')) &&
+      (error.includes('invalid') || error.includes('incorrect') || error.includes('wrong') || error.includes('expired'))) ||
+      (error.includes('验证码') && (error.includes('错误') || error.includes('无效') || error.includes('过期')))) {
+      return new ApiFailure('验证码不正确或已过期，请检查后重试', 0, 'verification_rejected');
+    }
+    if (((error.includes('password') || error.includes('credential')) &&
+      (error.includes('invalid') || error.includes('incorrect') || error.includes('wrong'))) ||
+      (error.includes('密码') && (error.includes('错误') || error.includes('不正确')))) {
+      return new ApiFailure('账号或密码不正确，请检查后重试', 0, 'credentials_rejected');
+    }
+    if (error.includes('disabled') && (error.includes('account') || error.includes('user'))) {
+      return new ApiFailure('账号已被禁用，请联系服务器管理员', 0, 'account_disabled');
+    }
+    if (error.includes('permission denied') || error.includes('forbidden') || error.includes('not authorized')) {
+      return new ApiFailure('服务器拒绝了权限请求，请联系服务器管理员', 0, 'permission_denied');
+    }
+    return new ApiFailure(operation.startsWith('book_') || operation.startsWith('peer_')
+      ? '服务器拒绝了地址簿请求，请检查账号权限和服务器策略'
+      : '服务器拒绝了登录请求，请检查登录方式和服务器策略', 0, 'server_rejected');
+  }
+
   private async request(path: string, method: rcp.HttpMethod, content?: string, authenticated: boolean = true): Promise<ApiReply> {
     const operation = this.operation(path);
     if (authenticated && !this.token) {
@@ -666,6 +749,7 @@ export class RustDeskApiService {
     let phase = 'transport';
     let outcome = 'failed';
     let errorCode = 0;
+    let failureKind = 'none';
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     if (authenticated) headers['Authorization'] = `Bearer ${this.token}`;
     try {
@@ -682,15 +766,29 @@ export class RustDeskApiService {
       phase = 'http_status';
       if (epoch !== this.epoch) throw new ApiFailure('请求已取消');
       if (tooLarge) throw new ApiFailure('服务器响应超过安全大小限制');
-      if (response.statusCode >= 300 && response.statusCode < 400) throw new ApiFailure('API 地址发生跳转，请填写最终地址；为保护凭据已阻止跳转');
+      if (response.statusCode >= 300 && response.statusCode < 400) throw new ApiFailure('API 地址发生跳转，请填写最终地址；为保护凭据已阻止跳转', response.statusCode, 'redirect_blocked');
       if (response.statusCode === 401 || (response.statusCode === 400 && path === '/api/currentUser')) {
-        RustDeskNapi.setApiAccountContext('');
-        this.token = ''; this.secret = ''; this.challenge = '';
-        await ApiAccountStore.clear();
-        this.trace(`credential_invalidated id=${requestId} reason=unauthorized credential_disabled=true`);
-        throw new ApiFailure('账号或密码不正确，或登录已过期，请重新登录', 401);
+        if (authenticated) {
+          RustDeskNapi.setApiAccountContext('');
+          this.token = ''; this.secret = ''; this.challenge = '';
+          await ApiAccountStore.clear();
+          this.trace(`credential_invalidated id=${requestId} reason=unauthorized credential_disabled=true`);
+        }
+        if (!authenticated && operation === 'login' && this.challenge) {
+          throw new ApiFailure('验证码不正确或已过期，请检查后重试', response.statusCode, 'verification_rejected');
+        }
+        throw new ApiFailure(authenticated ? '登录已过期，请重新登录' : '服务器未通过登录验证，请检查账号或登录方式',
+          response.statusCode, 'unauthorized');
       }
-      if (response.statusCode !== 200) throw new ApiFailure(`API 请求被拒绝（HTTP ${response.statusCode}），请检查地址和账号权限`, response.statusCode);
+      if (response.statusCode === 408 || response.statusCode >= 500) {
+        throw new ApiFailure(`API 服务器暂时不可用（HTTP ${response.statusCode}），请稍后重试`, response.statusCode, 'server_busy', true);
+      }
+      if (response.statusCode === 429) {
+        throw new ApiFailure('登录请求过于频繁，请稍后重试', 429, 'rate_limited', true);
+      }
+      if (response.statusCode === 403) throw new ApiFailure('服务器拒绝了访问权限，请联系管理员', 403, 'permission_denied');
+      if (response.statusCode === 404) throw new ApiFailure('API 接口不存在，请检查 API 地址和服务器版本', 404, 'endpoint_missing');
+      if (response.statusCode !== 200) throw new ApiFailure(`API 请求被拒绝（HTTP ${response.statusCode}），请检查地址和账号权限`, response.statusCode, 'http_rejected');
       phase = 'decode';
       const bytes = new Uint8Array(size);
       let offset = 0;
@@ -699,19 +797,22 @@ export class RustDeskApiService {
       if (!raw.trim() || raw.trim() === 'null') { outcome = 'empty'; return {}; }
       phase = 'response_format';
       if (path === '/api/login-options') {
-        const options = JSON.parse(raw) as string[];
+        let options: string[];
+        try { options = JSON.parse(raw) as string[]; }
+        catch (_e) { throw new ApiFailure('网页登录选项格式不兼容，请检查 API 地址和服务器版本', 0, 'invalid_response'); }
         if (!Array.isArray(options) || options.some((item: string) => typeof item !== 'string')) {
-          throw new ApiFailure('网页登录选项格式不兼容');
+          throw new ApiFailure('网页登录选项格式不兼容，请检查 API 地址和服务器版本', 0, 'invalid_response');
         }
         outcome = 'ok'; return { loginOptions: options };
       }
       let reply: ApiReply;
-      try { reply = JSON.parse(raw) as ApiReply; } catch (_e) { throw new ApiFailure('服务器没有返回 JSON，请检查 API 地址是否指向网页'); }
-      if (!reply || typeof reply !== 'object' || Array.isArray(reply)) throw new ApiFailure('API 响应格式不兼容');
+      try { reply = JSON.parse(raw) as ApiReply; }
+      catch (_e) { throw new ApiFailure('服务器没有返回 JSON，请检查 API 地址是否指向网页', 0, 'invalid_response'); }
+      if (!reply || typeof reply !== 'object' || Array.isArray(reply)) throw new ApiFailure('API 响应格式不兼容', 0, 'invalid_response');
       if (path.startsWith('/api/oidc/auth-query?') && typeof reply.error === 'string' &&
         reply.error.includes('No authed oidc is found')) { outcome = 'pending'; return {}; }
       phase = 'server_result';
-      if (reply.error !== undefined) throw new ApiFailure('服务器拒绝操作，请检查账号密码、验证码、权限及服务端登录策略');
+      if (reply.error !== undefined) throw this.serverFailure(operation, typeof reply.error === 'string' ? reply.error : '');
       outcome = 'ok';
       return reply;
     } catch (error) {
@@ -721,14 +822,17 @@ export class RustDeskApiService {
       }
       if (epoch !== this.epoch) phase = 'cancelled';
       else if (tooLarge) phase = 'response_limit';
-      if (tooLarge) throw new ApiFailure('服务器响应超过安全大小限制');
-      if (error instanceof ApiFailure) throw error;
-      throw new ApiFailure('API 网络请求失败，请检查网络、端口和 HTTPS 证书');
+      if (epoch !== this.epoch) { failureKind = 'cancelled'; throw new ApiFailure('请求已取消', 0, 'cancelled'); }
+      if (tooLarge) { failureKind = 'response_limit'; throw new ApiFailure('服务器响应超过安全大小限制', 0, 'response_limit'); }
+      if (error instanceof ApiFailure) { failureKind = error.kind; throw error; }
+      failureKind = phase === 'transport' ? 'network' : 'invalid_response';
+      if (phase !== 'transport') throw new ApiFailure('服务器响应格式无效，请检查 API 地址和服务器版本', 0, 'invalid_response');
+      throw new ApiFailure('API 网络请求失败，请检查网络、端口和 HTTPS 证书', 0, 'network', true);
     } finally {
       // Query parameters may contain one-time codes and device identities.
       // Only the allowlisted operation label and numeric metadata are exported.
       if (sampled || outcome === 'failed') {
-        this.trace(`request_end id=${requestId} request_epoch=${epoch} op=${operation} outcome=${outcome} phase=${phase} http=${status} error_code=${errorCode} elapsed_ms=${Date.now() - started} bytes=${size} raw_redacted=true`);
+        this.trace(`request_end id=${requestId} request_epoch=${epoch} op=${operation} outcome=${outcome} phase=${phase} failure_kind=${failureKind} http=${status} error_code=${errorCode} elapsed_ms=${Date.now() - started} bytes=${size} raw_redacted=true`);
       }
       this.requests = this.requests.filter((item: rcp.Session) => item !== session);
       session.close();

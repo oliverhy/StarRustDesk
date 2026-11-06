@@ -15,7 +15,7 @@ function harness(disk = new Map()) {
     appendDiagnosticLog: (...args) => logs.push(args), getInputCapabilities: () => 2
   }, setTimeout(fn, ms) { const id = ++next; timers.set(id, { fn, ms }); return id; },
     clearTimeout: id => timers.delete(id) };
-  for (const file of ['model/KeyboardRemapping', 'model/RemoteToolbarPlacement', 'model/RemotePeerOptions', 'model/InputCompatibility',
+  for (const file of ['model/KeyboardRemapping', 'model/GamepadMapping', 'model/GameScreenControls', 'model/RemoteToolbarPlacement', 'model/RemotePeerOptions', 'model/InputCompatibility',
     'service/RemotePeerPreferences']) {
     const code = read('entry/src/main/ets/' + file + '.ets').replace(/^import .*\n/gm, '');
     vm.runInNewContext(ts.transpile(code), context);
@@ -28,6 +28,40 @@ function harness(disk = new Map()) {
 }
 let checks = 0;
 function test(name, run) { run(); checks++; console.log('PASS ' + name); }
+test('screen controls are scoped, validated, and restore without pressed keys', () => {
+  const h = harness(), a = h.make('srv', 'A'), b = h.make('srv', 'B');
+  const config = h.context.defaultScreenGameConfig();
+  config.profiles[0].name = '游戏 A';
+  config.profiles[0].keys.push({ id: 1, target: 'mouse:left', x: 0.25, y: 0.75, size: 52, opacity: 70 });
+  assert(a.set('game-screen-controls-v1', JSON.stringify(config)));
+  assert(a.set('game-screen-enabled', '1'));
+  assert(a.set('game-relative-sensitivity', '150'));
+  assert(!a.set('game-relative-sensitivity', '999'));
+  assert(a.flush());
+  assert.equal(b.get('game-screen-controls-v1'), '');
+  assert.equal(h.make('srv', 'A').get('game-relative-sensitivity'), '150');
+  assert.equal(h.context.decodeScreenGameConfig(h.make('srv', 'A').get('game-screen-controls-v1')).profiles[0].keys[0].target, 'mouse:left');
+  config.profiles[0].keys.push({ ...config.profiles[0].keys[0] });
+  assert(!a.set('game-screen-controls-v1', JSON.stringify(config)), 'duplicate IDs rejected');
+});
+test('controller mappings and performance priority are off by default and isolated per peer', () => {
+  const h = harness(), a = h.make('private.example', 'a'), b = h.make('private.example', 'b');
+  assert.equal(a.get('high-performance-priority'), '');
+  assert.equal(a.get('gamepad-physical'), '');
+  assert.equal(a.get('gamepad-virtual'), '');
+  const mapping = JSON.stringify(h.context.defaultGamepadMapping());
+  assert(a.set('gamepad-map-v1', mapping));
+  assert(a.set('gamepad-physical', '1'));
+  assert(a.set('high-performance-priority', '1'));
+  assert(a.flush());
+  assert.equal(b.get('gamepad-map-v1'), '');
+  assert.equal(b.get('high-performance-priority'), '');
+  const restored = h.make('private.example', 'a');
+  assert.equal(restored.get('gamepad-map-v1'), mapping);
+  assert.equal(restored.get('gamepad-physical'), '1');
+  assert.equal(restored.get('high-performance-priority'), '1');
+  assert.equal(restored.set('gamepad-map-v1', '{"version":1,"bindings":[]}'), false);
+});
 test('server + peer namespaces avoid punctuation/separator/public collisions', () => {
   const h = harness(), key = h.remotePeerPreferenceKey;
   const pairs = [['', '123'], ['public', '123'], ['srv-a', 'b'], ['srv', 'a-b'],
@@ -74,7 +108,7 @@ test('a fresh runtime restores all whitelisted option types without pressed-inpu
     'remote-toolbar-position-v1': '{"x":0.8,"y":0.4}', 'keyboard-toolbar-position-v1': '{"x":0.2,"y":0.1}',
     'remote-toolbar-collapsed': '1', 'keyboard-tools-collapsed': '0', 'pc-toolbar-pinned': '1', 'pc-immersive-window': '1',
     'desktop-view-mode': 'custom', 'desktop-custom-percent': '175', 'handheld-zoom': '2.5',
-    'show-local-cursor': '0', 'show-virtual-mouse': '1' };
+    'show-local-cursor': '0', 'show-virtual-mouse': '1', 'game-mode': '1' };
   for (const [name, value] of Object.entries(values)) assert(p.set(name, value), name);
   assert.equal(h.writes.length, 0); p.dispose(); assert.equal(h.writes.length, 1);
   const restored = harness(h.disk).make('srv', 'A');

@@ -3,8 +3,10 @@
 #include "core/config.h"
 #include "core/diagnostic_log.h"
 #include "core/connection_deadline.h"
+#include "core/gamepad_input.h"
 #include "crypto/aead.h"
 #include "core/video_render.h"
+#include "core/secondary_video_render.h"
 #include "core/xcomponent_render.h"
 #include "core/audio_player.h"
 #include "core/communication_napi.h"
@@ -25,6 +27,7 @@
 #include <cstdint>
 #include <thread>
 #include <mutex>
+#include <memory>
 #include <condition_variable>
 #include <vector>
 #include <deque>
@@ -50,6 +53,7 @@ static std::atomic<int64_t> g_attemptStartedAtMs{0};
 static std::atomic<int64_t> g_stageStartedAtMs{0};
 static std::atomic<int> g_lastConnectionResult{0};
 static std::atomic<uint64_t> g_connectionGeneration{0};
+static std::atomic<uint64_t> g_gamepadGeneration{0};
 static std::atomic<int64_t> g_connectionStartedAtMs{0};
 static std::atomic<int64_t> g_loginStartedAtMs{0};
 static std::atomic<int> g_loginProgress{0}; // transport, first packet, challenge, queued, written, response
@@ -68,6 +72,22 @@ static std::mutex g_lastConnectionMessageMutex;
 static std::string g_lastConnectionMessage;
 static std::mutex g_connectionLifecycleMutex;
 static std::condition_variable g_disconnectFinished;
+static std::mutex g_secondaryControlMutex;
+static std::mutex g_secondaryRendererMutex;
+static std::shared_ptr<SecondaryVideoRender> g_secondaryRenderer;
+static std::atomic<int> g_secondaryDisplay{-1};
+static std::atomic<int> g_secondaryError{0};
+static std::atomic<int> g_secondaryWidth{0};
+static std::atomic<int> g_secondaryHeight{0};
+static std::atomic<int> g_secondaryToken{0};
+static std::atomic<int> g_secondaryTokenCounter{0};
+// Protected by g_secondaryControlMutex, including teardown and focus loss.
+static int g_secondaryHeldButtons = 0;
+static int g_secondaryLastModifiers = 0;
+static double g_secondaryLastX = 0;
+static double g_secondaryLastY = 0;
+static bool g_secondaryKeyboardFocused = false;
+static constexpr int SECONDARY_KEY_SOURCE = 1001;
 
 struct NativeMouseInputEvent {
     float x{0.0F};
@@ -90,6 +110,7 @@ struct NativeKeyInputEvent {
     bool modifierValid{false};
     bool capsLockOn{false};
     bool capsLockValid{false};
+    int32_t source{-1};
 };
 
 enum class NativeInputKind { Mouse, Key, Reset };
@@ -388,6 +409,8 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
         return;
     }
     OH_NativeXComponent_GetKeyEventTimestamp(event, &timestamp);
+    OH_NativeXComponent_EventSourceType source = OH_NATIVEXCOMPONENT_SOURCE_TYPE_UNKNOWN;
+    OH_NativeXComponent_GetKeyEventSourceType(event, &source);
     int32_t modifierMask = 0;
     bool capsLockOn = false;
     bool modifierValid = TryGetNativeKeyModifiers(event, modifierMask);
@@ -406,7 +429,7 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
     }
     const bool capsLockValid = TryGetNativeCapsLockState(event, capsLockOn);
     const uint64_t sequence = QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
-        modifierMask, modifierValid, capsLockOn, capsLockValid});
+        modifierMask, modifierValid, capsLockOn, capsLockValid, static_cast<int32_t>(source)});
     if (code == KEY_CTRL_LEFT || code == KEY_CTRL_RIGHT || code == KEY_SHIFT_LEFT ||
         code == KEY_SHIFT_RIGHT || code == KEY_ALT_LEFT || code == KEY_ALT_RIGHT ||
         code == KEY_META_LEFT || code == KEY_META_RIGHT || code == KEY_CAPS_LOCK) {
@@ -568,6 +591,9 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         // Rust emits only fixed phase/type/action labels and boolean metadata
         // under this prefix; no protobuf fields or credentials are included.
         "rv_diag ",
+        // Fixed game-transport phase/policy/reason labels and numeric metadata;
+        // the Rust producer never includes endpoints, credentials or payloads.
+        "game_transport ",
         "connection auth config ",
         "account auth selection ",
         "account rendezvous encryption ",
@@ -675,13 +701,14 @@ static void OnRustEvent(const char* message) {
         if (text == "secure peer: encrypted stream enabled") g_peerSecurityState.store(1);
         if (text.rfind("secure peer: signature_unavailable", 0) == 0) g_peerSecurityState.store(2);
         if (text.rfind("IP direct connected;", 0) == 0) g_peerSecurityState.store(2);
+        if (text == "remote security: e2ee=false") g_peerSecurityState.store(2);
         if (text.rfind("secure peer: rejected", 0) == 0) {
             g_peerSecurityState.store(3);
-            g_lastConnectionResult.store(-16);
-            g_connectionStatus.store(3);
+            // Wait for the attempt result (or file-session error event): it
+            // distinguishes key mismatch and permits an encrypted relay retry.
         }
     }
-    if (text == "rendezvous tcp connected" || text == "punch request sent" ||
+    if (text == "rendezvous tcp connected" || text.rfind("punch request sent", 0) == 0 ||
         text == "rendezvous response received" || text == "direct peer connected" ||
         text.rfind("relay connected", 0) == 0 || text.rfind("IP direct connected;", 0) == 0 || text == "receive loop spawned" ||
         text == "login request sent" || text.rfind("login response: ok/", 0) == 0) {
@@ -743,12 +770,26 @@ static void OnRustEvent(const char* message) {
         g_lastConnectionResult.store(-17);
         g_connectionStartedAtMs.store(0);
         g_connectionStatus.store(3);
+    } else if (text == "file-only session security_signature_missing") {
+        SetLastConnectionMessage("远端身份签名缺失，无法建立加密连接");
+        g_lastConnectionResult.store(-34);
+        g_connectionStartedAtMs.store(0); g_connectionStatus.store(3);
+    } else if (text == "file-only session security_key_invalid") {
+        SetLastConnectionMessage("服务器密钥无效");
+        g_lastConnectionResult.store(-24);
+        g_connectionStartedAtMs.store(0); g_connectionStatus.store(3);
     } else if (text == "file-only session ready") {
         SetLastConnectionMessage(""); g_lastConnectionResult.store(0);
         g_connectionStartedAtMs.store(0); g_connectionStatus.store(2);
     } else if (text == "file-only session ended") {
         if (g_connectionStatus.load() == 1 || g_connectionStatus.load() == 2 || g_connectionStatus.load() == 4) {
-            SetLastConnectionMessage("文件连接结束，请检查远端文件权限、密码和网络");
+            // Do not disguise a rejected peer handshake as a file permission error.
+            if (g_peerSecurityState.load() == 3) {
+                SetLastConnectionMessage("与远端安全握手失败");
+                g_lastConnectionResult.store(-16);
+            } else {
+                SetLastConnectionMessage("文件连接结束，请检查远端文件权限、密码和网络");
+            }
             g_connectionStatus.store(3);
         }
     } else if (text.rfind("peer close reason class=", 0) == 0) {
@@ -841,18 +882,32 @@ static std::string ConnectionResultToMessage(int result) {
         case -26: return "服务器账号登录已过期或令牌无效，请到设置中的 API 账号重新登录";
         case -27: return "服务器拒绝访问，请检查账号的远控权限";
         case -28: return "ID 服务器连接中断，请重试；如持续失败，请导出诊断日志";
+        case -29: return "ID 服务器账号安全握手超时，令牌未发送，请检查网络或服务器";
+        case -30: return "ID 服务器账号安全握手时连接已关闭，令牌未发送";
+        case -31: return "ID 服务器账号安全握手通信失败，令牌未发送，请检查网络";
+        case -32: return "ID 服务器账号安全握手响应异常，令牌未发送，请检查服务器兼容性";
+        case -33: return "ID 服务器安全握手校验失败，令牌未发送，请检查服务器密钥";
+        case -34: return "远端身份签名缺失，无法建立加密连接";
+        case -35: return "直连无法验证远端身份，连接未加密";
+        case -36: return "UDP 直连失败，准备重新协商 TCP";
         default: return "连接失败（错误码：" + std::to_string(result) + "）";
     }
 }
 
 static napi_value Connect(napi_env env, napi_callback_info info) {
-    size_t argc = 10;
-    napi_value args[10] = {nullptr};
+    size_t argc = 12;
+    napi_value args[12] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     bool forceRelay = false;
     bool allowInsecureFallback = false;
+    int32_t insecureReason = 0;
     if (argc >= 5) napi_get_value_bool(env, args[4], &forceRelay);
     if (argc >= 6) napi_get_value_bool(env, args[5], &allowInsecureFallback);
+    if (argc >= 11) napi_get_value_int32(env, args[10], &insecureReason);
+    int32_t transportPolicy = 0;
+    if (argc >= 12) napi_get_value_int32(env, args[11], &transportPolicy);
+    if (transportPolicy < 0 || transportPolicy > 2) transportPolicy = 0;
+    if (!allowInsecureFallback || insecureReason < 1 || insecureReason > 3) insecureReason = 0;
     bool fileOnly = false;
     if (argc >= 7) napi_get_value_bool(env, args[6], &fileOnly);
     bool lockAfterDisconnect = false;
@@ -913,13 +968,14 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         " rendezvous=" + std::string(rendezvous.empty() ? "default" : "custom") +
         " relay=" + std::string(relay.empty() ? "default" : "custom") +
         " key=" + std::string(serverKey.empty() ? "empty" : "set") +
-        " insecure_fallback=" + std::string(allowInsecureFallback ? "approved_once" : "denied") +
+        " insecure_fallback=" + std::string(insecureReason != 0 ? "approved_scoped" : "denied") +
         " lock_after_disconnect=" + std::string(lockAfterDisconnect ? "yes" : "no") +
         " privacy_requested=" + std::string(privacyMode ? "yes" : "no") +
-        " os_password_configured=" + std::string(osPass.empty() ? "no" : "yes"));
+        " os_password_configured=" + std::string(osPass.empty() ? "no" : "yes") +
+        " transport_policy=" + std::to_string(transportPolicy));
     std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId,
-                 osPass = std::move(osPass), generation, forceRelay, allowInsecureFallback,
-                 fileOnly, lockAfterDisconnect, privacyMode]() mutable {
+                 osPass = std::move(osPass), generation, forceRelay, insecureReason,
+                 fileOnly, lockAfterDisconnect, privacyMode, transportPolicy]() mutable {
         {
             std::unique_lock<std::mutex> lock(g_connectionLifecycleMutex);
             g_disconnectFinished.wait(lock, []() { return !g_disconnectInProgress.load(); });
@@ -940,8 +996,9 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
             "rust_connect_started generation=" + std::to_string(generation));
         int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
                                   serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0,
-                                  allowInsecureFallback ? 1 : 0, fileOnly ? 1 : 0,
-                                  lockAfterDisconnect ? 1 : 0, privacyMode ? 1 : 0, osPass.c_str());
+                                  insecureReason, fileOnly ? 1 : 0,
+                                  lockAfterDisconnect ? 1 : 0, privacyMode ? 1 : 0, osPass.c_str(),
+                                  transportPolicy);
         std::fill(osPass.begin(), osPass.end(), '\0');
         osPass.clear();
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);
@@ -954,8 +1011,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
             OH_LOG_INFO(LOG_APP, "Ignore stale rust_connect result generation=%{public}llu", static_cast<unsigned long long>(generation));
             return;
         }
-        g_lastConnectionResult.store(result);
         if (result != 0) {
+            g_lastConnectionResult.store(result);
             g_connectionStartedAtMs.store(0);
             g_connectionStatus.store(3);
         }
@@ -981,6 +1038,101 @@ static napi_value SetPerformancePreset(napi_env env, napi_callback_info info) {
     napi_value ret;
     napi_create_int32(env, result, &ret);
     return ret;
+}
+
+static napi_value SetGameMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc < 1 || napi_get_value_bool(env, args[0], &enabled) != napi_ok) {
+        napi_throw_type_error(env, nullptr, "game mode requires a boolean");
+        return nullptr;
+    }
+    napi_value result;
+    napi_create_int32(env, rust_set_game_mode(enabled ? 1 : 0, g_connectionStatus.load() == 2 ? 1 : 0), &result);
+    return result;
+}
+
+static napi_value SetHighPerformance(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enabled = false;
+    if (argc < 1 || napi_get_value_bool(env, args[0], &enabled) != napi_ok) {
+        napi_throw_type_error(env, nullptr, "high performance requires a boolean");
+        return nullptr;
+    }
+    napi_value result;
+    napi_create_int32(env, rust_set_high_performance(enabled ? 1 : 0,
+        g_connectionStatus.load() == 2 ? 1 : 0), &result);
+    return result;
+}
+
+static napi_value StartGamepadMonitor(napi_env env, napi_callback_info info) {
+    // The optional system monitor must not observe input outside a foreground,
+    // authenticated remote-control session.
+    const uint64_t generation = g_connectionGeneration.load();
+    int result = g_connectionStatus.load() == 2 && !g_backgroundVideoMode.load()
+        ? StartGamepadInput() : -3;
+    if (result == 0 && (generation != g_connectionGeneration.load() ||
+        g_connectionStatus.load() != 2 || g_backgroundVideoMode.load())) {
+        StopGamepadInput();
+        result = -3;
+    }
+    if (result == 0) g_gamepadGeneration.store(generation);
+    DiagnosticLog::instance().append("I", "gamepad", "monitor_start result=" + std::to_string(result));
+    napi_value value;
+    napi_create_int32(env, result, &value);
+    return value;
+}
+
+static napi_value StopGamepadMonitor(napi_env env, napi_callback_info info) {
+    g_gamepadGeneration.store(0);
+    StopGamepadInput();
+    napi_value value;
+    napi_create_int32(env, 0, &value);
+    return value;
+}
+
+static napi_value TakeGamepadEvents(napi_env env, napi_callback_info info) {
+    auto events = TakeGamepadInput();
+    if (g_gamepadGeneration.load() == 0 || g_gamepadGeneration.load() != g_connectionGeneration.load() ||
+        g_connectionStatus.load() != 2 || g_backgroundVideoMode.load()) {
+        StopGamepadInput();
+        g_gamepadGeneration.store(0);
+        events.clear();
+        events.push_back(GamepadInputEvent{3});
+    }
+    napi_value array;
+    napi_create_array_with_length(env, events.size(), &array);
+    uint32_t index = 0;
+    for (const auto& event : events) {
+        napi_value object, value;
+        napi_create_object(env, &object);
+        napi_create_int32(env, event.kind, &value); napi_set_named_property(env, object, "kind", value);
+        napi_create_int32(env, event.device, &value); napi_set_named_property(env, object, "device", value);
+        napi_create_int32(env, event.control, &value); napi_set_named_property(env, object, "control", value);
+        napi_create_int32(env, event.action, &value); napi_set_named_property(env, object, "action", value);
+        napi_create_double(env, event.x, &value); napi_set_named_property(env, object, "x", value);
+        napi_create_double(env, event.y, &value); napi_set_named_property(env, object, "y", value);
+        napi_set_element(env, array, index++, object);
+    }
+    return array;
+}
+
+static napi_value SetGameFps(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t fps = 60;
+    if (argc < 1 || napi_get_value_int32(env, args[0], &fps) != napi_ok) {
+        napi_throw_type_error(env, nullptr, "game fps requires a number");
+        return nullptr;
+    }
+    napi_value result;
+    napi_create_int32(env, rust_set_game_fps(fps, g_connectionStatus.load() == 2 ? 1 : 0), &result);
+    return result;
 }
 
 static napi_value Disconnect(napi_env env, napi_callback_info info) {
@@ -2088,10 +2240,12 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     uint64_t totalBytes = VideoRender::instance().receivedByteCount();
     uint64_t decodedFrames = VideoRender::instance().decodedFrameCount();
     uint64_t renderedFrames = VideoRender::instance().renderedFrameCount();
+    int queuedFrames = rust_get_game_mode() != 0 ? VideoRender::instance().queuedFrameCount() : -1;
     if (g_videoReadyGeneration.load() != g_connectionGeneration.load()) {
         hasFrame = false;
         totalFrames = totalBytes = decodedFrames = renderedFrames = 0;
         width = height = length = 0;
+        queuedFrames = -1;
     }
     int codec = VideoRender::instance().activeCodec();
     int decoderMode = VideoRender::instance().activeDecodeMode();
@@ -2120,6 +2274,7 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
             " bytes_total=" + std::to_string(totalBytes) +
             " decoded_total=" + std::to_string(decodedFrames) +
             " presented_total=" + std::to_string(renderedFrames) +
+            " app_queued_frames=" + std::to_string(queuedFrames) +
             " decoded_delta=" + std::to_string(decodedFrames - std::min(decodedFrames, previousDecoded)) +
             " frame=" + std::to_string(width) + "x" + std::to_string(height) +
             " latest_size=" + std::to_string(length) +
@@ -2137,12 +2292,21 @@ static napi_value GetVideoFrame(napi_env env, napi_callback_info info) {
     napi_value frameCountVal; napi_create_int64(env, static_cast<int64_t>(totalFrames), &frameCountVal); napi_set_named_property(env, obj, "totalFrames", frameCountVal);
     napi_value byteCountVal; napi_create_int64(env, static_cast<int64_t>(totalBytes), &byteCountVal); napi_set_named_property(env, obj, "totalBytes", byteCountVal);
     napi_value decodedCountVal; napi_create_int64(env, static_cast<int64_t>(decodedFrames), &decodedCountVal); napi_set_named_property(env, obj, "decodedFrames", decodedCountVal);
+    napi_value queuedVal; napi_create_int32(env, queuedFrames, &queuedVal); napi_set_named_property(env, obj, "queuedFrames", queuedVal);
+    napi_value gameFpsVal; napi_create_int32(env, rust_get_game_effective_fps(), &gameFpsVal); napi_set_named_property(env, obj, "gameEffectiveFps", gameFpsVal);
+    const bool connected = g_connectionStatus.load() == 2;
+    napi_value requestedFpsVal; napi_create_int32(env, connected ? rust_get_requested_performance_fps() : 0, &requestedFpsVal);
+    napi_set_named_property(env, obj, "requestedFps", requestedFpsVal);
+    napi_value requestedBitrateVal; napi_create_int32(env, connected ? rust_get_requested_bitrate_percent() : 0, &requestedBitrateVal);
+    napi_set_named_property(env, obj, "requestedBitratePercent", requestedBitrateVal);
     napi_value codecVal; napi_create_int32(env, codec, &codecVal); napi_set_named_property(env, obj, "codec", codecVal);
     napi_value decoderModeVal; napi_create_int32(env, decoderMode, &decoderModeVal); napi_set_named_property(env, obj, "decoderMode", decoderModeVal);
     napi_value dynamicRangeVal; napi_create_int32(env, static_cast<int>(color.dynamicRange()), &dynamicRangeVal); napi_set_named_property(env, obj, "dynamicRange", dynamicRangeVal);
     napi_value colorOutputVal; napi_create_int32(env, static_cast<int>(color.output), &colorOutputVal); napi_set_named_property(env, obj, "colorOutput", colorOutputVal);
     napi_value bitDepthVal; napi_create_int32(env, color.bitDepth, &bitDepthVal); napi_set_named_property(env, obj, "bitDepth", bitDepthVal);
-    napi_value delayVal; napi_create_int32(env, rust_get_connection_delay_ms(), &delayVal); napi_set_named_property(env, obj, "delayMs", delayVal);
+    const uint64_t delaySample = rust_get_connection_delay_sample();
+    napi_value delayVal; napi_create_int32(env, static_cast<int32_t>(delaySample & 0xffffffffU), &delayVal); napi_set_named_property(env, obj, "delayMs", delayVal);
+    napi_value delaySeqVal; napi_create_int64(env, static_cast<int64_t>(delaySample >> 32), &delaySeqVal); napi_set_named_property(env, obj, "delaySampleSeq", delaySeqVal);
     napi_value targetBitrateVal; napi_create_int32(env, rust_get_connection_target_bitrate_kb(), &targetBitrateVal); napi_set_named_property(env, obj, "targetBitrateKb", targetBitrateVal);
     return obj;
 }
@@ -2159,6 +2323,221 @@ static napi_value SetHdrDisplayFormats(napi_env env, napi_callback_info info) {
     napi_value result;
     napi_create_int32(env, 0, &result);
     return result;
+}
+
+static void OnSecondaryVideoFrame(const unsigned char* data, int length, int width, int height,
+                                  int isKey, int64_t pts, int display, int codec) {
+    if (g_secondaryDisplay.load() != display || g_secondaryError.load() != 0) return;
+    if (codec != 'V' && codec != 'H' && codec != '5') {
+        g_secondaryError.store(-5);
+        DiagnosticLog::instance().append("W", "multi-display", "secondary_unsupported_codec");
+        return;
+    }
+    std::shared_ptr<SecondaryVideoRender> renderer;
+    { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); renderer = g_secondaryRenderer; }
+    if (!renderer || !renderer->enqueue(data, length, width, height, isKey != 0, pts, codec)) return;
+    g_secondaryWidth.store(width);
+    g_secondaryHeight.store(height);
+}
+
+static void ReleaseSecondaryButtonsInternal() {
+    const int display = g_secondaryDisplay.load();
+    if (display >= 0) {
+        if (g_secondaryHeldButtons & 1) rust_send_secondary_mouse_event(display, g_secondaryLastX, g_secondaryLastY, 2, g_secondaryLastModifiers);
+        if (g_secondaryHeldButtons & 2) rust_send_secondary_mouse_event(display, g_secondaryLastX, g_secondaryLastY, 4, g_secondaryLastModifiers);
+        if (g_secondaryHeldButtons & 4) rust_send_secondary_mouse_event(display, g_secondaryLastX, g_secondaryLastY, 6, g_secondaryLastModifiers);
+    }
+    g_secondaryHeldButtons = 0;
+}
+
+// All secondary key events are processed by the primary window's existing
+// keyboard mapper. A reset is ordered after previously queued key events.
+static void EndSecondaryKeyboardInternal() {
+    if (!g_secondaryKeyboardFocused) return;
+    g_secondaryKeyboardFocused = false;
+    NativeKeyInputEvent key;
+    key.source = SECONDARY_KEY_SOURCE;
+    key.action = -1;
+    QueueNativeKeyInput(key);
+}
+
+static void StopSecondaryDisplayInternal() {
+    EndSecondaryKeyboardInternal();
+    ReleaseSecondaryButtonsInternal();
+    g_secondaryDisplay.store(-1);
+    rust_set_secondary_frame_callback(nullptr);
+    std::shared_ptr<SecondaryVideoRender> old;
+    { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); old.swap(g_secondaryRenderer); }
+    if (old) old->reset();
+    g_secondaryWidth.store(0); g_secondaryHeight.store(0); g_secondaryError.store(0);
+    g_secondaryToken.store(0);
+}
+
+static napi_value SetSecondaryKeyboardFocus(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2] = {}; int32_t token = 0; bool focused = false;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int result = -1;
+    if (argc == 2 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
+        napi_get_value_bool(env, args[1], &focused) == napi_ok) {
+        std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+        if (token > 0 && token == g_secondaryToken.load()) {
+            if (focused) g_secondaryKeyboardFocused = true;
+            else EndSecondaryKeyboardInternal();
+            result = 0;
+        }
+    }
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
+}
+
+static napi_value QueueSecondaryKey(napi_env env, napi_callback_info info) {
+    size_t argc = 6; napi_value args[6] = {}; int32_t token = 0, code = 0, action = -1, mask = 0, caps = -1;
+    bool valid = false;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int result = -1;
+    if (argc == 6 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
+        napi_get_value_int32(env, args[1], &code) == napi_ok &&
+        napi_get_value_int32(env, args[2], &action) == napi_ok &&
+        napi_get_value_int32(env, args[3], &mask) == napi_ok &&
+        napi_get_value_bool(env, args[4], &valid) == napi_ok &&
+        napi_get_value_int32(env, args[5], &caps) == napi_ok &&
+        code > 0 && (action == 0 || action == 1) && mask >= 0 && mask <= 15 && caps >= -1 && caps <= 1) {
+        std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+        if (token > 0 && token == g_secondaryToken.load() && g_secondaryKeyboardFocused &&
+            g_secondaryError.load() == 0) {
+            NativeKeyInputEvent key;
+            key.keyCode = code; key.action = action; key.modifierMask = mask; key.modifierValid = valid;
+            key.capsLockValid = caps >= 0; key.capsLockOn = caps == 1; key.source = SECONDARY_KEY_SOURCE;
+            QueueNativeKeyInput(key);
+            result = 0;
+        }
+    }
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
+}
+
+static napi_value IsSecondaryDisplaySupported(napi_env env, napi_callback_info) {
+    napi_value result;
+    napi_get_boolean(env, rust_is_secondary_display_supported() != 0, &result);
+    return result;
+}
+
+static napi_value StartSecondaryDisplay(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char surface[128] = {}; size_t length = 0; int32_t display = -1;
+    if (argc < 2 || napi_get_value_string_utf8(env, args[0], surface, sizeof(surface), &length) != napi_ok ||
+        napi_get_value_int32(env, args[1], &display) != napi_ok || length == 0 || length >= sizeof(surface) - 1 || display < 0) {
+        napi_value ret; napi_create_int32(env, -1, &ret); return ret;
+    }
+    std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+    StopSecondaryDisplayInternal();
+    int result = -5;
+    const int primaryCodec = VideoRender::instance().activeCodec();
+    if (primaryCodec == 1 || primaryCodec == 2 || primaryCodec == 3) {
+        auto renderer = std::make_shared<SecondaryVideoRender>();
+        if (renderer->setSurface(surface)) {
+            { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); g_secondaryRenderer = renderer; }
+            g_secondaryDisplay.store(display);
+            rust_set_secondary_frame_callback(OnSecondaryVideoFrame);
+            result = rust_set_secondary_display(display);
+            if (result != 0) StopSecondaryDisplayInternal();
+            else {
+                int token = g_secondaryTokenCounter.fetch_add(1) + 1;
+                if (token <= 0) { g_secondaryTokenCounter.store(1); token = 1; }
+                g_secondaryToken.store(token);
+                result = token;
+            }
+        } else result = -6;
+    }
+    DiagnosticLog::instance().append(result > 0 ? "I" : "W", "multi-display",
+        std::string("secondary_start result=") + (result > 0 ? "ok" : std::to_string(result)));
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
+}
+
+static napi_value StopSecondaryDisplay(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value arg = nullptr; int32_t token = 0;
+    napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+    if (argc > 0) napi_get_value_int32(env, arg, &token);
+    std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+    if (token > 0 && token != g_secondaryToken.load()) {
+        napi_value ret; napi_create_int32(env, -1, &ret); return ret;
+    }
+    StopSecondaryDisplayInternal();
+    napi_value ret; napi_create_int32(env, 0, &ret); return ret;
+}
+
+static napi_value ReleaseSecondaryButtons(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value arg = nullptr; int32_t token = 0;
+    napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+    int result = -1;
+    if (argc == 1 && napi_get_value_int32(env, arg, &token) == napi_ok && token > 0) {
+        std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+        if (token == g_secondaryToken.load()) { ReleaseSecondaryButtonsInternal(); result = 0; }
+    }
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
+}
+
+static napi_value GetSecondaryDisplayState(napi_env env, napi_callback_info) {
+    std::shared_ptr<SecondaryVideoRender> renderer;
+    { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); renderer = g_secondaryRenderer; }
+    napi_value obj; napi_create_object(env, &obj);
+    const auto setInt = [env, obj](const char* name, int value) {
+        napi_value v; napi_create_int32(env, value, &v); napi_set_named_property(env, obj, name, v);
+    };
+    const int error = g_secondaryError.load() != 0 ? g_secondaryError.load() : renderer ? renderer->error() : 0;
+    setInt("display", g_secondaryDisplay.load()); setInt("error", error);
+    setInt("token", g_secondaryToken.load());
+    setInt("width", g_secondaryWidth.load()); setInt("height", g_secondaryHeight.load());
+    setInt("frames", renderer && renderer->presentedFrames() > 0 ? 1 : 0);
+    return obj;
+}
+
+static napi_value SendSecondaryPointer(napi_env env, napi_callback_info info) {
+    size_t argc = 5; napi_value args[5] = {}; int32_t token = 0, action = -1, modifiers = 0;
+    double x = 0, y = 0;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int result = -1;
+    if (argc == 5 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
+        napi_get_value_double(env, args[1], &x) == napi_ok && napi_get_value_double(env, args[2], &y) == napi_ok &&
+        napi_get_value_int32(env, args[3], &action) == napi_ok && napi_get_value_int32(env, args[4], &modifiers) == napi_ok) {
+        std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+        std::shared_ptr<SecondaryVideoRender> renderer;
+        { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); renderer = g_secondaryRenderer; }
+        if (token > 0 && token == g_secondaryToken.load() && g_secondaryError.load() == 0 &&
+            renderer && renderer->error() == 0 && renderer->presentedFrames() > 0) {
+            result = rust_send_secondary_mouse_event(g_secondaryDisplay.load(), x, y, action, modifiers);
+            if (result == 0) {
+                g_secondaryLastX = x; g_secondaryLastY = y; g_secondaryLastModifiers = modifiers;
+                if (action == 1) g_secondaryHeldButtons |= 1;
+                if (action == 2) g_secondaryHeldButtons &= ~1;
+                if (action == 3) g_secondaryHeldButtons |= 2;
+                if (action == 4) g_secondaryHeldButtons &= ~2;
+                if (action == 5) g_secondaryHeldButtons |= 4;
+                if (action == 6) g_secondaryHeldButtons &= ~4;
+            }
+        }
+    }
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
+}
+
+static napi_value SendSecondaryWheel(napi_env env, napi_callback_info info) {
+    size_t argc = 6; napi_value args[6] = {}; int32_t token = 0, modifiers = 0;
+    double x = 0, y = 0, dx = 0, dy = 0;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int result = -1;
+    if (argc == 6 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
+        napi_get_value_double(env, args[1], &x) == napi_ok && napi_get_value_double(env, args[2], &y) == napi_ok &&
+        napi_get_value_double(env, args[3], &dx) == napi_ok && napi_get_value_double(env, args[4], &dy) == napi_ok &&
+        napi_get_value_int32(env, args[5], &modifiers) == napi_ok) {
+        std::lock_guard<std::mutex> control(g_secondaryControlMutex);
+        std::shared_ptr<SecondaryVideoRender> renderer;
+        { std::lock_guard<std::mutex> lock(g_secondaryRendererMutex); renderer = g_secondaryRenderer; }
+        if (token > 0 && token == g_secondaryToken.load() && g_secondaryError.load() == 0 &&
+            renderer && renderer->error() == 0 && renderer->presentedFrames() > 0) {
+            result = rust_send_secondary_wheel(g_secondaryDisplay.load(), x, y, dx, dy, modifiers);
+            if (result == 0) { g_secondaryLastX = x; g_secondaryLastY = y; g_secondaryLastModifiers = modifiers; }
+        }
+    }
+    napi_value ret; napi_create_int32(env, result, &ret); return ret;
 }
 
 static napi_value SetSurfaceId(napi_env env, napi_callback_info info) {
@@ -2265,6 +2644,9 @@ static napi_value NativeKeyInputToJs(napi_env env, const NativeKeyInputEvent& in
     napi_value capsLockValid;
     napi_get_boolean(env, input.capsLockValid, &capsLockValid);
     napi_set_named_property(env, object, "capsLockValid", capsLockValid);
+    napi_value source;
+    napi_create_int32(env, input.source, &source);
+    napi_set_named_property(env, object, "source", source);
     return object;
 }
 
@@ -2298,11 +2680,24 @@ static napi_value TakeNativeInputEvents(napi_env env, napi_callback_info info) {
     if (!pending.empty()) {
         const auto timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        DiagnosticLog::instance().append("I", "input-native",
-            "drain first_seq=" + std::to_string(pending.front().sequence) +
-            " last_seq=" + std::to_string(pending.back().sequence) +
-            " timestamp_ms=" + std::to_string(timestampMs) +
-            " count=" + std::to_string(pending.size()));
+        // Diagnostics are synchronously written to disk. In game mode,
+        // sample move-only drains; always retain key/button/reset boundaries.
+        static std::atomic<int64_t> lastGameMoveLogMs{0};
+        const bool boundary = std::any_of(pending.begin(), pending.end(),
+            [](const NativeInputEvent& input) { return !IsNativeMouseMove(input); });
+        bool logDrain = rust_get_game_mode() == 0 || boundary;
+        if (!logDrain) {
+            int64_t last = lastGameMoveLogMs.load();
+            logDrain = (last == 0 || timestampMs - last >= 1000) &&
+                lastGameMoveLogMs.compare_exchange_strong(last, timestampMs);
+        }
+        if (logDrain) {
+            DiagnosticLog::instance().append("I", "input-native",
+                "drain first_seq=" + std::to_string(pending.front().sequence) +
+                " last_seq=" + std::to_string(pending.back().sequence) +
+                " timestamp_ms=" + std::to_string(timestampMs) +
+                " count=" + std::to_string(pending.size()));
+        }
     }
     return array;
 }
@@ -2379,6 +2774,8 @@ static napi_value GetHardwareKeyStateForJs(napi_env env, napi_callback_info info
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     TryRegisterNativeInput(env, exports);
+    static std::once_flag initialized;
+    std::call_once(initialized, []() {
     Config::instance().load();
     // Always subscribe to the controlled device's real cursor. The local
     // pointer preference only controls HarmonyOS' own physical mouse pointer.
@@ -2393,6 +2790,7 @@ static napi_value Init(napi_env env, napi_value exports) {
                                  decoderCapabilities.av1 ? 1 : 0,
                                  decoderCapabilities.h265 ? 1 : 0);
     DiagnosticLog::instance().append("I", "native", "module_initialized");
+    });
 
     napi_property_descriptor desc[] = {
         {"connect", nullptr, Connect, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -2402,6 +2800,12 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getDiagnosticLog", nullptr, GetDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearDiagnosticLog", nullptr, ClearDiagnosticLog, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPerformancePreset", nullptr, SetPerformancePreset, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setGameMode", nullptr, SetGameMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setHighPerformance", nullptr, SetHighPerformance, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startGamepadMonitor", nullptr, StartGamepadMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopGamepadMonitor", nullptr, StopGamepadMonitor, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeGamepadEvents", nullptr, TakeGamepadEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setGameFps", nullptr, SetGameFps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setPrivacyMode", nullptr, SetPrivacyMode, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPrivacyModeState", nullptr, GetPrivacyModeState, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"disconnect", nullptr, Disconnect, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -2471,6 +2875,15 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"getVideoFrame", nullptr, GetVideoFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setHdrDisplayFormats", nullptr, SetHdrDisplayFormats, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setSurfaceId", nullptr, SetSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isSecondaryDisplaySupported", nullptr, IsSecondaryDisplaySupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startSecondaryDisplay", nullptr, StartSecondaryDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopSecondaryDisplay", nullptr, StopSecondaryDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"releaseSecondaryButtons", nullptr, ReleaseSecondaryButtons, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getSecondaryDisplayState", nullptr, GetSecondaryDisplayState, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendSecondaryPointer", nullptr, SendSecondaryPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setSecondaryKeyboardFocus", nullptr, SetSecondaryKeyboardFocus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"queueSecondaryKey", nullptr, QueueSecondaryKey, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendSecondaryWheel", nullptr, SendSecondaryWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"prepareSurfaceRebind", nullptr, PrepareSurfaceRebind, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"rebindSurface", nullptr, RebindSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeNativeInputEvents", nullptr, TakeNativeInputEvents, nullptr, nullptr, nullptr, napi_default, nullptr},

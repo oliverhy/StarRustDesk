@@ -31,6 +31,9 @@ public:
     uint64_t receivedFrameCount() const { return receivedFrameCount_.load(); }
     uint64_t receivedByteCount() const { return receivedByteCount_.load(); }
     uint64_t renderedFrameCount() const { return renderedFrameCount_.load(); }
+    // Non-blocking snapshot of application-owned compressed-frame queues.
+    // -1 means the snapshot was unavailable; platform/driver buffers are not included.
+    int queuedFrameCount();
     void restartDecoder();
     int activeCodec() const;
     int activeDecodeMode() const;

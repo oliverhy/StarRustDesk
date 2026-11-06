@@ -3,8 +3,10 @@
 #include "xcomponent_render.h"
 #include "diagnostic_log.h"
 #include "video_render.h"
+#include "nal_normalizer.h"
 #include <algorithm>
 #include <cstring>
+#include <utility>
 #include <hilog/log.h>
 #include <multimedia/player_framework/native_avbuffer.h>
 #include <multimedia/player_framework/native_avformat.h>
@@ -17,11 +19,23 @@
 
 namespace {
 constexpr int32_t MAX_COMPRESSED_FRAME_SIZE = 16 * 1024 * 1024;
+constexpr size_t MAX_SECONDARY_QUEUE_BYTES = 32 * 1024 * 1024;
 }
 
 H264Decoder& H264Decoder::instance() {
     static H264Decoder decoder;
     return decoder;
+}
+
+H264Decoder::H264Decoder(XComponentRender* outputSurface, OutputCallback output, ErrorCallback error, bool softwareOnly)
+    : outputSurface_(outputSurface), outputCallback_(std::move(output)), errorCallback_(std::move(error)),
+      softwareOnly_(softwareOnly) {}
+
+H264Decoder::~H264Decoder() { release(); }
+
+bool H264Decoder::isStarted() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return started_ && codec_ != nullptr;
 }
 
 void H264Decoder::setSurface(OHNativeWindow* window, int width, int height) {
@@ -65,7 +79,11 @@ void H264Decoder::decodeFrame(const uint8_t* data, int length, bool key, int64_t
             std::to_string(normalized.size()) + " key=" + std::string(key ? "yes" : "no") +
             " pts=" + std::to_string(pts));
     }
-    while (frames_.size() >= 120) {
+    size_t secondaryBytes = 0;
+    if (outputSurface_) for (const auto& frame : frames_) secondaryBytes += frame.data.size();
+    while (!frames_.empty() && (frames_.size() >= 120 ||
+        (outputSurface_ && secondaryBytes > MAX_SECONDARY_QUEUE_BYTES - normalized.size()))) {
+        if (outputSurface_) secondaryBytes -= frames_.front().data.size();
         frames_.pop_front();
         DiagnosticLog::instance().append("W", "h264", "input_queue_overflow dropped_oldest");
     }
@@ -114,7 +132,9 @@ void H264Decoder::release() {
 }
 
 bool H264Decoder::startLocked(OHNativeWindow* window, int width, int height) {
-    VideoDecoderSelection selection = createPreferredVideoDecoder(OH_AVCODEC_MIMETYPE_VIDEO_AVC);
+    VideoDecoderSelection selection = softwareOnly_ ?
+        createVideoDecoderByMode(OH_AVCODEC_MIMETYPE_VIDEO_AVC, VideoDecodeMode::Software) :
+        createPreferredVideoDecoder(OH_AVCODEC_MIMETYPE_VIDEO_AVC);
     codec_ = selection.codec;
     decodeMode_ = selection.mode;
     decoderName_ = selection.name;
@@ -270,40 +290,7 @@ void H264Decoder::feedLocked() {
 }
 
 std::vector<uint8_t> H264Decoder::normalizeH264(const uint8_t* data, int length) {
-    if (data == nullptr || length <= 0) {
-        return std::vector<uint8_t>();
-    }
-    if (isAnnexB(data, length)) {
-        return std::vector<uint8_t>(data, data + length);
-    }
-    if (length > 4) {
-        uint32_t nalLength = readBe32(data);
-        if (nalLength > 0 && nalLength + 4 <= static_cast<uint32_t>(length)) {
-            std::vector<uint8_t> out;
-            int offset = 0;
-            while (offset + 4 <= length) {
-                uint32_t size = readBe32(data + offset);
-                offset += 4;
-                if (size == 0 || offset + static_cast<int>(size) > length) {
-                    break;
-                }
-                out.push_back(0);
-                out.push_back(0);
-                out.push_back(0);
-                out.push_back(1);
-                out.insert(out.end(), data + offset, data + offset + size);
-                offset += static_cast<int>(size);
-            }
-            return out;
-        }
-    }
-    std::vector<uint8_t> out;
-    out.push_back(0);
-    out.push_back(0);
-    out.push_back(0);
-    out.push_back(1);
-    out.insert(out.end(), data, data + length);
-    return out;
+    return normalizeAnnexBNals(data, length, MAX_COMPRESSED_FRAME_SIZE);
 }
 
 bool H264Decoder::isAnnexB(const uint8_t* data, int length) {
@@ -357,6 +344,9 @@ uint32_t H264Decoder::nalFlags(const std::vector<uint8_t>& frame) {
 void H264Decoder::onError(OH_AVCodec* codec, int32_t errorCode, void* userData) {
     OH_LOG_ERROR(LOG_APP, "Decoder error %{public}d", errorCode);
     DiagnosticLog::instance().append("E", "h264", "decoder_error code=" + std::to_string(errorCode));
+    auto* context = static_cast<VideoCallbackContext<H264Decoder>*>(userData);
+    if (context && context->active->load() && context->owner && context->owner->errorCallback_)
+        context->owner->errorCallback_(errorCode);
 }
 
 void H264Decoder::onStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void* userData) {
@@ -412,11 +402,13 @@ void H264Decoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuff
         }
         auto color = decoder->color_;
         enrichVideoColorFromBuffer(buffer, color);
-        color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
-        VideoRender::instance().updateColorInfo(color);
+        XComponentRender& target = decoder->outputSurface_ ? *decoder->outputSurface_ : XComponentRender::instance();
+        color.output = target.applyVideoColor(decoder->window_, color);
+        if (!decoder->outputSurface_) VideoRender::instance().updateColorInfo(color);
         OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
-        VideoRender::instance().markDecodedFrame(1, decoder->width_, decoder->height_,
-            static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
+        if (decoder->outputCallback_) decoder->outputCallback_(ret == AV_ERR_OK);
+        else VideoRender::instance().markDecodedFrame(1, decoder->width_, decoder->height_,
+                static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
         if (ret != AV_ERR_OK) {
             OH_LOG_WARN(LOG_APP, "Render H264 output failed index=%{public}u ret=%{public}d", index, ret);
             DiagnosticLog::instance().append("E", "h264",

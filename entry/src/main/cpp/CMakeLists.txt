@@ -37,10 +37,12 @@ endif()
 
 add_library(entry SHARED napi_init.cpp
                        core/config.cpp
+                       core/gamepad_input.cpp
                        core/diagnostic_log.cpp
                        core/audio_player.cpp
                        core/voice_capture.cpp
                        core/video_render.cpp
+                       core/secondary_video_render.cpp
                        core/video_color.cpp
                        core/video_decoder_selector.cpp
                        core/xcomponent_render.cpp

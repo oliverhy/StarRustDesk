@@ -8,9 +8,11 @@ const password = 'sensitive-password-value';
 const options = new Map(); let calls = 0, wait;
 const diagnostics = [];
 const native = { getOption: k => options.get(k) || '', setPerformancePreset: () => {},
+  setGameMode: () => {}, setHighPerformance: () => {},
   appendDiagnosticLog: (component, message) => diagnostics.push(message),
   connect: () => { calls++; return 0; }, connectWithServer: () => { calls++; return 0; } };
 const context = { RustDeskNapi: native, ConnectionStatus: { CONNECTING: 1, FAILED: 3 },
+  RemotePeerPreferences: class { get() { return ''; } dispose() {} },
   RemoteSessionBackgroundTask: { syncForConnectionStatus: () => {} },
   AccountSession: { getApi: () => ({ sessionRevision: () => 1, prepareConnection: async () => { if (wait) await wait; } }) } };
 vm.createContext(context);

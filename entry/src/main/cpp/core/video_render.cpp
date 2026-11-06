@@ -239,6 +239,30 @@ uint64_t VideoRender::decodedFrameCount() const {
     return decodedFrameCount_.load();
 }
 
+int VideoRender::queuedFrameCount() {
+    int pending = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return -1;
+        pending = static_cast<int>(pendingFrames_.size());
+    }
+    std::unique_lock<std::mutex> decoder(g_decoderMutex, std::try_to_lock);
+    if (!decoder.owns_lock()) return -1;
+    int queued = -1;
+    switch (g_activeDecoder) {
+        case ActiveDecoder::H264: queued = H264Decoder::instance().queuedFrameCount(); break;
+        case ActiveDecoder::VP9: queued = VP9Decoder::instance().queuedFrameCount(); break;
+        case ActiveDecoder::SoftwareVP9: queued = SoftwareVP9Decoder::instance().queuedFrameCount(); break;
+        case ActiveDecoder::H265: queued = SystemVideoDecoder::h265().queuedFrameCount(); break;
+        case ActiveDecoder::VP8: queued = SystemVideoDecoder::vp8().queuedFrameCount(); break;
+        case ActiveDecoder::SoftwareVP8: queued = SoftwareVP8Decoder::instance().queuedFrameCount(); break;
+        case ActiveDecoder::AV1: queued = SystemVideoDecoder::av1().queuedFrameCount(); break;
+        case ActiveDecoder::SoftwareAV1: queued = SoftwareAV1Decoder::instance().queuedFrameCount(); break;
+        case ActiveDecoder::None: return -1;
+    }
+    return queued < 0 ? -1 : pending + queued;
+}
+
 int VideoRender::activeCodec() const {
     return activeCodec_.load();
 }

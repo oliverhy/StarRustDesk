@@ -6,7 +6,14 @@ pub type DisplayInfo = (i32, i32, i32, i32, bool);
 pub fn display_rect(current: &Mutex<i32>, displays: &Mutex<Vec<DisplayInfo>>) -> Option<(i32, i32, i32, i32)> {
     // These are short state-copy locks, never held across FFI/network/decoder
     // calls. Contention is not evidence of a new 1920x1080 display.
-    let index = (*current.lock().ok()?).max(0) as usize;
+    let index = (*current.lock().ok()?).max(0);
+    display_rect_for_index(index, displays)
+}
+
+// The display index is explicit so a second window can use the geometry of its
+// own monitor without changing the primary window's current-display state.
+pub fn display_rect_for_index(index: i32, displays: &Mutex<Vec<DisplayInfo>>) -> Option<(i32, i32, i32, i32)> {
+    let index = usize::try_from(index).ok()?;
     let guard = displays.lock().ok()?;
     guard.get(index).filter(|d| d.2 > 0 && d.3 > 0).map(|d| (d.0, d.1, d.2, d.3))
 }
@@ -59,6 +66,18 @@ mod tests {
         worker.join().unwrap();
         *current.lock().unwrap() = 3;
         assert_eq!(display_rect(&current, &displays), None);
+    }
+
+    #[test]
+    fn explicit_display_geometry_does_not_change_the_primary_screen() {
+        let current = Mutex::new(0);
+        let displays = Mutex::new(vec![(0, 0, 1920, 1080, false), (-1280, 100, 1280, 1024, false)]);
+        assert_eq!(display_rect_for_index(1, &displays), Some((-1280, 100, 1280, 1024)));
+        assert_eq!(display_rect(&current, &displays), Some((0, 0, 1920, 1080)));
+        assert_eq!(display_rect_for_index(-1, &displays), None);
+        assert_eq!(display_rect_for_index(2, &displays), None);
+        *displays.lock().unwrap() = vec![(0, 0, 0, 1080, false)];
+        assert_eq!(display_rect_for_index(0, &displays), None);
     }
 
     #[test]

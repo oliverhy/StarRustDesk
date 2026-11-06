@@ -14,7 +14,10 @@ for (const prop of ['label: string', 'selected: boolean', 'isEnabled: boolean'])
 assert(action.includes('.enabled(this.isEnabled)'));
 assert(action.includes('Button(translate(this.label, this.uiLanguage))'));
 assert(action.includes('if (this.isEnabled) this.onAction()'));
-assert.equal((dialog.match(/ApiAccountAction\(\{/g) || []).length, 17);
+assert.equal((dialog.match(/ApiAccountAction\(\{/g) || []).length, 18);
+for (const label of ['官方公共服务器', '自建 Server Pro', '第三方 rustdesk-api']) {
+  assert(dialog.includes(`label: '${label}'`), `missing account mode ${label}`);
+}
 assert(dialog.includes("label: this.busy ? '取消请求' : '关闭'"));
 assert(dialog.includes("label: '登录', selected: true, isEnabled: !this.busy"));
 assert(dialog.includes('isEnabled: !this.busy && this.selected.length > 0'));
@@ -32,4 +35,4 @@ state.selected = ['device']; notify(true); assert.equal(state.changes, 0, 'selec
 notify(false); assert.equal(state.changes, 1); assert.deepEqual(state.selected, []);
 notify(false); assert.equal(state.changes, 1, 'state-driven uncheck is idempotent');
 notify(true); assert.equal(state.changes, 2); assert.deepEqual(state.selected, ['device']);
-console.log('PASS account buttons: reactive labels, selected state, enablement and click guard on all 17 actions');
+console.log('PASS account buttons: three modes, reactive labels, selected state, enablement and click guard on all 18 actions');

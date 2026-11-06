@@ -18,6 +18,7 @@ struct VideoDecoderSelection {
 };
 
 VideoDecoderSelection createPreferredVideoDecoder(const char* mime);
+VideoDecoderSelection createVideoDecoderByMode(const char* mime, VideoDecodeMode mode);
 VideoDecodeMode preferredSystemDecoderMode(const char* mime);
 const char* videoDecodeModeName(VideoDecodeMode mode);
 

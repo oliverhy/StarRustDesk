@@ -25,6 +25,7 @@ import { CloudBackupSummary, CloudRestorePreview, CloudSyncResult, CloudSyncServ
 import { CloudBackupHistoryDialog } from '../widget/CloudBackupHistoryDialog'
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference'
 import { ThemePreference } from '../service/ThemePreference'
+import { InsecureConsentStore } from '../service/InsecureConsentStore'
 
 const QQ_GROUP_NUMBER: string = '221568948'
 
@@ -49,9 +50,14 @@ export struct SettingsPage {
   @State diagnosticLogBusy: boolean = false
   @State cloudSyncEnabled: boolean = false
   @State cloudSyncIncludesSecrets: boolean = false
+  // The native switch moves immediately; this is only its visual draft until
+  // the password flow confirms the persisted preference.
+  @State cloudSecretsSwitchOn: boolean = false
+  @State cloudSecretsPending: boolean = false
   @State cloudSyncBusy: boolean = false
   @State cloudSyncStatus: string = '未开启'
   private cloudPasswordAction: string = ''
+  private cloudSecretsRequestGeneration: number = 0
   @State cloudBackups: CloudBackupSummary[] = []
   @State cloudHistoryHasMore: boolean = false
   private cloudHistoryOffset: number = 0
@@ -116,9 +122,7 @@ export struct SettingsPage {
         this.saveCloudPassword(password)
       },
       onCancel: () => {
-        if (this.cloudPasswordAction === 'restore') this.cancelCloudRestore()
-        this.cloudPasswordAction = ''
-        this.cloudPasswordDialogController.close()
+        this.cancelCloudPassword()
       }
     }),
     autoCancel: false,
@@ -144,6 +148,7 @@ export struct SettingsPage {
     this.peerOnlineQueryEnabled = AppStorage.get<boolean>('peerOnlineQueryEnabled') ?? true
     this.cloudSyncEnabled = CloudSyncService.isEnabled()
     this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
+    this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
     this.updateCloudSyncStatus()
     if (this.cloudSyncEnabled) {
       this.syncCloudNow(false, true)
@@ -152,9 +157,16 @@ export struct SettingsPage {
 
   aboutToDisappear(): void {
     this.cloudUiGeneration++
+    this.cloudSecretsRequestGeneration++
+    this.cloudSecretsPending = false
+    this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
     this.cloudSyncBusy = false
     this.cloudHistoryDialogController.close()
     if (this.cloudPasswordAction === 'restore') this.cloudPasswordDialogController.close()
+    if (this.cloudPasswordAction === 'enable-secrets') {
+      this.cloudPasswordAction = ''
+      this.cloudPasswordDialogController.close()
+    }
     this.cancelCloudRestore()
   }
 
@@ -457,6 +469,7 @@ export struct SettingsPage {
           })
       }
       .width('100%')
+
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
@@ -464,6 +477,23 @@ export struct SettingsPage {
     .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
     .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
     .width('100%')
+  }
+
+  confirmClearInsecureConsent(): void {
+    AlertDialog.show({
+      title: translate('清除未加密连接免提醒', this.uiLanguage),
+      message: translate('清除后，本机所有远端将在下次遇到未加密连接时重新提示。不会删除连接、密码或服务器设置。', this.uiLanguage),
+      primaryButton: { value: translate('取消', this.uiLanguage), action: () => {} },
+      secondaryButton: { value: translate('清除', this.uiLanguage), fontColor: RustDeskTheme.ERROR,
+        action: () => { this.clearInsecureConsent() } },
+    })
+  }
+
+  async clearInsecureConsent(): Promise<void> {
+    let cleared: boolean = false
+    try { cleared = await InsecureConsentStore.clear(getContext(this) as common.UIAbilityContext) } catch (_error) {}
+    RustDeskNapi.appendDiagnosticLog('connection-security', `insecure_grants_cleared=${cleared}`)
+    promptAction.showToast({ message: translate(cleared ? '免提醒授权已清除' : '清除免提醒授权失败，请重试', this.uiLanguage) })
   }
 
   @Builder
@@ -572,14 +602,14 @@ export struct SettingsPage {
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.cloudSyncIncludesSecrets })
-          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
+        Toggle({ type: ToggleType.Switch, isOn: this.cloudSecretsSwitchOn })
+          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy && !this.cloudSecretsPending)
           .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.cloudSyncIncludesSecrets ?
+          .switchPointColor(this.cloudSecretsSwitchOn ?
             (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
             (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
           .onChange((isOn: boolean) => {
-            this.setCloudSecretsEnabled(isOn)
+            this.onCloudSecretsSwitchChanged(isOn)
           })
       }
       .width('100%')
@@ -658,6 +688,13 @@ export struct SettingsPage {
     this.cloudSyncEnabled = enabled
     CloudSyncService.setEnabled(enabled)
     if (!enabled) {
+      this.cloudSecretsRequestGeneration++
+      this.cloudSecretsPending = false
+      this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
+      if (this.cloudPasswordAction === 'enable-secrets') {
+        this.cloudPasswordAction = ''
+        this.cloudPasswordDialogController.close()
+      }
       this.cloudHistoryDialogController.close()
       this.cancelCloudRestore()
       this.cloudSyncStatus = '已关闭'
@@ -667,7 +704,39 @@ export struct SettingsPage {
     this.syncCloudNow(false, false)
   }
 
+  onCloudSecretsSwitchChanged(isOn: boolean): void {
+    // Programmatic rollback may itself cause onChange on some ArkUI versions.
+    // Ignore it so cancelling never writes preferences or starts a cloud sync.
+    if (isOn === this.cloudSecretsSwitchOn) return
+    this.cloudSecretsSwitchOn = isOn
+    if (this.cloudSecretsPending) {
+      // A second gesture may arrive before the disabled state is rendered.
+      // Invalidate the earlier password check rather than enabling later.
+      this.cloudSecretsRequestGeneration++
+      this.cloudSecretsPending = false
+      this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
+      return
+    }
+    this.setCloudSecretsEnabled(isOn)
+  }
+
+  cancelCloudPassword(): void {
+    const action: string = this.cloudPasswordAction
+    this.cloudPasswordAction = ''
+    if (action === 'restore') this.cancelCloudRestore()
+    if (action === 'enable-secrets') this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
+    this.cloudPasswordDialogController.close()
+  }
+
   async setCloudSecretsEnabled(enabled: boolean): Promise<void> {
+    if (this.cloudSecretsPending || this.cloudSyncBusy || !this.cloudSyncEnabled ||
+      enabled === this.cloudSyncIncludesSecrets) {
+      this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
+      return
+    }
+    const requestGeneration: number = ++this.cloudSecretsRequestGeneration
+    const uiGeneration: number = this.cloudUiGeneration
+    this.cloudSecretsPending = true
     try {
       if (!enabled) {
         this.cloudSyncIncludesSecrets = false
@@ -675,7 +744,10 @@ export struct SettingsPage {
         await this.syncCloudNow(false, false)
         return
       }
-      if (await CloudSyncService.hasCloudPassword()) {
+      const hasPassword: boolean = await CloudSyncService.hasCloudPassword()
+      if (requestGeneration !== this.cloudSecretsRequestGeneration ||
+        uiGeneration !== this.cloudUiGeneration || !this.cloudSyncEnabled) return
+      if (hasPassword) {
         this.cloudSyncIncludesSecrets = true
         CloudSyncService.setIncludesSecrets(true)
         await this.syncCloudNow(false, false)
@@ -684,8 +756,12 @@ export struct SettingsPage {
       this.cloudPasswordAction = 'enable-secrets'
       this.cloudPasswordDialogController.open()
     } catch (_error) {
+      if (requestGeneration !== this.cloudSecretsRequestGeneration || uiGeneration !== this.cloudUiGeneration) return
+      this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
       this.cloudSyncStatus = '无法读取本机云备份密码，请稍后重试'
       promptAction.showToast({ message: translate(this.cloudSyncStatus, this.uiLanguage) })
+    } finally {
+      if (requestGeneration === this.cloudSecretsRequestGeneration) this.cloudSecretsPending = false
     }
   }
 
@@ -740,6 +816,9 @@ export struct SettingsPage {
       if (result.success) this.updateCloudSyncStatus()
       else this.cloudSyncStatus = result.message
       this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
+      if (this.cloudPasswordAction !== 'enable-secrets' && !this.cloudSecretsPending) {
+        this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
+      }
       if (!quiet || !result.success) {
         promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
       }
@@ -1293,6 +1372,22 @@ export struct SettingsPage {
           })
       }
       .width('100%')
+
+      Divider().height(1).color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
+        .margin({ top: 12, bottom: 12 })
+      Row({ space: 12 }) {
+        Column({ space: 3 }) {
+          Text(translate('未加密连接免提醒', this.uiLanguage)).fontSize(RustDeskTheme.FONT_SIZE_BODY)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY).width('100%')
+          Text(translate('清除本机7天免提醒授权，不影响连接、密码和服务器设置', this.uiLanguage))
+            .fontSize(RustDeskTheme.FONT_SIZE_SMALL).width('100%')
+            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button(translate('清除', this.uiLanguage)).constraintSize({ minHeight: 40 })
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+          .onClick(() => { this.confirmClearInsecureConsent() })
+      }.width('100%')
     }
     .padding(16)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)

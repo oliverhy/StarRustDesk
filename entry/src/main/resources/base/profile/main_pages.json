@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/HomePage",
+    "pages/ExtendedDisplayPage",
     "pages/RemotePage"
   ]
 }

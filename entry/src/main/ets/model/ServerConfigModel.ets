@@ -29,35 +29,45 @@ export class ServerConfigModel {
   }
 
   static decode(input: string): ServerConfigModel {
-    const source: string = input.trim()
+    let source: string = input.trim()
     if (source.length === 0) {
       return new ServerConfigModel()
     }
 
     if (source.length > 16384) return new ServerConfigModel()
-    if (source.startsWith('config=') || source.startsWith('{')) {
+    if (source.startsWith('config=')) {
+      // Official QR codes may contain either JSON or the same encoded token
+      // used by the clipboard. Older app versions also export JSON here.
+      source = source.substring(7).trim()
+    } else if (source.toLowerCase().startsWith('rustdesk://config/')) {
       try {
-        const json = JSON.parse(source.startsWith('config=') ? source.substring(7) : source) as OfficialServerConfig
-        if (typeof json.host !== 'string' ||
-          (json.key !== undefined && typeof json.key !== 'string') ||
-          (json.api !== undefined && typeof json.api !== 'string') ||
-          (json.relay !== undefined && typeof json.relay !== 'string')) return new ServerConfigModel()
-        return new ServerConfigModel(json.host, json.relay, json.api, json.key)
+        source = decodeURIComponent(source.substring('rustdesk://config/'.length)).trim()
       } catch (_e) { return new ServerConfigModel() }
     }
-    const plain: ServerConfigModel = ServerConfigModel.decodePlainConfig(source)
+    if (source.startsWith('{')) {
+      try {
+        return ServerConfigModel.fromJson(JSON.parse(source) as OfficialServerConfig)
+      } catch (_e) { return new ServerConfigModel() }
+    }
+    // Strip executable suffixes before extracting host/key/relay values.
+    // A Windows duplicate suffix is only removed for executable filenames.
+    const isExecutable: boolean = /\.exe(?:\.exe)?$/i.test(source)
+    let normalized: string = source
+    if (isExecutable) {
+      normalized = normalized.replace(/\.exe(?:\.exe)?$/i, '').replace(/(?:\s*\(\d+\))+$/, '')
+    }
+    const plain: ServerConfigModel = ServerConfigModel.decodePlainConfig(normalized)
     if (plain.isValid()) {
       return plain
     }
 
-    const normalized: string = source
-      .replace(/\.exe\.exe$/i, '')
-      .replace(/\.exe$/i, '')
+    normalized = normalized
       .replace(/-licensed---/g, '--')
       .replace(/-licensed--/g, '--')
       .replace(/-licensed-/g, '--')
-    let candidates: string[] = normalized.split('--')
-    candidates.push(normalized)
+    // Try the entire token first: '--' can also occur in Base64URL data.
+    let candidates: string[] = [normalized]
+    candidates = candidates.concat(normalized.split('--'))
     for (let candidate of candidates) {
       let parts: string[] = candidate.includes('(') ? candidate.split('(') : [candidate]
       for (let part of parts) {
@@ -68,6 +78,14 @@ export class ServerConfigModel {
       }
     }
     return new ServerConfigModel()
+  }
+
+  private static fromJson(json: OfficialServerConfig): ServerConfigModel {
+    if (json === null || typeof json !== 'object' || typeof json.host !== 'string' ||
+      (json.key !== undefined && typeof json.key !== 'string') ||
+      (json.api !== undefined && typeof json.api !== 'string') ||
+      (json.relay !== undefined && typeof json.relay !== 'string')) return new ServerConfigModel()
+    return new ServerConfigModel(json.host, json.relay, json.api, json.key)
   }
 
   private static decodePlainConfig(source: string): ServerConfigModel {
@@ -103,7 +121,7 @@ export class ServerConfigModel {
       const bytes: Uint8Array = helper.decodeSync(reversed, util.Type.BASIC_URL_SAFE)
       const decoder: util.TextDecoder = new util.TextDecoder('utf-8')
       const json: OfficialServerConfig = JSON.parse(decoder.decodeToString(bytes)) as OfficialServerConfig
-      return new ServerConfigModel(json.host, json.relay, json.api, json.key)
+      return ServerConfigModel.fromJson(json)
     } catch (_error) {
       return new ServerConfigModel()
     }
@@ -134,6 +152,15 @@ export class ServerConfigModel {
 
   isValid(): boolean {
     return this.idServer.length > 0
+  }
+
+  isValidImport(): boolean {
+    // Imported addresses and public keys cannot contain embedded whitespace or
+    // controls. Do not change validation of manually entered configurations.
+    return this.isValid() && !/[\s\x00-\x1f\x7f]/.test(this.idServer) &&
+      !/[\s\x00-\x1f\x7f]/.test(this.relayServer) &&
+      !/[\s\x00-\x1f\x7f]/.test(this.apiServer) &&
+      !/[\s\x00-\x1f\x7f]/.test(this.serverKey)
   }
 
   toQrPayload(): string {

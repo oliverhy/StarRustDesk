@@ -14,11 +14,16 @@ export interface VideoFrameInfo {
   totalBytes?: number;
   decodedFrames?: number;
   renderedFrames?: number;
+  queuedFrames?: number;
+  gameEffectiveFps?: number;
+  requestedFps?: number;
+  requestedBitratePercent?: number;
   generation?: number;
   security?: number;
   codec?: number;
   decoderMode?: number;
   delayMs?: number;
+  delaySampleSeq?: number;
   targetBitrateKb?: number;
   dynamicRange?: number;
   colorOutput?: number;
@@ -66,6 +71,7 @@ export interface NativeMouseInputEvent {
 export interface NativeKeyInputEvent {
   keyCode: number;
   action: number;
+  source?: number;
   timestamp: number;
   modifierMask: number;
   modifierValid: boolean;
@@ -97,8 +103,23 @@ export const getDiagnosticLog: () => string;
 export const clearDiagnosticLog: () => number;
 export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string,
   forceRelay?: boolean, allowInsecureFallback?: boolean, fileOnly?: boolean,
-  lockAfterDisconnect?: boolean, privacyMode?: boolean, osPassword?: string) => number;
+  lockAfterDisconnect?: boolean, privacyMode?: boolean, osPassword?: string, insecureReason?: number,
+  transportPolicy?: number) => number;
 export const disconnect: () => number;
+export const setGameMode: (enabled: boolean) => number;
+export const setHighPerformance: (enabled: boolean) => number;
+export interface GamepadInputEvent {
+  kind: number;
+  device: number;
+  control: number;
+  action: number;
+  x: number;
+  y: number;
+}
+export const startGamepadMonitor: () => number;
+export const stopGamepadMonitor: () => number;
+export const takeGamepadEvents: () => GamepadInputEvent[];
+export const setGameFps: (fps: number) => number;
 export const setPrivacyMode: (enabled: boolean) => number;
 export const getPrivacyModeState: () => number;
 export const sendKeyEvent: (keyCode: number, action: number, modifierMask?: number) => number;
@@ -156,6 +177,16 @@ export const isUsingPublicServer: () => boolean;
 export const getVideoFrame: () => VideoFrameInfo;
 export const setHdrDisplayFormats: (formats: number) => number;
 export const setSurfaceId: (surfaceId: string) => number;
+export interface SecondaryDisplayState { display: number; error: number; width: number; height: number; frames: number; token: number; }
+export const isSecondaryDisplaySupported: () => boolean;
+export const startSecondaryDisplay: (surfaceId: string, display: number) => number;
+export const stopSecondaryDisplay: (token?: number) => number;
+export const releaseSecondaryButtons: (token: number) => number;
+export const getSecondaryDisplayState: () => SecondaryDisplayState;
+export const sendSecondaryPointer: (token: number, x: number, y: number, action: number, modifiers: number) => number;
+export const setSecondaryKeyboardFocus: (token: number, focused: boolean) => number;
+export const queueSecondaryKey: (token: number, code: number, action: number, mask: number, valid: boolean, caps: number) => number;
+export const sendSecondaryWheel: (token: number, x: number, y: number, dx: number, dy: number, modifiers: number) => number;
 export const prepareSurfaceRebind: () => number;
 export const rebindSurface: (surfaceId: string) => number;
 // Atomically drains both input kinds. Overflow clears the backlog and returns

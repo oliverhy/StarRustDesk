@@ -12,6 +12,13 @@
 class XComponentRender {
 public:
     static XComponentRender& instance();
+    // Independent windows must own separate native surfaces. The singleton is
+    // retained for the existing primary renderer.
+    explicit XComponentRender(bool followSurfaceSize = false)
+        : nativeWindow_(nullptr), followSurfaceSize_(followSurfaceSize) {}
+    ~XComponentRender() { release(); }
+    XComponentRender(const XComponentRender&) = delete;
+    XComponentRender& operator=(const XComponentRender&) = delete;
 
     void setSurface(const std::string& surfaceId);
     void prepareSurfaceRebind();
@@ -27,15 +34,13 @@ public:
     void release();
 
 private:
-    XComponentRender() : nativeWindow_(nullptr) {}
-    ~XComponentRender() { release(); }
-
     bool createWindowLocked();
     void configureWindowLocked(int width, int height);
     bool renderPackedFrame(const uint8_t* data, int length, int width, int height, bool rgbaInput);
     void destroyWindowLocked();
 
     OHNativeWindow* nativeWindow_;
+    const bool followSurfaceSize_;
     std::mutex mutex_;
     std::string surfaceId_;
     uint32_t bufferWidth_{0};

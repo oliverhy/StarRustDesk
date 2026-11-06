@@ -35,6 +35,20 @@ vm.runInNewContext(compile(source), sandbox);
 const service = sandbox.exports.ConnectionService;
 service.configureInputModes(0, true);
 calls.length = 0;
+service.sendPhysicalKeyEvent(26, 0); // hardware W
+service.sendPhysicalKeyEvent(26, 0, undefined, false, 'gamepad');
+service.sendPhysicalKeyEvent(26, 1); // gamepad still holds W
+service.sendPhysicalKeyEvent(26, 1, undefined, false, 'gamepad');
+assert.deepEqual(calls.filter(c => c[0] === 'sendPhysicalKeyEvent').map(c => c.slice(1, 3)),
+  [[26, 0], [26, 1]], 'hardware and gamepad share key ownership');
+calls.length = 0;
+service.sendPhysicalKeyEvent(26, 0, undefined, false, 'gamepad');
+service.sendPhysicalKeyEvent(26, 0); // same W held by both
+service.sendPhysicalKeyEvent(26, 1, undefined, false, 'gamepad');
+service.sendPhysicalKeyEvent(26, 1);
+assert.deepEqual(calls.filter(c => c[0] === 'sendPhysicalKeyEvent').map(c => c.slice(1, 3)),
+  [[26, 0], [26, 1]], 'releasing the gamepad must not release a hardware-held key');
+calls.length = 0;
 service.sendLetterKeyEvent('d', 7, 0, 2);
 service.sendLetterKeyEvent('d', 7, 1, 0);
 assert.deepEqual(calls.filter(c => c[0] === 'sendPhysicalKeyEvent').map(c => c.slice(1, 3)), [[7, 0], [7, 1]]);
@@ -64,7 +78,7 @@ service.sendPhysicalKeyEvent(0x1e, 1, 0);
 const page = read('entry/src/main/ets/pages/RemotePage.ets');
 assert(page.includes('!this.suppressCompatibilityCursor() && (!this.relativeMouseEnabled || this.hasAuthoritativeRemoteCursor)'));
 assert(page.includes('this.relativePointerSampleValid = false'));
-assert(page.includes('ConnectionService.sendRelativeMouseDelta(remoteDeltaX, remoteDeltaY)'));
+assert(page.includes('ConnectionService.sendRelativeMouseDelta(remoteDeltaX * sensitivity, remoteDeltaY * sensitivity)'));
 const method = name => {
   const start = page.indexOf('\n  ' + name + '(');
   assert(start >= 0);
@@ -90,4 +104,12 @@ p.updatePointerFromLocal(300,200);
 assert.equal(moves.length,0,'Reentry must not jump');
 p.updatePointerFromDelta(20,10);
 assert.deepEqual(moves.pop(),[40,20], 'Delta must continue even at predicted screen edge');
+p.gameModeEnabled = true; p.gameRelativeSensitivity = 150;
+p.updatePointerFromDelta(20,10);
+assert.deepEqual(moves.pop(), [60,30], 'game sensitivity applies only to relative deltas');
+p.updatePointerFromLocal(310,210);
+assert.deepEqual(moves.pop(), [30,30], 'physical relative deltas honor game sensitivity');
+p.gameModeEnabled = false;
+p.updatePointerFromDelta(20,10);
+assert.deepEqual(moves.pop(), [40,20], 'normal mode remains unchanged');
 console.log('PASS input compatibility: scoped preferences, KVM keyboard, fractional relative movement, buttons, normal auto path');

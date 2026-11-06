@@ -29,7 +29,7 @@ test('server save publishes a refresh version', () => {
 test('server config import and export match the official clipboard format', () => {
   assert.match(serverDialog, /importServerConfigFromClipboard\(\)/);
   assert.match(serverDialog, /exportServerConfigToClipboard\(\)/);
-  assert.match(serverDialog, /RustDeskNapi\.getClipboardTextAsync\(\)/);
+  assert.match(serverDialog, /RustDeskNapi\.getClipboardTextForImportAsync\(\)/);
   assert.match(serverDialog, /RustDeskNapi\.setClipboardTextAsync\(config\.encode\(\)\)/);
   assert.match(serverConfigModel, /util\.Type\.BASIC_URL_SAFE/);
   assert.match(serverConfigModel, /replace\(\/=\+\$\/g, ''\)/);

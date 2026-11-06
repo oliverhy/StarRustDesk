@@ -13,7 +13,7 @@ const methods=['clearDisplaySwitchTransition','canAnimateDisplaySwitch','traceDi
 const flush=async()=>{for(let i=0;i<5;i++)await Promise.resolve();};
 function harness() {
  let now=0,id=0,rendered=10,received=20,generation=1,nativeResult=true,background=false,captureResolve,captureReject;
- let animateFailure=false,postFailure=false,frameWidth=1920,frameHeight=1080;
+ let animateFailure=false,postFailure=false,frameWidth=1920,frameHeight=1080,secondary=-1;
  const timers=new Map(),calls=[],logs=[],systemLogs=[],animations=[],released=[],frames=[];
  let diagnostics=true;
  const c={Date:{now:()=>now},FrameCallback:function(){},ConnectionStatus:{CONNECTED:2},Curve:{EaseInOut:1},
@@ -22,7 +22,8 @@ function harness() {
   image:{createPixelMapFromSurface:()=>new Promise((r,j)=>{calls.push('capture');captureResolve=r;captureReject=j;})},
   RemoteSessionBackgroundTask:{isAppBackground:()=>background},
   RustDeskNapi:{appendDiagnosticLog:(tag,text)=>{if(diagnostics)logs.push(text);},getOption:()=>diagnostics?'1':'0',
-   getVideoFrame:()=>({hasFrame:true,width:frameWidth,height:frameHeight,totalFrames:received,renderedFrames:rendered,generation})}};
+   getVideoFrame:()=>({hasFrame:true,width:frameWidth,height:frameHeight,totalFrames:received,renderedFrames:rendered,generation}),
+   getSecondaryDisplayState:()=>({display:secondary}),stopSecondaryDisplay:()=>{calls.push('stop-secondary');secondary=-1;return 0;}}};
  vm.runInNewContext(ts.transpile(paint+'\n'+models+'\nclass Page{'+methods.map(method).join('\n')+'}globalThis.Page=Page;'),c);
  const p=Object.assign(new c.Page(),{remotePageVisible:true,hasVideo:true,fileOnly:false,pipSurfaceOwned:false,
   connectionStatus:2,currentDisplay:0,displayCount:3,componentWidth:800,componentHeight:600,
@@ -30,6 +31,7 @@ function harness() {
   displaySwitchAnimationEpoch:0,displaySwitchTimer:-1,displaySwitchCaptureBusy:false,displaySwitchActive:false,
   displaySwitchOutgoingX:0,displaySwitchIncomingX:0,displaySwitchImageReady:false,readCurrentSurfaceId:()=> '123',
   getDisplayWidth:()=>800,getDisplayHeight:()=>450,
+  isPcDevice:()=>false,
   cancelActiveTouchGesture(){calls.push('cancel');},releaseVirtualMouseButtons(){calls.push('releaseMouse');},stopEdgeAutoPan(){},
   showFileToast:()=>calls.push('toast'),
   switchDisplay(display){calls.push('switch:'+display);p.touchSequenceDraining=false;p.ignoreTouchUntilNextDown=false;
@@ -61,11 +63,16 @@ function harness() {
   disableDiagnostics:()=>diagnostics=false,
   resolve:label=>captureResolve(pixel(label)),reject:()=>captureReject(Error('unsupported')),
   render:()=>rendered++,receive:()=>received++,generation:()=>generation++,fail:()=>nativeResult=false,background:()=>background=true,
-  animateFailure:()=>animateFailure=true,postFailure:()=>postFailure=true,frameSize:(w,h)=>{frameWidth=w;frameHeight=h;}};
+  animateFailure:()=>animateFailure=true,postFailure:()=>postFailure=true,frameSize:(w,h)=>{frameWidth=w;frameHeight=h;},
+  secondary:id=>{secondary=id;p.isPcDevice=()=>true;}};
 }
 let checks=0;
 async function test(name,fn){await fn();checks++;console.log('PASS '+name);}
 (async()=>{
+ await test('switching the primary to the secondary monitor stops the old external display first',async()=>{
+  const h=harness();h.secondary(1);const pending=h.p.requestDisplaySwitch(1);
+  assert.equal(h.calls[0], 'stop-secondary');assert(h.calls.includes('capture'));h.resolve('old');await pending;
+ });
  await test('ArkUI-wrapped Image callbacks match by snapshot token, not JavaScript identity',async()=>{
   const h=harness(),pending=h.p.requestDisplaySwitch(1);h.resolve('old');await pending;
   const old=new Proxy(h.p.displaySwitchImage,{});

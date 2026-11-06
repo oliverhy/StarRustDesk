@@ -7,6 +7,8 @@ import { connection } from '@kit.NetworkKit'
 import { BusinessError } from '@kit.BasicServicesKit'
 import { KeyboardRemapConfig, decodeKeyboardRemap, keyboardModifierBit, keyboardRemapRule } from '../model/KeyboardRemapping'
 import { RemoteSecurityOptions } from './RustDeskNapi'
+import { InsecureConsentScope, insecureReasonForError } from '../model/InsecureConsent'
+import { RemotePeerPreferences } from './RemotePeerPreferences'
 
 interface MappedHardwarePress {
   identity: number
@@ -75,6 +77,10 @@ export class ConnectionService {
   private static legacyShiftLetterCodes: number[] = []
   private static legacyShiftSymbolHidCodes: number[] = []
   private static heldHidCodes: number[] = []
+  // Keep a gamepad-mapped key held until both the gamepad and ordinary
+  // keyboard release it. Keyboard auto-repeat still follows the existing path.
+  private static keyboardOwnedHids: number[] = []
+  private static gamepadOwnedHids: number[] = []
   private static heldLegacyKeys: number[] = []
   // Retry context lives only in memory and is cleared by an explicit disconnect.
   private static retryPeer: string = ''
@@ -88,6 +94,8 @@ export class ConnectionService {
   private static relayFailureRetryCount: number = 0
   private static loginTimeoutRetryUsed: boolean = false
   private static insecureRetryUsed: boolean = false
+  private static insecureRetryReasons: number[] = []
+  private static rememberedInsecureSession: boolean = false
   private static preparationGeneration: number = 0
   private static recoveryTimer: number = -1
   private static recoveryPending: boolean = false
@@ -101,6 +109,12 @@ export class ConnectionService {
   private static sessionAuthenticated: boolean = false
   private static sessionSettings: string = ''
   private static sessionAccountRevision: number = 0
+  // Attempt policy is scoped to the current peer and never persisted as a
+  // server or security option: 0 automatic, 1 UDP preferred, 2 TCP fallback.
+  private static gameTransportEnabled: boolean = false
+  private static gameTransportAttemptPolicy: number = 0
+  private static gameTcpFallbackUsed: boolean = false
+  private static lastEstablishedTransport: number = 0
   private static fileOnly: boolean = false
   static isFileOnly(): boolean { return ConnectionService.fileOnly }
 
@@ -111,6 +125,13 @@ export class ConnectionService {
     }
     if (status === ConnectionStatus.CONNECTED) {
       ConnectionService.sessionAuthenticated = true
+      const actualTransport: number = RustDeskNapi.getConnectionTransport()
+      if (ConnectionService.gameTransportEnabled && actualTransport !== ConnectionService.lastEstablishedTransport) {
+        RustDeskNapi.appendDiagnosticLog('game-transport',
+          `authenticated route=${RustDeskNapi.getConnectionRoute()} transport=${actualTransport} ` +
+          `policy=${ConnectionService.gameTransportAttemptPolicy} fallback_used=${ConnectionService.gameTcpFallbackUsed ? 1 : 0}`)
+      }
+      ConnectionService.lastEstablishedTransport = actualTransport
       ConnectionService.recoveryStartedAt = -1
       ConnectionService.recoveryAttempts = 0
       ConnectionService.recoveryStopped = false
@@ -126,6 +147,23 @@ export class ConnectionService {
     return ConnectionService.recoveryPending || ConnectionService.recoveryAwaitingConnected || ConnectionService.manualRetryPending
   }
   static getRecoveryAttempt(): number { return ConnectionService.recoveryAttempts }
+
+  static setGameTransportEnabled(enabled: boolean): void {
+    if (enabled && !ConnectionService.gameTransportEnabled) {
+      ConnectionService.gameTcpFallbackUsed = false
+      ConnectionService.gameTransportAttemptPolicy = 1
+    } else if (!enabled) {
+      ConnectionService.gameTransportAttemptPolicy = 0
+    }
+    ConnectionService.gameTransportEnabled = enabled
+  }
+
+  static gameTransportDescription(): string {
+    if (!ConnectionService.gameTransportEnabled) return '自动'
+    if (ConnectionService.isDirectAddress(ConnectionService.retryPeer)) return 'IP 直连（TCP）'
+    if (ConnectionService.gameTcpFallbackUsed) return '已回退，优先 TCP'
+    return 'UDP 优先'
+  }
 
   private static cancelRecovery(reason: string = 'explicit_session_change'): void {
     if (ConnectionService.isReconnecting() && reason !== 'session_connected') {
@@ -151,6 +189,22 @@ export class ConnectionService {
     }
     if (ConnectionService.recoveryStopped) return false
     if (ConnectionService.recoveryPending || ConnectionService.manualRetryPending) return true
+    if (reason === 'game_udp_failed' && (!ConnectionService.gameTransportEnabled ||
+      ConnectionService.gameTcpFallbackUsed || ConnectionService.insecureRetryUsed)) {
+      ConnectionService.cancelRecovery('game_udp_fallback_unavailable')
+      return false
+    }
+    if ((reason === 'game_udp_failed' || (reason === 'transport_interrupted' &&
+      (ConnectionService.lastEstablishedTransport === 2 || ConnectionService.lastEstablishedTransport === 3))) &&
+      ConnectionService.gameTransportEnabled &&
+      !ConnectionService.gameTcpFallbackUsed && !ConnectionService.insecureRetryUsed &&
+      !ConnectionService.isDirectAddress(ConnectionService.retryPeer)) {
+      ConnectionService.gameTcpFallbackUsed = true
+      ConnectionService.gameTransportAttemptPolicy = 2
+      RustDeskNapi.appendDiagnosticLog('game-transport',
+        `fallback reason=${reason === 'game_udp_failed' ? 'udp_punch_failed' : 'udp_transport_interrupted'} ` +
+        'next=tcp_renegotiation security=unchanged')
+    }
     const now: number = Date.now()
     if (ConnectionService.recoveryStartedAt < 0) ConnectionService.recoveryStartedAt = now
     const remaining: number = 30000 - (now - ConnectionService.recoveryStartedAt)
@@ -208,6 +262,7 @@ export class ConnectionService {
     // Only fixed local messages: arbitrary peer denial text must never trigger retry.
     if (message === '远端传输中断' || message === 'Peer transport interrupted' ||
       message === '远端连接已断开' || message === 'Peer connection closed' || message === 'Reset by the peer') return 'transport_interrupted'
+    if (message === 'UDP 直连失败，准备重新协商 TCP') return 'game_udp_failed'
     if (message === '远端设备已离线' || message === 'Remote desktop is offline') return 'peer_temporarily_offline'
     if (message === 'ID 服务器未响应' || message === 'Rendezvous server did not respond' ||
       message === '中继连接失败' || message === 'Relay connection failed' || message === '连接超时' ||
@@ -243,6 +298,8 @@ export class ConnectionService {
       }
       // The previous one-time insecure consent never carries into a manual retry.
       ConnectionService.insecureRetryUsed = false
+      ConnectionService.insecureRetryReasons = []
+      ConnectionService.rememberedInsecureSession = false
       ConnectionService.rendezvousRetryCount = 0
       ConnectionService.relayFailureRetryCount = 0
       ConnectionService.loginTimeoutRetryUsed = false
@@ -305,20 +362,34 @@ export class ConnectionService {
     ConnectionService.relayFailureRetryCount = 0
     ConnectionService.loginTimeoutRetryUsed = false
     ConnectionService.insecureRetryUsed = false
+    ConnectionService.insecureRetryReasons = []
+    ConnectionService.rememberedInsecureSession = false
     ConnectionService.sessionSettings = ConnectionService.authNetworkSnapshot()
     ConnectionService.sessionAccountRevision = AccountSession.getApi().sessionRevision()
     ConnectionService.fileOnly = fileOnly
+    const preferences: RemotePeerPreferences = new RemotePeerPreferences(rendezvousServer, peerId)
+    ConnectionService.gameTransportEnabled = !fileOnly && preferences.get('game-mode') === '1'
+    preferences.dispose()
+    ConnectionService.gameTransportAttemptPolicy = ConnectionService.gameTransportEnabled ? 1 : 0
+    ConnectionService.gameTcpFallbackUsed = false
+    ConnectionService.lastEstablishedTransport = 0
+    RustDeskNapi.appendDiagnosticLog('game-transport',
+      `initial_policy=${ConnectionService.gameTransportAttemptPolicy} direct_endpoint=${direct ? 1 : 0}`)
     RustDeskNapi.appendDiagnosticLog('connection', `session_mode=${fileOnly ? 'file_transfer_only' : 'remote_control'} generation=${generation}`)
     RustDeskNapi.appendDiagnosticLog('remote-security',
       `session_options lock=${security.lockAfterDisconnect} privacy=${security.privacyMode} ` +
       `auto_unlock=${security.autoUnlock} os_password_configured=${ConnectionService.retryOsPassword.length > 0}`)
+    // Do not carry a previous peer's transient game policy into this session.
+    RustDeskNapi.setGameMode(ConnectionService.gameTransportEnabled)
+    RustDeskNapi.setHighPerformance(false)
     RustDeskNapi.setPerformancePreset(performancePreset)
     let result: number
     if (rendezvousServer.length > 0) {
       result = RustDeskNapi.connectWithServer(peerId, password, rendezvousServer, relayServer, false, false, fileOnly,
-        security, ConnectionService.retryOsPassword)
+        security, ConnectionService.retryOsPassword, 0, ConnectionService.gameTransportAttemptPolicy)
     } else {
-      result = RustDeskNapi.connect(peerId, password, false, fileOnly, security, ConnectionService.retryOsPassword)
+      result = RustDeskNapi.connect(peerId, password, false, fileOnly, security, ConnectionService.retryOsPassword,
+        0, ConnectionService.gameTransportAttemptPolicy)
     }
     let status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
     RemoteSessionBackgroundTask.syncForConnectionStatus(status)
@@ -355,6 +426,10 @@ export class ConnectionService {
     ConnectionService.cancelRecovery()
     ConnectionService.manualRetryError = ''
     ConnectionService.sessionAuthenticated = false
+    ConnectionService.gameTransportEnabled = false
+    ConnectionService.gameTransportAttemptPolicy = 0
+    ConnectionService.gameTcpFallbackUsed = false
+    ConnectionService.lastEstablishedTransport = 0
     ConnectionService.preparationGeneration++
     ConnectionService.relativeMouse = false
     ConnectionService.retryPeer = ''
@@ -405,6 +480,19 @@ export class ConnectionService {
     }
 
     const route: number = RustDeskNapi.getConnectionRoute()
+    if (message === 'UDP 直连失败，准备重新协商 TCP' && ConnectionService.gameTransportEnabled &&
+      !ConnectionService.gameTcpFallbackUsed && !ConnectionService.insecureRetryUsed &&
+      !RemoteSessionBackgroundTask.isAppBackground() &&
+      ConnectionService.sessionAccountRevision === AccountSession.getApi().sessionRevision() &&
+      ConnectionService.sessionSettings === ConnectionService.authNetworkSnapshot()) {
+      ConnectionService.gameTcpFallbackUsed = true
+      ConnectionService.gameTransportAttemptPolicy = 2
+      RustDeskNapi.appendDiagnosticLog('game-transport', 'fallback reason=udp_punch_failed next=tcp_renegotiation security=unchanged')
+      if (ConnectionService.restartConnection(false, 'game_udp_failed', 1, 1)) {
+        return 'UDP 直连失败，正在尝试 TCP 或中继'
+      }
+      return ''
+    }
     if (message === '远端登录超时' && !ConnectionService.loginTimeoutRetryUsed &&
       !ConnectionService.sessionAuthenticated && !ConnectionService.insecureRetryUsed &&
       !RemoteSessionBackgroundTask.isAppBackground()) {
@@ -453,12 +541,14 @@ export class ConnectionService {
     ConnectionService.releaseModifiers()
     RustDeskNapi.appendDiagnosticLog('connection-recovery',
       `automatic_retry reason=${reason} attempt=${attempt} maximum=${maximum > 0 ? maximum.toString() : 'time_window'} ` +
-      `previous_route=${RustDeskNapi.getConnectionRoute()} force_relay=${forceRelay ? 1 : 0}`)
+      `previous_route=${RustDeskNapi.getConnectionRoute()} force_relay=${forceRelay ? 1 : 0} ` +
+      `transport_policy=${ConnectionService.gameTransportAttemptPolicy}`)
     RustDeskNapi.disconnect()
     ConnectionService.recordNetworkSnapshot()
     const result: number = RustDeskNapi.connectWithServer(ConnectionService.retryPeer,
       ConnectionService.retryPassword, ConnectionService.retryRendezvous, ConnectionService.retryRelay, forceRelay,
-      false, ConnectionService.fileOnly, ConnectionService.retrySecurity, ConnectionService.retryOsPassword)
+      false, ConnectionService.fileOnly, ConnectionService.retrySecurity, ConnectionService.retryOsPassword,
+      0, ConnectionService.gameTransportAttemptPolicy)
     ConnectionService.resetTransientInputState()
     const status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
     RemoteSessionBackgroundTask.syncForConnectionStatus(status)
@@ -467,35 +557,114 @@ export class ConnectionService {
     return result === 0
   }
 
+  static retryUnstableGameUdp(transferActive: boolean, securityState: number, beforeReconnect: () => void): boolean {
+    const transport: number = RustDeskNapi.getConnectionTransport()
+    if (!ConnectionService.gameTransportEnabled || ConnectionService.gameTcpFallbackUsed ||
+      !ConnectionService.sessionAuthenticated || ConnectionService.fileOnly || ConnectionService.insecureRetryUsed ||
+      securityState !== 1 || transferActive || ConnectionService.retrySecurity.lockAfterDisconnect ||
+      ConnectionService.retrySecurity.privacyMode || RustDeskNapi.getPrivacyModeState() > 0 ||
+      RemoteSessionBackgroundTask.isAppBackground() ||
+      ConnectionService.isReconnecting() || ConnectionService.isDirectAddress(ConnectionService.retryPeer) ||
+      (transport !== 2 && transport !== 3) || RustDeskNapi.getConnectionStatus() !== ConnectionStatus.CONNECTED ||
+      ConnectionService.sessionAccountRevision !== AccountSession.getApi().sessionRevision() ||
+      ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot()) return false
+    // Release the page-owned mouse/gamepad buttons while the old session is
+    // still alive. If that fails, do not initiate a discretionary reconnect.
+    try { beforeReconnect() } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('game-transport', 'fallback_deferred reason=input_release_failed')
+      return false
+    }
+    ConnectionService.gameTcpFallbackUsed = true
+    ConnectionService.gameTransportAttemptPolicy = 2
+    ConnectionService.recoveryStartedAt = Date.now()
+    ConnectionService.recoveryAttempts = 1
+    RustDeskNapi.appendDiagnosticLog('game-transport',
+      'fallback reason=sustained_high_peer_delay next=tcp_renegotiation security=unchanged')
+    ConnectionService.recoveryAwaitingConnected = ConnectionService.restartConnection(false, 'game_udp_unstable', 1, 1)
+    return ConnectionService.recoveryAwaitingConnected
+  }
+
+  static reconnectForGameMode(beforeReconnect: () => void): boolean {
+    if (!ConnectionService.gameTransportEnabled || !ConnectionService.sessionAuthenticated || ConnectionService.fileOnly ||
+      ConnectionService.insecureRetryUsed || ConnectionService.retrySecurity.lockAfterDisconnect ||
+      ConnectionService.retrySecurity.privacyMode || RustDeskNapi.getPrivacyModeState() > 0 ||
+      ConnectionService.isDirectAddress(ConnectionService.retryPeer) || RemoteSessionBackgroundTask.isAppBackground() ||
+      ConnectionService.isReconnecting() || RustDeskNapi.getConnectionStatus() !== ConnectionStatus.CONNECTED ||
+      ConnectionService.sessionAccountRevision !== AccountSession.getApi().sessionRevision() ||
+      ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot()) return false
+    try { beforeReconnect() } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('game-transport', 'manual_reconnect_cancelled reason=input_release_failed')
+      return false
+    }
+    ConnectionService.gameTcpFallbackUsed = false
+    ConnectionService.gameTransportAttemptPolicy = 1
+    ConnectionService.recoveryStartedAt = Date.now()
+    ConnectionService.recoveryAttempts = 1
+    RustDeskNapi.appendDiagnosticLog('game-transport', 'manual_reconnect policy=udp_preferred security=unchanged')
+    ConnectionService.recoveryAwaitingConnected = ConnectionService.restartConnection(false, 'game_mode_requested', 1, 1)
+    return ConnectionService.recoveryAwaitingConnected
+  }
+
   private static isDirectAddress(peer: string): boolean {
     return /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(peer) || peer.includes(':')
   }
 
   static canRetryWithoutEncryption(): boolean {
     const message: string = RustDeskNapi.getLastConnectionError()
-    return !ConnectionService.insecureRetryUsed && ConnectionService.retryPeer.length > 0 &&
+    return ConnectionService.retryPeer.length > 0 &&
       RustDeskNapi.getConnectionStatus() === ConnectionStatus.FAILED &&
-      (message === '服务器密钥无效' || message === 'Server key is invalid')
+      insecureReasonForError(message) !== 0 &&
+      !ConnectionService.insecureRetryReasons.includes(insecureReasonForError(message))
   }
 
-  static retryWithoutEncryption(): boolean {
+  static isRememberedInsecureSession(): boolean { return ConnectionService.rememberedInsecureSession }
+
+  static insecureConsentScope(): InsecureConsentScope | undefined {
+    if (!ConnectionService.canRetryWithoutEncryption() ||
+      ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot() ||
+      ConnectionService.sessionAccountRevision !== AccountSession.getApi().sessionRevision()) return undefined
+    return { peer: ConnectionService.retryPeer, network: ConnectionService.sessionSettings,
+      reason: insecureReasonForError(RustDeskNapi.getLastConnectionError()),
+      generation: ConnectionService.preparationGeneration }
+  }
+
+  static isInsecureConsentScopeCurrent(scope: InsecureConsentScope): boolean {
+    const current = ConnectionService.insecureConsentScope()
+    return current !== undefined && current.peer === scope.peer && current.network === scope.network &&
+      current.reason === scope.reason && current.generation === scope.generation
+  }
+
+  static retryWithoutEncryption(expectedReason: number = 0, remembered: boolean = false): boolean {
     if (!ConnectionService.canRetryWithoutEncryption()) {
       return false
     }
+    const reason: number = insecureReasonForError(RustDeskNapi.getLastConnectionError())
+    if (expectedReason !== 0 && expectedReason !== reason) return false
+    // Consent applies to the network/account configuration that produced the
+    // warning, never to a different server or account selected in the meantime.
+    if (ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot() ||
+      ConnectionService.sessionAccountRevision !== AccountSession.getApi().sessionRevision()) {
+      ConnectionService.manualRetryError = '服务器配置或账号已改变，请返回首页重新连接'
+      RustDeskNapi.appendDiagnosticLog('connection-security',
+        'insecure_fallback_cancelled reason=account_or_network_changed')
+      return false
+    }
     ConnectionService.insecureRetryUsed = true
+    ConnectionService.insecureRetryReasons.push(reason)
+    ConnectionService.rememberedInsecureSession = remembered
     ConnectionService.releaseModifiers()
     RustDeskNapi.appendDiagnosticLog('connection-security',
-      'user_approved_insecure_fallback scope=current_attempt_only')
+      `insecure_fallback_approved source=${remembered ? 'remembered' : 'explicit'} reason=${reason}`)
     RustDeskNapi.disconnect()
     ConnectionService.recordNetworkSnapshot()
     let result: number
     if (ConnectionService.retryRendezvous.length > 0) {
       result = RustDeskNapi.connectWithServer(ConnectionService.retryPeer, ConnectionService.retryPassword,
         ConnectionService.retryRendezvous, ConnectionService.retryRelay, false, true, ConnectionService.fileOnly,
-        ConnectionService.retrySecurity, ConnectionService.retryOsPassword)
+        ConnectionService.retrySecurity, ConnectionService.retryOsPassword, reason)
     } else {
       result = RustDeskNapi.connect(ConnectionService.retryPeer, ConnectionService.retryPassword, true,
-        ConnectionService.fileOnly, ConnectionService.retrySecurity, ConnectionService.retryOsPassword)
+        ConnectionService.fileOnly, ConnectionService.retrySecurity, ConnectionService.retryOsPassword, reason)
     }
     ConnectionService.resetTransientInputState()
     RemoteSessionBackgroundTask.syncForConnectionStatus(
@@ -636,7 +805,23 @@ export class ConnectionService {
     RustDeskNapi.sendKeyEvent(keyCode, action, ConnectionService.getKeyModifierMask())
   }
 
-  static sendPhysicalKeyEvent(hidCode: number, action: number, eventModifierMask?: number, maskAlreadyMapped: boolean = false): void {
+  static sendPhysicalKeyEvent(hidCode: number, action: number, eventModifierMask?: number,
+    maskAlreadyMapped: boolean = false, source: string = 'keyboard'): void {
+    const isGamepad: boolean = source === 'gamepad'
+    const own: number[] = isGamepad ? ConnectionService.gamepadOwnedHids : ConnectionService.keyboardOwnedHids
+    const other: number[] = isGamepad ? ConnectionService.keyboardOwnedHids : ConnectionService.gamepadOwnedHids
+    const index: number = own.indexOf(hidCode)
+    if (action === 0) {
+      if (index >= 0) {
+        if (isGamepad) return
+      } else {
+        own.push(hidCode)
+        if (other.includes(hidCode)) return
+      }
+    } else if (action === 1) {
+      if (index >= 0) own.splice(index, 1)
+      if (other.includes(hidCode)) return
+    }
     let modifierMask: number = ConnectionService.getEffectiveKeyModifierMask(eventModifierMask, maskAlreadyMapped)
     if (ConnectionService.useExplicitKeyboardPath()) {
       ConnectionService.trackHeldKey(ConnectionService.heldHidCodes, hidCode, action)
@@ -713,8 +898,8 @@ export class ConnectionService {
     ConnectionService.trackHeldKey(ConnectionService.heldLegacyKeys, characterCode, action)
     let result: number = RustDeskNapi.sendKeyEvent(characterCode, action, modifierMask)
     hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
-      'InputTrace letter char=%{public}s action=%{public}d mask=%{public}d result=%{public}d',
-      character, action, modifierMask, result)
+      'InputTrace letter action=%{public}d mask=%{public}d result=%{public}d',
+      action, modifierMask, result)
   }
 
   static syncHeldModifierState(control: boolean, shift: boolean, alt: boolean, meta: boolean = false): void {
@@ -830,6 +1015,8 @@ export class ConnectionService {
       RustDeskNapi.sendKeyEvent(key, 1, ConnectionService.getKeyModifierMask())
     }
     ConnectionService.heldHidCodes = []
+    ConnectionService.keyboardOwnedHids = []
+    ConnectionService.gamepadOwnedHids = []
     ConnectionService.heldLegacyKeys = []
     ConnectionService.legacyShiftLetterHidCodes = []
     ConnectionService.legacyShiftLetterCodes = []
@@ -919,6 +1106,8 @@ export class ConnectionService {
     ConnectionService.legacyShiftLetterCodes = []
     ConnectionService.legacyShiftSymbolHidCodes = []
     ConnectionService.heldHidCodes = []
+    ConnectionService.keyboardOwnedHids = []
+    ConnectionService.gamepadOwnedHids = []
     ConnectionService.heldLegacyKeys = []
   }
 

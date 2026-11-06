@@ -1,11 +1,17 @@
 import rustdeskNapi from 'libentry.so'
-import { pasteboard, deviceInfo } from '@kit.BasicServicesKit';
+import { pasteboard, deviceInfo, BusinessError } from '@kit.BasicServicesKit';
 import { RELEASE_NOTES_VERSION, RELEASE_NOTES_BUILD } from '../widget/ReleaseNotesDialog'
 
 export interface RemoteSecurityOptions {
   lockAfterDisconnect: boolean
   privacyMode: boolean
   autoUnlock: boolean
+}
+
+export interface ClipboardImportReadResult {
+  text: string
+  failed: boolean
+  code: number
 }
 
 const systemPasteboard: pasteboard.SystemPasteboard = pasteboard.getSystemPasteboard()
@@ -26,15 +32,29 @@ export interface VideoFrameInfo {
   totalBytes?: number
   decodedFrames?: number
   renderedFrames?: number
+  queuedFrames?: number
+  gameEffectiveFps?: number
+  requestedFps?: number
+  requestedBitratePercent?: number
   generation?: number
   security?: number
   codec?: number
   decoderMode?: number
   delayMs?: number
+  delaySampleSeq?: number
   targetBitrateKb?: number
   dynamicRange?: number
   colorOutput?: number
   bitDepth?: number
+}
+
+export interface GamepadInputEvent {
+  kind: number
+  device: number
+  control: number
+  action: number
+  x: number
+  y: number
 }
 
 export interface RemoteCursorPosition {
@@ -69,9 +89,19 @@ export interface NativeMouseInputEvent {
   surfaceHeight?: number
 }
 
+export interface SecondaryDisplayState {
+  display: number
+  error: number
+  width: number
+  height: number
+  frames: number
+  token: number
+}
+
 export interface NativeKeyInputEvent {
   keyCode: number
   action: number
+  source?: number
   timestamp: number
   modifierMask: number
   modifierValid: boolean
@@ -174,17 +204,17 @@ export class RustDeskNapi {
 
   static connect(peerId: string, password: string, allowInsecureFallback: boolean = false, fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = ''): number {
+    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0): number {
     return rustdeskNapi.connect(peerId, password, '', '', false, allowInsecureFallback, fileOnly,
-      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '')
+      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy)
   }
 
   static connectWithServer(peerId: string, password: string, rendezvousServer: string, relayServer: string,
     forceRelay: boolean = false, allowInsecureFallback: boolean = false, fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = ''): number {
+    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0): number {
     return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer, forceRelay, allowInsecureFallback, fileOnly,
-      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '')
+      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy)
   }
 
   static restartVideoDecoder(): number {
@@ -193,6 +223,22 @@ export class RustDeskNapi {
 
   static setPerformancePreset(preset: string): number {
     return (rustdeskNapi as ESObject).setPerformancePreset(preset)
+  }
+
+  static setGameMode(enabled: boolean): number {
+    return rustdeskNapi.setGameMode(enabled)
+  }
+
+  static setHighPerformance(enabled: boolean): number {
+    return rustdeskNapi.setHighPerformance(enabled)
+  }
+
+  static startGamepadMonitor(): number { return rustdeskNapi.startGamepadMonitor() }
+  static stopGamepadMonitor(): number { return rustdeskNapi.stopGamepadMonitor() }
+  static takeGamepadEvents(): GamepadInputEvent[] { return rustdeskNapi.takeGamepadEvents() }
+
+  static setGameFps(fps: number): number {
+    return rustdeskNapi.setGameFps(fps)
   }
 
   static disconnect(): number {
@@ -259,6 +305,15 @@ export class RustDeskNapi {
   // Use exclusively: legacy drains consume from the same queue.
   static takeNativeInputEvents(): NativeInputEvent[] {
     return (rustdeskNapi as ESObject).takeNativeInputEvents() as NativeInputEvent[]
+  }
+
+  static setSecondaryKeyboardFocus(token: number, focused: boolean): number {
+    return (rustdeskNapi as ESObject).setSecondaryKeyboardFocus(token, focused)
+  }
+
+  static queueSecondaryKey(token: number, code: number, action: number, mask: number,
+    valid: boolean, caps: number): number {
+    return (rustdeskNapi as ESObject).queueSecondaryKey(token, code, action, mask, valid, caps)
   }
 
   // Deprecated: unordered across devices; throws ERR_NATIVE_INPUT_RESET on overflow.
@@ -368,14 +423,37 @@ export class RustDeskNapi {
     return ''
   }
 
+  // Import needs to distinguish an empty clipboard from an OS read failure.
+  // Keep the existing remote clipboard API's behaviour unchanged.
+  static async getClipboardTextForImportAsync(): Promise<ClipboardImportReadResult> {
+    try {
+      const data: pasteboard.PasteData = await systemPasteboard.getData()
+      const recordCount: number = data.getRecordCount()
+      for (let i: number = 0; i < recordCount; i++) {
+        try {
+          const text: string = RustDeskNapi.getPlainTextFromRecord(data.getRecord(i))
+          if (text.length > 0) return { text: text, failed: false, code: 0 }
+        } catch (_recordError) {
+          // A non-text record must not prevent reading a later text record.
+        }
+      }
+      return { text: '', failed: false, code: 0 }
+    } catch (error) {
+      const code = (error as BusinessError)?.code
+      return { text: '', failed: true, code: typeof code === 'number' && Number.isFinite(code) ? code : 0 }
+    }
+  }
+
   private static getPlainTextFromRecord(record: pasteboard.PasteDataRecord): string {
-    if (record.plainText.length > 0) {
-      return record.plainText
+    const plainText: string = record.plainText ?? ''
+    if (plainText.length > 0) {
+      return plainText
     }
-    if (record.htmlText.length > 0) {
-      return RustDeskNapi.htmlToText(record.htmlText)
+    const htmlText: string = record.htmlText ?? ''
+    if (htmlText.length > 0) {
+      return RustDeskNapi.htmlToText(htmlText)
     }
-    return record.toPlainText()
+    return record.toPlainText() ?? ''
   }
 
   private static htmlToText(html: string): string {
@@ -481,6 +559,28 @@ export class RustDeskNapi {
 
   static setSurfaceId(surfaceId: string): number {
     return rustdeskNapi.setSurfaceId(surfaceId)
+  }
+
+  static isSecondaryDisplaySupported(): boolean {
+    try { return rustdeskNapi.isSecondaryDisplaySupported(); } catch (_error) { return false; }
+  }
+
+  static startSecondaryDisplay(surfaceId: string, display: number): number {
+    return rustdeskNapi.startSecondaryDisplay(surfaceId, display)
+  }
+
+  static stopSecondaryDisplay(token: number = 0): number { return rustdeskNapi.stopSecondaryDisplay(token) }
+
+  static releaseSecondaryButtons(token: number): number { return rustdeskNapi.releaseSecondaryButtons(token) }
+
+  static getSecondaryDisplayState(): SecondaryDisplayState { return rustdeskNapi.getSecondaryDisplayState() }
+
+  static sendSecondaryPointer(token: number, x: number, y: number, action: number, modifiers: number): number {
+    return rustdeskNapi.sendSecondaryPointer(token, x, y, action, modifiers)
+  }
+
+  static sendSecondaryWheel(token: number, x: number, y: number, dx: number, dy: number, modifiers: number): number {
+    return rustdeskNapi.sendSecondaryWheel(token, x, y, dx, dy, modifiers)
   }
 
   static setHdrDisplayFormats(formats: number): number {

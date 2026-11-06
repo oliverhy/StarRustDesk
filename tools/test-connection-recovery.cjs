@@ -6,6 +6,10 @@ const assert = require('node:assert/strict');
 const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+const modelContext = vm.createContext({exports:{}});
+vm.runInContext(ts.transpileModule(read('entry/src/main/ets/model/InsecureConsent.ets'),
+  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021}}).outputText, modelContext);
+const insecureReasonForError = modelContext.exports.insecureReasonForError;
 function slice(file, start, end) {
   const source = read(file);
   const a = source.indexOf(start), b = source.indexOf(end, a);
@@ -119,26 +123,29 @@ test('static desktop with no new input frames does not restart a healthy decoder
   now=140000; video.checkDecoderHealth(idle);
   assert.equal(restart,before);
 });
-let route=1, status=2, forcedConnections=0, normalConnections=0, insecureConnections=0, disconnects=0;
+let route=1, status=2, forcedConnections=0, normalConnections=0, insecureConnections=0, disconnects=0, approvedReason=0;
 let lastConnectionError='';
 let serviceBackground=false;
 const serviceNapi={getConnectionStatus:()=>status,getConnectionRoute:()=>route,
   getLastConnectionError:()=>lastConnectionError,
   disconnect:()=>{disconnects++;}, appendDiagnosticLog:()=>{},
-  connectWithServer:(id,pw,rv,relay,forced,insecure=false)=>{
-    if(insecure){assert.equal(forced,false);insecureConnections++;}
+  connectWithServer:(id,pw,rv,relay,forced,insecure=false,fileOnly,security,osPassword,reason=0)=>{
+    if(insecure){assert.equal(forced,false);insecureConnections++;approvedReason=reason;}
     else if(forced){forcedConnections++;}
     else{normalConnections++;}
     return 0;
   },
-  connect:(id,pw,insecure=false)=>{assert.equal(insecure,true);insecureConnections++;return 0;}};
+  connect:(id,pw,insecure=false,fileOnly,security,osPassword,reason=0)=>{
+    assert.equal(insecure,true);insecureConnections++;approvedReason=reason;return 0;}};
 const Service = subject(slice('entry/src/main/ets/service/ConnectionService.ets',
   '  static disconnect():', '  static sendKeyEvent(').replaceAll('ConnectionService','Subject'), {
-  RustDeskNapi:serviceNapi,ConnectionStatus:{CONNECTING:1,CONNECTED:2,FAILED:3},
+  RustDeskNapi:serviceNapi,ConnectionStatus:{CONNECTING:1,CONNECTED:2,FAILED:3},insecureReasonForError,
+  AccountSession:{getApi:()=>({sessionRevision:()=>1})},
   RemoteSessionBackgroundTask:{stop:()=>{},syncForConnectionStatus:()=>{},isAppBackground:()=>serviceBackground},
 });
 Object.assign(Service,{retryPeer:'test',retryPassword:'test-only',relayRetryUsed:false,
   cancelRecovery:()=>{},
+  sessionSettings:'unchanged',sessionAccountRevision:1,authNetworkSnapshot:()=>'unchanged',insecureRetryReasons:[],
   releaseModifiers:()=>{},recordNetworkSnapshot:()=>{},resetTransientInputState:()=>{}});
 test('direct retry forces relay exactly once',()=>{
   assert.equal(Service.retryDirectViaRelay('test'),true);
@@ -230,17 +237,105 @@ for (const endpoint of ['192.168.2.123', '192.168.2.123:21118', '[2001:db8::1]:2
 test('invalid server key downgrade requires explicit one-time retry',()=>{
   status=3; route=2; lastConnectionError='服务器密钥无效';
   Object.assign(Service,{retryPeer:'test-peer',retryPassword:'test-only',retryRendezvous:'server',
-    retryRelay:'relay',insecureRetryUsed:false});
+    retryRelay:'relay',insecureRetryUsed:false,insecureRetryReasons:[]});
   assert.equal(Service.canRetryWithoutEncryption(),true);
   assert.equal(Service.retryWithoutEncryption(),true);
   assert.equal(Service.canRetryWithoutEncryption(),false);
   assert.equal(Service.retryWithoutEncryption(),false);
   assert.equal(insecureConnections,1);
+  assert.equal(approvedReason,1);
   assert.equal(Service.retryPassword,'test-only');
 });
 test('other handshake errors never offer insecure downgrade',()=>{
   status=3; lastConnectionError='与远端安全握手失败'; Service.insecureRetryUsed=false;
   assert.equal(Service.canRetryWithoutEncryption(),false);
+});
+for (const message of ['远端身份签名缺失，无法建立加密连接', '直连无法验证远端身份，连接未加密']) {
+  test(`${message}: explicit consent is required once`,()=>{
+    status=3; lastConnectionError=message;
+    Object.assign(Service,{retryPeer:'test-peer',retryPassword:'test-only',retryRendezvous:'server',
+      retryRelay:'relay',insecureRetryUsed:false,insecureRetryReasons:[]});
+    const before=insecureConnections;
+    assert.equal(Service.canRetryWithoutEncryption(),true);
+    assert.equal(Service.retryRecoverableConnectionFailure(message),'');
+    assert.equal(insecureConnections,before);
+    assert.equal(Service.retryWithoutEncryption(),true);
+    assert.equal(insecureConnections,before+1);
+    assert.equal(approvedReason,insecureReasonForError(message));
+    assert.equal(Service.retryWithoutEncryption(),false);
+  });
+}
+test('changed network or account cannot reuse an earlier insecure approval',()=>{
+  status=3; lastConnectionError='远端身份签名缺失，无法建立加密连接';
+  Object.assign(Service,{retryPeer:'test-peer',insecureRetryUsed:false,insecureRetryReasons:[],sessionSettings:'different',sessionAccountRevision:1});
+  const before=insecureConnections;
+  assert.equal(Service.retryWithoutEncryption(),false); assert.equal(insecureConnections,before);
+  assert.equal(Service.manualRetryError,'服务器配置或账号已改变，请返回首页重新连接');
+  Object.assign(Service,{sessionSettings:'unchanged',sessionAccountRevision:2});
+  assert.equal(Service.retryWithoutEncryption(),false); assert.equal(insecureConnections,before);
+  Object.assign(Service,{sessionAccountRevision:1,manualRetryError:''});
+});
+test('reason change after an approved retry requires a separate approval',()=>{
+  status=3; lastConnectionError='服务器密钥无效';
+  Object.assign(Service,{retryPeer:'test-peer',retryRendezvous:'server',insecureRetryUsed:true,insecureRetryReasons:[2]});
+  const before=insecureConnections;
+  assert.equal(Service.canRetryWithoutEncryption(),true);
+  assert.equal(Service.retryWithoutEncryption(2,true),false);
+  assert.equal(insecureConnections,before);
+  assert.equal(Service.retryWithoutEncryption(1,false),true);
+  assert.equal(approvedReason,1);
+});
+test('scope validation rejects peer, risk, network, account and attempt changes',()=>{
+  status=3; lastConnectionError='远端身份签名缺失，无法建立加密连接';
+  Object.assign(Service,{retryPeer:'test-peer',insecureRetryUsed:false,insecureRetryReasons:[],
+    sessionSettings:'unchanged',sessionAccountRevision:1,preparationGeneration:7});
+  const scope=Service.insecureConsentScope(); assert(scope); assert.equal(scope.reason,2);
+  assert.equal(Service.isInsecureConsentScopeCurrent(scope),true);
+  Service.retryPeer='another'; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.retryPeer='test-peer';
+  lastConnectionError='服务器密钥无效'; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false);
+  lastConnectionError='远端身份签名缺失，无法建立加密连接';
+  Service.preparationGeneration++; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.preparationGeneration--;
+  Service.sessionSettings='changed'; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.sessionSettings='unchanged';
+  Service.sessionAccountRevision=2; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.sessionAccountRevision=1;
+});
+let riskPrompt, approvals=0, rejections=0;
+const Prompt = subject(slice('entry/src/main/ets/pages/RemotePage.ets',
+  '  showInsecureFallbackPrompt(scope:', '  async acceptInsecureConnection('), {
+  InsecureConnectionDialog:value=>value,
+  CustomDialogController:class { constructor(options){riskPrompt=options.builder;} open(){} },
+  INSECURE_DIRECT_ENDPOINT:3,INSECURE_MISSING_SIGNATURE:2,DialogAlignment:{Center:0},
+  RustDeskNapi:{appendDiagnosticLog:()=>{rejections++;}},
+});
+test('security prompt distinguishes direct and missing-signature paths; cancel never approves',()=>{
+  const page=Object.assign(new Prompt(),{uiLanguage:'zh',acceptInsecureConnection:()=>{approvals++;}});
+  page.showInsecureFallbackPrompt({reason:2});
+  assert.equal(riskPrompt.title,'无法验证远端身份');
+  assert.match(riskPrompt.message,/文件可能被窃听或篡改/);
+  riskPrompt.onCancel(); assert.equal(rejections,1); assert.equal(approvals,0);
+  page.showInsecureFallbackPrompt({reason:3});
+  assert.equal(riskPrompt.title,'直连未加密');
+  assert.match(riskPrompt.message,/信任网络及远端设备/);
+  riskPrompt.onContinue(true); assert.equal(approvals,1);
+});
+test('file-only signature failures reach the same consent prompt without a success race',()=>{
+  const cpp=read('entry/src/main/cpp/napi_init.cpp');
+  const branch=cpp.slice(cpp.indexOf('text == "file-only session security_signature_missing"'),
+    cpp.indexOf('text == "file-only session security_key_invalid"'));
+  assert.match(branch,/远端身份签名缺失，无法建立加密连接/);
+  assert.match(branch,/g_lastConnectionResult\.store\(-34\)/);
+  assert.match(branch,/g_connectionStatus\.store\(3\)/);
+  const start=cpp.indexOf('"rust_connect_finished generation="');
+  const result=cpp.slice(start,cpp.indexOf('}).detach();',start));
+  assert.match(result,/if \(result != 0\)\s*\{\s*g_lastConnectionResult\.store\(result\)/);
+});
+test('account-server handshake failures never offer insecure downgrade',()=>{
+  const cpp = read('entry/src/main/cpp/napi_init.cpp');
+  for (const code of [-29, -30, -31, -32, -33]) {
+    const message = cpp.match(new RegExp(`case ${code}: return "([^"]+)";`))?.[1];
+    assert(message, `missing handshake result ${code}`);
+    status=3; lastConnectionError=message; Service.insecureRetryUsed=false;
+    assert.equal(Service.canRetryWithoutEncryption(),false, `unsafe retry for ${code}`);
+  }
 });
 test('rendezvous license mismatch has a distinct message and cannot downgrade',()=>{
   const cpp = read('entry/src/main/cpp/napi_init.cpp');
@@ -254,7 +349,7 @@ test('all connection error codes have Chinese messages',()=>{
   const mapping = cpp.slice(cpp.indexOf('static std::string ConnectionResultToMessage('),
     cpp.indexOf('static napi_value Connect(', cpp.indexOf('static std::string ConnectionResultToMessage(')));
   const cases = [...mapping.matchAll(/case (-\d+): return "([^"]+)";/g)];
-  assert.equal(cases.length, 27);
+  assert.equal(cases.length, 35);
   for (const [, code, message] of cases) {
     assert.match(message, /[\u4e00-\u9fff]/, `code ${code}`);
   }
@@ -267,11 +362,13 @@ const Poller = subject(slice('entry/src/main/ets/pages/RemotePage.ets',
   slice('entry/src/main/ets/pages/RemotePage.ets',
   '  resetRemoteViewportForSession():', '  checkFirstVideoHealth('), {
   RustDeskNapi:{getVideoFrame:()=>polledFrame,appendDiagnosticLog:()=>{}},
+  ConnectionService:{isRememberedInsecureSession:()=>false},
   setTimeout:fn=>{scheduled=fn;return 1;},ConnectionStatus:{CONNECTED:2},
 });
 const poller=Object.assign(new Poller(),{framePollGeneration:0,videoSessionGeneration:-1,
   stopFramePolling(){this.framePollGeneration++;}, resetViewportTransform(){},
   physicalMouseDeduplicator:{clear(){}},remoteWheel:{reset(){}},resetPointerDiagnostics(){},clearKeyboardInputAnchor(){},
+  gameModePolicy:{reset(){}},gameTransportHealth:{reset(){}},updateGameModePolicy(){},updateGameTransportHealth(){},
   checkFirstVideoHealth(){},checkDecoderHealth(){},updateStats(){},
   scheduleSurfaceRebindIfSizeChanged(){}});
 test('new session resets old successful frame and statistics',()=>{

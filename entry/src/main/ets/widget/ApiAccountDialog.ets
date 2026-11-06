@@ -4,6 +4,7 @@ import { common } from '@kit.AbilityKit';
 import { ApiAddressBookImport } from '../service/ApiAddressBookImport';
 import { RustDeskNapi } from '../service/RustDeskNapi';
 import { ApiAccountAction } from './ApiAccountAction';
+import { ApiOAuthProviderButton } from './ApiOAuthProviderButton';
 import { ApiBookSync, BookSyncPlan, BookSyncChange } from '../service/ApiBookSync';
 
 @CustomDialog
@@ -14,6 +15,7 @@ export struct ApiAccountDialog {
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true;
   @State server: string = '';
   @State provider: string = 'official';
+  @State loginMode: string = 'public';
   @State username: string = '';
   @State password: string = '';
   @State code: string = '';
@@ -29,6 +31,7 @@ export struct ApiAccountDialog {
   @State selected: string[] = [];
   @State bookIndex: number = -1;
   @State loginOptions: ApiLoginOption[] = [];
+  @State loginOptionsState: string = 'idle';
   @State webWaiting: boolean = false;
   @State syncPlan: BookSyncPlan | undefined = undefined;
   @State preferLocal: boolean = false;
@@ -37,13 +40,22 @@ export struct ApiAccountDialog {
   @State editingTags: string = '';
   private webTimer: number = -1;
   private webAttempt: number = 0;
+  private webRetryCount: number = 0;
   private api: RustDeskApiService = AccountSession.getApi();
   private alive: boolean = true;
+  private proServerDraft: string = '';
+  private thirdPartyServerDraft: string = '';
+  private proHttpDraft: boolean = false;
+  private thirdPartyHttpDraft: boolean = false;
 
   aboutToAppear(): void {
     this.alive = true;
     this.server = RustDeskApiService.defaultServer();
     this.provider = RustDeskNapi.getOption('api-account-provider') === 'thirdParty' ? 'thirdParty' : 'official';
+    this.proServerDraft = RustDeskApiService.defaultCustomServer('official');
+    this.thirdPartyServerDraft = RustDeskApiService.defaultCustomServer('thirdParty');
+    this.loginMode = this.provider === 'thirdParty' ? 'thirdParty' :
+      RustDeskApiService.isPublicServer(this.server) ? 'public' : 'pro';
     this.initialize();
   }
   aboutToDisappear(): void {
@@ -56,29 +68,60 @@ export struct ApiAccountDialog {
   stopWebLogin(): void {
     this.webAttempt++;
     if (this.webTimer >= 0) clearTimeout(this.webTimer);
-    this.webTimer = -1; this.webWaiting = false;
+    this.webTimer = -1; this.webWaiting = false; this.webRetryCount = 0;
     this.api.cancel();
   }
 
+  isOfficialPublic(): boolean {
+    return this.loginMode === 'public';
+  }
+
+  shouldOfferCustomAuthorization(): boolean {
+    return !this.isOfficialPublic();
+  }
+
+  async selectLoginMode(mode: string): Promise<void> {
+    if (this.busy || this.loggedIn || this.challenge || !['public', 'pro', 'thirdParty'].includes(mode)) return;
+    if (this.loginMode === mode) return;
+    if (this.loginMode === 'pro') { this.proServerDraft = this.server; this.proHttpDraft = this.allowHttp; }
+    if (this.loginMode === 'thirdParty') { this.thirdPartyServerDraft = this.server; this.thirdPartyHttpDraft = this.allowHttp; }
+    this.api.cancel();
+    this.loginMode = mode; this.provider = mode === 'thirdParty' ? 'thirdParty' : 'official';
+    this.server = mode === 'public' ? RustDeskApiService.PUBLIC_API : mode === 'pro' ? this.proServerDraft : this.thirdPartyServerDraft;
+    this.allowHttp = mode === 'pro' ? this.proHttpDraft : mode === 'thirdParty' ? this.thirdPartyHttpDraft : false;
+    this.username = ''; this.password = ''; this.code = ''; this.authorizeConnections = false; this.message = '';
+    this.resetLoginOptions();
+    // Selecting a mode edits this dialog only. ID/relay/key and saved API
+    // options remain unchanged until a login actually succeeds.
+    if (mode === 'public') await this.loadLoginOptions();
+  }
+
+  resetLoginOptions(): void {
+    this.loginOptions = []; this.loginOptionsState = 'idle';
+  }
+
   async loadLoginOptions(): Promise<void> {
-    this.busy = true; this.message = ''; this.loginOptions = [];
+    if (this.busy || this.loggedIn || this.challenge) return;
+    this.busy = true; this.message = ''; this.loginOptions = []; this.loginOptionsState = 'loading';
     try {
       this.api.configure(this.server, this.provider, this.allowHttp);
       const options = await this.api.loginOptions();
       if (this.alive) {
-        this.loginOptions = options;
-        if (!options.length) this.message = '服务器没有提供网页登录方式，可使用账号密码登录';
+        this.loginOptions = options; this.loginOptionsState = 'ready';
+        if (!options.length) this.message = this.isOfficialPublic() ? '暂未获取到第三方登录方式，请检查网络后刷新' :
+          '服务器没有提供第三方登录方式；如果服务器支持，可使用账号密码登录';
       }
-    } catch (error) { this.showError(error as Error); }
+    } catch (error) { if (this.alive) this.loginOptionsState = 'failed'; this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
   }
 
   async webLogin(op: string): Promise<void> {
     this.busy = true; this.webWaiting = true; this.message = '正在打开安全登录网页…';
+    this.webRetryCount = 0;
     const attempt: number = ++this.webAttempt;
     let browserPhase: boolean = false;
     try {
-      const address = await this.api.startWebLogin(op, this.remember, this.authorizeConnections);
+      const address = await this.api.startWebLogin(op, this.remember, this.isOfficialPublic() ? false : this.authorizeConnections);
       if (!this.alive || attempt !== this.webAttempt) return;
       const context = getContext(this) as common.UIAbilityContext;
       browserPhase = true;
@@ -102,6 +145,10 @@ export struct ApiAccountDialog {
     try {
       const done = await this.api.pollWebLogin();
       if (!this.alive || attempt !== this.webAttempt) return;
+      if (this.webRetryCount > 0) {
+        this.api.recordWebRecovery(this.webRetryCount); this.webRetryCount = 0;
+        this.message = '请在浏览器完成登录后返回，正在等待确认（最多 3 分钟）';
+      }
       if (done) {
         this.loggedIn = true; this.username = this.api.username;
         this.webWaiting = false; this.busy = false;
@@ -113,6 +160,14 @@ export struct ApiAccountDialog {
       if (this.challenge) { this.webWaiting = false; this.busy = false; return; }
     } catch (error) {
       if (!this.alive || attempt !== this.webAttempt) return;
+      if (error instanceof ApiFailure && error.retryable) {
+        this.webRetryCount++;
+        const delay = Math.min(8000, 1000 * Math.pow(2, Math.min(this.webRetryCount - 1, 3)));
+        this.api.recordWebRetry(error, this.webRetryCount, delay);
+        this.message = '登录确认遇到临时网络问题，正在重试；请检查网络和 HTTPS 证书';
+        this.webTimer = setTimeout(() => { this.pollWebLogin(attempt); }, delay);
+        return;
+      }
       this.stopWebLogin(); this.busy = false; this.showError(error as Error);
       return;
     }
@@ -125,12 +180,17 @@ export struct ApiAccountDialog {
       if (!this.alive) return;
       if (this.loggedIn) {
         this.server = this.api.server; this.provider = this.api.provider;
+        this.loginMode = this.provider === 'thirdParty' ? 'thirdParty' :
+          RustDeskApiService.isPublicServer(this.server) ? 'public' : 'pro';
         this.username = this.api.username; this.allowHttp = this.api.allowHttp;
         this.message = this.api.warning;
         this.books = await this.api.books();
       }
     } catch (error) { this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
+    // Only contact the well-known public API automatically. Custom endpoints
+    // are queried after the user explicitly chooses to load login methods.
+    if (this.alive && !this.loggedIn && !this.message && this.isOfficialPublic()) await this.loadLoginOptions();
   }
   showError(error: Error): void {
     if (!this.alive) return;
@@ -251,6 +311,37 @@ export struct ApiAccountDialog {
     return options;
   }
 
+  @Builder
+  thirdPartyLoginSection() {
+    Column({ space: 10 }) {
+      Row() {
+        Column({ space: 3 }) {
+          Text(translate('第三方账号登录', this.uiLanguage)).fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor(this.textColor()).width('100%');
+          Text(translate('将在浏览器中安全完成登录', this.uiLanguage)).fontSize(12)
+            .fontColor(this.secondaryColor()).width('100%');
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start);
+        if (this.loginOptionsState === 'ready' && this.loginOptions.length > 0) {
+          ApiAccountAction({ label: '刷新', isEnabled: !this.busy, onAction: () => { this.loadLoginOptions(); } });
+        }
+      }.width('100%');
+      if (this.loginOptionsState === 'loading') {
+        Row({ space: 8 }) {
+          LoadingProgress().width(20).height(20);
+          Text(translate('正在获取登录方式…', this.uiLanguage)).fontSize(13).fontColor(this.secondaryColor()).layoutWeight(1);
+        }.width('100%').constraintSize({ minHeight: 48 });
+      } else if (this.loginOptions.length > 0) {
+        ForEach(this.loginOptions, (option: ApiLoginOption) => {
+          ApiOAuthProviderButton({ providerName: option.name, isEnabled: !this.busy, onAction: () => { this.webLogin(option.name); } });
+        }, (option: ApiLoginOption) => option.name);
+      } else {
+        ApiAccountAction({ label: this.loginOptionsState === 'idle' ? '获取登录方式' : '重新获取登录方式',
+          isEnabled: !this.busy, onAction: () => { this.loadLoginOptions(); } });
+      }
+    }.width('100%').padding(14).alignItems(HorizontalAlign.Start)
+      .backgroundColor(this.isDarkMode ? '#202F41' : '#F5F8FC').borderRadius(16);
+  }
+
   build() {
     Column({ space: 12 }) {
       Row() {
@@ -268,44 +359,57 @@ export struct ApiAccountDialog {
       }.width('100%');
       Scroll() {
         Column({ space: 12 }) {
-          Row({ space: 8 }) {
-            ApiAccountAction({ label: '官方 / Server Pro', selected: this.provider === 'official',
+          Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+            ApiAccountAction({ label: '官方公共服务器', selected: this.loginMode === 'public',
               isEnabled: !this.busy && !this.loggedIn && !this.challenge,
-              onAction: () => { this.provider = 'official'; this.loginOptions = []; } });
-            ApiAccountAction({ label: '第三方 rustdesk-api', selected: this.provider === 'thirdParty',
+              onAction: () => { this.selectLoginMode('public'); } }).margin({ right: 8, bottom: 4 });
+            ApiAccountAction({ label: '自建 Server Pro', selected: this.loginMode === 'pro',
               isEnabled: !this.busy && !this.loggedIn && !this.challenge,
-              onAction: () => { this.provider = 'thirdParty'; this.loginOptions = []; } });
+              onAction: () => { this.selectLoginMode('pro'); } }).margin({ right: 8, bottom: 4 });
+            ApiAccountAction({ label: '第三方 rustdesk-api', selected: this.loginMode === 'thirdParty',
+              isEnabled: !this.busy && !this.loggedIn && !this.challenge,
+              onAction: () => { this.selectLoginMode('thirdParty'); } }).margin({ bottom: 4 });
           }.width('100%');
           TextInput({ text: this.server, placeholder: translate('API 地址，例如 https://api.example.com', this.uiLanguage) }).fontSize(14)
-            .enabled(!this.loggedIn && !this.busy && !this.challenge).onChange((value: string) => { this.server = value; this.loginOptions = []; });
+            .enabled(!this.isOfficialPublic() && !this.loggedIn && !this.busy && !this.challenge).onChange((value: string) => {
+              if (this.server !== value) { this.server = value; this.resetLoginOptions(); }
+            });
           if (!this.loggedIn && !this.challenge) {
-            Row() {
-              Checkbox({ name: 'allowHttp' }).select(this.allowHttp).enabled(!this.busy)
-                .onChange((value: boolean) => { this.allowHttp = value; this.loginOptions = []; });
-              Text(translate('允许 HTTP（账号密码和令牌可能被窃听）', this.uiLanguage)).fontSize(12).fontColor(this.secondaryColor()).layoutWeight(1);
-            }.width('100%');
-            TextInput({ text: this.username, placeholder: translate('服务器账号，不是远端设备 ID', this.uiLanguage) }).enabled(!this.busy)
-              .onChange((value: string) => { this.username = value; }).maxLength(128);
-            TextInput({ text: this.password, placeholder: translate('账号密码', this.uiLanguage) }).type(InputType.Password).enabled(!this.busy)
-              .onChange((value: string) => { this.password = value; }).maxLength(256);
+            if (!this.isOfficialPublic()) {
+              Row() {
+                Checkbox({ name: 'allowHttp' }).select(this.allowHttp).enabled(!this.busy)
+                  .onChange((value: boolean) => { if (this.allowHttp !== value) { this.allowHttp = value; this.resetLoginOptions(); } });
+                Text(translate('允许 HTTP（账号密码和令牌可能被窃听）', this.uiLanguage)).fontSize(12).fontColor(this.secondaryColor()).layoutWeight(1);
+              }.width('100%');
+            }
             Row() {
               Checkbox({ name: 'rememberApi' }).select(this.remember).enabled(!this.busy)
                 .onChange((value: boolean) => { this.remember = value; });
               Text(translate('记住登录（仅令牌保存在本机安全存储）', this.uiLanguage)).fontSize(12).fontColor(this.secondaryColor()).layoutWeight(1);
             }.width('100%');
-            Row() {
-              Checkbox({ name: 'authorizeConnections' }).select(this.authorizeConnections).enabled(!this.busy)
-                .onChange((value: boolean) => { this.authorizeConnections = value; });
-              Text(translate('用于当前自建 ID 服务器的连接权限认证（需公钥）', this.uiLanguage))
-                .fontSize(12).fontColor(this.secondaryColor()).layoutWeight(1);
-            }.width('100%');
-            ApiAccountAction({ label: '登录', selected: true, isEnabled: !this.busy, onAction: () => { this.login(); } });
-            Text(translate('官方公共网络登录后自动用于官方连接；自建网络需勾选上方连接认证。账号密码不是远端设备密码。', this.uiLanguage))
+            if (this.shouldOfferCustomAuthorization()) {
+              Row() {
+                Checkbox({ name: 'authorizeConnections' }).select(this.authorizeConnections).enabled(!this.busy)
+                  .onChange((value: boolean) => { this.authorizeConnections = value; });
+                Text(translate('用于当前自建 ID 服务器的连接权限认证（需公钥）', this.uiLanguage))
+                  .fontSize(12).fontColor(this.secondaryColor()).layoutWeight(1);
+              }.width('100%');
+            }
+            if (!this.isOfficialPublic()) {
+              TextInput({ text: this.username, placeholder: translate('服务器账号，不是远端设备 ID', this.uiLanguage) }).enabled(!this.busy)
+                .onChange((value: string) => { this.username = value; }).maxLength(128);
+              TextInput({ text: this.password, placeholder: translate('账号密码', this.uiLanguage) }).type(InputType.Password).enabled(!this.busy)
+                .onChange((value: string) => { this.password = value; }).maxLength(256);
+              ApiAccountAction({ label: '登录', selected: true, isEnabled: !this.busy, onAction: () => { this.login(); } });
+            } else {
+              Text(translate('官方公共服务器请使用第三方账号登录', this.uiLanguage))
+                .fontSize(13).fontColor(this.secondaryColor()).width('100%');
+            }
+            this.thirdPartyLoginSection();
+            Text(translate(this.isOfficialPublic() ?
+              '官方账号登录不会修改当前自建 ID/中继服务器配置；账号登录与远控网络选择相互独立。' :
+              '自建 API 地址需由服务器提供；自动推算的地址不代表已部署账号服务。账号密码不是远端设备密码。', this.uiLanguage))
               .fontSize(12).fontColor(this.secondaryColor());
-            ApiAccountAction({ label: '获取网页登录方式', isEnabled: !this.busy, onAction: () => { this.loadLoginOptions(); } });
-            ForEach(this.loginOptions, (option: ApiLoginOption) => {
-              ApiAccountAction({ label: `通过 ${option.name} 登录`, isEnabled: !this.busy, onAction: () => { this.webLogin(option.name); } });
-            }, (option: ApiLoginOption) => option.name);
           } else if (!this.loggedIn) {
             Text(translate(this.challenge === 'email' ? '请输入邮箱验证码' : '请输入身份验证器验证码', this.uiLanguage))
               .fontSize(14).fontColor(this.textColor());
@@ -385,7 +489,9 @@ export struct ApiAccountDialog {
               }, (peer: ApiPeer) => peer.id);
             }
           }
-          if (this.busy) { Text(translate('正在请求服务器…', this.uiLanguage)).fontSize(13).fontColor(this.secondaryColor()); }
+          if (this.busy && !this.webWaiting && this.loginOptionsState !== 'loading') {
+            Text(translate('正在请求服务器…', this.uiLanguage)).fontSize(13).fontColor(this.secondaryColor());
+          }
           if (this.message) { Text(translate(this.message, this.uiLanguage)).fontSize(13).fontColor(this.textColor()).width('100%'); }
           Text(translate('API 用于账号和地址簿，不替代 ID/中继服务器。导入后沿用当前中继配置，请确保属于同一网络。不会自动上传本地连接；不导入远端密码或密码哈希。', this.uiLanguage))
             .fontSize(12).fontColor(this.secondaryColor()).width('100%');

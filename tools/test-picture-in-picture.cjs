@@ -168,7 +168,13 @@ const test = async (name, fn) => { await fn(); console.log('PASS ' + name); coun
     const viewport = page.slice(page.indexOf('  buildRemoteViewport()'), page.indexOf('  buildErrorView()'));
     assert(!viewport.includes('buildPictureInPicturePlaceholder'), 'return button must not be transformed with the remote desktop');
     for (const name of ['syncHardwareKeyState', 'toggleRemoteKeyboard', 'requestRemoteInputFocus']) {
-      assert.match(page, new RegExp(`${name}\\(\\): void \\{\\n    if \\(this.pipSurfaceOwned\\) return;`));
+      const start = page.indexOf(`  ${name}(): void {`);
+      assert(start >= 0, name);
+      const method = page.slice(start, page.indexOf('\n  }', start));
+      assert(method.includes('if (this.pipSurfaceOwned) return;'), `${name} guards PiP ownership`);
+      const guard = method.indexOf('if (this.pipSurfaceOwned) return;');
+      const firstNativeCall = method.indexOf('RustDeskNapi.');
+      assert(firstNativeCall < 0 || guard < firstNativeCall, `${name} guards ownership before native input`);
     }
   });
   console.log(`PASS ${count} picture-in-picture scenarios (SDK mocked; device rendering not tested)`);

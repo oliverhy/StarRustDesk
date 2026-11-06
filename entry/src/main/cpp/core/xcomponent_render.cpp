@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <hilog/log.h>
 #include <native_buffer/native_buffer.h>
+#include <libyuv/scale_argb.h>
 #include <unistd.h>
 #include "diagnostic_log.h"
+#include "native_frame_bounds.h"
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -65,6 +67,10 @@ bool XComponentRender::createWindowLocked() {
 
     int ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(sid, &nativeWindow_);
     if (nativeWindow_) {
+        if (followSurfaceSize_) {
+            int scaling = OH_NativeWindow_NativeWindowSetScalingModeV2(nativeWindow_, OH_SCALING_MODE_SCALE_TO_WINDOW_V2);
+            if (scaling != 0) OH_LOG_WARN(LOG_APP, "Secondary surface scaling setup failed ret=%{public}d", scaling);
+        }
         bufferWidth_ = 0;
         bufferHeight_ = 0;
     consecutiveNoBuffer_ = 0;
@@ -88,7 +94,9 @@ void XComponentRender::configureWindowLocked(int width, int height) {
     uint64_t usage = NATIVEBUFFER_USAGE_CPU_WRITE | NATIVEBUFFER_USAGE_MEM_DMA;
     OH_NativeWindow_NativeWindowHandleOpt(nativeWindow_, SET_USAGE, usage);
     OH_NativeWindow_NativeWindowHandleOpt(nativeWindow_, SET_TIMEOUT, 16);
-    OH_NativeWindow_NativeWindowHandleOpt(nativeWindow_, SET_BUFFER_GEOMETRY, width, height);
+    // Independent extension windows follow the XComponent's actual size;
+    // forcing video geometry here leaves full-screen content at native pixels.
+    if (!followSurfaceSize_) OH_NativeWindow_NativeWindowHandleOpt(nativeWindow_, SET_BUFFER_GEOMETRY, width, height);
     bufferWidth_ = width;
     bufferHeight_ = height;
     cpuConfigured_ = true;
@@ -205,13 +213,31 @@ bool XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
     OH_NativeBuffer_Config config;
     memset(&config, 0, sizeof(config));
     OH_NativeBuffer_GetConfig(nativeBuffer, &config);
-    int strideBytes = config.stride > 0 ? config.stride : width * 4;
+    int strideBytes = config.stride;
     int bpp = 4;
+
+    // A surface resize can return an old, smaller buffer for a few frames.
+    // Never infer its capacity from the requested video dimensions.
+    if (!nativeFrameSourceValid(width, height, length) ||
+        !nativeFrameBufferValid(config.width, config.height, strideBytes) ||
+        (rgbaInput && !nativeFrameFits(width, height, length, config.width, config.height, strideBytes)) ||
+        config.format != NATIVEBUFFER_PIXEL_FMT_BGRA_8888) {
+        static std::atomic<uint64_t> invalidBuffers{0};
+        const uint64_t count = invalidBuffers.fetch_add(1) + 1;
+        if (count == 1 || count % 120 == 0) {
+            OH_LOG_WARN(LOG_APP, "Skip incompatible surface buffer frame=%{public}dx%{public}d buffer=%{public}dx%{public}d stride=%{public}d format=%{public}d count=%{public}llu",
+                width, height, config.width, config.height, strideBytes, config.format,
+                static_cast<unsigned long long>(count));
+        }
+        if (fenceFd >= 0) close(fenceFd);
+        OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
+        return false;
+    }
 
     void* mapped = nullptr;
     ret = OH_NativeBuffer_Map(nativeBuffer, &mapped);
     uint8_t* dst = static_cast<uint8_t*>(mapped);
-    if (!dst) {
+    if (ret != 0 || !dst) {
         OH_LOG_ERROR(LOG_APP, "NativeBuffer map failed ret=%{public}d stride=%{public}d", ret, strideBytes);
         if (fenceFd >= 0) {
             close(fenceFd);
@@ -220,10 +246,21 @@ bool XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
         return false;
     }
 
-    if (length >= width * height * 4) {
+    if (!rgbaInput && (config.width != width || config.height != height)) {
+        // The compositor may resize the surface independently of the requested
+        // video geometry. Scale into the actual buffer, never past its edges.
+        const int scaled = libyuv::ARGBScale(data, width * bpp, width, height, dst,
+            strideBytes, config.width, config.height, libyuv::kFilterBilinear);
+        if (scaled != 0) {
+            OH_NativeBuffer_Unmap(nativeBuffer);
+            if (fenceFd >= 0) close(fenceFd);
+            OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
+            return false;
+        }
+    } else {
         for (int y = 0; y < height; y++) {
-            uint8_t* dstRow = dst + y * strideBytes;
-            const uint8_t* srcRow = data + y * width * bpp;
+            uint8_t* dstRow = dst + static_cast<size_t>(y) * static_cast<size_t>(strideBytes);
+            const uint8_t* srcRow = data + static_cast<size_t>(y) * static_cast<size_t>(width) * bpp;
             if (!rgbaInput) {
                 memcpy(dstRow, srcRow, static_cast<size_t>(width) * bpp);
             } else {
@@ -236,14 +273,6 @@ bool XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
                 }
             }
         }
-    } else {
-        OH_LOG_WARN(LOG_APP, "Skip encoded or incomplete frame length=%{public}d expected=%{public}d", length, width * height * 4);
-        OH_NativeBuffer_Unmap(nativeBuffer);
-        if (fenceFd >= 0) {
-            close(fenceFd);
-        }
-        OH_NativeWindow_NativeWindowAbortBuffer(nativeWindow_, buffer);
-        return false;
     }
 
     OH_NativeBuffer_Unmap(nativeBuffer);
@@ -251,11 +280,11 @@ bool XComponentRender::renderPackedFrame(const uint8_t* data, int length, int wi
         close(fenceFd);
     }
     ret = OH_NativeWindow_NativeWindowFlushBuffer(nativeWindow_, buffer, -1, region);
-    static uint64_t renderedFrames = 0;
-    renderedFrames += 1;
-    if (renderedFrames == 1 || renderedFrames % 300 == 0 || ret != 0) {
+    static std::atomic<uint64_t> renderedFrames{0};
+    const uint64_t count = renderedFrames.fetch_add(1) + 1;
+    if (count == 1 || count % 300 == 0 || ret != 0) {
         OH_LOG_INFO(LOG_APP, "Flush mapped frame count=%{public}llu size=%{public}dx%{public}d stride=%{public}d ret=%{public}d",
-            static_cast<unsigned long long>(renderedFrames), width, height, strideBytes, ret);
+            static_cast<unsigned long long>(count), width, height, strideBytes, ret);
     }
     return ret == 0;
 }

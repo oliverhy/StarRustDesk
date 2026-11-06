@@ -1,10 +1,21 @@
 import { readableInputHeight } from '../theme/ReadableLayout'
 import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { FullTextDialog } from '../widget/FullTextDialog'
+import { InsecureConnectionDialog } from '../widget/InsecureConnectionDialog'
+import { InsecureConsentStore } from '../service/InsecureConsentStore'
+import { InsecureConsentScope, INSECURE_DIRECT_ENDPOINT, INSECURE_MISSING_SIGNATURE } from '../model/InsecureConsent'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { inputCompatibilityKey, selectedKeyboardMode, selectedCursorMode, shouldSuppressCursor } from '../model/InputCompatibility';
 import { PhysicalMouseDeduplicator, isTouchOnlyMouseEvent } from '../model/PhysicalMousePolicy';
 import { RemoteWheelNormalizer, RemoteWheelStep } from '../model/RemoteWheelNormalizer';
+import { GameModePolicy } from '../model/GameModePolicy';
+import { GameTransportHealth } from '../model/GameTransportHealth';
+import { GamepadMapper, GamepadMapping, GamepadTarget, GAMEPAD_TARGETS, decodeGamepadMapping, defaultGamepadMapping, validGamepadMapping } from '../model/GamepadMapping';
+import { ScreenGameConfig, ScreenGameKey, defaultScreenGameConfig, decodeScreenGameConfig } from '../model/GameScreenControls';
+import { GameScreenRenderKey } from '../model/GameScreenRenderKey';
+import { GameScreenOverlay } from '../widget/GameScreenOverlay';
+import { GamepadMappingDialog } from '../widget/GamepadMappingDialog';
+import { VirtualGamepad } from '../widget/VirtualGamepad';
 import { RemoteDisplaySwipe, DisplaySwipePoint, adjacentRemoteDisplay } from '../model/RemoteDisplaySwipe';
 import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavigationKeys } from '../model/RemoteNavigationKeys';
 ﻿import { router } from '@kit.ArkUI';
@@ -17,7 +28,7 @@ import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
-import { FileDownloadRequest, FileTransferStatus, HardwareKeyState, NativeInputEvent, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { FileDownloadRequest, FileTransferStatus, GamepadInputEvent, HardwareKeyState, NativeInputEvent, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
@@ -32,6 +43,8 @@ import { OperationDiagnostic } from '../service/OperationDiagnostic';
 import { RecordingDialog } from '../widget/RecordingDialog';
 import { sortRemoteFiles } from '../utils/RemoteFileSort';
 import { RemoteDisplayPolicy, RemoteOrientationMode } from '../service/RemoteDisplayPolicy';
+import { RemoteMultiDisplayMonitor } from '../service/RemoteMultiDisplayMonitor';
+import { RemoteMultiDisplayCapability } from '../model/RemoteMultiDisplayCapability';
 import { RemoteGlassMenu } from '../widget/RemoteGlassMenu';
 import { RemoteGlassMenuState, RemoteGlassMenuMetrics, glassMenuMetrics, glassOrientationDescription, placeGlassMenu,
   RemoteGlassMenuPlacement } from '../model/RemoteGlassMenu';
@@ -197,7 +210,7 @@ const MODIFIER_MASK_META: number = 8;
 const KEYBOARD_CAPTURE_SENTINEL: string =
   '1111111111111111111111111111111111111111111111111111111111111111';
 const CONTROL_TOOLBAR_DEFAULT_ORDER: string[] = [
-  'displays', 'input', 'virtualMouse', 'edgePan', 'keyboard', 'mobileActions', 'gestureHelp',
+  'displays', 'input', 'virtualMouse', 'physicalGamepad', 'virtualGamepad', 'gameMode', 'highPerformance', 'edgePan', 'keyboard', 'mobileActions', 'gestureHelp',
   'pan', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
 ];
 const KEYBOARD_TOOLBAR_DEFAULT_ORDER: string[] = [
@@ -310,6 +323,40 @@ struct RemotePage {
   @State keyboardToolsPositionX: number = -1;
   @State keyboardToolsPositionY: number = -1;
   private peerPreferences: RemotePeerPreferences | undefined;
+  @State gameModeEnabled: boolean = false;
+  @State gameConsoleExpanded: boolean = false;
+  @State gameConsoleX: number = 8;
+  @State gameConsoleY: number = 80;
+  private gameConsoleDragX: number = 0;
+  private gameConsoleDragY: number = 0;
+  private gameConsoleDragAt: number = 0;
+  @State gameScreenEnabled: boolean = false;
+  @State gameScreenEditing: boolean = false;
+  @State gameScreenSelected: number = -1;
+  @State gameScreenConfig: ScreenGameConfig = defaultScreenGameConfig();
+  @State gameScreenKeys: GameScreenRenderKey[] = [];
+  private gameScreenKeysProfile: number = -1;
+  private gameScreenBeforeEdit: string = '';
+  private gameScreenEnabledBeforeEdit: boolean = false;
+  @State gameRelativeSensitivity: number = 100;
+  @State highPerformanceEnabled: boolean = false;
+  @State physicalGamepadEnabled: boolean = false;
+  @State virtualGamepadEnabled: boolean = false;
+  @State showGamepadMappingDialog: boolean = false;
+  private gamepadMappingDialog?: CustomDialogController;
+  private gamepadMapping: GamepadMapping = defaultGamepadMapping();
+  private gamepadMapper?: GamepadMapper;
+  private gamepadTimer: number = -1;
+  private gamepadGeneration: number = 0;
+  private gamepadNativeStarted: boolean = false;
+  private gamepadRetryAt: number = 0;
+  @State gameModeEffectiveFps: number = 0;
+  private gameModePolicy: GameModePolicy = new GameModePolicy();
+  private gameTransportHealth: GameTransportHealth = new GameTransportHealth();
+  private gameTransportLastDeferredAt: number = 0;
+  @State gameTransportText: string = '自动';
+  private gameModeAppliedFps: number = 0;
+  private gameModeRetryAfter: number = 0;
   private peerPreferenceServer: string = '';
   private rememberedHandheldZoomScale: number = 1;
   @State remoteToolbarCollapsed: boolean = false;
@@ -393,6 +440,7 @@ struct RemotePage {
   @State keyboardInput: string = KEYBOARD_CAPTURE_SENTINEL;
   private keyboardComposing: boolean = false;
   private navigationKeys: RemoteNavigationKeys = new RemoteNavigationKeys();
+  private secondaryHeldKeys: number[] = [];
   @State showCursor: boolean = false;
   @State projectedPhysicalPointer: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
@@ -426,6 +474,8 @@ struct RemotePage {
   @State delayText: string = '-';
   @State delayMs: number = 0;
   @State targetBitrateText: string = '-';
+  @State requestedFpsText: string = '-';
+  @State requestedBitrateText: string = '-';
   @State codecText: string = '等待视频';
   @State codecNameText: string = '等待视频';
   @State hdrText: string = '-';
@@ -471,6 +521,7 @@ struct RemotePage {
   @State enableTrustedDevices: boolean = false;
   @State connectionError: string = '';
   private insecureFallbackPromptShown: boolean = false;
+  private insecureFallbackController?: CustomDialogController;
   @State isFullScreen: boolean = false;
   @State fullscreenTransitioning: boolean = false;
   private fullscreenRequestId: number = 0;
@@ -588,6 +639,9 @@ struct RemotePage {
   // does not continuously acknowledge display switches. Keep the user's local
   // selection after the initial sync instead of overwriting it during polling.
   private displayStateInitialized: boolean = false;
+  // A reconnect is the same viewing session: keep the display the user was
+  // watching, but never carry it into a fresh connection or another peer.
+  private reconnectPreferredDisplay: number = -1;
   private mobileActionsDragStartX: number = 0;
   private mobileActionsDragStartY: number = 0;
   private keyboardToolsDragStartX: number = 0;
@@ -719,6 +773,10 @@ struct RemotePage {
   private keyboardAvoidModeBeforePanel: KeyboardAvoidMode = KeyboardAvoidMode.OFFSET;
   private keyboardAvoidModeChanged: boolean = false;
   private navigationBarPolicy: RemoteNavigationBarPolicy = new RemoteNavigationBarPolicy();
+  private multiDisplayMonitor?: RemoteMultiDisplayMonitor;
+  @State private externalMonitorId: number = -1;
+  @State private extendedRemoteDisplay: number = -1;
+  private extendedOpening: boolean = false;
 
   aboutToAppear(): void {
     this.remotePageVisible = true;
@@ -740,6 +798,9 @@ struct RemotePage {
     this.peerPreferenceServer = RustDeskNapi.getOption('custom-rendezvous-server');
     this.peerPreferences?.dispose();
     this.peerPreferences = new RemotePeerPreferences(this.peerPreferenceServer, this.connectedPeerId);
+    this.loadGameModePreference();
+    this.loadHighPerformancePreference();
+    this.loadGamepadPreferences();
     this.immersivePreferenceRestored = false;
     this.resetRemoteViewportForSession();
     this.showRemoteSurface = true;
@@ -765,6 +826,16 @@ struct RemotePage {
     }
     this.startPolling();
     if (this.fileOnly) { this.showGestureHelp = false; return; }
+    if (this.isPcDevice()) {
+      this.multiDisplayMonitor = new RemoteMultiDisplayMonitor((result: RemoteMultiDisplayCapability) => {
+        this.externalMonitorId = result.available && result.candidates.length > 0 ? result.candidates[0].id : -1;
+        if (this.externalMonitorId < 0 && this.extendedRemoteDisplay >= 0) {
+          RustDeskNapi.stopSecondaryDisplay();
+          this.extendedRemoteDisplay = -1;
+        }
+      });
+      this.multiDisplayMonitor.start();
+    }
     this.startRemoteKeyboardTracking();
     if (this.isHandheldDevice() && !this.remoteExternalDisplay) this.navigationBarPolicy.enter(this.remoteKeyboardWindow);
     this.startDesktopWindowTracking();
@@ -777,7 +848,14 @@ struct RemotePage {
   }
 
   aboutToDisappear(): void {
+    if (this.isPcDevice()) RustDeskNapi.stopSecondaryDisplay();
+    this.multiDisplayMonitor?.stop();
+    this.multiDisplayMonitor = undefined;
+    this.stopGamepadPolling();
+    this.gamepadMappingDialog?.close();
+    this.showGamepadMappingDialog = false;
     this.navigationBarPolicy.leave();
+    this.insecureFallbackController?.close();
     this.fullTextController?.close();
     this.remotePageVisible = false;
     this.clearDisplaySwitchHint();
@@ -826,6 +904,7 @@ struct RemotePage {
     this.releaseHeldMouseButtons('page_disappear');
     this.releaseRemoteNavigationKeys('page_disappear');
     ConnectionService.releaseModifiers();
+    this.secondaryHeldKeys = [];
     if (this.surfaceRebindTimer !== -1) {
       clearTimeout(this.surfaceRebindTimer);
       this.surfaceRebindTimer = -1;
@@ -922,6 +1001,7 @@ struct RemotePage {
       } else if (status === ConnectionStatus.FAILED) {
         const failedMessage: string = ConnectionService.getLastConnectionError();
         if (ConnectionService.recoverInterruptedSession(failedMessage)) {
+          this.rememberDisplayForReconnect();
           this.videoWaitingHint = '连接暂时中断，正在重新连接…';
           if (!this.reconnecting) {
             this.resetRemoteViewportForSession();
@@ -932,6 +1012,7 @@ struct RemotePage {
         const recoveryHint: string = status === ConnectionStatus.FAILED ?
           ConnectionService.retryRecoverableConnectionFailure(failedMessage) : '';
         if (recoveryHint.length > 0) {
+          this.rememberDisplayForReconnect();
           this.resetRemoteViewportForSession();
           this.displayStateInitialized = false;
           this.directLoginStartedAt = 0;
@@ -955,6 +1036,13 @@ struct RemotePage {
       this.reconnectAttempt = ConnectionService.getRecoveryAttempt();
       if (status === ConnectionStatus.CONNECTED && !this.inputCompatibilityLoaded && !this.fileOnly) {
         this.loadInputCompatibility();
+        if (this.gameModeEnabled) {
+          RustDeskNapi.setGameMode(true);
+          if (!this.highPerformanceEnabled) {
+            this.gameModeAppliedFps = RustDeskNapi.setGameFps(this.gameModePolicy.fps()) === 0 ? this.gameModePolicy.fps() : 0;
+          }
+        }
+        if (this.highPerformanceEnabled) RustDeskNapi.setHighPerformance(true);
       } else if (status !== ConnectionStatus.CONNECTED) {
         this.inputCompatibilityLoaded = false;
         this.waylandTextAllowed = false;
@@ -983,18 +1071,24 @@ struct RemotePage {
         this.connectionError = ConnectionService.getLastConnectionError();
         if (!this.insecureFallbackPromptShown && ConnectionService.canRetryWithoutEncryption()) {
           this.insecureFallbackPromptShown = true;
-          this.showInsecureFallbackPrompt();
+          this.checkInsecureFallback();
         }
       }
       if (status === ConnectionStatus.CONNECTED && !this.fileOnly && now - this.lastDisplayPollAt > 2000) {
         this.lastDisplayPollAt = now;
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());
+        this.multiDisplayMonitor?.setRemoteCount(this.displayCount);
+        if (this.isPcDevice()) this.extendedRemoteDisplay = RustDeskNapi.getSecondaryDisplayState().display;
         if (!this.displayStateInitialized) {
-          // Always start a new remote session on the first display, regardless
-          // of which display the remote peer reported as currently active.
-          this.currentDisplay = 0;
+          // A fresh session starts on screen 1. Reconnection must resume the
+          // screen being viewed, since another screen may be off or black.
+          const requestedDisplay: number = this.reconnectPreferredDisplay;
+          this.currentDisplay = requestedDisplay >= 0 && requestedDisplay < this.displayCount ? requestedDisplay : 0;
+          this.reconnectPreferredDisplay = -1;
           this.displayStateInitialized = true;
-          const switchResult: number = RustDeskNapi.switchDisplay(0);
+          const switchResult: number = RustDeskNapi.switchDisplay(this.currentDisplay);
+          RustDeskNapi.appendDiagnosticLog('video-layout',
+            `display_restore requested=${requestedDisplay} selected=${this.currentDisplay} count=${this.displayCount} result=${switchResult}`);
           if (switchResult === 0) {
             RustDeskNapi.refreshVideo();
           } else {
@@ -1073,9 +1167,13 @@ struct RemotePage {
         this.lastStatsBytes = 0;
         this.smoothFps = 0;
         this.smoothKbps = 0;
+        this.gameModePolicy.reset();
+        this.gameTransportHealth.reset();
+        this.gameTransportLastDeferredAt = 0;
+        this.gameModeAppliedFps = 0;
       }
       const security: number = frame.security ?? 0;
-      if (security === 2 && this.peerSecurityState !== 2) {
+      if (security === 2 && this.peerSecurityState !== 2 && !ConnectionService.isRememberedInsecureSession()) {
         try {
           this.getUIContext().getPromptAction().showToast({
             message: translate('此连接未启用端到端加密，请仅在可信网络使用', this.uiLanguage), duration: 3000
@@ -1087,6 +1185,8 @@ struct RemotePage {
       // flag. Keep it updating while the native surface is already rendering,
       // including during a short surface/generation rebind.
       this.updateStats(frame);
+      this.updateGameModePolicy(frame);
+      this.updateGameTransportHealth(frame);
       this.checkFirstVideoHealth(frame);
       this.checkDecoderHealth(frame);
       if (frame.hasFrame) {
@@ -1229,6 +1329,8 @@ struct RemotePage {
     this.delayMs = 0;
     this.delayText = '-';
     this.targetBitrateText = '-';
+    this.requestedFpsText = '-';
+    this.requestedBitrateText = '-';
     this.codecText = '等待视频';
     this.codecNameText = '等待视频';
     this.hdrText = '-';
@@ -1277,12 +1379,19 @@ struct RemotePage {
 
   retryStalledDirectConnection(reason: string): boolean {
     if (!ConnectionService.retryDirectViaRelay(reason)) return false;
+    this.rememberDisplayForReconnect();
     this.resetRemoteViewportForSession();
     this.displayStateInitialized = false;
     this.directLoginStartedAt = 0;
     this.connectionStatus = ConnectionStatus.CONNECTING;
     this.videoWaitingHint = '直连未收到响应，正在通过中继重试';
     return true;
+  }
+
+  rememberDisplayForReconnect(): void {
+    if (this.displayStateInitialized && this.currentDisplay >= 0 && this.currentDisplay < this.displayCount) {
+      this.reconnectPreferredDisplay = this.currentDisplay;
+    }
   }
 
   checkDecoderHealth(frame: VideoFrameInfo): void {
@@ -1526,7 +1635,9 @@ struct RemotePage {
         }
       } catch (_e) {
       }
-      this.nativeMouseTimer = setTimeout(poll, 16);
+      this.nativeMouseTimer = setTimeout(poll, this.gameModeEnabled && this.connectionStatus === ConnectionStatus.CONNECTED &&
+        this.desktopWindowActive && !RemoteSessionBackgroundTask.isAppBackground() && !this.controlMenu &&
+        !this.showKeyboardPanel && !this.pipSurfaceOwned ? 8 : 16);
     };
     this.nativeMouseTimer = setTimeout(poll, 16);
   }
@@ -1538,6 +1649,7 @@ struct RemotePage {
         this.releaseHeldMouseButtons('input_queue_reset');
         this.releaseRemoteNavigationKeys('input_queue_reset');
         ConnectionService.releaseModifiers();
+        this.secondaryHeldKeys = [];
       } else if (event.key !== undefined) {
         this.handleNativeKeyInput(event.key);
       } else if (event.mouse !== undefined) {
@@ -1547,6 +1659,7 @@ struct RemotePage {
   }
 
   syncHardwareKeyState(): void {
+    if (this.showGamepadMappingDialog) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
     if (this.showCommunicationPanel) return;
@@ -1598,6 +1711,7 @@ struct RemotePage {
   }
 
   handleNativeMouseInput(event: NativeMouseInputEvent): void {
+    if (this.showGamepadMappingDialog) return;
     if (this.displaySwitchActive) return;
     if (this.pipSurfaceOwned) return;
     if (this.controlMenu) return;
@@ -1699,16 +1813,27 @@ struct RemotePage {
   }
 
   handleNativeKeyInput(event: NativeKeyInputEvent): void {
+    const secondaryKeyboard: boolean = event.source === 1001;
+    if (secondaryKeyboard && event.action === -1) {
+      this.releaseSecondaryKeyboardKeys();
+      return;
+    }
+    if (this.showGamepadMappingDialog || (this.physicalGamepadEnabled && event.source === 4)) return;
     if (this.pipSurfaceOwned) return;
-    if (this.controlMenu) return;
+    if (this.controlMenu && !secondaryKeyboard) return;
     if (this.showCommunicationPanel) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
-    if (this.desktopWindowActive === false) return;
+    if (this.desktopWindowActive === false && !secondaryKeyboard) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
     if (event.action !== 0 && event.action !== 1) {
       return;
+    }
+    if (secondaryKeyboard) {
+      const index = this.secondaryHeldKeys.indexOf(event.keyCode);
+      if (event.action === 0 && index < 0) this.secondaryHeldKeys.push(event.keyCode);
+      if (event.action === 1 && index >= 0) this.secondaryHeldKeys.splice(index, 1);
     }
     if (event.capsLockValid) {
       ConnectionService.syncCapsLockState(event.capsLockOn);
@@ -1720,7 +1845,7 @@ struct RemotePage {
       this.forwardRemoteNavigationKey(controlCode, action === 0, 'native');
       return;
     }
-    if (this.showKeyboardPanel) return;
+    if (this.showKeyboardPanel && !secondaryKeyboard) return;
     if (controlCode === 20) {
       ConnectionService.sendCapsLockEvent(action, event.capsLockValid ? event.capsLockOn : undefined);
       return;
@@ -1741,12 +1866,36 @@ struct RemotePage {
       } else {
         ConnectionService.sendPhysicalKeyEvent(hidCode, action, eventModifierMask);
       }
-      if (action === 0) {
+      if (action === 0 && !secondaryKeyboard) {
         RustDeskNapi.appendDiagnosticLog('input',
           `native_key_forwarded code=${event.keyCode} hid=${hidCode} modifiers=${event.modifierMask} ` +
           `modifier_valid=${event.modifierValid ? 1 : 0}`);
       }
     }
+  }
+
+  releaseSecondaryKeyboardKeys(): void {
+    const held: number[] = this.secondaryHeldKeys.slice();
+    this.secondaryHeldKeys = [];
+    for (const keyCode of held) {
+      const control: number = this.mapControlKeyCode(keyCode);
+      if (isNavigationControlKey(control)) {
+        this.forwardRemoteNavigationKey(control, false, 'native');
+      } else if (control === 20) {
+        ConnectionService.sendCapsLockEvent(1);
+      } else if (control > 0) {
+        ConnectionService.sendHardwareControlKey(control, 1, keyCode, 'native');
+      } else {
+        const hid = this.mapHarmonyKeyCodeToUsbHidCode(keyCode);
+        const letter = this.mapHarmonyKeyCodeToLetter(keyCode);
+        if (hid > 0 && letter.length > 0) ConnectionService.sendLetterKeyEvent(letter, hid, 1);
+        else if (hid > 0) ConnectionService.sendPhysicalKeyEvent(hid, 1);
+      }
+    }
+    // Remove the secondary window's last modifier snapshot after balancing its
+    // own presses; do not release keys owned by a gamepad or another source.
+    ConnectionService.syncNativeModifierState(0);
+    RustDeskNapi.appendDiagnosticLog('multi-display-input', `keyboard_focus_lost released=${held.length}`);
   }
 
   pollRemoteCursorImage(): void {
@@ -2839,6 +2988,37 @@ struct RemotePage {
         this.buildPictureInPicturePlaceholder();
       }
       if (this.showQualityMonitor) this.buildDraggableQualityMonitor();
+      if (this.virtualGamepadEnabled && this.gamepadCanForward() && this.qualityViewportWidth > 0 && this.qualityViewportHeight > 0) {
+        if (this.qualityViewportWidth >= 240 && this.qualityViewportHeight >= 160) {
+          VirtualGamepad({ viewportWidth: this.qualityViewportWidth, viewportHeight: this.qualityViewportHeight,
+            onButton: (code: number, down: boolean) => { this.gamepadVirtualButton(code, down) },
+            onAxis: (axis: number, x: number, y: number) => { this.gamepadVirtualAxis(axis, x, y) } })
+        } else {
+          Text(translate('窗口过小，请放大窗口以使用虚拟手柄', this.uiLanguage))
+            .fontSize(12).fontColor(Color.White).padding(8).backgroundColor('#B0283448')
+            .borderRadius(8).align(Alignment.Center).hitTestBehavior(HitTestMode.None)
+        }
+      }
+      if (this.gameModeEnabled && this.gameScreenEditing) {
+        Column() {}.width('100%').height('100%').hitTestBehavior(HitTestMode.Block).zIndex(19)
+      }
+      if (this.gameModeEnabled && this.gameScreenEnabled && (this.gamepadCanForward() || this.gameScreenEditing) &&
+        this.qualityViewportWidth > 0 && this.qualityViewportHeight > 0) {
+        GameScreenOverlay({ keys: $gameScreenKeys,
+          editing: this.gameScreenEditing, selected: this.gameScreenSelected,
+          viewportWidth: this.qualityViewportWidth, viewportHeight: this.qualityViewportHeight,
+          onButton: (id: number, target: string, down: boolean) => { this.gameScreenButton(id, target, down) },
+          onSelect: (id: number) => {
+            this.gameScreenSelected = id;
+            RustDeskNapi.appendDiagnosticLog('game-mode', 'screen_edit_touch');
+          },
+          onMove: (id: number, x: number, y: number) => { this.moveGameScreenKey(id, x, y) } })
+          .zIndex(20)
+      }
+      if (this.gameModeEnabled && this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
+        !this.pipSurfaceOwned && this.qualityViewportWidth > 0 && this.qualityViewportHeight > 0) {
+        this.buildGameConsole()
+      }
     }
     .width('100%')
     .layoutWeight(1)
@@ -3414,6 +3594,8 @@ struct RemotePage {
     state.keyboardItems = this.keyboardMoreOrder.join('|') === KEYBOARD_MORE_DEFAULT_ORDER.join('|') ? prototypeKeys :
       this.keyboardMoreOrder.includes('Enter') ? this.keyboardMoreOrder.slice() : this.keyboardMoreOrder.concat(['Enter']);
     state.displayCount = this.displayCount; state.currentDisplay = this.currentDisplay;
+    state.canExtendDisplay = this.isPcDevice() && this.externalMonitorId >= 0 && this.displayCount > 1;
+    state.extendedDisplay = this.extendedRemoteDisplay;
     state.displaySwipe = this.displaySwipeEnabled;
     state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
     state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
@@ -3422,6 +3604,10 @@ struct RemotePage {
     state.pip = this.pipPhase === 'active'; state.recording = this.recordingActive;
     state.privacy = this.privacyModeState === 2; state.privacyPending = this.privacyModeState === 1;
     state.monitor = this.showQualityMonitor; state.transferBusy = this.transferActive || this.uploadStaging;
+    state.gameMode = this.gameModeEnabled;
+    state.highPerformance = this.highPerformanceEnabled;
+    state.physicalGamepad = this.physicalGamepadEnabled;
+    state.virtualGamepad = this.virtualGamepadEnabled;
     state.canSendCtrlAltDel = this.canSendCtrlAltDel;
     state.modifiers = (this.virtualCtrlSelected ? 1 : 0) | (this.virtualAltSelected ? 2 : 0) |
       (this.virtualShiftSelected ? 4 : 0) | (this.virtualMetaSelected ? 8 : 0);
@@ -3468,10 +3654,36 @@ struct RemotePage {
       anchor.x, anchor.y, anchor.width, anchor.height);
   }
 
+  private openExtendedDisplay(remoteDisplay: number): void {
+    if (!this.isPcDevice() || this.externalMonitorId < 0 || !Number.isInteger(remoteDisplay) ||
+      remoteDisplay < 0 || remoteDisplay >= this.displayCount || remoteDisplay === this.currentDisplay ||
+      this.extendedOpening) return;
+    if (this.extendedRemoteDisplay === remoteDisplay) {
+      RustDeskNapi.stopSecondaryDisplay();
+      this.extendedRemoteDisplay = -1;
+      this.showFileToast('已关闭扩展画面');
+      return;
+    }
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (!context) { this.showFileToast('无法启动扩展窗口'); return; }
+    this.extendedOpening = true;
+    context.startAbility({ bundleName: context.abilityInfo.bundleName, abilityName: 'ExtendedDisplayAbility',
+      parameters: { remoteDisplay: remoteDisplay } }, { displayId: this.externalMonitorId }).then(() => {
+      RustDeskNapi.appendDiagnosticLog('multi-display', 'secondary_window_started');
+    }).catch((error: BusinessError) => {
+      RustDeskNapi.appendDiagnosticLog('multi-display', `secondary_window_failed code=${error.code ?? -1}`);
+      this.showFileToast('无法启动扩展窗口，请检查扩展屏连接');
+    }).finally(() => { this.extendedOpening = false; });
+  }
+
   handleGlassMenuAction(action: string): void {
     if (!this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED ||
       this.controlMenuClosing || !this.controlMenu) return;
     RustDeskNapi.appendDiagnosticLog('remote-ui', `glass_menu_action category=${this.controlMenu} action=${action}`);
+    if (action.startsWith('extend-')) {
+      this.openExtendedDisplay(Number(action.substring('extend-'.length)));
+      return;
+    }
     if (action.startsWith('tab-')) {
       const tab = action.substring(4);
       if (this.controlMenu === 'keyboard' && ['modifiers', 'function', 'more'].includes(tab)) this.glassKeyboardTab = tab;
@@ -3506,6 +3718,11 @@ struct RemotePage {
       case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
       case 'edgePan': if (this.canPanViewport()) this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled); return;
       case 'monitor': this.showQualityMonitor = !this.showQualityMonitor; return;
+      case 'gameMode': this.setGameMode(!this.gameModeEnabled); return;
+      case 'highPerformance': this.setHighPerformance(!this.highPerformanceEnabled); return;
+      case 'physicalGamepad': this.setGamepadEnabled('physical', !this.physicalGamepadEnabled); return;
+      case 'virtualGamepad': this.setGamepadEnabled('virtual', !this.virtualGamepadEnabled); return;
+      case 'gamepadSettings': this.openGamepadMappingDialog(); return;
       case 'privacy': if (this.privacyModeState !== 1) this.togglePrivacyMode(); return;
       case 'zoomIn': this.adjustZoom(0.25); return;
       case 'zoomOut': this.adjustZoom(-0.25); return;
@@ -3807,6 +4024,10 @@ struct RemotePage {
       case 'displays': return '屏幕切换';
       case 'input': return '鼠标 / 触摸模式';
       case 'virtualMouse': return '虚拟鼠标';
+      case 'gameMode': return '游戏模式';
+      case 'highPerformance': return '高性能优先';
+      case 'physicalGamepad': return '实体手柄映射';
+      case 'virtualGamepad': return '虚拟手柄';
       case 'edgePan': return '边缘跟随';
       case 'keyboard': return '键盘';
       case 'mobileActions': return '手机操作';
@@ -5650,6 +5871,119 @@ struct RemotePage {
   }
 
   @Builder
+  buildGameConsole() {
+    Column({ space: 5 }) {
+      Row({ space: 6 }) {
+        Text('⋮⋮').fontSize(16).fontColor('#FFD5E5FF').width(24).height(34).textAlign(TextAlign.Center)
+          .gesture(PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
+            .onActionStart(() => { this.gameConsoleDragX = this.gameConsoleX; this.gameConsoleDragY = this.gameConsoleY; })
+            .onActionUpdate((event: GestureEvent) => {
+              this.gameConsoleX = Math.max(0, Math.min(this.qualityViewportWidth - this.gameConsoleWidth(), this.gameConsoleDragX + event.offsetX));
+              this.gameConsoleY = Math.max(0, Math.min(this.qualityViewportHeight - 44, this.gameConsoleDragY + event.offsetY));
+              this.gameConsoleDragAt = Date.now();
+            }))
+        Text(translate('游戏', this.uiLanguage)).fontColor(Color.White).fontSize(13).fontWeight(FontWeight.Bold)
+          .layoutWeight(1).onClick(() => {
+            if (Date.now() - this.gameConsoleDragAt > 250 && !this.gameScreenEditing) this.gameConsoleExpanded = !this.gameConsoleExpanded;
+          })
+        Text(this.gameConsoleExpanded ? '−' : '+').fontColor(Color.White).fontSize(20).width(30).textAlign(TextAlign.Center)
+          .onClick(() => { if (!this.gameScreenEditing) this.gameConsoleExpanded = !this.gameConsoleExpanded; })
+      }.width('100%').constraintSize({ minHeight: 34 })
+      if (this.gameConsoleExpanded) {
+        Scroll() {
+          Column({ space: 7 }) {
+            Text(`${this.fpsText} · ${this.delayText} · ${this.routeText}`).fontSize(11).fontColor('#FFD6E5FA')
+              .width('100%').maxLines(2)
+            if (!this.gameScreenEditing) {
+              if (this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length === 0) {
+                Text(translate('当前方案没有屏幕按键，请先编辑并添加', this.uiLanguage))
+                  .fontSize(11).fontColor('#FFD6E5FA').width('100%')
+              }
+              Button(translate(this.gameScreenEnabled ? '隐藏屏幕按键' : '显示屏幕按键', this.uiLanguage))
+                .fontSize(12).width('100%').onClick(() => { this.toggleGameScreenControls(!this.gameScreenEnabled); })
+              Button(translate('编辑屏幕按键', this.uiLanguage)).fontSize(12).width('100%')
+                .onClick(() => { this.beginGameScreenEdit(); })
+              Button(translate(this.relativeMouseEnabled ? '关闭相对鼠标' : '开启相对鼠标', this.uiLanguage))
+                .fontSize(12).width('100%').enabled(this.relativeMouseSupported)
+                .onClick(() => { this.setRelativeMouse(!this.relativeMouseEnabled); })
+              if (!this.relativeMouseSupported) {
+                Text(translate('当前远端不支持相对鼠标', this.uiLanguage)).fontSize(11).fontColor('#FFCAD4E4').width('100%')
+              }
+              Text(translate(`相对鼠标灵敏度 ${this.gameRelativeSensitivity}%`, this.uiLanguage))
+                .fontSize(11).fontColor(Color.White).width('100%')
+              Slider({ value: this.gameRelativeSensitivity, min: 25, max: 200, step: 5 }).width('100%')
+                .onChange((value: number) => {
+                  this.gameRelativeSensitivity = Math.round(value / 5) * 5;
+                  this.peerPreferences?.set('game-relative-sensitivity', this.gameRelativeSensitivity.toString());
+                })
+              Button(translate('手柄映射设置', this.uiLanguage)).fontSize(12).width('100%')
+                .onClick(() => { this.openGamepadMappingDialog(); })
+            } else {
+              Text(translate('拖动按键调整位置，点击按键后修改', this.uiLanguage))
+                .fontSize(11).fontColor('#FFD6E5FA').width('100%')
+              Select(this.gameScreenConfig.profiles.map((profile): SelectOption => ({ value: profile.name })))
+                .selected(this.gameScreenConfig.active).value(this.gameScreenConfig.profiles[this.gameScreenConfig.active].name)
+                .fontColor(Color.White).backgroundColor('#FF35475F')
+                .width('100%').onSelect((index: number) => {
+                  if (index >= 0 && index < 3) { this.gameScreenConfig.active = index; this.gameScreenSelected = -1; this.screenGameClone(); }
+                })
+              TextInput({ text: this.gameScreenConfig.profiles[this.gameScreenConfig.active].name, placeholder: '方案名称' })
+                .fontColor(Color.White).placeholderColor('#FFC2CFE0').backgroundColor('#FF35475F')
+                .width('100%').height(36).maxLength(16).onChange((value: string) => {
+                  const name: string = value.trim();
+                  this.gameScreenConfig.profiles[this.gameScreenConfig.active].name = name || `方案 ${this.gameScreenConfig.active + 1}`;
+                })
+              Row({ space: 5 }) {
+                Button(translate('添加按键', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.addGameScreenKey(); })
+                Button(translate('删除', this.uiLanguage)).fontSize(11).layoutWeight(1).enabled(this.gameScreenSelected >= 0)
+                  .onClick(() => {
+                    const profile = this.gameScreenConfig.profiles[this.gameScreenConfig.active];
+                    profile.keys = profile.keys.filter((key: ScreenGameKey) => key.id !== this.gameScreenSelected);
+                    this.gameScreenSelected = -1; this.screenGameClone();
+                  })
+              }.width('100%')
+              if (this.screenGameSelectedKey()) {
+                Text(translate('按键功能', this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Select(GAMEPAD_TARGETS.filter((target: GamepadTarget) => target.value !== 'none')
+                  .map((target: GamepadTarget): SelectOption => ({ value: translate(target.label, this.uiLanguage) })))
+                  .value(translate(GAMEPAD_TARGETS.find((target: GamepadTarget) => target.value === this.screenGameSelectedKey()?.target)?.label ?? '', this.uiLanguage))
+                  .fontColor(Color.White).backgroundColor('#FF35475F')
+                  .width('100%').onSelect((index: number) => {
+                    const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
+                    const choices: GamepadTarget[] = GAMEPAD_TARGETS.filter((target: GamepadTarget) => target.value !== 'none');
+                    if (key && index >= 0 && index < choices.length) { key.target = choices[index].value; this.screenGameClone(); }
+                  })
+                Text(translate(`大小 ${this.screenGameSelectedKey()?.size ?? 52}`, this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Slider({ value: this.screenGameSelectedKey()?.size ?? 52, min: 36, max: 100, step: 1 }).width('100%')
+                  .onChange((value: number) => { const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
+                    if (key) { key.size = Math.round(value); this.screenGameClone(); } })
+                Text(translate(`不透明度 ${this.screenGameSelectedKey()?.opacity ?? 70}%`, this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Slider({ value: this.screenGameSelectedKey()?.opacity ?? 70, min: 20, max: 100, step: 1 }).width('100%')
+                  .onChange((value: number) => { const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
+                    if (key) { key.opacity = Math.round(value); this.screenGameClone(); } })
+              }
+              Row({ space: 5 }) {
+                Button(translate('取消', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.finishGameScreenEdit(false); })
+                Button(translate('保存', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.finishGameScreenEdit(true); })
+              }.width('100%')
+            }
+          }.width('100%')
+        }.width('100%').constraintSize({ maxHeight: Math.max(1, this.qualityViewportHeight -
+          Math.max(0, Math.min(this.gameConsoleY, this.qualityViewportHeight - 44)) - 52) })
+          .scrollBar(BarState.Auto)
+      }
+    }.width(this.gameConsoleWidth()).padding(6).backgroundColor('#DE101D30').borderRadius(14)
+      .border({ width: 1, color: '#777DA9E2' })
+      .position({ x: Math.max(0, Math.min(this.gameConsoleX, this.qualityViewportWidth - this.gameConsoleWidth())),
+        y: Math.max(0, Math.min(this.gameConsoleY, this.qualityViewportHeight - 44)) })
+      .zIndex(45).hitTestBehavior(HitTestMode.Default)
+  }
+
+  gameConsoleWidth(): number {
+    return Math.max(1, Math.min(this.gameConsoleExpanded ? 230 : 100, this.qualityViewportWidth));
+  }
+
+  @Builder
   buildDraggableQualityMonitor() {
     Scroll() {
       if (this.showQualityMonitor) {
@@ -5742,11 +6076,19 @@ struct RemotePage {
       .width('100%')
       .constraintSize({ minHeight: 22 })
 
-      ConnectionQualityRow({ label: '速度', value: this.speedText })
-      ConnectionQualityRow({ label: 'FPS', value: this.fpsText })
+      ConnectionQualityRow({ label: '画面接收速率', value: this.speedText })
+      ConnectionQualityRow({ label: '实际帧率', value: this.fpsText })
+      ConnectionQualityRow({ label: '请求帧率', value: this.requestedFpsText })
+      ConnectionQualityRow({ label: '请求码率比例', value: this.requestedBitrateText })
+      if (this.gameModeEnabled && !this.highPerformanceEnabled) {
+        ConnectionQualityRow({ label: '游戏目标帧率', value: this.gameModeEffectiveFps > 0 ? `${this.gameModeEffectiveFps} FPS` : '-' })
+      }
       ConnectionQualityRow({ label: '延迟', value: this.delayText, valueColor: this.delayTextColor() })
       ConnectionQualityRow({ label: '连接', value: this.routeText })
-      ConnectionQualityRow({ label: '目标码率', value: this.targetBitrateText })
+      if (this.gameModeEnabled) {
+        ConnectionQualityRow({ label: '游戏链路策略', value: this.gameTransportText })
+      }
+      ConnectionQualityRow({ label: '远端目标码率', value: this.targetBitrateText })
       ConnectionQualityRow({ label: '编码', value: this.codecNameText })
       ConnectionQualityRow({ label: '解码', value: this.decoderText })
       ConnectionQualityRow({ label: '动态范围', value: this.hdrText })
@@ -6164,6 +6506,429 @@ struct RemotePage {
     return peerKey.length > 0 ? `mobile-input-mode-${peerKey}` : 'mobile-input-mode-default';
   }
 
+  loadGamepadPreferences(): void {
+    this.gamepadMapping = decodeGamepadMapping(this.peerPreferences?.get('gamepad-map-v1') ?? '');
+    this.gameScreenConfig = decodeScreenGameConfig(this.peerPreferences?.get('game-screen-controls-v1') ?? '');
+    this.gameScreenKeysProfile = -1;
+    this.syncGameScreenKeys();
+    this.gameScreenEnabled = this.peerPreferences?.get('game-screen-enabled') === '1';
+    const sensitivity: number = Number(this.peerPreferences?.get('game-relative-sensitivity') || '100');
+    this.gameRelativeSensitivity = Number.isFinite(sensitivity) ? Math.max(25, Math.min(200, sensitivity)) : 100;
+    this.gamepadMapper = new GamepadMapper((target: string, down: boolean) => { this.sendGamepadTarget(target, down) },
+      (x: number, y: number) => { this.moveGamepadPointer(x, y) });
+    this.gamepadMapper.setMapping(this.gamepadMapping);
+    this.physicalGamepadEnabled = !this.fileOnly && this.peerPreferences?.get('gamepad-physical') === '1';
+    this.virtualGamepadEnabled = !this.fileOnly && this.peerPreferences?.get('gamepad-virtual') === '1';
+    if (this.physicalGamepadEnabled || this.virtualGamepadEnabled || (this.gameScreenEnabled && this.gameModeEnabled)) this.startGamepadPolling();
+  }
+
+  gamepadCanForward(): boolean {
+    return this.remotePageVisible && !this.fileOnly && this.connectionStatus === ConnectionStatus.CONNECTED &&
+      this.desktopWindowActive && !RemoteSessionBackgroundTask.isAppBackground() && !this.pipSurfaceOwned &&
+      !this.controlMenu && !this.displaySwitchActive && !this.showKeyboardPanel && !this.showGestureHelp &&
+      !this.showRemoteFileBrowser && !this.showCommunicationPanel && !this.showToolbarOrderEditor &&
+      !this.showMobileActions && !this.disconnectConfirmationVisible && !this.showGamepadMappingDialog &&
+      !this.showKeyboardMappingDialog && !this.showKeyboardCalibration && !this.showKeyboardSettings &&
+      !this.showMouseSettings && !this.showOrientationDialog && !this.gameScreenEditing;
+  }
+
+  setGamepadEnabled(kind: string, enabled: boolean): void {
+    if (this.fileOnly || this.connectionStatus !== ConnectionStatus.CONNECTED || (kind !== 'physical' && kind !== 'virtual')) return;
+    this.gamepadMapper?.releaseAll();
+    if (kind === 'physical') {
+      this.physicalGamepadEnabled = enabled;
+      if (!enabled && this.gamepadNativeStarted) {
+        RustDeskNapi.stopGamepadMonitor(); this.gamepadNativeStarted = false;
+      }
+    } else this.virtualGamepadEnabled = enabled;
+    let saved: boolean = this.peerPreferences?.set(kind === 'physical' ? 'gamepad-physical' : 'gamepad-virtual', enabled ? '1' : '0') ?? false;
+    if (saved) saved = this.peerPreferences?.flush() ?? false;
+    RustDeskNapi.appendDiagnosticLog('gamepad', `toggle kind=${kind} enabled=${enabled ? 1 : 0} saved=${saved ? 1 : 0}`);
+    if (!saved) this.showFileToast('手柄模式已切换，但设置未保存');
+    if (this.physicalGamepadEnabled || this.virtualGamepadEnabled || (this.gameScreenEnabled && this.gameModeEnabled)) this.startGamepadPolling();
+    else this.stopGamepadPolling();
+  }
+
+  startGamepadPolling(): void {
+    if (this.gamepadTimer !== -1) return;
+    const generation: number = ++this.gamepadGeneration;
+    const poll = (): void => {
+      if (generation !== this.gamepadGeneration || !this.remotePageVisible) return;
+      this.gamepadTimer = -1;
+      if (!this.physicalGamepadEnabled && !this.virtualGamepadEnabled && !(this.gameScreenEnabled && this.gameModeEnabled)) {
+        this.stopGamepadPolling(); return;
+      }
+      if (!this.gamepadCanForward()) {
+        this.gamepadMapper?.releaseAll();
+        if (this.gamepadNativeStarted) { RustDeskNapi.stopGamepadMonitor(); this.gamepadNativeStarted = false; }
+        this.gamepadTimer = setTimeout(poll, 100);
+        return;
+      }
+      const now: number = Date.now();
+      if (this.physicalGamepadEnabled && !this.gamepadNativeStarted && now >= this.gamepadRetryAt) {
+        const result: number = RustDeskNapi.startGamepadMonitor();
+        if (result === 0) this.gamepadNativeStarted = true;
+        else if (result === -1 || result === -2) {
+          this.physicalGamepadEnabled = false;
+          this.peerPreferences?.set('gamepad-physical', '0'); this.peerPreferences?.flush();
+          RustDeskNapi.appendDiagnosticLog('gamepad', `physical_unavailable result=${result}`);
+          this.showFileToast('当前系统无法使用实体手柄，虚拟手柄仍可使用');
+        } else this.gamepadRetryAt = now + 1000;
+      }
+      if (this.gamepadNativeStarted) {
+        const events: GamepadInputEvent[] = RustDeskNapi.takeGamepadEvents();
+        for (const event of events) {
+          if (event.kind === 0 && (event.action === 0 || event.action === 1)) {
+            this.gamepadMapper?.button(event.device, event.control, event.action === 0);
+          } else if (event.kind === 1) {
+            this.gamepadMapper?.axis(event.device, event.control, event.x, event.y);
+          } else if (event.kind === 2) {
+            this.gamepadMapper?.releaseDevice(event.device);
+          } else if (event.kind === 3) {
+            this.gamepadMapper?.releaseAll();
+            // A reset can mean overflow or a session-generation change. Restart
+            // the monitor only after the current connection is eligible again.
+            RustDeskNapi.stopGamepadMonitor(); this.gamepadNativeStarted = false;
+            this.gamepadRetryAt = now + 1000;
+            RustDeskNapi.appendDiagnosticLog('gamepad', 'input_reset reason=queue_or_session');
+            break;
+          }
+        }
+      }
+      this.gamepadMapper?.tick(now);
+      this.gamepadTimer = setTimeout(poll, 16);
+    };
+    this.gamepadTimer = setTimeout(poll, 16);
+  }
+
+  stopGamepadPolling(): void {
+    this.gamepadGeneration++;
+    if (this.gamepadTimer !== -1) clearTimeout(this.gamepadTimer);
+    this.gamepadTimer = -1;
+    this.gamepadMapper?.releaseAll();
+    if (this.gamepadNativeStarted) RustDeskNapi.stopGamepadMonitor();
+    this.gamepadNativeStarted = false;
+    this.gamepadRetryAt = 0;
+  }
+
+  gamepadVirtualButton(code: number, down: boolean): void {
+    if (down && !this.gamepadCanForward()) return;
+    this.gamepadMapper?.button(-1, code, down);
+  }
+
+  gameScreenButton(id: number, target: string, down: boolean): void {
+    if (down && (!this.gameModeEnabled || !this.gameScreenEnabled || !this.gamepadCanForward())) return;
+    this.gamepadMapper?.screenButton(id, target, down);
+  }
+
+  screenGameClone(): void {
+    this.gameScreenConfig = decodeScreenGameConfig(JSON.stringify(this.gameScreenConfig));
+    this.syncGameScreenKeys();
+  }
+
+  syncGameScreenKeys(): void {
+    const profile: number = this.gameScreenConfig.active;
+    const source: ScreenGameKey[] = this.gameScreenConfig.profiles[profile].keys;
+    const previous: GameScreenRenderKey[] = this.gameScreenKeysProfile === profile ? this.gameScreenKeys : [];
+    const next: GameScreenRenderKey[] = source.map((key: ScreenGameKey): GameScreenRenderKey => {
+      const existing: GameScreenRenderKey | undefined = previous.find((item: GameScreenRenderKey) => item.id === key.id);
+      if (existing) { existing.apply(key); return existing; }
+      return new GameScreenRenderKey(key);
+    });
+    const changed: boolean = next.length !== previous.length || next.some((item: GameScreenRenderKey, index: number) => item !== previous[index]);
+    this.gameScreenKeysProfile = profile;
+    if (changed || previous !== this.gameScreenKeys) this.gameScreenKeys = next;
+  }
+
+  screenGameSelectedKey(): ScreenGameKey | undefined {
+    return this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.find((key: ScreenGameKey) => key.id === this.gameScreenSelected);
+  }
+
+  moveGameScreenKey(id: number, x: number, y: number): void {
+    if (!this.gameScreenEditing) return;
+    const key: ScreenGameKey | undefined = this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.find((item: ScreenGameKey) => item.id === id);
+    if (!key) return;
+    key.x = Math.round(x * 1000) / 1000; key.y = Math.round(y * 1000) / 1000;
+    this.screenGameClone();
+  }
+
+  beginGameScreenEdit(): void {
+    if (this.gameScreenEditing) return;
+    this.gamepadMapper?.releaseAll();
+    this.gameScreenBeforeEdit = JSON.stringify(this.gameScreenConfig);
+    this.gameScreenEnabledBeforeEdit = this.gameScreenEnabled;
+    this.gameScreenEnabled = true;
+    this.gameScreenSelected = -1;
+    this.gameScreenEditing = true;
+    this.startGamepadPolling();
+  }
+
+  finishGameScreenEdit(save: boolean): void {
+    if (!this.gameScreenEditing) return;
+    const preferences = this.peerPreferences;
+    const previous: string = preferences?.get('game-screen-controls-v1') || JSON.stringify(defaultScreenGameConfig());
+    if (save) {
+      const next: string = JSON.stringify(this.gameScreenConfig);
+      let saved: boolean = preferences?.set('game-screen-controls-v1', next) ?? false;
+      if (saved) saved = preferences?.set('game-screen-enabled', '1') ?? false;
+      if (saved) saved = preferences?.flush() ?? false;
+      if (!saved) {
+        preferences?.set('game-screen-controls-v1', previous);
+        preferences?.set('game-screen-enabled', this.gameScreenEnabledBeforeEdit ? '1' : '0');
+        this.showFileToast('屏幕按键保存失败，请重试'); return;
+      }
+      RustDeskNapi.appendDiagnosticLog('game-mode', `screen_layout_saved profile=${this.gameScreenConfig.active + 1} keys=${this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length}`);
+    } else {
+      this.gameScreenConfig = decodeScreenGameConfig(this.gameScreenBeforeEdit);
+      this.syncGameScreenKeys();
+      this.gameScreenEnabled = this.gameScreenEnabledBeforeEdit;
+    }
+    this.gamepadMapper?.releaseAll();
+    this.gameScreenEditing = false; this.gameScreenSelected = -1;
+    if (!this.gameScreenEnabled && !this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
+  }
+
+  addGameScreenKey(): void {
+    const keys: ScreenGameKey[] = this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys;
+    if (keys.length >= 12) { this.showFileToast('每个方案最多 12 个屏幕按键'); return; }
+    let id: number = 1;
+    while (keys.some((key: ScreenGameKey) => key.id === id)) id++;
+    keys.push({ id, target: 'k:44', x: 0.7, y: 0.55, size: 52, opacity: 70 });
+    this.gameScreenSelected = id; this.screenGameClone();
+  }
+
+  toggleGameScreenControls(enabled: boolean): void {
+    this.gamepadMapper?.releaseAll();
+    this.gameScreenEnabled = enabled;
+    let saved: boolean = this.peerPreferences?.set('game-screen-enabled', enabled ? '1' : '0') ?? false;
+    if (saved) saved = this.peerPreferences?.flush() ?? false;
+    if (!saved) this.showFileToast('屏幕按键状态未保存');
+    if (enabled) this.startGamepadPolling();
+    else if (!this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
+  }
+
+  gamepadVirtualAxis(axis: number, x: number, y: number): void {
+    if (!this.gamepadCanForward()) { x = 0; y = 0; }
+    this.gamepadMapper?.axis(-1, axis, x, y);
+  }
+
+  sendGamepadTarget(target: string, down: boolean): void {
+    // Releases remain allowed while an overlay or local app takes focus.
+    if (!this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      (down && !this.gamepadCanForward())) return;
+    const action: number = down ? 0 : 1;
+    if (target.startsWith('k:')) {
+      const hid: number = Number(target.substring(2));
+      if (Number.isInteger(hid) && hid >= 4 && hid <= 82) {
+        ConnectionService.sendPhysicalKeyEvent(hid, action, undefined, false, 'gamepad');
+      }
+    } else if (target.startsWith('m:')) {
+      const code: number = Number(target.substring(2));
+      if ([16, 17, 18].includes(code)) ConnectionService.sendKeyEvent(code, action, 20000 + code);
+    } else if (target === 'mouse:left' || target === 'mouse:right') {
+      this.ensurePointerInitialized();
+      const mouseAction: number = target === 'mouse:left' ? (down ? 1 : 2) : (down ? 3 : 4);
+      ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, mouseAction);
+    }
+  }
+
+  moveGamepadPointer(x: number, y: number): void {
+    if (!this.gamepadCanForward() || this.remoteWidth <= 0 || this.remoteHeight <= 0) return;
+    const point: RemotePoint = this.updatePointerFromDelta(x, y);
+    if (!this.relativeMouseEnabled) ConnectionService.sendMouseEvent(point.x, point.y, 0);
+  }
+
+  openGamepadMappingDialog(): void {
+    const preferences = this.peerPreferences;
+    if (!preferences || this.showGamepadMappingDialog || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    this.gamepadMapper?.releaseAll();
+    if (this.gamepadNativeStarted) { RustDeskNapi.stopGamepadMonitor(); this.gamepadNativeStarted = false; }
+    this.setControlMenu('');
+    this.showGamepadMappingDialog = true;
+    try {
+      this.gamepadMappingDialog = new CustomDialogController({
+        builder: GamepadMappingDialog({ initial: this.gamepadMapping,
+          onClose: () => { this.showGamepadMappingDialog = false },
+          onSave: (mapping: GamepadMapping): boolean => {
+            if (!this.remotePageVisible || this.peerPreferences !== preferences ||
+              this.connectionStatus !== ConnectionStatus.CONNECTED || !validGamepadMapping(mapping)) return false;
+            const previous: string = preferences.get('gamepad-map-v1') || JSON.stringify(defaultGamepadMapping());
+            const next: string = JSON.stringify(mapping);
+            if (!preferences.set('gamepad-map-v1', next)) return false;
+            if (!preferences.flush()) { preferences.set('gamepad-map-v1', previous); return false; }
+            this.gamepadMapping = decodeGamepadMapping(next);
+            this.gamepadMapper?.setMapping(this.gamepadMapping);
+            RustDeskNapi.appendDiagnosticLog('gamepad', 'mapping_saved');
+            return true;
+          } }),
+        customStyle: true, autoCancel: false,
+        cancel: () => { this.showGamepadMappingDialog = false }
+      });
+      this.gamepadMappingDialog.open();
+    } catch (_error) {
+      this.showGamepadMappingDialog = false;
+      RustDeskNapi.appendDiagnosticLog('gamepad', 'mapping_editor_open_failed');
+      this.showFileToast('无法打开手柄设置，请重试');
+    }
+  }
+
+  loadGameModePreference(): void {
+    this.gameModeEnabled = !this.fileOnly && this.peerPreferences?.get('game-mode') === '1';
+    this.gameModePolicy.reset();
+    this.gameModeAppliedFps = 0;
+    this.gameModeRetryAfter = 0;
+    this.gameModeEffectiveFps = 0;
+    const result: number = RustDeskNapi.setGameMode(this.gameModeEnabled);
+    ConnectionService.setGameTransportEnabled(this.gameModeEnabled);
+    RustDeskNapi.appendDiagnosticLog('game-mode', `restore enabled=${this.gameModeEnabled ? 1 : 0} result=${result}`);
+  }
+
+  loadHighPerformancePreference(): void {
+    this.highPerformanceEnabled = !this.fileOnly && this.peerPreferences?.get('high-performance-priority') === '1';
+    const result: number = RustDeskNapi.setHighPerformance(this.highPerformanceEnabled);
+    RustDeskNapi.appendDiagnosticLog('performance', `priority_restore enabled=${this.highPerformanceEnabled ? 1 : 0} result=${result}`);
+  }
+
+  setHighPerformance(enabled: boolean): void {
+    if (this.fileOnly || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    const previous: boolean = this.highPerformanceEnabled;
+    const result: number = RustDeskNapi.setHighPerformance(enabled);
+    if (result !== 0) {
+      RustDeskNapi.setHighPerformance(previous);
+      RustDeskNapi.appendDiagnosticLog('performance', `priority_toggle_failed result=${result}`);
+      this.showFileToast('高性能模式切换失败，请重试');
+      return;
+    }
+    this.highPerformanceEnabled = enabled;
+    this.gameModePolicy.reset();
+    this.gameModeAppliedFps = 0;
+    this.gameModeRetryAfter = 0;
+    if (!enabled && this.gameModeEnabled) {
+      this.gameModeAppliedFps = RustDeskNapi.setGameFps(this.gameModePolicy.fps()) === 0 ? this.gameModePolicy.fps() : 0;
+    }
+    let saved: boolean = this.peerPreferences?.set('high-performance-priority', enabled ? '1' : '0') ?? false;
+    if (saved) saved = this.peerPreferences?.flush() ?? false;
+    RustDeskNapi.appendDiagnosticLog('performance', `priority_toggle enabled=${enabled ? 1 : 0} saved=${saved ? 1 : 0}`);
+    const publicRelay: boolean = enabled && RustDeskNapi.isUsingPublicServer() && ConnectionService.getConnectionRoute() !== 1;
+    this.showFileToast(!saved ? '高性能模式已切换，但设置未保存' : publicRelay ?
+      '公共中继仍按原有规则限制码率和帧率' : enabled ?
+      '高性能优先已开启，实际画质受远端和网络影响' : '已恢复自动画质策略');
+  }
+
+  setGameMode(enabled: boolean): void {
+    if (this.fileOnly || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    const previous: boolean = this.gameModeEnabled;
+    const result: number = RustDeskNapi.setGameMode(enabled);
+    if (result !== 0) {
+      RustDeskNapi.setGameMode(previous);
+      RustDeskNapi.appendDiagnosticLog('game-mode', `toggle_failed result=${result}`);
+      this.showFileToast('游戏模式切换失败，请重试');
+      return;
+    }
+    this.gameModeEnabled = enabled;
+    if (!enabled) {
+      if (this.gameScreenEditing) this.finishGameScreenEdit(false);
+      this.gamepadMapper?.releaseDevice(-2);
+      this.gameConsoleExpanded = false;
+      if (!this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
+    } else if (this.gameScreenEnabled) this.startGamepadPolling();
+    ConnectionService.setGameTransportEnabled(enabled);
+    this.gameTransportHealth.reset();
+    this.gameModePolicy.reset();
+    this.gameModeAppliedFps = enabled ? 60 : 0;
+    this.gameModeRetryAfter = 0;
+    this.gameModeEffectiveFps = 0;
+    let saved: boolean = this.peerPreferences?.set('game-mode', enabled ? '1' : '0') ?? false;
+    if (saved) saved = this.peerPreferences?.flush() ?? false;
+    RustDeskNapi.appendDiagnosticLog('game-mode', `toggle enabled=${enabled ? 1 : 0} saved=${saved ? 1 : 0}`);
+    if (enabled) {
+      if (!saved) this.showFileToast('游戏模式已切换，但设置未保存');
+      this.showGameReconnectChoice();
+    } else this.showFileToast(!saved ? '游戏模式已切换，但设置未保存' : '游戏模式已关闭，恢复原画质设置');
+  }
+
+  showGameReconnectChoice(): void {
+    const peer = this.peerPreferences;
+    const sessionGeneration = this.videoSessionGeneration;
+    try {
+      this.getUIContext().showAlertDialog({
+        title: translate('游戏模式已开启', this.uiLanguage),
+        message: translate('画质和输入优化已生效。UDP 优先需要重新连接，可能需要再次登录或验证。', this.uiLanguage),
+        autoCancel: false,
+        primaryButton: { value: translate('下次连接生效', this.uiLanguage), action: () => {} },
+        secondaryButton: { value: translate('立即重新连接', this.uiLanguage), action: () => {
+          if (!this.remotePageVisible || this.isLeavingAfterDisconnect || !this.gameModeEnabled ||
+            this.peerPreferences !== peer || this.videoSessionGeneration !== sessionGeneration ||
+            this.transferActive || this.uploadStaging || this.fileOperationBusy ||
+            this.recordingActive || this.communicationCallActive || this.pipSurfaceOwned || this.privacyModeState > 0) {
+            this.showFileToast('当前会话不适合重新连接，请稍后再试'); return;
+          }
+          const started = ConnectionService.reconnectForGameMode(() => {
+            this.gamepadMapper?.releaseAll();
+            this.releaseHeldMouseButtons('game_mode_reconnect');
+            this.releaseRemoteNavigationKeys('game_mode_reconnect');
+          });
+          if (!started) { this.showFileToast('当前会话不适合重新连接，请稍后再试'); return; }
+          this.rememberDisplayForReconnect();
+          this.resetRemoteViewportForSession();
+          this.displayStateInitialized = false;
+          this.connectionStatus = ConnectionStatus.CONNECTING;
+          this.reconnecting = true;
+        } }
+      });
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('game-transport', 'manual_reconnect_prompt_unavailable');
+      this.showFileToast('游戏模式已开启，下次连接优先尝试 UDP');
+    }
+  }
+
+  updateGameTransportHealth(frame: VideoFrameInfo): void {
+    const transport: number = ConnectionService.getConnectionTransport();
+    if (!this.gameModeEnabled || !this.remotePageVisible || this.isLeavingAfterDisconnect ||
+      this.disconnectConfirmationVisible || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      !this.desktopWindowActive || RemoteSessionBackgroundTask.isAppBackground() || this.pipSurfaceOwned ||
+      this.transferActive || this.uploadStaging || this.fileOperationBusy || this.recordingActive ||
+      this.communicationCallActive || this.privacyModeState > 0 || frame.security !== 1 ||
+      (transport !== 2 && transport !== 3)) {
+      this.gameTransportHealth.reset();
+      return;
+    }
+    const now: number = Date.now();
+    if (this.gameTransportHealth.observe(frame.delaySampleSeq ?? 0, frame.delayMs ?? 0, now)) {
+      if (ConnectionService.retryUnstableGameUdp(this.transferActive, frame.security ?? 0, () => {
+        this.gamepadMapper?.releaseAll();
+        this.releaseHeldMouseButtons('game_udp_fallback');
+        this.releaseRemoteNavigationKeys('game_udp_fallback');
+      })) {
+        this.rememberDisplayForReconnect();
+        RustDeskNapi.appendDiagnosticLog('game-transport',
+          `quality_fallback delay_ms=${frame.delayMs ?? 0} sample_seq=${frame.delaySampleSeq ?? 0}`);
+        this.gameTransportHealth.reset();
+        this.connectionStatus = ConnectionStatus.CONNECTING;
+        this.reconnecting = true;
+        this.showFileToast('UDP 延迟持续过高，正在尝试 TCP 或中继');
+      } else if (this.gameTransportLastDeferredAt === 0 || now - this.gameTransportLastDeferredAt >= 30000) {
+        this.gameTransportLastDeferredAt = now;
+        RustDeskNapi.appendDiagnosticLog('game-transport',
+          `quality_fallback_deferred delay_ms=${frame.delayMs ?? 0} sample_seq=${frame.delaySampleSeq ?? 0} reason=scope_or_safety_gate`);
+      }
+    }
+  }
+
+  updateGameModePolicy(frame: VideoFrameInfo): void {
+    this.gameModeEffectiveFps = this.gameModeEnabled ? (frame.gameEffectiveFps ?? 0) : 0;
+    if (!this.gameModeEnabled || this.highPerformanceEnabled || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      !this.desktopWindowActive || RemoteSessionBackgroundTask.isAppBackground() || this.pipSurfaceOwned || !frame.hasFrame) return;
+    const queued: number = frame.queuedFrames ?? -1;
+    const now: number = Date.now();
+    const target: number = this.gameModePolicy.observe(queued, now);
+    if (queued < 0 || target === this.gameModeAppliedFps || now < this.gameModeRetryAfter) return;
+    const result: number = RustDeskNapi.setGameFps(target);
+    if (result === 0) this.gameModeAppliedFps = target;
+    else this.gameModeRetryAfter = now + 3000;
+    RustDeskNapi.appendDiagnosticLog('game-mode', `fps_request target=${target} queue_frames=${queued} result=${result}`);
+  }
+
   loadInputMode(): void {
     const savedMode: string = this.peerPreferences?.get('input-mode', this.inputModeOptionKey()) ??
       RustDeskNapi.getOption(this.inputModeOptionKey());
@@ -6304,6 +7069,10 @@ struct RemotePage {
     if (this.displaySwitchActive || !this.remotePageVisible ||
       this.connectionStatus !== ConnectionStatus.CONNECTED || this.pipSurfaceOwned ||
       !Number.isInteger(display) || display < 0 || display >= this.displayCount || display === this.currentDisplay) return;
+    if (this.isPcDevice() && RustDeskNapi.getSecondaryDisplayState().display === display) {
+      RustDeskNapi.stopSecondaryDisplay();
+      this.extendedRemoteDisplay = -1;
+    }
     if (!this.canAnimateDisplaySwitch()) {
       this.traceDisplaySwitch(`skip target=${display} phase=preflight reason=viewport_unavailable video=${this.hasVideo} ` +
         `size=${this.componentWidth}x${this.componentHeight} active=${this.desktopWindowActive !== false} ` +
@@ -6941,6 +7710,7 @@ struct RemotePage {
   }
 
   handleRemoteHover(isHovering: boolean): void {
+    if (this.showGamepadMappingDialog) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
@@ -7043,6 +7813,7 @@ struct RemotePage {
   }
 
   handleRemoteTouch(event: TouchEvent): void {
+    if (this.showGamepadMappingDialog) return;
     if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
@@ -7578,6 +8349,7 @@ struct RemotePage {
   }
 
   handleRemoteClickFallback(event: ClickEvent, coordinatesFromSurface: boolean = false): void {
+    if (this.showGamepadMappingDialog) return;
     if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
@@ -7623,6 +8395,7 @@ struct RemotePage {
 
   handleRemoteMouse(event: MouseEvent, coordinatesFromSurface: boolean = false,
     coordinatesFromViewport: boolean = false): void {
+    if (this.showGamepadMappingDialog || (this.physicalGamepadEnabled && event.source === SourceType.JOYSTICK)) return;
     if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
@@ -7725,6 +8498,7 @@ struct RemotePage {
   }
 
   handleRemoteAxis(event: AxisEvent): void {
+    if (this.showGamepadMappingDialog || (this.physicalGamepadEnabled && event.source === SourceType.JOYSTICK)) return;
     if (this.displaySwitchActive) return;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return;
     if (this.desktopWindowActive === false) return;
@@ -7811,9 +8585,10 @@ struct RemotePage {
   updatePointerFromLocal(localX: number, localY: number): RemotePoint {
     if (this.relativeMouseEnabled) {
       if (this.relativePointerSampleValid) {
+        const sensitivity: number = this.gameModeEnabled ? this.gameRelativeSensitivity / 100 : 1;
         ConnectionService.sendRelativeMouseDelta(
-          (localX - this.relativePointerX) * this.remoteWidth / Math.max(1, this.getDisplayWidth()),
-          (localY - this.relativePointerY) * this.remoteHeight / Math.max(1, this.getDisplayHeight()));
+          (localX - this.relativePointerX) * this.remoteWidth / Math.max(1, this.getDisplayWidth()) * sensitivity,
+          (localY - this.relativePointerY) * this.remoteHeight / Math.max(1, this.getDisplayHeight()) * sensitivity);
       }
       this.relativePointerX = localX;
       this.relativePointerY = localY;
@@ -7861,7 +8636,8 @@ struct RemotePage {
     let remoteDeltaY: number = deltaY * this.remoteHeight / displayHeight * TOUCHPAD_POINTER_SPEED;
     if (this.relativeMouseEnabled) {
       // Do not clamp to our predicted cursor or throttle away movement: KVM does not echo position.
-      ConnectionService.sendRelativeMouseDelta(remoteDeltaX, remoteDeltaY);
+      const sensitivity: number = this.gameModeEnabled ? this.gameRelativeSensitivity / 100 : 1;
+      ConnectionService.sendRelativeMouseDelta(remoteDeltaX * sensitivity, remoteDeltaY * sensitivity);
       return { x: this.lastAbsX, y: this.lastAbsY };
     }
     this.lastAbsX = Math.max(0, Math.min(this.remoteWidth - 1, this.lastAbsX + remoteDeltaX));
@@ -7961,6 +8737,8 @@ struct RemotePage {
   }
 
   handleRemoteKey(event: KeyEvent): boolean {
+    if (this.showGamepadMappingDialog) return false;
+    if (this.physicalGamepadEnabled && event.keySource === KeySource.JOYSTICK) return true;
     if (this.pipSurfaceOwned) return false;
     if (this.showCommunicationPanel) return false;
     if (this.showKeyboardMappingDialog || this.showKeyboardCalibration || this.showKeyboardSettings || this.showMouseSettings || this.showOrientationDialog) return false;
@@ -9865,7 +10643,7 @@ struct RemotePage {
         let result: RemoteDirectoryResult = JSON.parse(raw) as RemoteDirectoryResult;
         this.remoteDirectoryLoading = false;
         if (result.error.length > 0) {
-          this.showFileToast(`读取远端目录失败：${result.error}`);
+          this.showFileToast(`读取远端目录失败：${translate(result.error, this.uiLanguage)}`);
           return;
         }
         this.remoteDirectoryPath = result.path;
@@ -10615,31 +11393,72 @@ struct RemotePage {
     ConnectionService.sendKeyEvent(code, 2);
   }
 
-  showInsecureFallbackPrompt(): void {
-    AlertDialog.show({
-      title: translate('服务器密钥不正确', this.uiLanguage),
-      message: translate('无法验证自建服务器密钥。降级后，本次连接将不再验证远端身份，可能存在被冒充或窃听的风险。是否仅对本次连接使用未加密模式？', this.uiLanguage),
-      autoCancel: false,
-      alignment: DialogAlignment.Center,
-      primaryButton: {
-        value: translate('取消连接', this.uiLanguage),
-        action: () => {
-          RustDeskNapi.appendDiagnosticLog('connection-security', 'user_rejected_insecure_fallback');
-        },
-      },
-      secondaryButton: {
-        value: translate('仅本次继续', this.uiLanguage),
-        fontColor: RustDeskTheme.ERROR,
-        action: () => {
-          this.connectionError = '';
-          this.connectionStatus = ConnectionStatus.CONNECTING;
-          if (!ConnectionService.retryWithoutEncryption()) {
-            this.connectionStatus = ConnectionStatus.FAILED;
-            this.connectionError = ConnectionService.getLastConnectionError();
-          }
-        },
-      },
+  async checkInsecureFallback(): Promise<void> {
+    const scope = ConnectionService.insecureConsentScope();
+    if (!scope) {
+      this.connectionError = '服务器配置或账号已改变，请返回首页重新连接';
+      return;
+    }
+    let remembered: boolean = false;
+    try { remembered = await InsecureConsentStore.has(getContext(this) as common.UIAbilityContext, scope); }
+    catch (_error) { remembered = false; }
+    if (!this.remotePageVisible || this.isLeavingAfterDisconnect) return;
+    if (!ConnectionService.isInsecureConsentScopeCurrent(scope)) {
+      this.insecureFallbackPromptShown = false;
+      return;
+    }
+    if (remembered) {
+      RustDeskNapi.appendDiagnosticLog('connection-security', `insecure_grant_used reason=${scope.reason}`);
+      this.continueInsecureConnection(scope, true);
+      return;
+    }
+    this.showInsecureFallbackPrompt(scope);
+  }
+
+  showInsecureFallbackPrompt(scope: InsecureConsentScope): void {
+    const direct: boolean = scope.reason === INSECURE_DIRECT_ENDPOINT;
+    const missingSignature: boolean = scope.reason === INSECURE_MISSING_SIGNATURE;
+    const title: string = direct ? '直连未加密' : (missingSignature ? '无法验证远端身份' : '服务器密钥不正确');
+    const message: string = direct ?
+      '直接通过 IP 或域名连接无法验证远端身份，且连接未加密。屏幕、输入和文件可能被窃听或篡改。仅在信任网络及远端设备时继续。' :
+      (missingSignature ? '本次连接未获取到远端身份签名，无法建立加密连接。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。' :
+        '无法验证自建服务器密钥。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。');
+    this.insecureFallbackController = new CustomDialogController({
+      builder: InsecureConnectionDialog({ title: title, message: message,
+        onCancel: () => { RustDeskNapi.appendDiagnosticLog('connection-security', 'user_rejected_insecure_fallback'); },
+        onContinue: (remember: boolean) => { this.acceptInsecureConnection(scope, remember); } }),
+      autoCancel: false, customStyle: true, alignment: DialogAlignment.Center,
     });
+    this.insecureFallbackController.open();
+  }
+
+  async acceptInsecureConnection(scope: InsecureConsentScope, remember: boolean): Promise<void> {
+    if (!this.remotePageVisible || !ConnectionService.isInsecureConsentScopeCurrent(scope)) return;
+    if (remember) {
+      let saved: boolean = false;
+      try {
+        saved = await InsecureConsentStore.remember(getContext(this) as common.UIAbilityContext, scope,
+          () => this.remotePageVisible && !this.isLeavingAfterDisconnect &&
+            ConnectionService.isInsecureConsentScopeCurrent(scope));
+      } catch (_error) { saved = false; }
+      RustDeskNapi.appendDiagnosticLog('connection-security', `insecure_grant_saved=${saved} reason=${scope.reason}`);
+      if (!saved && this.remotePageVisible) this.showFileToast('免提醒保存失败，本次仍可继续');
+    }
+    if (!this.remotePageVisible || this.isLeavingAfterDisconnect ||
+      !ConnectionService.isInsecureConsentScopeCurrent(scope)) return;
+    this.continueInsecureConnection(scope, false);
+  }
+
+  continueInsecureConnection(scope: InsecureConsentScope, remembered: boolean): void {
+    this.connectionError = '';
+    this.connectionStatus = ConnectionStatus.CONNECTING;
+    if (ConnectionService.retryWithoutEncryption(scope.reason, remembered)) {
+      // A different failure on the new attempt needs its own warning.
+      this.insecureFallbackPromptShown = false;
+    } else {
+      this.connectionStatus = ConnectionStatus.FAILED;
+      this.connectionError = ConnectionService.getLastConnectionError();
+    }
   }
 
   async retrySession(): Promise<void> {
@@ -10653,6 +11472,7 @@ struct RemotePage {
     this.directLoginStartedAt = 0;
     this.releaseHeldMouseButtons('manual_retry');
     this.releaseRemoteNavigationKeys('manual_retry');
+    this.rememberDisplayForReconnect();
     this.resetRemoteViewportForSession();
     this.displayStateInitialized = false;
     let started: boolean = false;
@@ -11068,6 +11888,10 @@ struct RemotePage {
     this.delayMs = delayMs;
     this.delayText = delayMs > 0 ? `${delayMs} ms` : '-';
     this.targetBitrateText = targetBitrateKb > 0 ? `${targetBitrateKb} kb` : '-';
+    const requestedFps: number = frame.requestedFps ?? 0;
+    const requestedBitrate: number = frame.requestedBitratePercent ?? 0;
+    this.requestedFpsText = requestedFps > 0 ? `${requestedFps} FPS` : '-';
+    this.requestedBitrateText = requestedFps <= 0 ? '-' : requestedBitrate > 0 ? `${requestedBitrate}%` : translate('自动', this.uiLanguage);
     let now: number = Date.now();
     let totalFrames: number = frame.renderedFrames ?? frame.totalFrames ?? this.lastStatsFrames;
     let totalBytes: number = frame.totalBytes ?? this.lastStatsBytes;
@@ -11170,5 +11994,6 @@ struct RemotePage {
       transportLabel = 'WebSocket';
     }
     this.routeText = transportLabel.length > 0 ? `${translate(routeLabel, this.uiLanguage)} · ${transportLabel}` : routeLabel;
+    this.gameTransportText = ConnectionService.gameTransportDescription();
   }
 }

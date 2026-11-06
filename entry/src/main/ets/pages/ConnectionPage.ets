@@ -12,6 +12,7 @@ import { ConnectionService } from '../service/ConnectionService'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { PerformanceSettings } from '../model/PerformanceSettings'
+import { RemotePeerPreferences } from '../service/RemotePeerPreferences'
 import { PeerOnlineResult, PeerOnlineState, RemoteSecurityOptions, RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
 import { RemoteSecurityStore } from '../service/RemoteSecurityStore'
@@ -129,6 +130,8 @@ export struct ConnectionPage {
   private savedConnectionsLoadGeneration: number = 0
   @State selectedConnectionId: string = ''
   @State connectionEditorDraft: SavedConnectionDraft = SavedConnectionEditing.empty()
+  @State connectionEditorGameMode: boolean = false
+  @State connectionEditorGameServer: string = ''
   @State connectionEditorGroups: ConnectionEditorGroup[] = []
   @State creatingSavedConnection: boolean = false
   private lastSavedHomepageId: string = ''
@@ -158,8 +161,10 @@ export struct ConnectionPage {
       initial: this.connectionEditorDraft,
       groups: this.connectionEditorGroups,
       createNew: this.creatingSavedConnection,
-      onSave: (draft: SavedConnectionDraft, action: string): Promise<ConnectionEditResult> => {
-        return this.saveEditedConnection(draft, action)
+      initialGameMode: this.connectionEditorGameMode,
+      gameModeServer: this.connectionEditorGameServer,
+      onSave: (draft: SavedConnectionDraft, action: string, gameMode: boolean, changed: boolean): Promise<ConnectionEditResult> => {
+        return this.saveEditedConnection(draft, action, gameMode, changed)
       },
       onClose: () => { this.closeConnectionEditor() }
     }),
@@ -3301,8 +3306,10 @@ export struct ConnectionPage {
     this.creatingSavedConnection = true
     this.editingConnectionScope = this.currentConnectionScope()
     this.connectionEditorDraft = SavedConnectionEditing.empty()
+    this.connectionEditorGameServer = RustDeskNapi.getOption('custom-rendezvous-server').trim()
     // Only the ID is offered as a convenience. Quick-session secrets/settings stay separate.
     if (useQuickId) this.connectionEditorDraft.remoteId = this.normalizeRemoteId(this.remoteId)
+    this.connectionEditorGameMode = this.readEditorGameMode(this.connectionEditorGameServer, this.connectionEditorDraft.remoteId)
     this.connectionEditorGroups = this.connectionGroups.map((group: SavedConnectionGroup): ConnectionEditorGroup => {
       return { id: group.id, name: group.name }
     })
@@ -3321,6 +3328,8 @@ export struct ConnectionPage {
     this.editingConnectionId = item.id
     this.editingConnectionOriginal = this.cloneSavedConnections([item])[0]
     this.editingConnectionScope = scope
+    this.connectionEditorGameServer = RustDeskNapi.getOption('custom-rendezvous-server').trim()
+    this.connectionEditorGameMode = this.readEditorGameMode(this.connectionEditorGameServer, item.remoteId)
     const options = RemoteSecurityStore.options(item.id)
     const hasOsPassword = (await RemoteSecurityStore.loadOsPassword(item.id)).length > 0
     if (!this.savePageActive || generation !== this.editingConnectionGeneration || scope !== this.currentConnectionScope() ||
@@ -3345,7 +3354,15 @@ export struct ConnectionPage {
     this.connectionEditorDraft = SavedConnectionEditing.empty()
   }
 
-  async saveEditedConnection(draft: SavedConnectionDraft, action: string): Promise<ConnectionEditResult> {
+  readEditorGameMode(server: string, peer: string): boolean {
+    if (!peer) return false
+    const preferences = new RemotePeerPreferences(server, peer)
+    const enabled = preferences.get('game-mode') === '1'
+    preferences.dispose()
+    return enabled
+  }
+
+  async saveEditedConnection(draft: SavedConnectionDraft, action: string, gameMode: boolean, changed: boolean): Promise<ConnectionEditResult> {
     if (this.savingConnection || (!this.creatingSavedConnection && this.editingConnectionId.length === 0) || !this.savePageActive) {
       return { success: false, message: '编辑已过期，请重新打开连接' }
     }
@@ -3355,11 +3372,22 @@ export struct ConnectionPage {
     }
     this.savingConnection = true
     const generation = this.editingConnectionGeneration
+    const gameServer = this.connectionEditorGameServer
     try {
       await this.saveConnectionDraft(draft, this.creatingSavedConnection ? '' : this.editingConnectionId,
         this.creatingSavedConnection ? 'new' : 'update',
         this.editingConnectionOriginal, this.editingConnectionScope, generation)
-      if (generation === this.editingConnectionGeneration && this.savePageActive) this.showSavedTip()
+      let gameSaved = true
+      if (changed) {
+        const preferences = new RemotePeerPreferences(gameServer, this.normalizeRemoteId(draft.remoteId))
+        gameSaved = preferences.set('game-mode', gameMode ? '1' : '0')
+        if (gameSaved) gameSaved = preferences.flush()
+        preferences.dispose()
+      }
+      if (generation === this.editingConnectionGeneration && this.savePageActive) {
+        if (gameSaved) this.showSavedTip()
+        else promptAction.showToast({ message: translate('连接已保存，但游戏模式设置未保存', this.uiLanguage) })
+      }
       return { success: true, message: '已保存' }
     } catch (_error) {
       return { success: false, message: _error instanceof ConnectionSaveConflict ? _error.message : '保存失败，请重试' }

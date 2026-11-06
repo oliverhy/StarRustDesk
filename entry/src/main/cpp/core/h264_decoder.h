@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <atomic>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -14,13 +15,27 @@
 #include <multimedia/player_framework/native_avcodec_videodecoder.h>
 #include "video_decoder_selector.h"
 
+class XComponentRender;
+
 class H264Decoder {
 public:
     static H264Decoder& instance();
+    using OutputCallback = std::function<void(bool)>;
+    using ErrorCallback = std::function<void(int)>;
+    explicit H264Decoder(XComponentRender* outputSurface = nullptr,
+                         OutputCallback output = {}, ErrorCallback error = {}, bool softwareOnly = false);
+    ~H264Decoder();
+    H264Decoder(const H264Decoder&) = delete;
+    H264Decoder& operator=(const H264Decoder&) = delete;
 
     void setSurface(OHNativeWindow* window, int width, int height);
     void decodeFrame(const uint8_t* data, int length, bool key, int64_t pts);
     VideoDecodeMode decodeMode();
+    bool isStarted();
+    int queuedFrameCount() {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        return lock.owns_lock() ? static_cast<int>(frames_.size()) : -1;
+    }
     void release();
 
 private:
@@ -34,9 +49,6 @@ private:
         bool key;
         int64_t pts;
     };
-
-    H264Decoder() {}
-    ~H264Decoder() { release(); }
 
     bool startLocked(OHNativeWindow* window, int width, int height);
     void stopLocked();
@@ -52,6 +64,10 @@ private:
     static void onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData);
 
     std::mutex mutex_;
+    XComponentRender* outputSurface_{nullptr};
+    OutputCallback outputCallback_;
+    ErrorCallback errorCallback_;
+    bool softwareOnly_{false};
     OH_AVCodec* codec_{nullptr};
     OHNativeWindow* window_{nullptr};
     int width_{0};

@@ -1,5 +1,7 @@
 import { decodeRemoteToolbarPosition } from './RemoteToolbarPlacement';
 import { validKeyboardRemapValue } from './KeyboardRemapping';
+import { validGamepadMappingValue } from './GamepadMapping';
+import { validScreenGameConfigValue } from './GameScreenControls';
 
 export const REMOTE_PEER_OPTION_NAMES: string[] = [
   'input-mode', 'show-local-cursor', 'show-virtual-mouse', 'edge-auto-pan-enabled',
@@ -7,7 +9,9 @@ export const REMOTE_PEER_OPTION_NAMES: string[] = [
   'remote-keyboard-toolbar-order', 'remote-keyboard-more-order', 'remote-toolbar-position-v1',
   'keyboard-toolbar-position-v1', 'remote-toolbar-collapsed', 'keyboard-tools-collapsed',
   'pc-toolbar-pinned', 'pc-immersive-window', 'desktop-view-mode', 'desktop-custom-percent', 'handheld-zoom', 'keyboard-remap-v1',
-  'keyboard-layout-mode', 'three-finger-display-swipe'
+  'keyboard-layout-mode', 'three-finger-display-swipe', 'game-mode', 'high-performance-priority',
+  'gamepad-physical', 'gamepad-virtual', 'gamepad-map-v1', 'game-screen-controls-v1', 'game-screen-enabled',
+  'game-relative-sensitivity'
 ];
 
 export function remotePeerPreferenceKey(server: string, peer: string): string {
@@ -21,10 +25,14 @@ export function remotePeerPreferenceKey(server: string, peer: string): string {
 }
 
 export function validRemotePeerOption(name: string, value: string): boolean {
-  if (REMOTE_PEER_OPTION_NAMES.indexOf(name) < 0 || typeof value !== 'string' || value.length > 2048) return false;
+  if (REMOTE_PEER_OPTION_NAMES.indexOf(name) < 0 || typeof value !== 'string' ||
+    value.length > (name === 'game-screen-controls-v1' ? 4096 : 2048)) return false;
   if (name === 'input-mode') return value === 'mouse' || value === 'touch';
   if (name === 'keyboard-compat') return value === '0' || value === '1' || value === '2';
   if (name === 'keyboard-remap-v1') return validKeyboardRemapValue(value);
+  if (name === 'gamepad-map-v1') return validGamepadMappingValue(value);
+  if (name === 'game-screen-controls-v1') return validScreenGameConfigValue(value);
+  if (name === 'game-relative-sensitivity') return /^\d+$/.test(value) && Number(value) >= 25 && Number(value) <= 200;
   if (name === 'keyboard-layout-mode') return value === 'auto' || value === 'system' || value === 'apple';
   if (name === 'cursor-compat') return value === 'auto' || value === 'embedded' || value === 'separate';
   if (name === 'desktop-view-mode') return value === 'adaptive' || value === 'original' || value === 'custom';

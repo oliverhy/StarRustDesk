@@ -58,9 +58,12 @@ const stubs = String.raw`
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
     std::string("line ") + std::to_string(__LINE__) + ": " + #condition); } while (false)
 constexpr int32_t OH_NATIVEXCOMPONENT_MOUSE_MOVE = 3;
+static std::atomic<bool> gameMode{false};
+static std::atomic<int> diagnosticCount{0};
+static int rust_get_game_mode() { return gameMode.load() ? 1 : 0; }
 struct DiagnosticLog {
     static DiagnosticLog& instance() { static DiagnosticLog log; return log; }
-    void append(const std::string&, const std::string&, const std::string&) {}
+    void append(const std::string&, const std::string&, const std::string&) { ++diagnosticCount; }
 };
 struct JsValue;
 using napi_value = std::shared_ptr<JsValue>;
@@ -133,6 +136,20 @@ static void Test(const char* name, const std::function<void()>& body) {
     std::cout << "PASS " << name << std::endl;
 }
 int main() {
+    Test("game mode samples move-only diagnostics while preserving key and button boundaries", [] {
+        gameMode = true; diagnosticCount = 0;
+        QueueNativeMouseInput(Mouse(1)); Drain();
+        const int afterFirst = diagnosticCount;
+        QueueNativeMouseInput(Mouse(2)); Drain();
+        CHECK(diagnosticCount == afterFirst);
+        QueueNativeKeyInput(Key(65)); Drain();
+        CHECK(diagnosticCount == afterFirst + 1);
+        QueueNativeMouseInput(Mouse(3, 1)); Drain();
+        CHECK(diagnosticCount == afterFirst + 2);
+        gameMode = false;
+        QueueNativeMouseInput(Mouse(4)); Drain();
+        CHECK(diagnosticCount == afterFirst + 3);
+    });
     try {
         Test("key -> mouse preserves order and payload", [] {
             const auto keySeq = QueueNativeKeyInput(Key(42));
@@ -256,7 +273,7 @@ int main() {
                 CHECK(keyIds.size() == 64); CHECK(mouseIds.size() == 64); CHECK(Drain().empty());
             }
         });
-        std::cout << "12 executable native input queue tests passed" << std::endl;
+        std::cout << "13 executable native input queue tests passed" << std::endl;
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << std::endl; return 1;

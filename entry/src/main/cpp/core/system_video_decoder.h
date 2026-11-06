@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <atomic>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -16,16 +18,27 @@
 #include <multimedia/player_framework/native_avcodec_base.h>
 #include <multimedia/player_framework/native_avcodec_videodecoder.h>
 
+class XComponentRender;
+
 class SystemVideoDecoder {
 public:
     static SystemVideoDecoder& h265();
     static SystemVideoDecoder& vp8();
     static SystemVideoDecoder& av1();
+    using OutputCallback = std::function<void(bool)>;
+    using ErrorCallback = std::function<void(int)>;
+    static std::unique_ptr<SystemVideoDecoder> createH265Secondary(XComponentRender* outputSurface,
+        OutputCallback output, ErrorCallback error, bool softwareOnly = false);
+    ~SystemVideoDecoder();
 
     void setSurface(OHNativeWindow* window, int width, int height);
     void decodeFrame(const uint8_t* data, int length, bool key, int64_t pts);
     bool isStarted();
     VideoDecodeMode decodeMode();
+    int queuedFrameCount() {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        return lock.owns_lock() ? static_cast<int>(frames_.size()) : -1;
+    }
     void release();
 
 private:
@@ -40,8 +53,9 @@ private:
         int64_t pts;
     };
 
-    SystemVideoDecoder(const char* mime, const char* component, int codecId, bool annexB);
-    ~SystemVideoDecoder();
+    SystemVideoDecoder(const char* mime, const char* component, int codecId, bool annexB,
+        XComponentRender* outputSurface = nullptr, OutputCallback output = {}, ErrorCallback error = {},
+        bool softwareOnly = false);
     SystemVideoDecoder(const SystemVideoDecoder&) = delete;
     SystemVideoDecoder& operator=(const SystemVideoDecoder&) = delete;
 
@@ -63,6 +77,10 @@ private:
     const char* component_;
     int codecId_;
     bool annexB_;
+    XComponentRender* outputSurface_{nullptr};
+    OutputCallback outputCallback_;
+    ErrorCallback errorCallback_;
+    bool softwareOnly_{false};
     std::mutex mutex_;
     OH_AVCodec* codec_{nullptr};
     OHNativeWindow* window_{nullptr};

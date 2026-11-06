@@ -68,7 +68,12 @@ for (const scale of [1, 1.5, 2, 3]) {
 }
 assert(writes.every(([key]) => key === 'button-shape'), 'changing shape never mutates connection preferences');
 const remote = read('pages/RemotePage.ets');
-const capture = remote.slice(remote.indexOf("Button('', { stateEffect: false })"), remote.indexOf('buildRemoteViewport()') + 4400);
+const viewportStart = remote.indexOf('  buildRemoteViewport() {');
+const captureStart = remote.indexOf("Button('', { stateEffect: false })", viewportStart);
+assert(viewportStart >= 0 && captureStart > viewportStart, 'capture belongs to the viewport builder, not a call site');
+const surfaceStart = remote.indexOf('      if (this.showRemoteSurface)', captureStart);
+assert(surfaceStart > captureStart, 'capture ends before the conditional render surface');
+const capture = remote.slice(captureStart, surfaceStart);
 assert.match(capture, /borderRadius\(0\)/);
-assert.doesNotMatch(capture.slice(0, capture.indexOf('\n      XComponent')), /ButtonShapeModifier/);
+assert.doesNotMatch(capture, /ButtonShapeModifier/);
 console.log('PASS button appearance: default, classic restoration, persistence, reactive consumers and input surface exclusion');

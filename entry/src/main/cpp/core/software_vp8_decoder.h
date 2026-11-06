@@ -16,6 +16,10 @@ public:
     static SoftwareVP8Decoder& instance();
 
     void decodeFrame(const uint8_t* data, int length, bool key, int64_t pts);
+    int queuedFrameCount() {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        return lock.owns_lock() ? static_cast<int>(frames_.size()) : -1;
+    }
     void release();
 
 private:

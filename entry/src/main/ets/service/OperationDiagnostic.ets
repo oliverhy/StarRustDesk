@@ -3,7 +3,7 @@ import { RustDeskNapi } from './RustDeskNapi';
 // Closed vocabulary and numeric/boolean fields: never serialize an Error, URI,
 // peer name, server configuration, credential or user-entered content.
 const SCOPES: string[] = ['api-book-sync', 'recording', 'file-operation', 'file-transfer', 'server-config'];
-const ACTIONS: string[] = ['preview', 'apply', 'record', 'export', 'delete', 'prepare_files', 'prepare_folder', 'prepare_download', 'transfer', 'remote_action', 'qr_scan'];
+const ACTIONS: string[] = ['preview', 'apply', 'record', 'export', 'delete', 'prepare_files', 'prepare_folder', 'prepare_download', 'transfer', 'remote_action', 'qr_scan', 'clipboard_import'];
 const STEPS: string[] = ['start', 'read_local', 'read_remote', 'preflight', 'permissions', 'write_remote', 'write_local',
   'verify', 'select', 'copy', 'open_source', 'open_target', 'close', 'queued', 'cancel_requested', 'failed', 'cancelled',
   'completed', 'started', 'stop', 'decode', 'ready', 'stale', 'timeout', 'rejected', 'progress', 'archive', 'waiting_confirmation'];

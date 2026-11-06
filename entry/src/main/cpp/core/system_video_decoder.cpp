@@ -4,9 +4,11 @@
 #include "video_render.h"
 #include "video_color_format.h"
 #include "xcomponent_render.h"
+#include "nal_normalizer.h"
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 #include <hilog/log.h>
 #include <multimedia/player_framework/native_avbuffer.h>
 #include <multimedia/player_framework/native_averrors.h>
@@ -23,10 +25,14 @@ constexpr const char* VP8_MIME_TYPE = "video/x-vnd.on2.vp8";
 constexpr const char* AV1_MIME_TYPE = "video/av01";
 constexpr int32_t MAX_COMPRESSED_FRAME_SIZE = 16 * 1024 * 1024;
 constexpr size_t MAX_QUEUED_FRAMES = 120;
+constexpr size_t MAX_SECONDARY_QUEUE_BYTES = 32 * 1024 * 1024;
 }
 
-SystemVideoDecoder::SystemVideoDecoder(const char* mime, const char* component, int codecId, bool annexB)
-    : mime_(mime), component_(component), codecId_(codecId), annexB_(annexB) {}
+SystemVideoDecoder::SystemVideoDecoder(const char* mime, const char* component, int codecId, bool annexB,
+                                       XComponentRender* outputSurface, OutputCallback output, ErrorCallback error,
+                                       bool softwareOnly)
+    : mime_(mime), component_(component), codecId_(codecId), annexB_(annexB), outputSurface_(outputSurface),
+      outputCallback_(std::move(output)), errorCallback_(std::move(error)), softwareOnly_(softwareOnly) {}
 
 SystemVideoDecoder::~SystemVideoDecoder() {
     release();
@@ -35,6 +41,12 @@ SystemVideoDecoder::~SystemVideoDecoder() {
 SystemVideoDecoder& SystemVideoDecoder::h265() {
     static SystemVideoDecoder decoder(H265_MIME_TYPE, "h265", 3, true);
     return decoder;
+}
+
+std::unique_ptr<SystemVideoDecoder> SystemVideoDecoder::createH265Secondary(XComponentRender* outputSurface,
+    OutputCallback output, ErrorCallback error, bool softwareOnly) {
+    return std::unique_ptr<SystemVideoDecoder>(new SystemVideoDecoder(H265_MIME_TYPE, "secondary-h265", 3, true,
+        outputSurface, std::move(output), std::move(error), softwareOnly));
 }
 
 SystemVideoDecoder& SystemVideoDecoder::vp8() {
@@ -83,7 +95,11 @@ void SystemVideoDecoder::decodeFrame(const uint8_t* data, int length, bool key, 
             "input frame=" + std::to_string(inputFrames_) + " size=" + std::to_string(normalized.size()) +
             " key=" + std::string(key ? "yes" : "no") + " pts=" + std::to_string(pts));
     }
-    while (frames_.size() >= MAX_QUEUED_FRAMES) {
+    size_t secondaryBytes = 0;
+    if (outputSurface_) for (const auto& frame : frames_) secondaryBytes += frame.data.size();
+    while (!frames_.empty() && (frames_.size() >= MAX_QUEUED_FRAMES ||
+        (outputSurface_ && secondaryBytes > MAX_SECONDARY_QUEUE_BYTES - normalized.size()))) {
+        if (outputSurface_) secondaryBytes -= frames_.front().data.size();
         frames_.pop_front();
         DiagnosticLog::instance().append("W", component_, "input_queue_overflow dropped_oldest");
     }
@@ -132,7 +148,8 @@ void SystemVideoDecoder::release() {
 }
 
 bool SystemVideoDecoder::startLocked(OHNativeWindow* window, int width, int height) {
-    VideoDecoderSelection selection = createPreferredVideoDecoder(mime_);
+    VideoDecoderSelection selection = softwareOnly_ ? createVideoDecoderByMode(mime_, VideoDecodeMode::Software) :
+        createPreferredVideoDecoder(mime_);
     codec_ = selection.codec;
     decodeMode_ = selection.mode;
     decoderName_ = selection.name;
@@ -269,33 +286,13 @@ void SystemVideoDecoder::feedLocked() {
 }
 
 std::vector<uint8_t> SystemVideoDecoder::normalizeFrame(const uint8_t* data, int length) const {
-    if (data == nullptr || length <= 0) {
+    if (data == nullptr || length <= 0 || length > MAX_COMPRESSED_FRAME_SIZE) {
         return {};
     }
-    if (!annexB_ || isAnnexB(data, length)) {
+    if (!annexB_) {
         return std::vector<uint8_t>(data, data + length);
     }
-    if (length > 4) {
-        uint32_t firstLength = readBe32(data);
-        if (firstLength > 0 && firstLength + 4 <= static_cast<uint32_t>(length)) {
-            std::vector<uint8_t> output;
-            int offset = 0;
-            while (offset + 4 <= length) {
-                uint32_t size = readBe32(data + offset);
-                offset += 4;
-                if (size == 0 || offset + static_cast<int>(size) > length) {
-                    break;
-                }
-                output.insert(output.end(), {0, 0, 0, 1});
-                output.insert(output.end(), data + offset, data + offset + size);
-                offset += static_cast<int>(size);
-            }
-            return output;
-        }
-    }
-    std::vector<uint8_t> output {0, 0, 0, 1};
-    output.insert(output.end(), data, data + length);
-    return output;
+    return normalizeAnnexBNals(data, length, MAX_COMPRESSED_FRAME_SIZE);
 }
 
 uint32_t SystemVideoDecoder::bufferFlags(const EncodedFrame& frame) const {
@@ -350,6 +347,7 @@ void SystemVideoDecoder::onError(OH_AVCodec*, int32_t errorCode, void* userData)
     if (decoder != nullptr) {
         DiagnosticLog::instance().append("E", decoder->component_,
             "decoder_error code=" + std::to_string(errorCode));
+        if (context->active->load() && decoder->errorCallback_) decoder->errorCallback_(errorCode);
     }
 }
 
@@ -404,11 +402,13 @@ void SystemVideoDecoder::onNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH
         }
         auto color = decoder->color_;
         enrichVideoColorFromBuffer(buffer, color);
-        color.output = XComponentRender::instance().applyVideoColor(decoder->window_, color);
-        VideoRender::instance().updateColorInfo(color);
+        XComponentRender& target = decoder->outputSurface_ ? *decoder->outputSurface_ : XComponentRender::instance();
+        color.output = target.applyVideoColor(decoder->window_, color);
+        if (!decoder->outputSurface_) VideoRender::instance().updateColorInfo(color);
         OH_AVErrCode ret = OH_VideoDecoder_RenderOutputBuffer(codec, index);
-        VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
-            static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
+        if (decoder->outputCallback_) decoder->outputCallback_(ret == AV_ERR_OK);
+        else VideoRender::instance().markDecodedFrame(decoder->codecId_, decoder->width_, decoder->height_,
+                static_cast<int>(decoder->decodeMode_), ret == AV_ERR_OK);
         if (ret != AV_ERR_OK) {
             DiagnosticLog::instance().append("E", decoder->component_,
                 "render_output_failed result=" + std::to_string(ret));

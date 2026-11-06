@@ -14,6 +14,133 @@ fn legacy_peers_without_display_tags_keep_video_compatible() {
 }
 
 #[test]
+fn secondary_frames_use_their_own_geometry_and_stop_on_close() {
+    use hbb_common::message_proto::EncodedVideoFrame;
+    static CALLS: AtomicI32 = AtomicI32::new(0);
+    static WIDTH: AtomicI32 = AtomicI32::new(0);
+    static CODEC: AtomicI32 = AtomicI32::new(0);
+    static DISPLAY: AtomicI32 = AtomicI32::new(-1);
+    extern "C" fn receive(_data: *const c_uchar, _length: i32, width: i32, _height: i32,
+                          _key: i32, _pts: i64, display: i32, codec: i32) {
+        DISPLAY.store(display, Ordering::SeqCst);
+        WIDTH.store(width, Ordering::SeqCst);
+        CODEC.store(codec, Ordering::SeqCst);
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        // Simulate closing the secondary surface while a batch is in flight.
+        SECONDARY_DISPLAY.store(-1, Ordering::SeqCst);
+    }
+    CALLS.store(0, Ordering::SeqCst);
+    *DISPLAY_INFOS.lock().unwrap() = vec![(0, 0, 1920, 1080, false), (-1280, 0, 1280, 720, false)];
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = Some(receive);
+    SECONDARY_DISPLAY.store(1, Ordering::SeqCst);
+    let item = EncodedVideoFrame { data: vec![1, 2, 3].into(), key: true, pts: 1, ..Default::default() };
+    let frames = EncodedVideoFrames { frames: vec![item.clone(), item], ..Default::default() };
+    assert_eq!(forward_frame_for_destination(frames, b'V',
+        multi_display_routing::FrameDestination::Secondary(1)), 1);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(WIDTH.load(Ordering::SeqCst), 1280);
+    assert_eq!(DISPLAY.load(Ordering::SeqCst), 1);
+    assert_eq!(CODEC.load(Ordering::SeqCst), i32::from(b'V'));
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = None;
+    DISPLAY_INFOS.lock().unwrap().clear();
+}
+
+#[test]
+fn secondary_subscription_rejects_unsupported_or_unready_sessions() {
+    extern "C" fn callback(_: *const c_uchar, _: i32, _: i32, _: i32, _: i32, _: i64, _: i32, _: i32) {}
+    CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    *CURRENT_DISPLAY.lock().unwrap() = 0;
+    *DISPLAY_INFOS.lock().unwrap() = vec![(0, 0, 800, 600, false), (800, 0, 1024, 768, false)];
+    PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(false, Ordering::SeqCst);
+    assert_eq!(rust_set_secondary_display(1), -2);
+    PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(true, Ordering::SeqCst);
+    PEER_IS_WAYLAND.store(true, Ordering::SeqCst);
+    assert_eq!(rust_set_secondary_display(1), -2);
+    PEER_IS_WAYLAND.store(false, Ordering::SeqCst);
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = None;
+    assert_eq!(rust_set_secondary_display(1), -3);
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = Some(callback);
+    assert_eq!(rust_set_secondary_display(0), -4);
+    assert_eq!(rust_set_secondary_display(2), -4);
+    assert_eq!(SECONDARY_DISPLAY.load(Ordering::SeqCst), -1);
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = None;
+    reset_display_state();
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn secondary_subscription_preserves_primary_and_restores_single_capture() {
+    extern "C" fn callback(_: *const c_uchar, _: i32, _: i32, _: i32, _: i32, _: i64, _: i32, _: i32) {}
+    fn capture(cmd: QueuedPeerCommand) -> Vec<i32> {
+        match cmd {
+            QueuedPeerCommand::Message { message, .. } => match message.union {
+                Some(message::Union::Misc(misc)) => match misc.union {
+                    Some(misc::Union::CaptureDisplays(displays)) => displays.set,
+                    _ => panic!("expected capture displays"),
+                },
+                _ => panic!("expected misc"),
+            },
+            _ => panic!("expected message"),
+        }
+    }
+    let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+    let session = SESSION_ID.load(Ordering::SeqCst);
+    *PEER_MESSAGE_SENDER.lock().unwrap() = Some((session, sender));
+    CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+    PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.store(true, Ordering::SeqCst);
+    PEER_IS_WAYLAND.store(false, Ordering::SeqCst);
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    *CURRENT_DISPLAY.lock().unwrap() = 0;
+    *DISPLAY_INFOS.lock().unwrap() = vec![(0, 0, 800, 600, false), (800, 0, 800, 600, false), (1600, 0, 800, 600, false)];
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = Some(callback);
+    assert_eq!(rust_set_secondary_display(1), 0);
+    assert_eq!(capture(receiver.try_recv().unwrap()), vec![0, 1]);
+    assert_eq!(rust_switch_display(2), 0);
+    let _switch = receiver.try_recv().unwrap();
+    assert_eq!(capture(receiver.try_recv().unwrap()), vec![2, 1]);
+    assert_eq!(rust_set_secondary_display(-1), 0);
+    assert_eq!(capture(receiver.try_recv().unwrap()), vec![2]);
+    assert_eq!(SECONDARY_DISPLAY.load(Ordering::SeqCst), -1);
+    *SECONDARY_FRAME_CALLBACK.lock().unwrap() = None;
+    *PEER_MESSAGE_SENDER.lock().unwrap() = None;
+    reset_display_state();
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn secondary_pointer_uses_its_own_origin_and_rejects_stale_events() {
+    let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+    let session = SESSION_ID.load(Ordering::SeqCst);
+    *PEER_MESSAGE_SENDER.lock().unwrap() = Some((session, sender));
+    CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    *CURRENT_DISPLAY.lock().unwrap() = 0;
+    *DISPLAY_INFOS.lock().unwrap() = vec![(0, 0, 1920, 1080, false), (-1280, 120, 1280, 720, false)];
+    SECONDARY_DISPLAY.store(1, Ordering::SeqCst);
+    assert_eq!(rust_send_secondary_mouse_event(1, 5000.0, -5.0, 1, 0), 0);
+    let QueuedPeerCommand::Message { message, .. } = receiver.try_recv().unwrap() else { panic!("expected mouse"); };
+    let Some(message::Union::MouseEvent(mouse)) = message.union else { panic!("expected mouse event"); };
+    assert_eq!((mouse.x, mouse.y, mouse.mask), (-1, 120, 9));
+    assert_eq!(*CURRENT_DISPLAY.lock().unwrap(), 0);
+    assert_eq!(rust_send_secondary_mouse_event(0, 10.0, 10.0, 1, 0), -1);
+    assert_eq!(rust_send_secondary_mouse_event(1, f64::NAN, 10.0, 1, 0), -1);
+    assert_eq!(rust_send_secondary_wheel(1, 20.0, 30.0, 0.0, -2.0, 0), 0);
+    let QueuedPeerCommand::Message { message: first, .. } = receiver.try_recv().unwrap() else { panic!("expected move"); };
+    let QueuedPeerCommand::Message { message: second, .. } = receiver.try_recv().unwrap() else { panic!("expected wheel"); };
+    let Some(message::Union::MouseEvent(moved)) = first.union else { panic!("expected move event"); };
+    let Some(message::Union::MouseEvent(wheel)) = second.union else { panic!("expected wheel event"); };
+    assert_eq!((moved.x, moved.y, moved.mask), (-1260, 150, 0));
+    assert_eq!((wheel.x, wheel.y, wheel.mask), (0, -2, 3));
+    SECONDARY_DISPLAY.store(-1, Ordering::SeqCst);
+    assert_eq!(rust_send_secondary_mouse_event(1, 10.0, 10.0, 1, 0), -1);
+    assert!(receiver.try_recv().is_err());
+    *PEER_MESSAGE_SENDER.lock().unwrap() = None;
+    reset_display_state();
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+#[test]
 fn ip_literals_use_direct_listener_and_preserve_explicit_ports() {
     for (input, expected) in [
         ("192.0.2.8", "192.0.2.8:21118"),
@@ -108,7 +235,7 @@ fn retry_guard_endpoint_forms_never_select_id_rendezvous() {
     let invalid = CString::new("192.0.2.8:0").unwrap();
     let null = std::ptr::null();
     assert_eq!(
-        rust_connect(invalid.as_ptr(), null, null, null, null, null, null, 0, 0, 0, 0, 0, null),
+        rust_connect(invalid.as_ptr(), null, null, null, null, null, null, 0, 0, 0, 0, 0, null, 0),
         -23
     );
 }
@@ -230,31 +357,136 @@ fn rendezvous_refusals_are_logged_as_safe_categories() {
 }
 
 #[test]
-fn official_direct_timeout_preserves_relay_fallback_responsiveness() {
+fn adaptive_direct_timeout_uses_punch_latency_nat_and_bounded_fallback() {
     assert_eq!(
-        official_direct_timeout(true, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 0),
+        adaptive_direct_timeout(true, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 0, 3_000),
         LOCAL_DIRECT_CONNECT_TIMEOUT
     );
     assert_eq!(
-        official_direct_timeout(false, NatType::SYMMETRIC, NatType::ASYMMETRIC, true, 0),
+        adaptive_direct_timeout(false, NatType::SYMMETRIC, NatType::ASYMMETRIC, true, 0, 3_000),
         LOCAL_DIRECT_CONNECT_TIMEOUT
     );
     assert_eq!(
-        official_direct_timeout(false, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 0),
+        adaptive_direct_timeout(false, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 0, 3_000),
+        ADAPTIVE_DIRECT_MAX_TIMEOUT
+    );
+    assert_eq!(
+        adaptive_direct_timeout(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, true, 0, 250),
         DIRECT_CONNECT_TIMEOUT
     );
     assert_eq!(
-        official_direct_timeout(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, true, 0),
-        DIRECT_CONNECT_TIMEOUT
-    );
-    assert_eq!(
-        official_direct_timeout(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, false, 2),
+        adaptive_direct_timeout(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, false, 2, 250),
         DIRECT_ONLY_CONNECT_TIMEOUT
     );
     assert_eq!(
-        official_direct_timeout(false, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 1),
+        adaptive_direct_timeout(false, NatType::ASYMMETRIC, NatType::SYMMETRIC, true, 0, 3_000),
         LOCAL_DIRECT_CONNECT_TIMEOUT
     );
+    assert_eq!(
+        adaptive_direct_timeout(false, NatType::ASYMMETRIC, NatType::ASYMMETRIC, true, 1, 3_000),
+        ADAPTIVE_DIRECT_RETRY_MAX_TIMEOUT
+    );
+    assert_eq!(
+        adaptive_direct_timeout(false, NatType::UNKNOWN_NAT, NatType::UNKNOWN_NAT, false, 0, u64::MAX),
+        ADAPTIVE_DIRECT_ONLY_MAX_TIMEOUT
+    );
+}
+
+#[test]
+fn relay_standby_requires_authenticated_pairing_and_an_active_direct_candidate() {
+    assert!(should_prepare_relay_standby(true, true, true, false, true));
+    for (authenticated, paired, available, forced, direct) in [
+        (false, true, true, false, true), (true, false, true, false, true),
+        (true, true, false, false, true), (true, true, true, true, true),
+        (true, true, true, false, false),
+    ] {
+        assert!(!should_prepare_relay_standby(authenticated, paired, available, forced, direct));
+    }
+}
+
+#[test]
+fn standby_is_cancelled_on_direct_success_and_retained_only_for_fallback() {
+    struct DropProbe(Arc<AtomicBool>);
+    impl Drop for DropProbe { fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); } }
+    runtime().block_on(async {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let direct = async { tokio::time::sleep(Duration::from_millis(25)).await; Ok::<_, ()>(7) };
+        let standby = async move {
+            let _guard = DropProbe(flag);
+            std::future::pending::<Option<i32>>().await
+        };
+        let (result, standby) = direct_with_standby(direct, standby).await;
+        assert_eq!(result, Ok(7));
+        assert_eq!(standby, None);
+        assert!(cancelled.load(Ordering::SeqCst));
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = dropped.clone();
+        let direct = async { tokio::time::sleep(Duration::from_millis(25)).await; Ok::<_, ()>(8) };
+        let standby = async move { Some(DropProbe(flag)) };
+        let (result, standby) = direct_with_standby(direct, standby).await;
+        assert_eq!(result, Ok(8));
+        assert!(standby.is_none());
+        assert!(dropped.load(Ordering::SeqCst), "ready standby must close when direct wins");
+
+        let direct = async { Err::<i32, _>("direct_failed") };
+        let standby = async { tokio::time::sleep(Duration::from_millis(15)).await; Some(9) };
+        let (result, standby) = direct_with_standby(direct, standby).await;
+        assert_eq!(result, Err("direct_failed"));
+        assert_eq!(standby, Some(9));
+
+        let direct_dropped = Arc::new(AtomicBool::new(false));
+        let standby_dropped = Arc::new(AtomicBool::new(false));
+        let first = direct_dropped.clone();
+        let second = standby_dropped.clone();
+        let direct = async move { let _guard = DropProbe(first); std::future::pending::<Result<i32, ()>>().await };
+        let standby = async move { let _guard = DropProbe(second); std::future::pending::<Option<i32>>().await };
+        let epoch = AtomicU64::new(1);
+        let cancel = async { tokio::time::sleep(Duration::from_millis(75)).await; epoch.store(2, Ordering::SeqCst); };
+        let (result, ()) = tokio::join!(await_connection_attempt(1, &epoch, Duration::from_secs(1),
+            direct_with_standby(direct, standby)), cancel);
+        assert!(matches!(result, Err(ConnectionAttemptError::Cancelled)));
+        assert!(direct_dropped.load(Ordering::SeqCst));
+        assert!(standby_dropped.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn relay_preconnect_sends_no_pairing_until_selected_and_expires_safely() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let prepared = prepare_relay_transport(&endpoint, true).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let mut peer = Stream::from(socket, addr);
+        assert!(tokio::time::timeout(Duration::from_millis(40), peer.next()).await.is_err(),
+            "standby must not send a request before the direct path fails");
+        let joined = create_relay_with_standby(Some(prepared), "TEST_PEER", "TEST_UUID", &endpoint,
+            "TEST_PUBLIC_KEY", true).await.unwrap();
+        let bytes = peer.next_timeout(1_000).await.unwrap().unwrap();
+        let request = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+        assert_eq!(request.request_relay().id, "TEST_PEER");
+        assert_eq!(request.request_relay().uuid, "TEST_UUID");
+        assert_eq!(request.request_relay().licence_key, "TEST_PUBLIC_KEY");
+        drop(joined);
+
+        let mut expired = prepare_relay_transport(&endpoint, true).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let mut old_peer = Stream::from(socket, addr);
+        expired.ready_at = Instant::now() - PREPARED_RELAY_MAX_IDLE - Duration::from_millis(1);
+        let (joined, accepted) = tokio::join!(create_relay_with_standby(Some(expired), "TEST_PEER",
+            "TEST_FRESH_UUID", &endpoint, "TEST_PUBLIC_KEY", true), listener.accept());
+        let joined = joined.unwrap();
+        let (socket, addr) = accepted.unwrap();
+        let mut fresh_peer = Stream::from(socket, addr);
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(1), old_peer.next()).await,
+            Ok(None) | Ok(Some(Err(_)))));
+        let bytes = fresh_peer.next_timeout(1_000).await.unwrap().unwrap();
+        let request = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+        assert_eq!(request.request_relay().uuid, "TEST_FRESH_UUID");
+        drop(joined);
+    });
 }
 
 #[test]
@@ -367,6 +599,110 @@ fn extended_transports_never_block_the_custom_or_forced_relay_fast_path() {
 }
 
 #[test]
+fn game_transport_preference_is_bounded_and_never_bypasses_security() {
+    assert_eq!(udp_probe_budget(GameTransportPolicy::Automatic), Duration::from_millis(300));
+    assert_eq!(udp_probe_budget(GameTransportPolicy::UdpPreferred), Duration::from_millis(800));
+    assert_eq!(udp_probe_budget(GameTransportPolicy::TcpFallback), Duration::from_millis(300));
+    assert_eq!(GameTransportPolicy::from_wire(1, false), GameTransportPolicy::UdpPreferred);
+    assert_eq!(GameTransportPolicy::from_wire(2, false), GameTransportPolicy::TcpFallback);
+    assert_eq!(GameTransportPolicy::from_wire(1, true), GameTransportPolicy::Automatic);
+    assert_eq!(GameTransportPolicy::from_wire(999, false), GameTransportPolicy::Automatic);
+    assert_eq!(game_candidate_delay_ms(GameTransportPolicy::UdpPreferred, true, false), 350);
+    assert_eq!(game_candidate_delay_ms(GameTransportPolicy::UdpPreferred, false, false), 0);
+    assert_eq!(game_candidate_delay_ms(GameTransportPolicy::UdpPreferred, true, true), 0);
+    assert_eq!(game_candidate_delay_ms(GameTransportPolicy::Automatic, true, false), 0);
+    assert!(should_retry_game_udp_as_tcp(GameTransportPolicy::UdpPreferred, false, true, INSECURE_NONE));
+    for reason in [INSECURE_SERVER_KEY, INSECURE_MISSING_SIGNATURE, INSECURE_DIRECT_ENDPOINT] {
+        assert!(!should_retry_game_udp_as_tcp(GameTransportPolicy::UdpPreferred, false, true, reason));
+    }
+    assert!(!should_retry_game_udp_as_tcp(GameTransportPolicy::UdpPreferred, true, true, INSECURE_NONE));
+    assert!(!should_retry_game_udp_as_tcp(GameTransportPolicy::UdpPreferred, false, false, INSECURE_NONE));
+    assert!(!should_retry_game_udp_as_tcp(GameTransportPolicy::TcpFallback, false, true, INSECURE_NONE));
+}
+
+#[test]
+fn game_udp_probe_accepts_a_slow_real_server_reply_without_inventing_a_port() {
+    runtime().block_on(async {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buf = [0_u8; 1500];
+            let (_, peer) = server.recv_from(&mut buf).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            let mut response = RendezvousMessage::new();
+            response.set_test_nat_response(hbb_common::rendezvous_proto::TestNatResponse {
+                port: i32::from(peer.port()), ..Default::default()
+            });
+            server.send_to(&response.write_to_bytes().unwrap(), peer).await.unwrap();
+        });
+        let result = prepare_udp_punch_socket(&address.to_string(), false,
+            udp_probe_budget(GameTransportPolicy::UdpPreferred)).await;
+        assert!(result.is_some(), "game probe must accept a real delayed mapping");
+        task.await.unwrap();
+    });
+}
+
+#[test]
+fn game_udp_preference_does_not_block_a_real_tcp_fallback() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(target.local_addr().unwrap()).await.unwrap();
+        let started = Instant::now();
+        let selected = connect_direct_transports(Some(listener.local_addr().unwrap()),
+            "127.0.0.1:0".parse().unwrap(), 1500, Some(Arc::new(socket)), None, None, 1,
+            GameTransportPolicy::UdpPreferred).await.expect("TCP fallback must remain available");
+        assert_eq!(selected.transport, TRANSPORT_TCP);
+        assert!(started.elapsed() >= Duration::from_millis(GAME_UDP_PREFERENCE_MS));
+    });
+}
+
+#[test]
+fn game_udp_preference_selects_a_working_kcp_peer_before_tcp() {
+    runtime().block_on(async {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server.local_addr().unwrap()).await.unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0_u8; 1500];
+            let (size, address) = server.recv_from(&mut buf).await.unwrap();
+            let transaction = punch_transaction(&buf[..size], &PUNCH_PROBE).expect("UDP probe");
+            server.connect(address).await.unwrap();
+            server.send(&punch_packet(&PUNCH_ACK, transaction)).await.unwrap();
+            let mut endpoint = kcp_sys::endpoint::KcpEndpoint::new();
+            endpoint.run().await;
+            let input = endpoint.input_sender();
+            let mut output = endpoint.output_receiver().unwrap();
+            let accept = endpoint.accept();
+            tokio::pin!(accept);
+            loop {
+                tokio::select! {
+                    accepted = &mut accept => {
+                        assert!(accepted.is_ok());
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        break;
+                    }
+                    packet = server.recv(&mut buf) => {
+                        let size = packet.unwrap();
+                        if size >= std::mem::size_of::<kcp_sys::packet_def::KcpPacketHeader>() {
+                            input.send(hbb_common::bytes::BytesMut::from(&buf[..size]).into()).await.unwrap();
+                        }
+                    }
+                    Some(packet) = output.recv() => { server.send(&packet.inner()).await.unwrap(); }
+                }
+            }
+        });
+        let selected = connect_direct_transports(Some(tcp.local_addr().unwrap()),
+            "127.0.0.1:0".parse().unwrap(), 1500, Some(Arc::new(client)), None, None, 1,
+            GameTransportPolicy::UdpPreferred).await.expect("UDP/KCP should connect");
+        assert_eq!(selected.transport, TRANSPORT_UDP_KCP);
+        peer.abort();
+    });
+}
+
+#[test]
 fn public_bootstrap_and_online_port_match_upstream_without_overriding_custom_servers() {
     assert_eq!(default_rendezvous_addr(""), "rs-ny.rustdesk.com:21116");
     assert_eq!(default_rendezvous_addr("  "), default_rendezvous_addr(""));
@@ -421,13 +757,19 @@ async fn check_direct_listener(host: &str, file_session: bool, domain: bool) {
             client_id: "test".into(),
             os_password: String::new(),
         };
-        connect_file_stream(&config).await.unwrap()
+        let previous_approval = INSECURE_SESSION_REASON.swap(INSECURE_NONE, Ordering::SeqCst);
+        assert_eq!(connect_file_stream(&config).await.err().as_deref(),
+            Some("direct endpoint requires unencrypted approval"));
+        INSECURE_SESSION_REASON.store(INSECURE_DIRECT_ENDPOINT, Ordering::SeqCst);
+        let stream = connect_file_stream(&config).await.unwrap();
+        INSECURE_SESSION_REASON.store(previous_approval, Ordering::SeqCst);
+        stream
     } else {
         connect_direct_endpoint(direct_peer_endpoint(&endpoint).unwrap().unwrap()).await.unwrap()
     };
     let (socket, address) = listener.accept().await.unwrap();
     let mut peer = Stream::from(socket, address);
-    assert!(!client.is_secured()); // Explicit IP protocol, not a signed-ID downgrade.
+    assert!(!client.is_secured()); // Direct IP requires explicit session approval.
     assert!(
         peer.next_timeout(30).await.is_none(),
         "unexpected rendezvous or handshake data"
@@ -724,7 +1066,7 @@ fn unencrypted_server_messages_do_not_authorize_token_or_ice_disclosure() {
         let mut message = RendezvousMessage::new();
         message.set_configure_update(ConfigUpdate::new());
         peer.send(&message).await.unwrap();
-        assert!(secure_rendezvous_connection(&mut client, RS_PUB_KEY).await.is_err());
+        assert!(secure_rendezvous_connection(&mut client, RS_PUB_KEY, RendezvousHandshakeContext::Account).await.is_err());
         assert!(!client.is_secured());
         assert!(tokio::time::timeout(Duration::from_millis(40), peer.next()).await.is_err());
     });

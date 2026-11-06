@@ -13,11 +13,19 @@ int rust_connect(const char* peer_id, const char* password,
                  const char* server_key, const char* client_hwid,
                  const char* client_id, int force_relay,
                  int allow_insecure_fallback, int file_only,
-                 int lock_after_disconnect, int privacy_mode, const char* os_password);
+                 int lock_after_disconnect, int privacy_mode, const char* os_password,
+                 int transport_policy);
 const char* rust_get_build_id(void);
 void rust_set_video_codec_support(int h264_supported, int vp9_supported,
                                   int vp8_supported, int av1_supported, int h265_supported);
 int rust_set_performance_preset(const char* preset);
+int rust_set_game_mode(int enabled, int apply_live);
+int rust_set_game_fps(int fps, int apply_live);
+int rust_get_game_mode(void);
+int rust_get_game_effective_fps(void);
+int rust_set_high_performance(int enabled, int apply_live);
+int rust_get_requested_performance_fps(void);
+int rust_get_requested_bitrate_percent(void);
 int rust_set_remote_cursor_visible(int visible);
 int rust_set_audio_enabled(int enabled);
 int rust_set_privacy_mode(int enabled);
@@ -34,6 +42,7 @@ int rust_get_connection_status(void);
 int rust_get_connection_route(void);
 int rust_get_connection_transport(void);
 int rust_get_connection_delay_ms(void);
+uint64_t rust_get_connection_delay_sample(void);
 int rust_get_connection_target_bitrate_kb(void);
 int rust_send_mouse_event(double x, double y, int action, int modifier_mask);
 int rust_send_mouse_wheel(double delta_x, double delta_y, int modifier_mask);
@@ -79,6 +88,13 @@ char* rust_take_peer_online_states(void);
 typedef void (*rust_frame_callback_t)(const unsigned char* data, int length, int width, int height,
                                       int is_key, int64_t pts);
 void rust_set_frame_callback(rust_frame_callback_t callback);
+typedef void (*rust_secondary_frame_callback_t)(const unsigned char* data, int length, int width,
+                                                int height, int is_key, int64_t pts, int display, int codec);
+void rust_set_secondary_frame_callback(rust_secondary_frame_callback_t callback);
+int rust_is_secondary_display_supported(void);
+int rust_set_secondary_display(int display);
+int rust_send_secondary_mouse_event(int display, double x, double y, int action, int modifier_mask);
+int rust_send_secondary_wheel(int display, double x, double y, double dx, double dy, int modifier_mask);
 typedef void (*rust_event_callback_t)(const char* message);
 void rust_set_event_callback(rust_event_callback_t callback);
 typedef int (*rust_audio_start_callback_t)(int sample_rate, int channels);

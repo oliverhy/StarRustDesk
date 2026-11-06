@@ -1,8 +1,12 @@
 # 芝麻远控
 
-原名 **StarRustDesk**。此次仅更新对外名称及图标，仍在原应用记录下持续更新；包名、签名、应用标识及数据格式不变。覆盖升级无需卸载，原有连接、密码、设置和云备份继续沿用。
+原名 **StarRustDesk**，仍在原应用记录下持续更新；包名、签名、应用标识及既有数据格式不变。覆盖升级无需卸载，原有连接、密码、设置和云备份继续沿用。
 
-Previously **StarRustDesk**. This is a display-name and artwork update of the same app, not a new app identity. Existing data and backup formats are retained. The repository URL and internal project names remain unchanged.
+Previously **StarRustDesk**. Existing application identity, data and backup formats are retained. The repository URL and internal project names remain unchanged.
+
+## 2.0.0
+
+新增鸿蒙 PC 多屏扩展显示、三类账号登录入口、游戏与高性能优先设置、键鼠映射手柄及屏幕按键编辑；完善二次验证、网页登录、连接安全与诊断。功能条件和验证边界见 [2.0.0 更新说明](docs/releases/2.0.0-2000000.md)。
 
 改名范围、兼容性边界与上架材料待办见 [品牌更新说明](docs/branding-zhima.md)。
 

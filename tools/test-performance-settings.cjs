@@ -26,6 +26,27 @@ assert.equal(p.bitrate('custom:500:60'), 500);
 assert.equal(p.fps('custom:500:60'), 60);
 assert.equal(p.isCustom('best'), false);
 assert.equal(p.isCustom('custom:100:30'), true);
+const editor = read('entry/src/main/ets/widget/SavedConnectionEditorDialog.ets').replace(/\r/g, '');
+const editorMethod = name => {
+  const match = editor.match(new RegExp(`\\n  private ${name}\\([\\s\\S]*?\\n  }`));
+  assert(match, name);
+  return match[0].replace('private ', '');
+};
+const editorContext = { exports: {}, PerformanceSettings: p, translate: v => v };
+vm.runInNewContext(ts.transpile(`class Editor { ${['presetIndex', 'presetLabel', 'selectPreset'].map(editorMethod).join('\n')} } exports.Editor = Editor;`), editorContext);
+const instance = Object.assign(new editorContext.exports.Editor(), { performancePreset: 'smooth', initial: { performancePreset: 'custom:500:90' }, uiLanguage: 'zh-Hans' });
+instance.selectPreset(5);
+assert.equal(instance.performancePreset, 'custom:100:30');
+assert.equal(instance.presetIndex(), 5);
+instance.performancePreset = p.custom(500, 90);
+assert.equal(instance.presetLabel(), '自定义');
+instance.selectPreset(4);
+assert.equal(instance.performancePreset, 'best');
+instance.selectPreset(6);
+assert.equal(instance.performancePreset, 'custom:500:90', 'preserve restores the original saved preset');
+instance.selectPreset(99);
+assert.equal(instance.performancePreset, 'custom:500:90', 'invalid selections cannot overwrite a saved preset');
+assert(editor.includes('PerformanceSettings.bitrate(this.performancePreset)') && editor.includes('PerformanceSettings.fps(this.performancePreset)'));
 const page = read('entry/src/main/ets/pages/ConnectionPage.ets');
 assert.match(page, /Select\(this\.connectionModeOptions\(\)\)/);
 assert.match(page, /\['稳定', '高帧率', '高流畅', '高丝滑', '高清优先', '自定义'\]/);
@@ -38,6 +59,7 @@ for (const file of ['ConnectionBackupService.ets', 'CloudSyncService.ets']) {
   assert.match(read('entry/src/main/ets/service/' + file), /performancePreset: string/);
 }
 const rust = read('entry/src/main/rust/src/lib.rs');
-assert.equal((rust.match(/custom_image_quality: performance.wire_quality\(\)/g) || []).length, 4);
+assert.equal((rust.match(/custom_image_quality: performance.wire_quality\(\)/g) || []).length, 5);
+assert.match(rust, /fn queue_game_performance_update/);
 assert.match(rust, /custom_bitrate_percent=\{\}/);
-console.log('Performance settings validation, persistence and all four protocol paths passed');
+console.log('Performance settings validation, persistence and all five protocol paths passed');

@@ -10,14 +10,15 @@ function method(s,name){const start=s.search(new RegExp(`\\n  (?:async )?${name}
 const names=['saveCurrentConnection','currentConnectionScope','findDuplicateConnection','showDuplicateConnection',
   'requestForCurrentForm','requestForSavedConnection','saveConnectionDraft','cloneSavedConnections','persistSavedConnections',
   'savedConnectionForPassword','hasSavedConnectionPassword','connectionPasswordForUse','connectSavedConnection',
-  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','saveEditedConnection','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature','loadSavedConnections'];
+  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','saveEditedConnection','readEditorGameMode','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature','loadSavedConnections'];
 function compile(s,ctx){const out=ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ES2021},reportDiagnostics:true});assert.equal(out.diagnostics.length,0);vm.runInContext(out.outputText,ctx);}
 const row=(id,remoteId,name='Office',password='old-secret')=>({id,remoteId,name,password,performancePreset:'smooth',groupId:'work'});
 function fixture(rows=[]){
-  const options=new Map(),secrets=new Map(),osSecrets=new Map(),security=new Map(),bindings=new Map(),logs=[];
+  const options=new Map(),secrets=new Map(),osSecrets=new Map(),security=new Map(),bindings=new Map(),logs=[],gamePrefs=new Map();
   let dirty=0, dialog, failRows=false, failSecret=false, failOs=false, pause;
   for(const r of rows)if(r.password)secrets.set(r.id,r.password);
   const context=vm.createContext({
+    RemotePeerPreferences:class { constructor(server,peer){this.key=`${server || ''}:${peer}`;} get(){return gamePrefs.get(this.key)||'';} set(_key,value){gamePrefs.set(this.key,value);return true;} flush(){return true;} dispose(){} },
     RustDeskNapi:{getOption:k=>options.get(k)||'',setOption:(k,v)=>{if(k==='saved-connections'&&failRows)return -1;options.set(k,v);return 0;},appendDiagnosticLog:(...a)=>logs.push(a)},
     CredentialStore:{load:async id=>secrets.get(id)||'',save:async(id,p)=>{if(pause)await pause;if(failSecret){failSecret=false;secrets.delete(id);return;}if(p)secrets.set(id,p);else secrets.delete(id);}},
     RemoteSecurityStore:{options:id=>security.get(id)||{lockAfterDisconnect:false,privacyMode:false,autoUnlock:false},
@@ -41,13 +42,20 @@ function fixture(rows=[]){
   p.editSavedConnection=r=>{p.openedEditor=r.id;}; p.showSavedTip=()=>{};
   p.connectionEditorController={close:()=>{},open:()=>{p.editorOpened=true;}};
   p.persistSavedConnections(p.savedConnections,false);
-  return {p,context,options,secrets,osSecrets,security,bindings,logs,get dirty(){return dirty;},get dialog(){return dialog;},
+  return {p,context,options,secrets,osSecrets,security,bindings,logs,gamePrefs,get dirty(){return dirty;},get dialog(){return dialog;},
     failRows:()=>{failRows=true;},failSecret:()=>{failSecret=true;},failOs:()=>{failOs=true;},pause:()=>{let resolve;pause=new Promise(r=>{resolve=r;});return()=>{pause=undefined;resolve();};}};
 }
 const draft=(f,r)=>({...f.context.Editing.empty(),remoteId:r.remoteId,name:r.name,groupId:r.groupId,performancePreset:r.performancePreset});
 let count=0;
 async function test(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
+ await test('saved connection editor keeps game mode isolated by server and peer',async()=>{
+   const f=fixture();f.p.openNewSavedConnection();const d=draft(f,row('a','game-peer','Game',''));
+   assert.equal((await f.p.saveEditedConnection(d,'new',true,true)).success,true);
+   assert.equal(f.p.readEditorGameMode('', 'game-peer'),true);
+   assert.equal(f.p.readEditorGameMode('', 'other-peer'),false);
+   assert.equal(f.p.readEditorGameMode('other-server', 'game-peer'),false);
+ });
  await test('new editor and homepage preserve uppercase and mixed-case IDs while removing spacing',()=>{
    const f=fixture();compile(`class Editor {${['identityChanged','changeRemoteId'].map(n=>method(editor,n)).join('\n')}} globalThis.Editor=Editor;`,f.context);
    const e=Object.assign(new f.context.Editor(),{initial:f.context.Editing.empty(),remoteId:'',createNew:true,busy:false});

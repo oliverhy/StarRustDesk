@@ -63,6 +63,11 @@ export struct RemoteGlassMenu {
       case 'displaySwipe': return '三指切屏';
       case 'pan': return '移动画面';
       case 'edgePan': return '边缘跟随';
+      case 'gameMode': return '游戏模式';
+      case 'highPerformance': return '高性能优先';
+      case 'physicalGamepad': return '实体手柄映射';
+      case 'virtualGamepad': return '虚拟手柄';
+      case 'gamepadSettings': return '手柄映射设置';
       case 'fullscreen': return this.state.fullscreen ? '退出全屏' : '全屏';
       case 'pip': return this.state.pip ? '关闭小窗' : '画中画';
       case 'orientation': return this.state.projection ? '投屏方向' : '屏幕方向';
@@ -84,7 +89,8 @@ export struct RemoteGlassMenu {
     }
   }
   isToggle(key: string): boolean {
-    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor', 'displaySwipe'].includes(key);
+    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor', 'displaySwipe', 'gameMode', 'highPerformance',
+      'physicalGamepad', 'virtualGamepad'].includes(key);
   }
   isOn(key: string): boolean {
     switch (key) {
@@ -95,6 +101,10 @@ export struct RemoteGlassMenu {
       case 'privacy': return this.state.privacy;
       case 'monitor': return this.state.monitor;
       case 'displaySwipe': return this.state.displaySwipe;
+      case 'gameMode': return this.state.gameMode;
+      case 'highPerformance': return this.state.highPerformance;
+      case 'physicalGamepad': return this.state.physicalGamepad;
+      case 'virtualGamepad': return this.state.virtualGamepad;
       default: return false;
     }
   }
@@ -317,6 +327,7 @@ export struct RemoteGlassMenu {
     this.action('gestureHelp')
     this.action('keyboardSettings')
     this.action('mouseSettings')
+    this.action('gamepadSettings')
   }
 
   @Builder
@@ -324,6 +335,7 @@ export struct RemoteGlassMenu {
     Scroll() {
       Row({ space: 5 }) {
         ForEach(this.displayIndexes(), (display: number) => {
+          Column({ space: 3 }) {
           Button({ type: ButtonType.Normal }) {
             Column({ space: 5 }) {
               Image($r('app.media.glass_monitor')).width(23).height(23)
@@ -332,14 +344,21 @@ export struct RemoteGlassMenu {
                 .fontWeight(display === this.state.currentDisplay ? 600 : 500)
                 .fontColor(display === this.state.currentDisplay ? this.blue() : this.textColor())
             }
-          }.width(this.screenCaptionWidth(display)).height(this.metrics.screenHeight).padding(4).focusable(false)
+          }.width(this.screenCaptionWidth(display)).height(this.metrics.screenHeight - (this.state.canExtendDisplay ? 28 : 0)).padding(4).focusable(false)
             .backgroundColor(display === this.state.currentDisplay ? this.selected() : this.keyColor())
             .border({ width: 1, color: display === this.state.currentDisplay ? Style.SELECTED_BORDER : Style.DIVIDER })
             .borderRadius(7).id(`glass-display-${display}`)
             .gesture(LongPressGesture({ duration: 550 }).onAction(() => { this.onOrderEdit('displays'); }))
             .onClick(() => { this.onAction(`display-${display}`); })
+            if (this.state.canExtendDisplay && display !== this.state.currentDisplay) {
+              Button(this.state.extendedDisplay === display ? '关闭扩展' : '扩展显示')
+                .fontSize(10).fontColor(this.blue()).width(this.metrics.displayWidth).height(25)
+                .padding(0).backgroundColor(this.keyColor()).borderRadius(6).focusable(false)
+                .id(`glass-extend-${display}`).onClick(() => { this.onAction(`extend-${display}`); })
+            }
+          }.alignItems(HorizontalAlign.Center)
         }, (display: number) => `display-${display}`)
-      }
+      }.alignItems(VerticalAlign.Top)
     }.width('100%').height(this.metrics.screenHeight + 8).scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
     this.action('displaySwipe')
   }
@@ -415,11 +434,11 @@ export struct RemoteGlassMenu {
   view() {
     if (this.state.desktop) { this.desktop() }
     this.zoom()
-    ForEach(this.state.items.filter((key: string) => key === 'pan' || key === 'edgePan'), (key: string) => {
+    ForEach(this.state.items.filter((key: string) => key === 'gameMode' || key === 'highPerformance' || key === 'pan' || key === 'edgePan'), (key: string) => {
       this.action(key)
     }, (key: string) => key)
     this.divider()
-    ForEach(this.state.items.filter((key: string) => !['pan', 'edgePan', 'zoomIn', 'zoomOut'].includes(key)), (key: string) => {
+    ForEach(this.state.items.filter((key: string) => !['gameMode', 'highPerformance', 'pan', 'edgePan', 'zoomIn', 'zoomOut'].includes(key)), (key: string) => {
       this.action(key)
     }, (key: string) => key)
   }

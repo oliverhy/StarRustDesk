@@ -11,9 +11,10 @@ function fixture(){
   calls.push({peer,password,server,relay,forceRelay,insecure,fileOnly,security,osPassword});status=1;return 0;
  };
  const c=vm.createContext({exports:{},Date:{now:()=>now},ConnectionStatus:{DISCONNECTED:0,CONNECTING:1,CONNECTED:2,FAILED:3,WAITING_2FA:4},
-  RustDeskNapi:{getConnectionStatus:()=>status,getConnectionRoute:()=>2,getLastConnectionError:()=> '远端传输中断',getOption:k=>options[k]||'',
-   appendDiagnosticLog:(tag,text)=>logs.push([tag,text]),setPerformancePreset(){},connectWithServer:connect,
+  RustDeskNapi:{getConnectionStatus:()=>status,getConnectionRoute:()=>2,getConnectionTransport:()=>1,getLastConnectionError:()=> '远端传输中断',getOption:k=>options[k]||'',
+   appendDiagnosticLog:(tag,text)=>logs.push([tag,text]),setPerformancePreset(){},setGameMode(){},setHighPerformance(){},connectWithServer:connect,
    connect:(peer,pw,insecure,fileOnly,security,os)=>connect(peer,pw,'','',false,insecure,fileOnly,security,os),disconnect:()=>{status=0;}},
+  RemotePeerPreferences:class {get(){return '';}dispose(){}},
   RemoteSessionBackgroundTask:{isAppBackground:()=>background,syncForConnectionStatus(){},stop(){}},
   AccountSession:{getApi:()=>({sessionRevision:()=>revision,prepareConnection:async()=>{prepared++;await prepare();}})},
   setTimeout:(fn,ms)=>{timers.set(++id,{fn,ms,due:now+ms});return id;},clearTimeout:key=>timers.delete(key)});

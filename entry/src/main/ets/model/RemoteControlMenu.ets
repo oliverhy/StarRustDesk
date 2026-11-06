@@ -18,8 +18,8 @@ export function remoteControlCategoryItems(category: string, order: string[]): s
   let keys: string[] = [];
   switch (category) {
     case 'screens': keys = ['displays']; break;
-    case 'input': keys = ['input', 'virtualMouse', 'mobileActions', 'gestureHelp', 'clipboard']; break;
-    case 'view': keys = ['edgePan', 'pan', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation']; break;
+    case 'input': keys = ['input', 'virtualMouse', 'physicalGamepad', 'virtualGamepad', 'mobileActions', 'gestureHelp', 'clipboard']; break;
+    case 'view': keys = ['gameMode', 'highPerformance', 'edgePan', 'pan', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation']; break;
     case 'more': keys = ['chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'privacy']; break;
   }
   return order.filter((item: string) => keys.includes(item));
@@ -27,6 +27,8 @@ export function remoteControlCategoryItems(category: string, order: string[]): s
 
 function remoteControlMenuItemWidthLabels(item: string): string[] {
   switch (item) {
+    case 'gameMode': return ['游戏模式'];
+    case 'highPerformance': return ['高性能优先'];
     case 'edgePan': return ['边缘跟随', '边缘跟随开'];
     case 'pan': return ['移动画面', '结束移动'];
     case 'zoomIn': return ['+'];

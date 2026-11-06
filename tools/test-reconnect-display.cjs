@@ -1,0 +1,23 @@
+'use strict';
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const source = fs.readFileSync('entry/src/main/ets/pages/RemotePage.ets', 'utf8');
+const method = source.match(/  rememberDisplayForReconnect\(\): void \{[\s\S]*?\n  \}/);
+assert(method, 'reconnect display capture exists');
+const sandbox = {};
+vm.runInNewContext(ts.transpile(`class Page { ${method[0]} } globalThis.Page = Page;`), sandbox);
+const page = Object.assign(new sandbox.Page(), {displayStateInitialized: true, currentDisplay: 2,
+  displayCount: 3, reconnectPreferredDisplay: -1});
+page.rememberDisplayForReconnect();
+assert.equal(page.reconnectPreferredDisplay, 2);
+page.displayStateInitialized = false;
+page.currentDisplay = 0;
+page.rememberDisplayForReconnect();
+assert.equal(page.reconnectPreferredDisplay, 2, 'retry before initialization retains the original display');
+assert.match(source, /requestedDisplay >= 0 && requestedDisplay < this\.displayCount \? requestedDisplay : 0/);
+assert.match(source, /RustDeskNapi\.switchDisplay\(this\.currentDisplay\)/);
+assert.match(source, /this\.reconnectPreferredDisplay = -1/);
+assert.match(source, /if \(!started\).*?return; \}\s*this\.rememberDisplayForReconnect\(\)/s);
+console.log('PASS reconnect display: same screen on reconnect, bounded fallback, fresh session defaults');

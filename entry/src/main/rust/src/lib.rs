@@ -9,6 +9,7 @@ mod input_compat;
 mod session_health;
 mod file_transfer_state;
 mod session_recovery;
+mod multi_display_routing;
 use file_transfer_state::{TransferWatchdog, UploadTransferState, TRANSFER_IDLE_TIMEOUT};
 use performance::PerformanceConfig;
 #[cfg(test)]
@@ -67,6 +68,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::kcp_stream::KcpStream;
 
 type FrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32, i32, i64);
+type SecondaryFrameCallback = extern "C" fn(*const c_uchar, i32, i32, i32, i32, i64, i32, i32);
 type EventCallback = extern "C" fn(*const c_char);
 type AudioStartCallback = extern "C" fn(i32, i32) -> i32;
 type AudioStopCallback = extern "C" fn();
@@ -74,6 +76,9 @@ type AudioFrameCallback = extern "C" fn(*const c_uchar, i32);
 
 static CONNECTION: Mutex<Option<Stream>> = Mutex::new(None);
 static FRAME_CALLBACK: Mutex<Option<FrameCallback>> = Mutex::new(None);
+static SECONDARY_FRAME_CALLBACK: Mutex<Option<SecondaryFrameCallback>> = Mutex::new(None);
+static SECONDARY_DISPLAY: AtomicI32 = AtomicI32::new(-1);
+static DISPLAY_SUBSCRIPTION_LOCK: Mutex<()> = Mutex::new(());
 static EVENT_CALLBACK: Mutex<Option<EventCallback>> = Mutex::new(None);
 static AUDIO_START_CALLBACK: Mutex<Option<AudioStartCallback>> = Mutex::new(None);
 static AUDIO_STOP_CALLBACK: Mutex<Option<AudioStopCallback>> = Mutex::new(None);
@@ -137,12 +142,25 @@ static CONNECTION_ROUTE: AtomicI32 = AtomicI32::new(0);
 static USING_PUBLIC_SERVER: AtomicBool = AtomicBool::new(true);
 static CONNECTION_TRANSPORT: AtomicI32 = AtomicI32::new(0);
 static CONNECTION_DELAY_MS: AtomicI32 = AtomicI32::new(0);
+// A monotonically changing sequence distinguishes a fresh peer delay sample
+// from repeated UI reads of an old value. Never infer loss from a stale value.
+// High 32 bits are the sequence, low 32 bits are the delay. Keeping the pair
+// atomic prevents a poll from combining a new value with an old sequence.
+static CONNECTION_DELAY_SAMPLE: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_TARGET_BITRATE_KB: AtomicI32 = AtomicI32::new(0);
 static AUDIO_RESET_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static REMOTE_AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 static BACKGROUND_VIDEO_MODE: AtomicBool = AtomicBool::new(false);
+static GAME_MODE: AtomicBool = AtomicBool::new(false);
+static GAME_FPS_CAP: AtomicI32 = AtomicI32::new(60);
+static HIGH_PERFORMANCE_PRIORITY: AtomicBool = AtomicBool::new(false);
 static APP_LIFECYCLE_EPOCH: AtomicU64 = AtomicU64::new(0);
-static ALLOW_INSECURE_SESSION: AtomicBool = AtomicBool::new(false);
+// Consent is bound to the exact failure reason, including for file channels.
+const INSECURE_NONE: i32 = 0;
+const INSECURE_SERVER_KEY: i32 = 1;
+const INSECURE_MISSING_SIGNATURE: i32 = 2;
+const INSECURE_DIRECT_ENDPOINT: i32 = 3;
+static INSECURE_SESSION_REASON: AtomicI32 = AtomicI32::new(INSECURE_NONE);
 // Conservative defaults keep older native shells safe until they report the
 // decoders that can actually be created on the current device.
 static H264_DECODER_SUPPORTED: AtomicBool = AtomicBool::new(true);
@@ -158,9 +176,16 @@ static PEER_ROUTE_HISTORY_LOCK: Mutex<()> = Mutex::new(());
 
 const DIRECT_CONNECT_TIMEOUT: u64 = 1_500;
 const DIRECT_ONLY_CONNECT_TIMEOUT: u64 = 5_000;
-const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 800;
+const LOCAL_DIRECT_CONNECT_TIMEOUT: u64 = 1_000;
+const ADAPTIVE_DIRECT_MAX_TIMEOUT: u64 = 6_000;
+const ADAPTIVE_DIRECT_RETRY_MAX_TIMEOUT: u64 = 3_500;
+const ADAPTIVE_DIRECT_ONLY_MAX_TIMEOUT: u64 = 8_000;
 const SERVER_CONNECT_TIMEOUT: u64 = 8_000;
 const RENDEZVOUS_REPLY_TIMEOUT: u64 = 6_000;
+// A second, independently verified ID-server channel may rescue a stalled
+// handshake without shortening the original 18-second read window. Neither
+// attempt receives an account token until one has been verified and selected.
+const ACCOUNT_HANDSHAKE_HEDGE_DELAY_MS: u64 = 3_000;
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(28);
 const ONLINE_QUERY_DEADLINE: Duration = Duration::from_secs(10);
 // RustDesk wire-protocol compatibility version, not the HarmonyOS package version.
@@ -360,6 +385,7 @@ fn new_protocol_session_id() -> u64 {
 }
 
 fn reset_display_state() {
+    SECONDARY_DISPLAY.store(-1, Ordering::SeqCst);
     PEER_IS_ONE_KVM.store(false, Ordering::SeqCst);
     PEER_IS_WAYLAND.store(false, Ordering::SeqCst);
     INPUT_KEYBOARD_MODE.store(0, Ordering::SeqCst);
@@ -428,6 +454,14 @@ pub extern "C" fn rust_set_frame_callback(cb: Option<FrameCallback>) {
     if let Ok(mut guard) = FRAME_CALLBACK.lock() {
         *guard = cb;
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_secondary_frame_callback(cb: Option<SecondaryFrameCallback>) {
+    if cb.is_none() && SECONDARY_DISPLAY.load(Ordering::SeqCst) >= 0 {
+        let _ = rust_set_secondary_display(-1);
+    }
+    if let Ok(mut guard) = SECONDARY_FRAME_CALLBACK.lock() { *guard = cb; }
 }
 
 #[no_mangle]
@@ -502,6 +536,7 @@ pub extern "C" fn rust_connect(
     lock_after_disconnect: i32,
     privacy_mode: i32,
     os_password: *const c_char,
+    transport_policy: i32,
 ) -> i32 {
     if peer_id.is_null() {
         return -1;
@@ -527,8 +562,13 @@ pub extern "C" fn rust_connect(
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
     CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
     CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
+    CONNECTION_DELAY_SAMPLE.store(0, Ordering::SeqCst);
     CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
-    ALLOW_INSECURE_SESSION.store(allow_insecure_fallback != 0, Ordering::SeqCst);
+    let insecure_reason = match allow_insecure_fallback {
+        INSECURE_SERVER_KEY | INSECURE_MISSING_SIGNATURE | INSECURE_DIRECT_ENDPOINT => allow_insecure_fallback,
+        _ => INSECURE_NONE,
+    };
+    INSECURE_SESSION_REASON.store(insecure_reason, Ordering::SeqCst);
     reset_display_state();
     let _ = clear_connection_for_session(session_id);
     emit_event("previous connection cleared");
@@ -604,6 +644,16 @@ pub extern "C" fn rust_connect(
     emit_event(&format!("connect start peer={peer} rendezvous={rendezvous_addr} relay_override={relay_override} key_set={}", !key.is_empty()));
     let rt = runtime();
 
+    // Direct IP/host connections bypass rendezvous identity verification and
+    // do not negotiate a peer stream key. Never start them without consent.
+    if direct_addr.is_some() {
+        emit_event(&format!("rv_diag phase=peer_security mode=direct_endpoint outcome={} scope=session",
+            if insecure_reason == INSECURE_DIRECT_ENDPOINT { "user_approved" } else { "consent_required" }));
+        if insecure_reason != INSECURE_DIRECT_ENDPOINT {
+            return -35;
+        }
+    }
+
     if file_only != 0 {
         let Some(config) = CURRENT_CONNECTION_CONFIG.lock().ok().and_then(|c| c.clone()) else { return -22; };
         let (sender, receiver) = mpsc::channel();
@@ -643,25 +693,40 @@ pub extern "C" fn rust_connect(
             emit_event("IP direct connected; rendezvous bypassed; awaiting peer login challenge");
             return 0;
         }
-        let (mut rv_conn, active_rendezvous_addr) = match connect_rendezvous(&rendezvous_candidates).await {
+        let (rv_conn, active_rendezvous_addr) = match connect_rendezvous(&rendezvous_candidates).await {
             Ok(value) => value,
-            Err(error) => {
-                emit_event(&format!("rendezvous tcp failed: {error}"));
+            Err(_) => {
+                emit_event("rendezvous tcp failed: transport_or_dns_error raw_redacted=true");
                 return -1;
             }
         };
         emit_event("rendezvous tcp connected");
         let account_token = api_account::token_for(&active_rendezvous_addr, &key, public_server);
-        if !account_token.is_empty() {
-            let encryption_started = Instant::now();
-            emit_event("account rendezvous encryption start token_sent=false");
-            if secure_rendezvous_connection(&mut rv_conn, &key).await.is_err() {
-                emit_event(&format!("account rendezvous encryption failed; token not sent elapsed_ms={} raw_redacted=true",
-                    encryption_started.elapsed().as_millis()));
-                return -13;
-            }
-            emit_event(&format!("account rendezvous encryption ready elapsed_ms={}",
-                encryption_started.elapsed().as_millis()));
+        let transport_policy = GameTransportPolicy::from_wire(transport_policy, file_only != 0);
+        let mut preparation_policy = transport_preparation_policy(public_server, force_relay != 0);
+        if transport_policy == GameTransportPolicy::TcpFallback {
+            // Re-negotiate, do not interpret the peer's UDP socket as TCP.
+            preparation_policy.udp_kcp = false;
+            preparation_policy.ipv6_kcp = false;
+            preparation_policy.webrtc = false;
+        }
+        emit_event(&format!("game_transport phase=preparation policy={} forced_relay={} insecure_approved={}",
+            transport_policy.label(), force_relay != 0, insecure_reason != INSECURE_NONE));
+        let preparation_started = Instant::now();
+        let (mut rv_conn, (udp_candidate, ipv6_candidate)) = match prepare_authenticated_rendezvous(
+            rv_conn, &active_rendezvous_addr, &key, !account_token.is_empty(), public_server,
+            preparation_policy, transport_policy).await {
+            Ok(result) => result,
+            Err(error) => return error.connection_result(),
+        };
+        if SESSION_ID.load(Ordering::SeqCst) != session_id {
+            emit_event("rv_diag phase=preparation outcome=cancelled token_sent=false");
+            return -19;
+        }
+        // UDP configuration updates must never be applied while a required
+        // account handshake is pending or has failed.
+        if let Some(update) = udp_candidate.as_ref().and_then(|candidate| candidate.config_update.as_ref()) {
+            apply_rendezvous_config_update(update);
         }
         if let Ok(mut config) = CURRENT_CONNECTION_CONFIG.lock() {
             if let Some(config) = config.as_mut() {
@@ -683,47 +748,20 @@ pub extern "C" fn rust_connect(
             }
             cached
         };
-        let preparation_policy = transport_preparation_policy(public_server, force_relay != 0);
-        let preparation_started = Instant::now();
-        let udp_future = async {
-            if preparation_policy.udp_kcp {
-                prepare_udp_punch_socket(&active_rendezvous_addr, public_server).await
-            } else {
-                None
-            }
+        let mut webrtc_candidate = if preparation_policy.webrtc {
+            prepare_webrtc_offerer(false).await
+        } else {
+            None
         };
-        let ipv6_future = async {
-            if preparation_policy.ipv6_kcp {
-                match tokio::time::timeout(
-                    Duration::from_millis(IPV6_PREPARATION_TIMEOUT),
-                    prepare_ipv6_punch_socket(&active_rendezvous_addr),
-                ).await {
-                    Ok(candidate) => candidate,
-                    Err(_) => {
-                        emit_event("ipv6 preparation skipped after fast budget");
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        };
-        let webrtc_future = async {
-            if preparation_policy.webrtc {
-                prepare_webrtc_offerer(false).await
-            } else {
-                None
-            }
-        };
-        let (udp_candidate, ipv6_candidate, mut webrtc_candidate) =
-            tokio::join!(udp_future, ipv6_future, webrtc_future);
+        let mut webrtc_guard = PendingWebRtcGuard(
+            webrtc_candidate.as_ref().map(|(stream, _)| stream.clone()));
         // ICE candidates must not be disclosed in plaintext, even for an
         // anonymous connection. A failed exchange consumes the old stream.
         if webrtc_candidate.is_some() && account_token.is_empty() {
             let encryption_started = Instant::now();
             emit_event("webrtc offer encryption start budget_ms=1500");
             let encryption = tokio::time::timeout(Duration::from_millis(1500),
-                secure_rendezvous_connection(&mut rv_conn, &key)).await;
+                secure_rendezvous_connection(&mut rv_conn, &key, RendezvousHandshakeContext::WebRtc)).await;
             if !matches!(&encryption, Ok(Ok(()))) {
                 emit_event(&format!("webrtc offer encryption unavailable; reconnect without offer reason={} elapsed_ms={} raw_redacted=true",
                     if encryption.is_err() { "timeout" } else { "handshake_failed" },
@@ -752,7 +790,7 @@ pub extern "C" fn rust_connect(
             ipv6_candidate.is_some(),
             webrtc_candidate.is_some(),
         ));
-        let udp_port = udp_candidate.as_ref().map(|(_, port)| *port).unwrap_or(0);
+        let udp_port = udp_candidate.as_ref().map(|candidate| candidate.port).unwrap_or(0);
         let socket_addr_v6 = ipv6_candidate
             .as_ref()
             .map(|(_, address)| address.clone())
@@ -772,8 +810,13 @@ pub extern "C" fn rust_connect(
             webrtc_sdp_offer,
         );
 
+        if !account_token.is_empty() && !rv_conn.is_secured() {
+            emit_event("rv_diag phase=handshake_retry outcome=unsecured_request_blocked token_sent=false");
+            return -33;
+        }
         api_account::attach(&mut req, &account_token);
         let local_addr = rv_conn.local_addr();
+        let punch_started = Instant::now();
         let response = match send_punch_request(&mut rv_conn, &req, public_server).await {
             Ok(Some(msg)) => {
                 emit_event("rendezvous response received");
@@ -785,6 +828,8 @@ pub extern "C" fn rust_connect(
             }
             Err(code) => return code,
         };
+        let punch_elapsed_ms = punch_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        log_peer_signature_response("control", &response.union);
 
         let mut peer_addr: Option<SocketAddr> = None;
         let mut relay_from_server = relay_override.clone();
@@ -905,9 +950,10 @@ pub extern "C" fn rust_connect(
 
         // The TCP punch reuses the rendezvous connection's local endpoint.
         // The UDP/KCP sockets and WebRTC ICE sockets were prepared independently.
+        let rendezvous_authenticated = rv_conn.is_secured();
         drop(rv_conn);
 
-        let mut udp_socket = udp_candidate.map(|(socket, _)| socket);
+        let mut udp_socket = udp_candidate.map(|candidate| candidate.socket);
         if force_relay != 0 || !peer_is_udp {
             udp_socket = None;
         } else if let (Some(socket), Some(address)) = (udp_socket.as_ref(), peer_addr) {
@@ -944,22 +990,31 @@ pub extern "C" fn rust_connect(
         }
 
         let direct_failures = recent_peer_direct_failures(&peer, now_ms());
-        let direct_timeout = official_direct_timeout(
+        let direct_timeout = adaptive_direct_timeout(
             is_local,
             peer_nat_type,
             nat_type,
             !relay_from_server.is_empty(),
             direct_failures,
+            punch_elapsed_ms,
         );
+        emit_event(&format!("rv_diag phase=direct_policy punch_ms={} peer_nat={} local_nat={} relay_available={} recent_failures={} timeout_ms={}",
+            punch_elapsed_ms, peer_nat_type.value(), nat_type.value(), !relay_from_server.is_empty(),
+            direct_failures, direct_timeout));
         let tcp_peer = if force_relay == 0 && !peer_is_udp { peer_addr } else { None };
         emit_event(&format!(
-            "transport race tcp={} udp_kcp={} ipv6_kcp={} webrtc={} timeout={direct_timeout}",
+            "rv_diag phase=direct_candidates tcp={} udp_kcp={} ipv6_kcp={} webrtc={} timeout_ms={direct_timeout}",
             tcp_peer.is_some(),
             udp_socket.is_some(),
             ipv6_socket.is_some(),
             webrtc_stream.is_some(),
         ));
-        let direct_result = connect_direct_transports(
+        let can_prepare_relay = should_prepare_relay_standby(rendezvous_authenticated, relay_uuid.is_some(),
+            !relay_from_server.is_empty(), force_relay != 0,
+            tcp_peer.is_some() || udp_socket.is_some() || ipv6_socket.is_some() || webrtc_stream.is_some());
+        emit_event(&format!("rv_diag phase=relay_preconnect action=policy enabled={} authenticated_rendezvous={} pairing_ready={}",
+            can_prepare_relay, rendezvous_authenticated, relay_uuid.is_some()));
+        let direct_future = connect_direct_transports(
             tcp_peer,
             local_addr,
             direct_timeout,
@@ -967,12 +1022,27 @@ pub extern "C" fn rust_connect(
             ipv6_socket,
             webrtc_stream,
             if force_relay != 0 { 2 } else { 1 },
-        ).await;
+            transport_policy,
+        );
+        let (direct_result, prepared_relay) = if can_prepare_relay {
+            direct_with_standby(direct_future,
+                prepare_relay_transport(&relay_from_server, local_addr.is_ipv4())).await
+        } else {
+            (direct_future.await, None)
+        };
+        if can_prepare_relay && direct_result.is_ok() {
+            emit_event("rv_diag phase=relay_preconnect outcome=not_needed request_sent=false");
+        }
 
         let mut selected = match direct_result {
             Ok(transport) => {
                 emit_event(&format!("transport connected type={}", transport.label));
                 transport
+            }
+            Err(_) if should_retry_game_udp_as_tcp(transport_policy, force_relay != 0,
+                peer_is_udp, insecure_reason) => {
+                emit_event("game_transport phase=fallback reason=udp_direct_failed next=tcp_renegotiation security=unchanged");
+                return -36;
             }
             Err(direct_error) if !relay_from_server.is_empty() => {
                 emit_event(&format!("direct transports failed: {direct_error}; try relay"));
@@ -980,7 +1050,8 @@ pub extern "C" fn rust_connect(
                     record_peer_direct_failure(&peer, now_ms());
                 }
                 let relay_result = if let Some(uuid) = relay_uuid.as_deref() {
-                    create_relay(
+                    create_relay_with_standby(
+                        prepared_relay,
                         &peer,
                         uuid,
                         &relay_from_server,
@@ -1009,7 +1080,8 @@ pub extern "C" fn rust_connect(
                         }
                     }
                     Err(error) => {
-                        emit_event(&format!("relay failed: {error}"));
+                        let _ = error;
+                        emit_event("relay failed: transport_or_pairing_error raw_redacted=true");
                         return -15;
                     }
                 }
@@ -1025,10 +1097,15 @@ pub extern "C" fn rust_connect(
             &signed_id_pk,
             &key,
             &mut selected.stream,
-            allow_insecure_fallback != 0,
+            insecure_reason,
         ).await;
         let mut peer_encrypted = secure_result.as_ref().copied().unwrap_or(false);
         if let Err(error) = secure_result {
+            // Reusing the same unsigned identity via a different transport
+            // cannot make it authenticated. Ask before any retry instead.
+            if error.to_string() == MISSING_PEER_SIGNATURE {
+                return -34;
+            }
             if selected.stream.is_webrtc() && !relay_from_server.is_empty() {
                 emit_event(&format!("webrtc secure handshake failed: {error}; try relay"));
                 record_peer_direct_failure(&peer, now_ms());
@@ -1052,12 +1129,12 @@ pub extern "C" fn rust_connect(
                     &signed_id_pk,
                     &key,
                     &mut relay,
-                    allow_insecure_fallback != 0,
+                    insecure_reason,
                 ).await {
                     Ok(encrypted) => encrypted,
-                    Err(_) => {
+                    Err(error) => {
                         emit_event("secure relay fallback failed");
-                        return -16;
+                        return peer_security_error_code(&error);
                     }
                 };
                 let transport = stream_transport_code(&relay);
@@ -1070,11 +1147,7 @@ pub extern "C" fn rust_connect(
                 };
             } else {
                 emit_event("secure fallback failed");
-                return if matches!(error.to_string().as_str(), "invalid server key" | "server key mismatch") {
-                    -24
-                } else {
-                    -16
-                };
+                return peer_security_error_code(&error);
             }
         }
         emit_event("secure fallback completed");
@@ -1090,7 +1163,14 @@ pub extern "C" fn rust_connect(
         CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
         CONNECTION_ROUTE.store(selected.route, Ordering::SeqCst);
         CONNECTION_TRANSPORT.store(selected.transport, Ordering::SeqCst);
+        emit_event(&format!("game_transport phase=selected policy={} route={} transport={} encrypted={}",
+            transport_policy.label(), selected.route, selected.label, peer_encrypted));
 
+        if selected.stream.is_webrtc() {
+            // Only the authenticated winning stream is transferred to the
+            // session. Any losing or cancelled offer is closed by the guard.
+            webrtc_guard.0 = None;
+        }
         spawn_receive_loop(session_id, selected.stream, selected.kcp);
         emit_event(&format!("receive loop spawned transport={}", selected.label));
         0
@@ -1120,6 +1200,101 @@ pub extern "C" fn rust_set_performance_preset(preset: *const c_char) -> i32 {
         *guard = config;
     }
     0
+}
+
+fn queue_game_performance_update(reason: &str) -> i32 {
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || FILE_ONLY_SESSION.load(Ordering::SeqCst) {
+        return 0;
+    }
+    let performance = performance_config();
+    let mut misc = Misc::new();
+    misc.set_option(OptionMessage {
+        image_quality: performance.quality.into(),
+        custom_image_quality: performance.wire_quality(),
+        custom_fps: performance.fps,
+        ..Default::default()
+    });
+    let mut option = PeerMessage::new();
+    option.set_misc(misc);
+    let option_result = queue_peer_message(option);
+    if option_result != 0 { return option_result; }
+    let mut misc = Misc::new();
+    misc.set_auto_adjust_fps(performance.fps as u32);
+    let mut fps = PeerMessage::new();
+    fps.set_misc(misc);
+    let fps_result = queue_peer_message(fps);
+    emit_event(&format!("game mode performance queued reason={} enabled={} target_fps={} effective_fps={} option_result={} fps_result={}",
+        reason, GAME_MODE.load(Ordering::SeqCst), GAME_FPS_CAP.load(Ordering::SeqCst), performance.fps,
+        option_result, fps_result));
+    fps_result
+}
+
+fn queue_game_fps_update() -> i32 {
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || FILE_ONLY_SESSION.load(Ordering::SeqCst) {
+        return 0;
+    }
+    let performance = performance_config();
+    // A changing frame-rate cap must not repeatedly replace the peer's image
+    // quality or codec negotiation; those fields stay unset on this update.
+    let mut misc = Misc::new();
+    misc.set_option(OptionMessage { custom_fps: performance.fps, ..Default::default() });
+    let mut option = PeerMessage::new();
+    option.set_misc(misc);
+    let option_result = queue_peer_message(option);
+    if option_result != 0 { return option_result; }
+    let mut misc = Misc::new();
+    misc.set_auto_adjust_fps(performance.fps as u32);
+    let mut fps = PeerMessage::new();
+    fps.set_misc(misc);
+    let fps_result = queue_peer_message(fps);
+    emit_event(&format!("game fps queued target_fps={} effective_fps={} option_result={} fps_result={}",
+        GAME_FPS_CAP.load(Ordering::SeqCst), performance.fps, option_result, fps_result));
+    fps_result
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_game_mode(enabled: i32, apply_live: i32) -> i32 {
+    let enabled = enabled != 0;
+    let previous = GAME_MODE.swap(enabled, Ordering::SeqCst);
+    if previous != enabled { GAME_FPS_CAP.store(60, Ordering::SeqCst); }
+    // The transport can be active before the peer has accepted login. Only
+    // publish runtime options after the native layer confirms authentication.
+    if apply_live != 0 { queue_game_performance_update("mode") } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_game_fps(fps: i32, apply_live: i32) -> i32 {
+    if !GAME_MODE.load(Ordering::SeqCst) { return -3; }
+    GAME_FPS_CAP.store(fps.clamp(20, 60), Ordering::SeqCst);
+    if apply_live != 0 { queue_game_fps_update() } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_game_mode() -> i32 {
+    GAME_MODE.load(Ordering::SeqCst) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_game_effective_fps() -> i32 {
+    if GAME_MODE.load(Ordering::SeqCst) { performance_config().fps } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_set_high_performance(enabled: i32, apply_live: i32) -> i32 {
+    HIGH_PERFORMANCE_PRIORITY.store(enabled != 0, Ordering::SeqCst);
+    if apply_live != 0 { queue_game_performance_update("high_performance") } else { 0 }
+}
+
+// These are the effective values sent to the peer after local restrictions,
+// not a measurement of the peer's actual encoder or displayed frames.
+#[no_mangle]
+pub extern "C" fn rust_get_requested_performance_fps() -> i32 {
+    performance_config().fps
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_requested_bitrate_percent() -> i32 {
+    performance_config().custom_quality
 }
 
 #[no_mangle]
@@ -1260,7 +1435,7 @@ pub extern "C" fn rust_disconnect() -> i32 {
     CONNECTION_TRANSPORT.store(0, Ordering::SeqCst);
     CONNECTION_DELAY_MS.store(0, Ordering::SeqCst);
     CONNECTION_TARGET_BITRATE_KB.store(0, Ordering::SeqCst);
-    ALLOW_INSECURE_SESSION.store(false, Ordering::SeqCst);
+    INSECURE_SESSION_REASON.store(INSECURE_NONE, Ordering::SeqCst);
     LOCK_AFTER_DISCONNECT.store(false, Ordering::SeqCst);
     PRIVACY_REQUESTED.store(false, Ordering::SeqCst);
     PRIVACY_REQUEST_SENT.store(false, Ordering::SeqCst);
@@ -1305,6 +1480,11 @@ pub extern "C" fn rust_get_connection_delay_ms() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_get_connection_delay_sample() -> u64 {
+    CONNECTION_DELAY_SAMPLE.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
 pub extern "C" fn rust_get_connection_target_bitrate_kb() -> i32 {
     CONNECTION_TARGET_BITRATE_KB.load(Ordering::SeqCst)
 }
@@ -1333,6 +1513,69 @@ pub extern "C" fn rust_send_mouse_event(x: f64, y: f64, action: i32, modifier_ma
         ..Default::default()
     });
     queue_peer_message(msg)
+}
+
+// Coordinates are relative to the specifically assigned secondary display,
+// never to CURRENT_DISPLAY. A stale or closed surface cannot inject input.
+#[no_mangle]
+pub extern "C" fn rust_send_secondary_mouse_event(display: i32, x: f64, y: f64,
+                                                   action: i32, modifier_mask: i32) -> i32 {
+    let Ok(_guard) = DISPLAY_SUBSCRIPTION_LOCK.lock() else { return -1; };
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || display < 0 ||
+        SECONDARY_DISPLAY.load(Ordering::SeqCst) != display || !x.is_finite() || !y.is_finite() {
+        return -1;
+    }
+    let mask = match action {
+        0 => 0, 1 => (1 << 3) | 1, 2 => (1 << 3) | 2,
+        3 => (2 << 3) | 1, 4 => (2 << 3) | 2,
+        5 => (4 << 3) | 1, 6 => (4 << 3) | 2,
+        _ => return -2,
+    };
+    let Some((left, top, width, height)) = session_health::display_rect_for_index(display, &DISPLAY_INFOS)
+        else { return -3; };
+    let local_x = x.round().clamp(0.0, f64::from(width - 1)) as i32;
+    let local_y = y.round().clamp(0.0, f64::from(height - 1)) as i32;
+    let mut msg = PeerMessage::new();
+    msg.set_mouse_event(MouseEvent {
+        mask, x: left.saturating_add(local_x), y: top.saturating_add(local_y),
+        modifiers: modifier_mask_to_controls(modifier_mask), ..Default::default()
+    });
+    queue_peer_message(msg)
+}
+
+// The position update and wheel event are queued under one sender lock. An
+// event from the primary window cannot slip between them and scroll elsewhere.
+#[no_mangle]
+pub extern "C" fn rust_send_secondary_wheel(display: i32, x: f64, y: f64,
+                                             delta_x: f64, delta_y: f64, modifier_mask: i32) -> i32 {
+    let Ok(_guard) = DISPLAY_SUBSCRIPTION_LOCK.lock() else { return -1; };
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || FILE_ONLY_SESSION.load(Ordering::SeqCst) ||
+        display < 0 || SECONDARY_DISPLAY.load(Ordering::SeqCst) != display ||
+        !x.is_finite() || !y.is_finite() || !delta_x.is_finite() || !delta_y.is_finite() { return -1; }
+    let Some((left, top, width, height)) = session_health::display_rect_for_index(display, &DISPLAY_INFOS)
+        else { return -3; };
+    let local_x = x.round().clamp(0.0, f64::from(width - 1)) as i32;
+    let local_y = y.round().clamp(0.0, f64::from(height - 1)) as i32;
+    let modifiers = modifier_mask_to_controls(modifier_mask);
+    let mut move_msg = PeerMessage::new();
+    move_msg.set_mouse_event(MouseEvent { mask: 0, x: left.saturating_add(local_x),
+        y: top.saturating_add(local_y), modifiers: modifiers.clone(), ..Default::default() });
+    let mut wheel_msg = PeerMessage::new();
+    wheel_msg.set_mouse_event(MouseEvent { mask: 3, x: delta_x.round().clamp(-32767.0, 32767.0) as i32,
+        y: delta_y.round().clamp(-32767.0, 32767.0) as i32, modifiers, ..Default::default() });
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
+    let Ok(guard) = PEER_MESSAGE_SENDER.lock() else { return -1; };
+    if SECONDARY_DISPLAY.load(Ordering::SeqCst) != display || !CONNECTION_ACTIVE.load(Ordering::SeqCst) {
+        return -1;
+    }
+    let Some((_, sender)) = guard.as_ref().filter(|(id, _)| *id == session_id) else { return -1; };
+    if sender.send(QueuedPeerCommand::Message { session_id, message: move_msg, voice_timestamp: 0 }).is_err() {
+        return -1;
+    }
+    if sender.send(QueuedPeerCommand::Message { session_id, message: wheel_msg, voice_timestamp: 0 }).is_err() {
+        return -1;
+    }
+    0
 }
 
 #[no_mangle]
@@ -2171,6 +2414,21 @@ async fn run_file_session(
         Ok(stream) => stream,
         Err(error) => {
             emit_event("file-session:connect-failed");
+            let error = match error.as_str() {
+                MISSING_PEER_SIGNATURE => {
+                    if FILE_ONLY_SESSION.load(Ordering::SeqCst) {
+                        emit_event("file-only session security_signature_missing");
+                    }
+                    "文件连接缺少远端身份签名，未建立未加密连接".to_string()
+                }
+                "invalid server key" | "server key mismatch" => {
+                    if FILE_ONLY_SESSION.load(Ordering::SeqCst) {
+                        emit_event("file-only session security_key_invalid");
+                    }
+                    "文件连接无法验证服务器密钥".to_string()
+                }
+                _ => error,
+            };
             set_remote_directory_result(RemoteDirectoryResult {
                 path: String::new(),
                 entries: Vec::new(),
@@ -2297,7 +2555,7 @@ async fn run_file_session(
                             handle_file_send_confirm(confirm, &mut read_jobs, &mut upload_state).await;
                         }
                     }
-                    Some(message::Union::TestDelay(delay)) => { send_test_delay_response(delay, &mut stream).await; }
+                    Some(message::Union::TestDelay(delay)) => { send_test_delay_response(delay, &mut stream, false).await; }
                     _ => {}
                 }
             }
@@ -2716,6 +2974,7 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     if display < 0 {
         return -1;
     }
+    let Ok(_guard) = DISPLAY_SUBSCRIPTION_LOCK.lock() else { return -1; };
     if let Ok(mut guard) = CURRENT_DISPLAY.lock() {
         *guard = display;
     }
@@ -2735,9 +2994,18 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
     // narrow the capture subscription. Without this message every newly
     // selected monitor remains subscribed and its VideoFrames are interleaved
     // on our single HarmonyOS rendering surface.
+    let secondary = SECONDARY_DISPLAY.load(Ordering::SeqCst);
+    let mut capture_set = vec![display];
+    if secondary >= 0 && secondary != display {
+        capture_set.push(secondary);
+    } else if secondary == display {
+        // Two windows must never consume the same display through separate decoders.
+        SECONDARY_DISPLAY.store(-1, Ordering::SeqCst);
+        emit_event("multi-display secondary_stopped reason=primary_selected_same_display");
+    }
     let mut capture_misc = Misc::new();
     capture_misc.set_capture_displays(CaptureDisplays {
-        set: vec![display],
+        set: capture_set,
         ..Default::default()
     });
     let mut capture_msg = PeerMessage::new();
@@ -2747,6 +3015,59 @@ pub extern "C" fn rust_switch_display(display: i32) -> i32 {
         "switch display requested display={display} capture_set_result={capture_result}"
     ));
     capture_result
+}
+
+/// Protocol capability only; decoder and surface resources are checked at start.
+#[no_mangle]
+pub extern "C" fn rust_is_secondary_display_supported() -> i32 {
+    i32::from(multi_display_routing::supports_secondary(
+        CONNECTION_ACTIVE.load(Ordering::SeqCst),
+        FILE_ONLY_SESSION.load(Ordering::SeqCst),
+        PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.load(Ordering::SeqCst),
+        PEER_IS_WAYLAND.load(Ordering::SeqCst),
+    ))
+}
+
+// This never changes authentication and retains a fail-closed protocol gate.
+#[no_mangle]
+pub extern "C" fn rust_set_secondary_display(display: i32) -> i32 {
+    let Ok(_guard) = DISPLAY_SUBSCRIPTION_LOCK.lock() else { return -1; };
+    let primary = CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(-1);
+    if display < 0 {
+        SECONDARY_DISPLAY.store(-1, Ordering::SeqCst);
+        if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || primary < 0 { return 0; }
+        return send_capture_display_set(vec![primary]);
+    }
+    if !CONNECTION_ACTIVE.load(Ordering::SeqCst) || FILE_ONLY_SESSION.load(Ordering::SeqCst) { return -1; }
+    if rust_is_secondary_display_supported() == 0 {
+        return -2;
+    }
+    if SECONDARY_FRAME_CALLBACK.lock().ok().and_then(|guard| *guard).is_none() { return -3; }
+    let valid = DISPLAY_INFOS.lock().ok().and_then(|infos| {
+        let selection = multi_display_routing::DisplaySelection::checked(primary, display, infos.len(), true)?;
+        let first = infos.get(selection.primary as usize)?;
+        let second = infos.get(selection.secondary as usize)?;
+        if first.2 <= 0 || first.3 <= 0 || second.2 <= 0 || second.3 <= 0 { return None; }
+        Some(selection.capture_set())
+    });
+    let Some(capture_set) = valid else { return -4; };
+    let session_id = SESSION_ID.load(Ordering::SeqCst);
+    let previous = SECONDARY_DISPLAY.swap(display, Ordering::SeqCst);
+    let result = send_capture_display_set(capture_set);
+    if result != 0 || SESSION_ID.load(Ordering::SeqCst) != session_id {
+        SECONDARY_DISPLAY.store(if SESSION_ID.load(Ordering::SeqCst) == session_id { previous } else { -1 }, Ordering::SeqCst);
+        return if result != 0 { result } else { -1 };
+    }
+    emit_event("multi-display secondary_subscription_requested");
+    0
+}
+
+fn send_capture_display_set(set: Vec<i32>) -> i32 {
+    let mut misc = Misc::new();
+    misc.set_capture_displays(CaptureDisplays { set, ..Default::default() });
+    let mut msg = PeerMessage::new();
+    msg.set_misc(misc);
+    queue_peer_message(msg)
 }
 
 #[no_mangle]
@@ -3337,6 +3658,33 @@ struct ConnectedTransport {
     transport: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GameTransportPolicy { Automatic, UdpPreferred, TcpFallback }
+
+impl GameTransportPolicy {
+    fn from_wire(value: i32, file_only: bool) -> Self {
+        if file_only { return Self::Automatic; }
+        match value { 1 => Self::UdpPreferred, 2 => Self::TcpFallback, _ => Self::Automatic }
+    }
+    fn label(self) -> &'static str {
+        match self { Self::Automatic => "automatic", Self::UdpPreferred => "udp_preferred", Self::TcpFallback => "tcp_fallback" }
+    }
+}
+
+fn should_retry_game_udp_as_tcp(policy: GameTransportPolicy, force_relay: bool,
+    peer_is_udp: bool, insecure_reason: i32) -> bool {
+    policy == GameTransportPolicy::UdpPreferred && !force_relay && peer_is_udp &&
+        insecure_reason == INSECURE_NONE
+}
+
+const GAME_UDP_PREFERENCE_MS: u64 = 350;
+
+fn game_candidate_delay_ms(policy: GameTransportPolicy, udp_available: bool, udp_candidate: bool) -> u64 {
+    if policy == GameTransportPolicy::UdpPreferred && udp_available && !udp_candidate {
+        GAME_UDP_PREFERENCE_MS
+    } else { 0 }
+}
+
 const TRANSPORT_TCP: i32 = 1;
 const TRANSPORT_UDP_KCP: i32 = 2;
 const TRANSPORT_IPV6_KCP: i32 = 3;
@@ -3391,6 +3739,10 @@ fn transport_preparation_policy(
 }
 
 const UDP_NAT_TEST_TIMEOUT: Duration = Duration::from_millis(300);
+// A game-mode connection intentionally spends a little more time waiting for
+// the ID server's response. Never manufacture a port if the server is silent.
+const GAME_UDP_NAT_TEST_TIMEOUT: Duration = Duration::from_millis(800);
+const UDP_PREPARATION_TOTAL_TIMEOUT: u64 = 3_000;
 const IPV6_PREPARATION_TIMEOUT: u64 = 300;
 const WEBRTC_OFFER_TIMEOUT: u64 = 500;
 const WEBRTC_CONNECT_TIMEOUT: u64 = 3_500;
@@ -3398,14 +3750,87 @@ const PUNCH_PROBE: [u8; 4] = *b"RDP?";
 const PUNCH_ACK: [u8; 4] = *b"RDP!";
 const PUNCH_PACKET_LEN: usize = 12;
 
+struct UdpPunchCandidate {
+    socket: Arc<UdpSocket>,
+    port: u16,
+    // A public-server update is applied by the caller only after any required
+    // account handshake succeeds, not by an overlapping unverified probe.
+    config_update: Option<hbb_common::rendezvous_proto::ConfigUpdate>,
+}
+
+type DirectSocketCandidates = (Option<UdpPunchCandidate>, Option<(Arc<UdpSocket>, Vec<u8>)>);
+
+async fn prepare_authenticated_rendezvous(
+    conn: Stream, endpoint: &str, key: &str, account_secured: bool,
+    public_server: bool, policy: TransportPreparationPolicy, transport: GameTransportPolicy,
+) -> Result<(Stream, DirectSocketCandidates), RendezvousHandshakeError> {
+    let started = Instant::now();
+    emit_event(&format!("rv_diag phase=preparation action=start overlap_account={} udp={} ipv6={} token_sent=false",
+        account_secured, policy.udp_kcp, policy.ipv6_kcp));
+    let auth_future = async {
+        if !account_secured { return Ok(conn); }
+        emit_event("account rendezvous encryption start token_sent=false");
+        match secure_rendezvous_with_retry(conn, endpoint, key, RendezvousHandshakeContext::Account).await {
+            Ok(conn) => {
+                emit_event(&format!("account rendezvous encryption ready elapsed_ms={}", started.elapsed().as_millis()));
+                Ok(conn)
+            }
+            Err(error) => {
+                emit_event(&format!("account rendezvous encryption failed; token not sent elapsed_ms={} raw_redacted=true",
+                    started.elapsed().as_millis()));
+                Err(error)
+            }
+        }
+    };
+    // UDP/IPv6 probing uses only the already-selected ID server. ICE/STUN
+    // gathering remains after authentication, so failed authorization does
+    // not start new third-party WebRTC activity or disclose an ICE offer.
+    let socket_future = async {
+        let candidates = prepare_direct_socket_candidates(endpoint, public_server, policy, transport).await;
+        emit_event(&format!("rv_diag phase=preparation action=sockets_ready elapsed_ms={} udp={} ipv6={}",
+            started.elapsed().as_millis(), candidates.0.is_some(), candidates.1.is_some()));
+        Ok::<_, RendezvousHandshakeError>(candidates)
+    };
+    tokio::try_join!(auth_future, socket_future)
+}
+
+async fn prepare_direct_socket_candidates(
+    rendezvous: &str, public_server: bool, policy: TransportPreparationPolicy, transport: GameTransportPolicy,
+) -> DirectSocketCandidates {
+    let udp = async {
+        if !policy.udp_kcp { return None; }
+        match tokio::time::timeout(Duration::from_millis(UDP_PREPARATION_TOTAL_TIMEOUT),
+            prepare_udp_punch_socket(rendezvous, public_server, udp_probe_budget(transport))).await {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                emit_event("rv_diag phase=preparation kind=udp outcome=timeout");
+                None
+            }
+        }
+    };
+    let ipv6 = async {
+        if !policy.ipv6_kcp { return None; }
+        match tokio::time::timeout(Duration::from_millis(IPV6_PREPARATION_TIMEOUT),
+            prepare_ipv6_punch_socket(rendezvous)).await {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                emit_event("ipv6 preparation skipped after fast budget");
+                None
+            }
+        }
+    };
+    tokio::join!(udp, ipv6)
+}
+
 async fn prepare_udp_punch_socket(
     rendezvous: &str,
     public_server: bool,
-) -> Option<(Arc<UdpSocket>, u16)> {
+    budget: Duration,
+) -> Option<UdpPunchCandidate> {
     let (socket, server_addr) = match new_direct_udp_for(rendezvous).await {
         Ok(value) => value,
-        Err(error) => {
-            emit_event(&format!("udp mapping socket unavailable: {error}"));
+        Err(_) => {
+            emit_event("udp mapping socket unavailable reason=resolve_or_bind_failed raw_redacted=true");
             return None;
         }
     };
@@ -3424,7 +3849,8 @@ async fn prepare_udp_punch_socket(
         }
     };
     let socket_for_probe = socket.clone();
-    let result = tokio::time::timeout(UDP_NAT_TEST_TIMEOUT, async move {
+    let started = Instant::now();
+    let result = tokio::time::timeout(budget, async move {
         let mut retry = Duration::from_millis(20);
         let mut buf = [0_u8; 1500];
         loop {
@@ -3437,13 +3863,9 @@ async fn prepare_udp_punch_socket(
                     if let Some(rendezvous_message::Union::TestNatResponse(response)) =
                         message.union
                     {
-                        if public_server {
-                            if let Some(update) = response.cu.as_ref() {
-                                apply_rendezvous_config_update(update);
-                            }
-                        }
                         if response.port > 0 && response.port <= u16::MAX as i32 {
-                            return Some(response.port as u16);
+                            let update = if public_server { response.cu.as_ref().cloned() } else { None };
+                            return Some((response.port as u16, update));
                         }
                     }
                 }
@@ -3456,15 +3878,21 @@ async fn prepare_udp_punch_socket(
     .ok()
     .flatten();
     match result {
-        Some(port) => {
+        Some((port, config_update)) => {
             emit_event(&format!("udp mapping available port={port}"));
-            Some((socket, port))
+            Some(UdpPunchCandidate { socket, port, config_update })
         }
         None => {
-            emit_event("udp mapping unavailable; keep tcp/webrtc/relay fallbacks");
+            emit_event(&format!("udp mapping unavailable; keep tcp/webrtc/relay fallbacks elapsed_ms={} budget_ms={} reason=no_valid_response",
+                started.elapsed().as_millis(), budget.as_millis()));
             None
         }
     }
+}
+
+fn udp_probe_budget(policy: GameTransportPolicy) -> Duration {
+    if policy == GameTransportPolicy::UdpPreferred { GAME_UDP_NAT_TEST_TIMEOUT }
+    else { UDP_NAT_TEST_TIMEOUT }
 }
 
 async fn prepare_ipv6_punch_socket(rendezvous: &str) -> Option<(Arc<UdpSocket>, Vec<u8>)> {
@@ -3507,7 +3935,22 @@ async fn prepare_webrtc_offerer(force_relay: bool) -> Option<(WebRTCStream, Stri
         }
         Err(_) => {
             emit_event("webrtc offer unavailable reason=local_endpoint_failed raw_redacted=true");
+            stream.close().await;
             None
+        }
+    }
+}
+
+struct PendingWebRtcGuard(Option<WebRTCStream>);
+
+impl Drop for PendingWebRtcGuard {
+    fn drop(&mut self) {
+        let Some(stream) = self.0.take() else { return; };
+        // The guard is owned by the connection future, including its timeout
+        // and cancellation paths. Closing is asynchronous and must not block
+        // the winning transport or leave an unused peer connection active.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { stream.close().await; });
         }
     }
 }
@@ -3589,12 +4032,18 @@ async fn connect_direct_transports(
     ipv6: Option<Arc<UdpSocket>>,
     webrtc: Option<WebRTCStream>,
     webrtc_route: i32,
+    policy: GameTransportPolicy,
 ) -> Result<ConnectedTransport, String> {
+    let udp_available = udp.is_some() || ipv6.is_some();
+    let fallback_delay = game_candidate_delay_ms(policy, udp_available, false);
+    emit_event(&format!("game_transport phase=candidate_policy policy={} udp_available={} fallback_delay_ms={}",
+        policy.label(), udp_available, fallback_delay));
     let mut attempts: Vec<BoxFuture<'static, hbb_common::ResultType<ConnectedTransport>>> =
         Vec::new();
     if let Some(peer) = tcp_peer {
         attempts.push(
-            async move {
+            trace_direct_candidate("tcp", async move {
+                if fallback_delay > 0 { tokio::time::sleep(Duration::from_millis(fallback_delay)).await; }
                 let stream = connect_direct_peer(peer, local_addr, timeout_ms).await?;
                 Ok(ConnectedTransport {
                     stream,
@@ -3603,19 +4052,20 @@ async fn connect_direct_transports(
                     route: 1,
                     transport: TRANSPORT_TCP,
                 })
-            }
+            })
             .boxed(),
         );
     }
     if let Some(socket) = udp {
-        attempts.push(connect_udp_kcp(socket, "UDP/KCP", timeout_ms).boxed());
+        attempts.push(trace_direct_candidate("udp_kcp", connect_udp_kcp(socket, "UDP/KCP", timeout_ms)).boxed());
     }
     if let Some(socket) = ipv6 {
-        attempts.push(connect_udp_kcp(socket, "IPv6/KCP", timeout_ms).boxed());
+        attempts.push(trace_direct_candidate("ipv6_kcp", connect_udp_kcp(socket, "IPv6/KCP", timeout_ms)).boxed());
     }
     if let Some(mut stream) = webrtc {
         attempts.push(
-            async move {
+            trace_direct_candidate("webrtc", async move {
+                if fallback_delay > 0 { tokio::time::sleep(Duration::from_millis(fallback_delay)).await; }
                 stream.wait_connected(WEBRTC_CONNECT_TIMEOUT).await?;
                 Ok(ConnectedTransport {
                     stream: Stream::WebRTC(stream),
@@ -3624,7 +4074,7 @@ async fn connect_direct_transports(
                     route: webrtc_route,
                     transport: TRANSPORT_WEBRTC,
                 })
-            }
+            })
             .boxed(),
         );
     }
@@ -3637,6 +4087,18 @@ async fn connect_direct_transports(
         .map_err(|error| error.to_string())
 }
 
+async fn trace_direct_candidate(
+    kind: &'static str,
+    candidate: impl std::future::Future<Output = hbb_common::ResultType<ConnectedTransport>>,
+) -> hbb_common::ResultType<ConnectedTransport> {
+    let started = Instant::now();
+    emit_event(&format!("rv_diag phase=direct_attempt kind={} action=start", kind));
+    let result = candidate.await;
+    emit_event(&format!("rv_diag phase=direct_attempt kind={} outcome={} elapsed_ms={}",
+        kind, if result.is_ok() { "connected" } else { "failed" }, started.elapsed().as_millis()));
+    result
+}
+
 async fn send_punch_request(
     conn: &mut Stream,
     request: &RendezvousMessage,
@@ -3644,6 +4106,7 @@ async fn send_punch_request(
 ) -> Result<Option<RendezvousMessage>, i32> {
     for (index, reply_timeout) in PUNCH_REPLY_TIMEOUTS.into_iter().enumerate() {
         let attempt = index + 1;
+        let started = Instant::now();
         if let Err(error) = conn.send(request).await {
             let kind = error.downcast_ref::<std::io::Error>().map(|e| format!("{:?}", e.kind()))
                 .unwrap_or_else(|| "transport_error".into());
@@ -3655,8 +4118,14 @@ async fn send_punch_request(
             PUNCH_REPLY_TIMEOUTS.len(), !request.punch_hole_request().token.is_empty()
         ));
         emit_event(&format!("rv_diag phase=punch action=wait_response attempt={attempt}"));
-        if let Some(response) = next_punch_response(conn, reply_timeout, allow_config_updates).await? {
-            return Ok(Some(response));
+        match next_punch_response(conn, reply_timeout, allow_config_updates).await? {
+            Some(response) => {
+                emit_event(&format!("rv_diag phase=punch action=received attempt={} elapsed_ms={}",
+                    attempt, started.elapsed().as_millis()));
+                return Ok(Some(response));
+            }
+            None => emit_event(&format!("rv_diag phase=punch action=timeout attempt={} elapsed_ms={}",
+                attempt, started.elapsed().as_millis())),
         }
     }
     Ok(None)
@@ -3801,24 +4270,34 @@ fn classify_rendezvous_refusal(reason: &str) -> &'static str {
     }
 }
 
-fn official_direct_timeout(
+fn adaptive_direct_timeout(
     is_local: bool,
     peer_nat_type: NatType,
-    _local_nat_type: NatType,
+    local_nat_type: NatType,
     relay_available: bool,
     recent_direct_failures: u8,
+    punch_elapsed_ms: u64,
 ) -> u64 {
     if is_local || peer_nat_type == NatType::SYMMETRIC {
         return LOCAL_DIRECT_CONNECT_TIMEOUT;
     }
-    if relay_available {
-        return if recent_direct_failures > 0 {
-            LOCAL_DIRECT_CONNECT_TIMEOUT
-        } else {
-            DIRECT_CONNECT_TIMEOUT
-        };
+    if !relay_available {
+        return punch_elapsed_ms.saturating_mul(6)
+            .clamp(DIRECT_ONLY_CONNECT_TIMEOUT, ADAPTIVE_DIRECT_ONLY_MAX_TIMEOUT);
     }
-    DIRECT_ONLY_CONNECT_TIMEOUT
+    // Like upstream, use observed punch latency, NAT types and recent
+    // failures. Keep explicit bounds so slow or forged timing never consumes
+    // the entire connection deadline before an available relay can be used.
+    if peer_nat_type == NatType::ASYMMETRIC && local_nat_type == NatType::SYMMETRIC {
+        return LOCAL_DIRECT_CONNECT_TIMEOUT;
+    }
+    let factor = if recent_direct_failures > 0 { 3 } else { 6 };
+    let max = if recent_direct_failures > 0 { ADAPTIVE_DIRECT_RETRY_MAX_TIMEOUT }
+        else { ADAPTIVE_DIRECT_MAX_TIMEOUT };
+    let estimate = punch_elapsed_ms.saturating_mul(factor);
+    let estimate = if peer_nat_type == NatType::ASYMMETRIC && local_nat_type == NatType::ASYMMETRIC
+        && recent_direct_failures == 0 { estimate.max(DIRECT_CONNECT_TIMEOUT) } else { estimate };
+    estimate.clamp(LOCAL_DIRECT_CONNECT_TIMEOUT, max)
 }
 
 fn peer_route_history_key(peer: &str) -> String {
@@ -4019,6 +4498,18 @@ fn rendezvous_message_kind(union: &Option<rendezvous_message::Union>) -> &'stati
     }
 }
 
+// Only fixed response types and the presence of a signature are recorded;
+// neither identity bytes nor the server response are written to diagnostics.
+fn log_peer_signature_response(context: &'static str, union: &Option<rendezvous_message::Union>) {
+    let present = match union {
+        Some(rendezvous_message::Union::PunchHoleResponse(response)) => !response.pk.is_empty(),
+        Some(rendezvous_message::Union::RelayResponse(response)) => !response.pk().is_empty(),
+        _ => false,
+    };
+    emit_event(&format!("rv_diag phase=peer_identity context={context} response={} signature_present={present}",
+        rendezvous_message_kind(union)));
+}
+
 fn should_skip_rendezvous_message(union: &Option<rendezvous_message::Union>) -> bool {
     matches!(
         union,
@@ -4181,6 +4672,10 @@ async fn connect_direct_peer(
 
 async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String> {
     if let Some(address) = direct_peer_endpoint(&config.peer).map_err(str::to_string)? {
+        if INSECURE_SESSION_REASON.load(Ordering::SeqCst) != INSECURE_DIRECT_ENDPOINT {
+            emit_event("rv_diag phase=file_peer_security mode=direct_endpoint outcome=consent_required");
+            return Err("direct endpoint requires unencrypted approval".to_string());
+        }
         return connect_direct_endpoint(address)
             .await
             .map_err(|_| "direct endpoint connection failed".to_string());
@@ -4194,7 +4689,8 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     .map_err(|error| error.to_string())?;
     let account_token = api_account::token_for(&config.rendezvous_addr, &config.key, config.public_server);
     if !account_token.is_empty() {
-        secure_rendezvous_connection(&mut rendezvous, &config.key).await
+        rendezvous = secure_rendezvous_with_retry(rendezvous, &config.rendezvous_addr, &config.key,
+            RendezvousHandshakeContext::FileAccount).await
             .map_err(|_| "账号连接认证需要安全的 ID 服务器通道，令牌未发送".to_string())?;
         emit_event("file account rendezvous encryption ready");
     }
@@ -4208,6 +4704,9 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         Vec::new(),
         String::new(),
     );
+    if !account_token.is_empty() && !rendezvous.is_secured() {
+        return Err("账号连接认证需要安全的 ID 服务器通道，令牌未发送".to_string());
+    }
     api_account::attach(&mut request, &account_token);
     rendezvous
         .send(&request)
@@ -4218,6 +4717,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     let response = next_rendezvous_for_phase(&mut rendezvous, RENDEZVOUS_REPLY_TIMEOUT, false, RendezvousPhase::FilePunch)
         .await
         .ok_or_else(|| "文件传输连接超时".to_string())?;
+    log_peer_signature_response("file", &response.union);
     let mut peer_addr = None;
     let mut relay = config.relay_override.clone();
     let mut signed_id_pk = Vec::new();
@@ -4249,7 +4749,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
             &signed_id_pk,
             &config.key,
             &mut stream,
-            ALLOW_INSECURE_SESSION.load(Ordering::SeqCst),
+            INSECURE_SESSION_REASON.load(Ordering::SeqCst),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -4325,7 +4825,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         &signed_id_pk,
         &config.key,
         &mut stream,
-        ALLOW_INSECURE_SESSION.load(Ordering::SeqCst),
+        INSECURE_SESSION_REASON.load(Ordering::SeqCst),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -4381,8 +4881,12 @@ async fn request_relay_with_type(
                 continue;
             }
         };
-        if !key.is_empty() && !token.is_empty() {
-            secure_rendezvous_connection(&mut rv_conn, key).await?;
+        if !token.is_empty() {
+            rv_conn = secure_rendezvous_with_retry(rv_conn, rendezvous_server, key,
+                RendezvousHandshakeContext::RelayAccount).await?;
+            if !rv_conn.is_secured() {
+                hbb_common::bail!("account relay channel was not secured");
+            }
         }
         let ipv4 = rv_conn.local_addr().is_ipv4();
         let uuid = Uuid::new_v4().to_string();
@@ -4440,43 +4944,282 @@ async fn request_relay_with_type(
     hbb_common::bail!("{last_error} after 3 attempts")
 }
 
-async fn secure_rendezvous_connection(
-    conn: &mut Stream,
-    key: &str,
-) -> Result<(), hbb_common::anyhow::Error> {
-    let Some(rs_pk) = get_rs_pk(key) else {
-        hbb_common::bail!("invalid rendezvous server public key");
-    };
+#[derive(Clone, Copy)]
+enum RendezvousHandshakeContext { Account, FileAccount, RelayAccount, WebRtc }
 
-    let Some(Ok(bytes)) = conn.next_timeout(READ_TIMEOUT).await else {
-        // This helper is used only when carrying an account token. Never
-        // silently disclose it on a downgraded or unverified connection.
-        hbb_common::bail!("account authorization encryption unavailable");
-    };
-    let Ok(message) = RendezvousMessage::parse_from_bytes(&bytes) else {
-        hbb_common::bail!("invalid account authorization handshake");
-    };
-    let Some(rendezvous_message::Union::KeyExchange(exchange)) = message.union else {
-        hbb_common::bail!("account authorization key exchange required");
-    };
-    if exchange.keys.len() != 1 {
-        hbb_common::bail!("invalid rendezvous key exchange message");
+impl RendezvousHandshakeContext {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::FileAccount => "file_account",
+            Self::RelayAccount => "relay_account",
+            Self::WebRtc => "webrtc",
+        }
+    }
+}
+
+// These categories are fixed labels, never upstream error text or message data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RendezvousHandshakeError {
+    InvalidServerKey, ReceiveTimeout, ReceiveClosed, ReceiveError, DecodeError,
+    UnexpectedMessage, InvalidExchange, SignatureInvalid, InvalidPeerKey,
+    SendTimeout, SendError,
+}
+
+impl RendezvousHandshakeError {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidServerKey => "invalid_server_key",
+            Self::ReceiveTimeout => "receive_timeout",
+            Self::ReceiveClosed => "receive_closed",
+            Self::ReceiveError => "receive_error",
+            Self::DecodeError => "decode_error",
+            Self::UnexpectedMessage => "unexpected_message",
+            Self::InvalidExchange => "invalid_exchange",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::InvalidPeerKey => "invalid_peer_key",
+            Self::SendTimeout => "send_timeout",
+            Self::SendError => "send_error",
+        }
     }
 
-    let their_pk = verify_signed_payload(&exchange.keys[0], &rs_pk)?;
-    let Some(their_pk) = get_pk(&their_pk) else {
-        hbb_common::bail!("invalid rendezvous key length");
+    // -13 remains reserved for an actual server refusal. These new codes are
+    // only returned from the account-channel handshake, not peer encryption.
+    fn connection_result(self) -> i32 {
+        match self {
+            Self::ReceiveTimeout | Self::SendTimeout => -29,
+            Self::ReceiveClosed => -30,
+            Self::ReceiveError | Self::SendError => -31,
+            Self::DecodeError | Self::UnexpectedMessage | Self::InvalidExchange => -32,
+            Self::InvalidServerKey | Self::SignatureInvalid | Self::InvalidPeerKey => -33,
+        }
+    }
+
+    fn is_transient(self) -> bool {
+        matches!(self, Self::ReceiveTimeout | Self::ReceiveClosed | Self::ReceiveError |
+            Self::SendTimeout | Self::SendError)
+    }
+}
+
+impl std::fmt::Display for RendezvousHandshakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for RendezvousHandshakeError {}
+
+fn log_rendezvous_handshake(
+    context: RendezvousHandshakeContext, step: &'static str, outcome: &'static str, started: Instant,
+    attempt: u8,
+) {
+    emit_event(&format!("rv_diag phase=handshake context={} step={} outcome={} elapsed_ms={} attempt={}",
+        context.as_str(), step, outcome, started.elapsed().as_millis(), attempt));
+}
+
+fn handshake_failure(
+    context: RendezvousHandshakeContext, step: &'static str, started: Instant,
+    error: RendezvousHandshakeError, attempt: u8,
+) -> RendezvousHandshakeError {
+    log_rendezvous_handshake(context, step, error.as_str(), started, attempt);
+    error
+}
+
+async fn secure_rendezvous_connection(
+    conn: &mut Stream, key: &str, context: RendezvousHandshakeContext,
+) -> Result<(), RendezvousHandshakeError> {
+    secure_rendezvous_connection_with_timeout(conn, key, context, READ_TIMEOUT).await
+}
+
+async fn secure_rendezvous_connection_with_timeout(
+    conn: &mut Stream, key: &str, context: RendezvousHandshakeContext, timeout_ms: u64,
+) -> Result<(), RendezvousHandshakeError> {
+    secure_rendezvous_attempt(conn, key, context, timeout_ms, 0).await
+}
+
+async fn secure_rendezvous_attempt(
+    conn: &mut Stream, key: &str, context: RendezvousHandshakeContext, timeout_ms: u64, attempt: u8,
+) -> Result<(), RendezvousHandshakeError> {
+    let started = Instant::now();
+    log_rendezvous_handshake(context, "validate_server_key", "start", started, attempt);
+    let rs_pk = get_rs_pk(key).ok_or_else(|| handshake_failure(
+        context, "validate_server_key", started, RendezvousHandshakeError::InvalidServerKey, attempt,
+    ))?;
+    log_rendezvous_handshake(context, "wait_server_key", "start", started, attempt);
+    // next_timeout() conflates timeout and EOF. Keep these outcomes distinct,
+    // without ever exposing transport errors or remote data in diagnostics.
+    let bytes = match tokio::time::timeout(Duration::from_millis(timeout_ms), conn.next()).await {
+        Err(_) => return Err(handshake_failure(context, "wait_server_key", started, RendezvousHandshakeError::ReceiveTimeout, attempt)),
+        Ok(None) => return Err(handshake_failure(context, "wait_server_key", started, RendezvousHandshakeError::ReceiveClosed, attempt)),
+        Ok(Some(Err(_))) => return Err(handshake_failure(context, "wait_server_key", started, RendezvousHandshakeError::ReceiveError, attempt)),
+        Ok(Some(Ok(bytes))) => bytes,
     };
+    let message = RendezvousMessage::parse_from_bytes(&bytes).map_err(|_| handshake_failure(
+        context, "decode_response", started, RendezvousHandshakeError::DecodeError, attempt,
+    ))?;
+    let kind = rendezvous_message_kind(&message.union);
+    let unknown_fields = message.special_fields().unknown_fields().iter().next().is_some();
+    emit_event(&format!("rv_diag phase=handshake context={} step=decode_response outcome=received kind={} unknown_fields={} elapsed_ms={} attempt={}",
+        context.as_str(), kind, unknown_fields, started.elapsed().as_millis(), attempt));
+    let Some(rendezvous_message::Union::KeyExchange(exchange)) = message.union else {
+        return Err(handshake_failure(context, "decode_response", started, RendezvousHandshakeError::UnexpectedMessage, attempt));
+    };
+    // Newer protocol versions may add fields inside KeyExchange itself. Log
+    // only their presence, never their values or the server's response bytes.
+    let exchange_unknown_fields = exchange.special_fields().unknown_fields().iter().next().is_some();
+    emit_event(&format!("rv_diag phase=handshake context={} step=validate_exchange outcome=received unknown_fields={} elapsed_ms={} attempt={}",
+        context.as_str(), exchange_unknown_fields, started.elapsed().as_millis(), attempt));
+    if exchange.keys.len() != 1 {
+        return Err(handshake_failure(context, "validate_exchange", started, RendezvousHandshakeError::InvalidExchange, attempt));
+    }
+    log_rendezvous_handshake(context, "verify_server_signature", "start", started, attempt);
+    let their_pk = verify_signed_payload(&exchange.keys[0], &rs_pk).map_err(|_| handshake_failure(
+        context, "verify_server_signature", started, RendezvousHandshakeError::SignatureInvalid, attempt,
+    ))?;
+    let their_pk = get_pk(&their_pk).ok_or_else(|| handshake_failure(
+        context, "validate_server_exchange_key", started, RendezvousHandshakeError::InvalidPeerKey, attempt,
+    ))?;
+    // This signed X25519 bit is a protocol feature marker in newer upstream
+    // servers; do not print the key or infer the server version from it.
+    emit_event(&format!("rv_diag phase=handshake context={} step=validate_server_exchange_key outcome=verified signed_params_marker={} elapsed_ms={} attempt={}",
+        context.as_str(), their_pk[31] & 0x80 != 0, started.elapsed().as_millis(), attempt));
     let (asymmetric_value, symmetric_value, secret_key) = create_symmetric_key_msg(their_pk);
     let mut response = RendezvousMessage::new();
     response.set_key_exchange(KeyExchange {
         keys: vec![asymmetric_value, symmetric_value],
         ..Default::default()
     });
-    conn.send(&response).await?;
+    log_rendezvous_handshake(context, "send_client_key", "start", started, attempt);
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), conn.send(&response)).await {
+        Err(_) => return Err(handshake_failure(context, "send_client_key", started, RendezvousHandshakeError::SendTimeout, attempt)),
+        Ok(Err(_)) => return Err(handshake_failure(context, "send_client_key", started, RendezvousHandshakeError::SendError, attempt)),
+        Ok(Ok(())) => {}
+    }
     conn.set_key(secret_key);
+    log_rendezvous_handshake(context, "secure_channel", "ready", started, attempt);
     emit_event("rendezvous relay request encrypted");
     Ok(())
+}
+
+async fn verified_rendezvous_candidate(
+    mut conn: Stream, key: &str, context: RendezvousHandshakeContext, timeout_ms: u64, attempt: u8,
+) -> Result<Stream, RendezvousHandshakeError> {
+    secure_rendezvous_attempt(&mut conn, key, context, timeout_ms, attempt).await?;
+    // Keep this boundary explicit: the token-bearing request is constructed by
+    // the caller only after this function returns a verified, secured stream.
+    if !conn.is_secured() {
+        emit_event("rv_diag phase=handshake_retry outcome=unsecured_channel_blocked token_sent=false");
+        return Err(RendezvousHandshakeError::InvalidExchange);
+    }
+    Ok(conn)
+}
+
+async fn verified_rendezvous_backup(
+    endpoint: &str, key: &str, context: RendezvousHandshakeContext,
+    handshake_timeout_ms: u64, connect_timeout_ms: u64,
+) -> Result<Stream, RendezvousHandshakeError> {
+    emit_event(&format!("rv_diag phase=handshake_retry context={} attempt=2 action=connect token_sent=false",
+        context.as_str()));
+    // Reconnect only to the originally selected logical server. Do not search
+    // for a different trust domain or attach account data to this socket.
+    let conn = connect_transport_endpoint(endpoint.to_string(), EndpointRole::Rendezvous, connect_timeout_ms)
+        .await.map_err(|_| {
+            emit_event(&format!("rv_diag phase=handshake_retry context={} attempt=2 outcome=connect_failed token_sent=false",
+                context.as_str()));
+            RendezvousHandshakeError::ReceiveError
+        })?;
+    verified_rendezvous_candidate(conn, key, context, handshake_timeout_ms, 2).await
+}
+
+async fn secure_rendezvous_with_retry(
+    conn: Stream, endpoint: &str, key: &str, context: RendezvousHandshakeContext,
+) -> Result<Stream, RendezvousHandshakeError> {
+    secure_rendezvous_with_retry_options(conn, endpoint, key, context,
+        Duration::from_millis(ACCOUNT_HANDSHAKE_HEDGE_DELAY_MS), READ_TIMEOUT, SERVER_CONNECT_TIMEOUT).await
+}
+
+async fn secure_rendezvous_with_retry_options(
+    conn: Stream, endpoint: &str, key: &str, context: RendezvousHandshakeContext,
+    hedge_delay: Duration, handshake_timeout_ms: u64, connect_timeout_ms: u64,
+) -> Result<Stream, RendezvousHandshakeError> {
+    let started = Instant::now();
+    let first = verified_rendezvous_candidate(conn, key, context, handshake_timeout_ms, 1);
+    tokio::pin!(first);
+    emit_event(&format!("rv_diag phase=handshake_retry context={} attempt=1 action=start token_sent=false",
+        context.as_str()));
+    tokio::select! {
+        biased;
+        result = &mut first => {
+            match result {
+                Ok(conn) => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=verified winner=1 elapsed_ms={}",
+                        context.as_str(), started.elapsed().as_millis()));
+                    return Ok(conn);
+                }
+                Err(error) if !error.is_transient() => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=terminal reason={} token_sent=false",
+                        context.as_str(), error.as_str()));
+                    return Err(error);
+                }
+                Err(error) => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} action=retry reason={} token_sent=false",
+                        context.as_str(), error.as_str()));
+                    let result = verified_rendezvous_backup(endpoint, key, context,
+                        handshake_timeout_ms, connect_timeout_ms).await;
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome={} winner={} elapsed_ms={} token_sent=false",
+                        context.as_str(), if result.is_ok() { "verified" } else { "failed" },
+                        if result.is_ok() { 2 } else { 0 }, started.elapsed().as_millis()));
+                    return result;
+                }
+            }
+        }
+        _ = tokio::time::sleep(hedge_delay) => {
+            emit_event(&format!("rv_diag phase=handshake_retry context={} action=hedge original_pending=true elapsed_ms={} token_sent=false",
+                context.as_str(), started.elapsed().as_millis()));
+        }
+    }
+
+    let backup = verified_rendezvous_backup(endpoint, key, context, handshake_timeout_ms, connect_timeout_ms);
+    tokio::pin!(backup);
+    let mut first_error = None;
+    let mut backup_error = None;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut first, if first_error.is_none() => match result {
+                Ok(conn) => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=verified winner=1 elapsed_ms={} token_sent=false",
+                        context.as_str(), started.elapsed().as_millis()));
+                    return Ok(conn);
+                }
+                Err(error) if !error.is_transient() => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=terminal reason={} token_sent=false",
+                        context.as_str(), error.as_str()));
+                    return Err(error);
+                }
+                Err(error) => first_error = Some(error),
+            },
+            result = &mut backup, if backup_error.is_none() => match result {
+                Ok(conn) => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=verified winner=2 elapsed_ms={} token_sent=false",
+                        context.as_str(), started.elapsed().as_millis()));
+                    return Ok(conn);
+                }
+                Err(error) if !error.is_transient() => {
+                    emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=terminal reason={} token_sent=false",
+                        context.as_str(), error.as_str()));
+                    return Err(error);
+                }
+                Err(error) => backup_error = Some(error),
+            },
+        }
+        if first_error.is_some() && backup_error.is_some() {
+            let error = backup_error.unwrap_or(RendezvousHandshakeError::ReceiveError);
+            emit_event(&format!("rv_diag phase=handshake_retry context={} outcome=failed reason={} elapsed_ms={} token_sent=false",
+                context.as_str(), error.as_str(), started.elapsed().as_millis()));
+            return Err(error);
+        }
+    }
 }
 
 async fn create_relay(
@@ -4497,6 +5240,11 @@ async fn create_relay_with_type(
     ipv4: bool,
     conn_type: ConnType,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
+    let relay_conn = open_relay_transport(relay_server, ipv4).await?;
+    join_relay_transport(relay_conn, peer, uuid, key, conn_type).await
+}
+
+async fn open_relay_transport(relay_server: &str, ipv4: bool) -> Result<Stream, hbb_common::anyhow::Error> {
     let relay_addr = check_port(relay_server.to_string(), RELAY_PORT);
     let mut relay_conn = match connect_transport_endpoint(
         relay_addr.clone(),
@@ -4517,7 +5265,12 @@ async fn create_relay_with_type(
         }
     };
     relay_conn.set_send_timeout(5000);
+    Ok(relay_conn)
+}
 
+async fn join_relay_transport(
+    mut relay_conn: Stream, peer: &str, uuid: &str, key: &str, conn_type: ConnType,
+) -> Result<Stream, hbb_common::anyhow::Error> {
     let mut create = RendezvousMessage::new();
     create.set_request_relay(RequestRelay {
         licence_key: key.to_string(),
@@ -4530,16 +5283,95 @@ async fn create_relay_with_type(
     Ok(relay_conn)
 }
 
+struct PreparedRelay {
+    conn: Stream,
+    ready_at: Instant,
+}
+
+const PREPARED_RELAY_MAX_IDLE: Duration = Duration::from_millis(2_500);
+
+fn should_prepare_relay_standby(
+    authenticated_rendezvous: bool, pairing_ready: bool, relay_available: bool,
+    force_relay: bool, direct_candidate: bool,
+) -> bool {
+    authenticated_rendezvous && pairing_ready && relay_available && !force_relay && direct_candidate
+}
+
+async fn prepare_relay_transport(relay_server: &str, ipv4: bool) -> Option<PreparedRelay> {
+    let started = Instant::now();
+    emit_event("rv_diag phase=relay_preconnect action=start request_sent=false");
+    match open_relay_transport(relay_server, ipv4).await {
+        Ok(conn) => {
+            emit_event(&format!("rv_diag phase=relay_preconnect outcome=ready elapsed_ms={} request_sent=false",
+                started.elapsed().as_millis()));
+            Some(PreparedRelay { conn, ready_at: Instant::now() })
+        }
+        Err(_) => {
+            emit_event(&format!("rv_diag phase=relay_preconnect outcome=failed elapsed_ms={} request_sent=false",
+                started.elapsed().as_millis()));
+            None
+        }
+    }
+}
+
+// The standby opens only a socket: it sends no relay pairing, peer login,
+// credentials, or media. Dropping it when direct succeeds cancels unused work.
+async fn direct_with_standby<T, E, S>(
+    direct: impl std::future::Future<Output = Result<T, E>>,
+    standby: impl std::future::Future<Output = Option<S>>,
+) -> (Result<T, E>, Option<S>) {
+    tokio::pin!(direct);
+    tokio::pin!(standby);
+    tokio::select! {
+        biased;
+        result = &mut direct => {
+            if result.is_ok() { (result, None) } else { (result, standby.await) }
+        }
+        ready = &mut standby => {
+            let result = direct.await;
+            if result.is_ok() { (result, None) } else { (result, ready) }
+        }
+    }
+}
+
+async fn create_relay_with_standby(
+    prepared: Option<PreparedRelay>, peer: &str, uuid: &str, relay_server: &str, key: &str, ipv4: bool,
+) -> Result<Stream, hbb_common::anyhow::Error> {
+    if let Some(prepared) = prepared {
+        let idle = prepared.ready_at.elapsed();
+        if idle <= PREPARED_RELAY_MAX_IDLE {
+            emit_event(&format!("rv_diag phase=relay_preconnect outcome=selected idle_ms={} request_sent=false", idle.as_millis()));
+            // A failed write may have been partially received. Do not repeat it
+            // with the same UUID; the normal retry creates a fresh pairing.
+            return join_relay_transport(prepared.conn, peer, uuid, key, ConnType::DEFAULT_CONN).await;
+        }
+        emit_event(&format!("rv_diag phase=relay_preconnect outcome=expired idle_ms={} request_sent=false", idle.as_millis()));
+    }
+    create_relay(peer, uuid, relay_server, key, ipv4).await
+}
+
+const MISSING_PEER_SIGNATURE: &str = "peer signature unavailable";
+
+fn peer_security_error_code(error: &hbb_common::anyhow::Error) -> i32 {
+    match error.to_string().as_str() {
+        MISSING_PEER_SIGNATURE => -34,
+        "invalid server key" | "server key mismatch" => -24,
+        _ => -16,
+    }
+}
+
 async fn secure_peer_connection(
     peer_id: &str,
     signed_id_pk: &[u8],
     key: &str,
     conn: &mut Stream,
-    allow_insecure_fallback: bool,
+    insecure_reason: i32,
 ) -> Result<bool, hbb_common::anyhow::Error> {
+    emit_event(&format!("rv_diag phase=peer_security signature_present={} insecure_reason={}",
+        !signed_id_pk.is_empty(), insecure_reason));
     let rs_pk = get_rs_pk(if key.is_empty() { RS_PUB_KEY } else { key });
     if rs_pk.is_none() {
-        if allow_insecure_fallback {
+        if insecure_reason == INSECURE_SERVER_KEY {
             emit_event("secure peer: invalid_server_key user_approved_insecure_once");
             conn.send(&PeerMessage::new()).await?;
             return Ok(false);
@@ -4555,7 +5387,7 @@ async fn secure_peer_connection(
                 sign_pk = Some(sign::PublicKey(pk));
             }
             Ok((_, _)) => {
-                if allow_insecure_fallback {
+                if insecure_reason == INSECURE_SERVER_KEY {
                     emit_event("secure peer: rendezvous_id_mismatch user_approved_insecure_once");
                     conn.send(&PeerMessage::new()).await?;
                     return Ok(false);
@@ -4564,7 +5396,7 @@ async fn secure_peer_connection(
                 hbb_common::bail!("server key mismatch");
             }
             Err(_) => {
-                if allow_insecure_fallback {
+                if insecure_reason == INSECURE_SERVER_KEY {
                     emit_event(
                         "secure peer: invalid_rendezvous_signature user_approved_insecure_once",
                     );
@@ -4578,9 +5410,13 @@ async fn secure_peer_connection(
     }
 
     let Some(sign_pk) = sign_pk else {
-        emit_event("secure peer: signature_unavailable; use non-secure connection");
-        // Keep compatibility with peers that are waiting for the client's
-        // first handshake message before continuing without encryption.
+        if insecure_reason != INSECURE_MISSING_SIGNATURE {
+            emit_event("rv_diag phase=peer_security outcome=signature_missing action=blocked");
+            hbb_common::bail!(MISSING_PEER_SIGNATURE);
+        }
+        emit_event("rv_diag phase=peer_security outcome=signature_missing action=user_approved");
+        emit_event("secure peer: signature_unavailable user_approved_insecure_once");
+        // Compatibility is used only after an explicit, session-scoped choice.
         conn.send(&PeerMessage::new()).await?;
         return Ok(false);
     };
@@ -5065,7 +5901,7 @@ async fn handle_peer_bytes(
             "video_frame"
         }
         Some(message::Union::TestDelay(delay)) => {
-            send_test_delay_response(delay, stream).await;
+            send_test_delay_response(delay, stream, true).await;
             "test_delay"
         }
         Some(message::Union::Clipboard(clipboard)) => {
@@ -5878,17 +6714,22 @@ fn performance_config() -> PerformanceConfig {
         .lock()
         .map(|guard| *guard)
         .unwrap_or(PerformanceConfig::DEFAULT);
-    configured.effective(
+    configured.for_session_with_priority(
+        GAME_MODE.load(Ordering::SeqCst),
+        GAME_FPS_CAP.load(Ordering::SeqCst),
+        HIGH_PERFORMANCE_PRIORITY.load(Ordering::SeqCst),
         BACKGROUND_VIDEO_MODE.load(Ordering::SeqCst),
         USING_PUBLIC_SERVER.load(Ordering::SeqCst) && CONNECTION_ROUTE.load(Ordering::SeqCst) != 1,
     )
 }
 
-async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream) {
+async fn send_test_delay_response(delay: TestDelay, stream: &mut Stream, report_quality: bool) {
     let should_respond = !delay.from_client;
-    if let Some((delay_ms, target_bitrate_kb)) = test_delay_quality_values(&delay) {
+    if let Some((delay_ms, target_bitrate_kb)) = test_delay_quality_values(&delay).filter(|_| report_quality) {
         CONNECTION_DELAY_MS.store(delay_ms, Ordering::Relaxed);
         CONNECTION_TARGET_BITRATE_KB.store(target_bitrate_kb, Ordering::Relaxed);
+        let seq = ((CONNECTION_DELAY_SAMPLE.load(Ordering::SeqCst) >> 32) as u32).wrapping_add(1).max(1);
+        CONNECTION_DELAY_SAMPLE.store(((seq as u64) << 32) | delay_ms as u32 as u64, Ordering::SeqCst);
     }
     emit_event(&format!(
         "test delay received time={} from_client={} last_delay={} target_bitrate={} action={}",
@@ -5929,11 +6770,14 @@ fn test_delay_quality_values(delay: &TestDelay) -> Option<(i32, i32)> {
 fn forward_video_frame(frame: VideoFrame) {
     let frame_display = frame.display.max(0);
     let current_display = CURRENT_DISPLAY.lock().map(|guard| *guard).unwrap_or(0);
-    if !should_forward_video_display(
+    let secondary = SECONDARY_DISPLAY.load(Ordering::SeqCst);
+    let destination = multi_display_routing::frame_destination(
         frame_display,
         current_display,
+        (secondary >= 0).then_some(secondary),
         PEER_SUPPORTS_MULTI_DISPLAY_FRAMES.load(Ordering::SeqCst),
-    ) {
+    );
+    if destination == multi_display_routing::FrameDestination::Drop {
         let now = now_ms();
         let last = LAST_DROPPED_DISPLAY_FRAME_LOG_MS.load(Ordering::Relaxed);
         if now.saturating_sub(last) >= 2_000
@@ -5949,11 +6793,11 @@ fn forward_video_frame(frame: VideoFrame) {
         return;
     }
     let forwarded = match frame.union {
-        Some(video_frame::Union::Vp9s(frames)) => forward_encoded_frames(frames, b'V'),
-        Some(video_frame::Union::H264s(frames)) => forward_encoded_frames(frames, b'H'),
-        Some(video_frame::Union::H265s(frames)) => forward_encoded_frames(frames, b'5'),
-        Some(video_frame::Union::Vp8s(frames)) => forward_encoded_frames(frames, b'8'),
-        Some(video_frame::Union::Av1s(frames)) => forward_encoded_frames(frames, b'A'),
+        Some(video_frame::Union::Vp9s(frames)) => forward_frame_for_destination(frames, b'V', destination),
+        Some(video_frame::Union::H264s(frames)) => forward_frame_for_destination(frames, b'H', destination),
+        Some(video_frame::Union::H265s(frames)) => forward_frame_for_destination(frames, b'5', destination),
+        Some(video_frame::Union::Vp8s(frames)) => forward_frame_for_destination(frames, b'8', destination),
+        Some(video_frame::Union::Av1s(frames)) => forward_frame_for_destination(frames, b'A', destination),
         Some(video_frame::Union::Rgb(_)) => {
             emit_event("video frame: rgb metadata without raw payload");
             0
@@ -5975,7 +6819,8 @@ fn forward_video_frame(frame: VideoFrame) {
         emit_event("video frame: empty data");
         return;
     }
-    if PRIVACY_REQUESTED.load(Ordering::SeqCst) && current_display == 0 &&
+    if matches!(destination, multi_display_routing::FrameDestination::Primary(_)) &&
+        PRIVACY_REQUESTED.load(Ordering::SeqCst) && current_display == 0 &&
         !PRIVACY_REQUEST_SENT.swap(true, Ordering::SeqCst) {
         PRIVACY_STATUS.store(1, Ordering::SeqCst);
         let result = send_privacy_toggle(true);
@@ -6086,7 +6931,32 @@ fn should_forward_video_display(
     current_display: i32,
     supports_display_tag: bool,
 ) -> bool {
-    !supports_display_tag || frame_display == current_display
+    matches!(multi_display_routing::frame_destination(frame_display, current_display, None, supports_display_tag),
+        multi_display_routing::FrameDestination::Primary(_))
+}
+
+fn forward_frame_for_destination(frames: EncodedVideoFrames, codec: u8,
+                                 destination: multi_display_routing::FrameDestination) -> usize {
+    match destination {
+        multi_display_routing::FrameDestination::Primary(display) => forward_encoded_frames(frames, codec, display),
+        multi_display_routing::FrameDestination::Secondary(display) => {
+            let callback = SECONDARY_FRAME_CALLBACK.lock().ok().and_then(|guard| *guard);
+            let Some(cb) = callback else { return 0; };
+            let Some((_, _, width, height)) = session_health::display_rect_for_index(display, &DISPLAY_INFOS)
+                else { return 0; };
+            let mut forwarded = 0;
+            for frame in frames.frames {
+                // A close or topology switch may have occurred during this batch.
+                if SECONDARY_DISPLAY.load(Ordering::SeqCst) != display { break; }
+                if frame.data.is_empty() { continue; }
+                cb(frame.data.as_ptr(), frame.data.len() as i32, width, height,
+                    i32::from(frame.key), frame.pts, display, i32::from(codec));
+                forwarded += 1;
+            }
+            forwarded
+        }
+        multi_display_routing::FrameDestination::Drop => 0,
+    }
 }
 
 #[no_mangle]
@@ -6107,7 +6977,7 @@ pub extern "C" fn rust_stop_recording() -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_get_recording_status() -> i32 { session_recording::status() }
 
-fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8) -> usize {
+fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8, display: i32) -> usize {
     let frame_count = frames.frames.len();
     if frame_count > 1 {
         emit_event(&format!("video frame: batch count={frame_count}"));
@@ -6116,7 +6986,7 @@ fn forward_encoded_frames(frames: EncodedVideoFrames, codec_tag: u8) -> usize {
     let Some(cb) = callback else {
         return 0;
     };
-    let Some((_, _, width, height)) = current_display_rect() else {
+    let Some((_, _, width, height)) = session_health::display_rect_for_index(display, &DISPLAY_INFOS) else {
         // Wait for real display metadata, never rebuild using invented dimensions.
         return 0;
     };

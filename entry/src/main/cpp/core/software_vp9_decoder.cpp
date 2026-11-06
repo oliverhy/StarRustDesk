@@ -5,6 +5,7 @@
 #include "xcomponent_render.h"
 
 #include <algorithm>
+#include <utility>
 #include <hilog/log.h>
 #include <libyuv/convert_argb.h>
 #include <vpx/vp8dx.h>
@@ -16,6 +17,8 @@
 
 namespace {
 constexpr size_t MAX_QUEUED_FRAMES = 90;
+constexpr size_t MAX_SECONDARY_FRAME_BYTES = 16 * 1024 * 1024;
+constexpr size_t MAX_SECONDARY_QUEUE_BYTES = 32 * 1024 * 1024;
 
 const uint8_t* plane(const vpx_image_t* image, int index) {
     return image->planes[index];
@@ -31,7 +34,8 @@ SoftwareVP9Decoder& SoftwareVP9Decoder::instance() {
     return decoder;
 }
 
-SoftwareVP9Decoder::SoftwareVP9Decoder() : worker_(&SoftwareVP9Decoder::workerLoop, this) {}
+SoftwareVP9Decoder::SoftwareVP9Decoder(OutputCallback outputCallback)
+    : outputCallback_(std::move(outputCallback)), worker_(&SoftwareVP9Decoder::workerLoop, this) {}
 
 SoftwareVP9Decoder::~SoftwareVP9Decoder() {
     {
@@ -52,7 +56,11 @@ void SoftwareVP9Decoder::decodeFrame(const uint8_t* data, int length, bool key, 
 
     std::lock_guard<std::mutex> lock(mutex_);
     queuedFrames_ += 1;
-    if (frames_.size() >= MAX_QUEUED_FRAMES) {
+    if (outputCallback_ && static_cast<size_t>(length) > MAX_SECONDARY_FRAME_BYTES) return;
+    size_t secondaryBytes = 0;
+    if (outputCallback_) for (const auto& frame : frames_) secondaryBytes += frame.data.size();
+    if (frames_.size() >= MAX_QUEUED_FRAMES || (outputCallback_ &&
+        secondaryBytes > MAX_SECONDARY_QUEUE_BYTES - static_cast<size_t>(length))) {
         frames_.clear();
         waitingForKeyframe_ = true;
         overflowDrops_ += 1;
@@ -245,11 +253,18 @@ void SoftwareVP9Decoder::workerLoop() {
             color.matrix = image->cs == VPX_CS_BT_2020 ? 9 : image->cs == VPX_CS_BT_709 ? 1 : 6;
             color.range = static_cast<int>(image->range);
             color.output = VideoColorOutput::SDR;
-            VideoRender::instance().updateColorInfo(color);
-            const bool presented = XComponentRender::instance().renderBGRAFrame(bgra.data(), static_cast<int>(bgra.size()),
-                static_cast<int>(image->d_w), static_cast<int>(image->d_h));
-            VideoRender::instance().markDecodedFrame(2,
-                static_cast<int>(image->d_w), static_cast<int>(image->d_h), 2, presented);
+            bool presented = false;
+            if (outputCallback_) {
+                // No singleton state is touched for an independent output.
+                presented = outputCallback_(bgra.data(), static_cast<int>(bgra.size()),
+                    static_cast<int>(image->d_w), static_cast<int>(image->d_h), color);
+            } else {
+                VideoRender::instance().updateColorInfo(color);
+                presented = XComponentRender::instance().renderBGRAFrame(bgra.data(), static_cast<int>(bgra.size()),
+                    static_cast<int>(image->d_w), static_cast<int>(image->d_h));
+                VideoRender::instance().markDecodedFrame(2,
+                    static_cast<int>(image->d_w), static_cast<int>(image->d_h), 2, presented);
+            }
             if (decodedFrames_.load() == 1 && presented) {
                 DiagnosticLog::instance().append("I", "vp9_software",
                     "first_output_rendered resolution=" + std::to_string(image->d_w) + "x" +

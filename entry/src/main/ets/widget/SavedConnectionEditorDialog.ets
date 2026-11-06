@@ -1,8 +1,10 @@
 import { readableInputHeight } from '../theme/ReadableLayout'
 import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { ConnectionEditorGroup, ConnectionEditResult, SavedConnectionDraft, SavedConnectionEditing } from '../model/SavedConnectionEditing'
+import { PerformanceSettings } from '../model/PerformanceSettings'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
+import { RemotePeerPreferences } from '../service/RemotePeerPreferences'
 
 @CustomDialog
 export struct SavedConnectionEditorDialog {
@@ -14,6 +16,10 @@ export struct SavedConnectionEditorDialog {
   @Prop initial: SavedConnectionDraft = SavedConnectionEditing.empty()
   @Prop groups: ConnectionEditorGroup[] = []
   @Prop createNew: boolean = false
+  @Prop initialGameMode: boolean = false
+  @Prop gameModeServer: string = ''
+  @State gameMode: boolean = false
+  @State gameModeChanged: boolean = false
   @State remoteId: string = ''
   @State name: string = ''
   @State groupId: string = ''
@@ -30,7 +36,7 @@ export struct SavedConnectionEditorDialog {
   @State error: string = ''
   private active: boolean = false
   private generation: number = 0
-  onSave: (draft: SavedConnectionDraft, action: string) => Promise<ConnectionEditResult> =
+  onSave: (draft: SavedConnectionDraft, action: string, gameMode: boolean, changed: boolean) => Promise<ConnectionEditResult> =
     async () => { return { success: false, message: '保存失败，请重试' } }
   onClose: () => void = () => {}
 
@@ -41,6 +47,8 @@ export struct SavedConnectionEditorDialog {
     this.name = this.initial.name
     this.groupId = this.initial.groupId
     this.performancePreset = this.initial.performancePreset
+    this.gameMode = this.initialGameMode
+    this.gameModeChanged = false
     this.lockAfterDisconnect = this.initial.lockAfterDisconnect
     this.privacyMode = this.initial.privacyMode
     this.autoUnlock = this.initial.autoUnlock
@@ -71,6 +79,10 @@ export struct SavedConnectionEditorDialog {
     this.remoteId = normalized
     this.error = ''
     if (changed) {
+      const preferences = new RemotePeerPreferences(this.gameModeServer, normalized)
+      this.gameMode = preferences.get('game-mode') === '1'
+      preferences.dispose()
+      this.gameModeChanged = false
       this.password = ''
       this.osPassword = ''
       this.passwordMode = 'keep'
@@ -109,7 +121,7 @@ export struct SavedConnectionEditorDialog {
       hasOsPassword: !this.identityChanged() && this.initial.hasOsPassword
     }
     try {
-      const result = await this.onSave(draft, this.createNew ? 'new' : 'update')
+      const result = await this.onSave(draft, this.createNew ? 'new' : 'update', this.gameMode, this.gameModeChanged)
       if (!this.active || generation !== this.generation) return
       if (result.success) this.onClose()
       else this.error = result.message
@@ -152,6 +164,7 @@ export struct SavedConnectionEditorDialog {
             })
           if (this.showAdvanced) {
           Column({ space: 12 }) {
+          this.option('游戏模式', this.gameMode, (value: boolean) => { this.gameMode = value; this.gameModeChanged = true })
           if (!this.identityChanged() && this.initial.hasPassword && this.passwordMode === 'keep') {
             Row({ space: 8 }) {
               Text(translate('密码已保存', this.uiLanguage)).fontColor(this.primary()).layoutWeight(1)
@@ -177,10 +190,26 @@ export struct SavedConnectionEditorDialog {
           Text(translate('连接模式', this.uiLanguage)).fontColor(this.primary()).width('100%')
           Select([{ value: translate('稳定', this.uiLanguage) }, { value: translate('高帧率', this.uiLanguage) },
             { value: translate('高流畅', this.uiLanguage) }, { value: translate('高丝滑', this.uiLanguage) },
+            { value: translate('高清优先', this.uiLanguage) }, { value: translate('自定义', this.uiLanguage) },
             { value: translate('保留当前设置', this.uiLanguage) }])
             .selected(this.presetIndex()).value(this.presetLabel()).width('100%').enabled(!this.busy)
-            .onSelect((index: number) => { this.performancePreset = index === 4 ? this.initial.performancePreset :
-              ['stable', 'high_fps', 'smooth', 'silky'][index] })
+            .onSelect((index: number) => { this.selectPreset(index) })
+          if (PerformanceSettings.isCustom(this.performancePreset)) {
+            Text(translate(`码率比例：${PerformanceSettings.bitrate(this.performancePreset)}%`, this.uiLanguage))
+              .fontSize(13).fontColor(this.primary()).width('100%')
+            Slider({ value: PerformanceSettings.bitrate(this.performancePreset), min: 10, max: 2000, step: 10 })
+              .width('100%').enabled(!this.busy).onChange((value: number) => {
+                this.performancePreset = PerformanceSettings.custom(value, PerformanceSettings.fps(this.performancePreset))
+              })
+            Text(translate(`目标帧率：${PerformanceSettings.fps(this.performancePreset)} FPS`, this.uiLanguage))
+              .fontSize(13).fontColor(this.primary()).width('100%')
+            Slider({ value: PerformanceSettings.fps(this.performancePreset), min: 5, max: 120, step: 1 })
+              .width('100%').enabled(!this.busy).onChange((value: number) => {
+                this.performancePreset = PerformanceSettings.custom(PerformanceSettings.bitrate(this.performancePreset), value)
+              })
+            Text(translate('高码率会增加流量、耗电和延迟风险，百分比不等于固定 Mbps。公共中继下超过 100% 将按官方规则回退至 50%，帧率最高 30 FPS；自建服务器或直连可用更高设置。保存后下次连接生效。', this.uiLanguage))
+              .fontSize(12).fontColor(this.secondary()).width('100%')
+          }
           this.option('断开后锁屏', this.lockAfterDisconnect, (value: boolean) => {
             this.lockAfterDisconnect = value; if (!value) this.autoUnlock = false
           })
@@ -237,12 +266,20 @@ export struct SavedConnectionEditorDialog {
   }
 
   private presetIndex(): number {
-    const index = ['stable', 'high_fps', 'smooth', 'silky'].indexOf(this.performancePreset)
-    return index < 0 ? 4 : index
+    if (PerformanceSettings.isCustom(this.performancePreset)) return 5
+    const index = ['stable', 'high_fps', 'smooth', 'silky', 'best'].indexOf(this.performancePreset)
+    return index < 0 ? 6 : index
   }
   private presetLabel(): string {
-    const labels: string[] = ['稳定', '高帧率', '高流畅', '高丝滑', '保留当前设置']
+    const labels: string[] = ['稳定', '高帧率', '高流畅', '高丝滑', '高清优先', '自定义', '保留当前设置']
     return translate(labels[this.presetIndex()], this.uiLanguage)
+  }
+  private selectPreset(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index > 6) return
+    if (index === 6) this.performancePreset = this.initial.performancePreset
+    else if (index === 5) this.performancePreset = PerformanceSettings.custom(
+      PerformanceSettings.bitrate(this.performancePreset), PerformanceSettings.fps(this.performancePreset))
+    else this.performancePreset = ['stable', 'high_fps', 'smooth', 'silky', 'best'][index]
   }
   private groupOptions(): SelectOption[] {
     const options: SelectOption[] = [{ value: translate('未分组', this.uiLanguage) }]

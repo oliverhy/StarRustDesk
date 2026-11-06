@@ -31,6 +31,12 @@ VideoDecoderSelection createPreferredVideoDecoder(const char* mime) {
     return createForCategory(mime, SOFTWARE, VideoDecodeMode::Software);
 }
 
+VideoDecoderSelection createVideoDecoderByMode(const char* mime, VideoDecodeMode mode) {
+    if (mode == VideoDecodeMode::Hardware) return createForCategory(mime, HARDWARE, mode);
+    if (mode == VideoDecodeMode::Software) return createForCategory(mime, SOFTWARE, mode);
+    return {};
+}
+
 VideoDecodeMode preferredSystemDecoderMode(const char* mime) {
     VideoDecoderSelection hardware = createForCategory(mime, HARDWARE, VideoDecodeMode::Hardware);
     if (hardware.codec != nullptr) {

@@ -147,15 +147,53 @@ async function login(api, provider = 'official') {
   } });
   assert.equal(await auth.verify('123456'), true);
   assert.equal(stored, undefined);
+  const officialTotp = new Api(); officialTotp.configure('https://two.test', 'official', false);
+  respond({ type: 'email_check', tfa_type: 'tfa_check', secret: 'official-totp-secret', user: { name: 'alice' } });
+  assert.equal(await officialTotp.login('alice', 'password', false), false);
+  assert.equal(officialTotp.challenge, 'totp', 'official email_check envelope must respect tfa_type');
+  respond({}, undefined, 401);
+  await assert.rejects(officialTotp.verify('654321'), error => error.kind === 'verification_rejected');
+  assert.equal(officialTotp.challenge, 'totp', 'a rejected verification code can be retried');
+  pending.push({ body: { type: 'access_token', access_token: 'official-totp-token' }, check: request => {
+    const body = JSON.parse(request.content);
+    assert.equal(body.type, 'email_code'); assert.equal(body.tfaCode, '654321');
+    assert.equal(body.verificationCode, '654321'); assert.equal(body.password, undefined);
+  } });
+  assert.equal(await officialTotp.verify('654321'), true);
+  const officialEmail = new Api(); officialEmail.configure('https://two.test', 'official', false);
+  respond({ type: 'email_check', tfa_type: 'email_check', secret: 'official-email-secret' });
+  assert.equal(await officialEmail.login('alice', 'password', false), false);
+  assert.equal(officialEmail.challenge, 'email');
+  pending.push({ body: { type: 'access_token', access_token: 'official-email-token' }, check: request => {
+    const body = JSON.parse(request.content); assert.equal(body.verificationCode, '112233'); assert.equal(body.tfaCode, undefined);
+  } });
+  assert.equal(await officialEmail.verify('112233'), true);
+  const oldEmail = new Api(); oldEmail.configure('https://two.test', 'official', false);
+  respond({ type: 'email_check', secret: 'legacy-email-secret' });
+  assert.equal(await oldEmail.login('alice', 'password', false), false);
+  assert.equal(oldEmail.challenge, 'email', 'legacy email challenge has no tfa_type');
+  const unsupported = new Api(); unsupported.configure('https://two.test', 'official', false);
+  respond({ type: 'email_check', tfa_type: 'future-private-kind', secret: 'unsupported-secret' });
+  await assert.rejects(unsupported.login('alice', 'password', false), /不支持的二次验证/);
   respond({}, undefined, 302); await assert.rejects(auth.books(), /跳转/);
   respond({}, undefined, 401); await assert.rejects(api.books(), /过期/); assert.equal(api.isLoggedIn(), false);
   await login(api);
   pending.push({ raw: 'x'.repeat(2 * 1024 * 1024 + 1) }); await assert.rejects(api.books(), /安全/);
   respond({ total: 2, data: [{ id: '123' }] }); respond({ total: 2, data: [{ id: '123' }] });
   await assert.rejects(api.peers({ guid: 'broken', legacy: false }, true), /分页/);
-  let release; clearWait = new Promise(resolve => { release = resolve; });
+  let release; const waitLogin = new Promise(resolve => { release = resolve; });
+  const oldRemembered = stored;
+  pending.push({ body: { type: 'access_token', access_token: 'cancelled-token' }, check: async () => waitLogin });
   const before = calls.length; const canceled = api.login('alice', 'password', false); api.cancel(); release();
-  await assert.rejects(canceled, /取消/); clearWait = undefined; assert.equal(calls.length, before);
+  await assert.rejects(canceled, /取消/); assert.equal(calls.length, before + 1);
+  assert.equal(stored, oldRemembered, 'cancelling a new login retains the prior remembered session');
+  respond({ error: 'wrong password' });
+  await assert.rejects(api.login('alice', 'incorrect-password', false), error => error.kind === 'credentials_rejected');
+  assert.equal(stored, oldRemembered, 'failed login retains the prior remembered session');
+  const oneTime = new Api(); oneTime.configure('https://one-time.test', 'official', false);
+  respond({ type: 'access_token', access_token: 'not-remembered-token' });
+  assert.equal(await oneTime.login('alice', 'password', false), true);
+  assert.equal(stored, undefined, 'successful non-remembered login removes an older saved session');
   const Import = load('entry/src/main/ets/service/ApiAddressBookImport.ets', { './RustDeskApiService': exported }).ApiAddressBookImport;
   options.set('saved-connections', JSON.stringify([{ id: 'old', remoteId: '123', name: 'keep', credentialAlias: 'old' }]));
   assert.equal(Import.importSelected({ name: 'Team' }, [{ id: '123', name: 'overwrite' }, { id: '456', name: 'new' }]), 1);
@@ -232,12 +270,13 @@ async function login(api, provider = 'official') {
   assert.equal(JSON.parse(transportContext).token, 'web-token');
   respond({ code: 's', url: 'http://identity.example.test/' });
   await assert.rejects(web.startWebLogin('github', false, false), /HTTPS/);
+  assert.equal(stored.token, 'web-token', 'rejected authorization URL must not clear the saved session');
   respond({ code: 's', url: 'https://identity.example.test/' });
   await web.startWebLogin('github', false, false);
   let releasePoll; const waitPoll = new Promise(resolve => { releasePoll = resolve; });
   pending.push({ body: { type: 'access_token', access_token: 'late-secret' }, check: async () => waitPoll });
   const late = web.pollWebLogin(); web.cancel(); releasePoll();
-  await assert.rejects(late, /取消/); assert.equal(transportContext, ''); assert.equal(stored, undefined);
+  await assert.rejects(late, /取消/); assert.equal(transportContext, ''); assert.equal(stored.token, 'web-token');
   respond({ code: 's', url: 'https://identity.example.test/' });
   await web.startWebLogin('github', false, false); web.oidcDeadline = 0;
   await assert.rejects(web.pollWebLogin(), /超时/);
@@ -248,22 +287,49 @@ async function login(api, provider = 'official') {
   for (let i = 0; i < 16; i++) { respond({}); assert.equal(await web.pollWebLogin(), false); }
   const pollLog = diagnostics.slice(beforePolling).map(v => v.message).join('\n');
   assert.equal((pollLog.match(/request_start/g) || []).length, 2, 'pending polling sampled first and every 15 attempts');
-  respond({}, undefined, 503); await assert.rejects(web.pollWebLogin());
-  pending.push({ check: () => { throw Object.assign(Error('sensitive-network-secret'), { code: 2300006 }); } }); await assert.rejects(web.pollWebLogin());
+  respond({}, undefined, 503); await assert.rejects(web.pollWebLogin(), error => error.kind === 'server_busy' && error.retryable);
+  respond({}, undefined, 429); await assert.rejects(web.pollWebLogin(), error => error.kind === 'rate_limited' && error.retryable);
+  respond({}, undefined, 403); await assert.rejects(web.pollWebLogin(), error => error.kind === 'permission_denied' && !error.retryable);
+  pending.push({ check: () => { throw Object.assign(Error('sensitive-network-secret'), { code: 2300006 }); } });
+  await assert.rejects(web.pollWebLogin(), error => error.kind === 'network' && error.retryable);
   pending.push({ check: () => { throw Object.assign(Error('sensitive-network-secret'), { code: 'sensitive-error-code' }); } }); await assert.rejects(web.pollWebLogin());
   pending.push({ check: () => { throw null; } }); await assert.rejects(web.pollWebLogin(), /网络请求失败/);
   pending.push({ raw: 'sensitive-invalid-json' }); await assert.rejects(web.pollWebLogin());
   respond({ error: 'sensitive-server-refusal' }); await assert.rejects(web.pollWebLogin());
+  respond({ error: 'Invalid verification code sensitive-refusal-code' });
+  await assert.rejects(web.pollWebLogin(), error => error.kind === 'verification_rejected' && !error.message.includes('sensitive-refusal-code'));
+  web.recordWebRetry({ kind: 'untrusted-kind-secret' }, 2, 2000);
+  web.recordWebRetry({ kind: 'network' }, 3, 4000);
+  web.recordWebRecovery(3);
+  const priorSession = { server: 'https://old.test', provider: 'official', token: 'prior-token', username: 'prior-user', allowHttp: false };
+  stored = priorSession;
+  respond({}, undefined, 401); await assert.rejects(web.pollWebLogin(), error => error.kind === 'unauthorized' && !error.retryable);
+  assert.equal(stored, priorSession, 'an unauthenticated web request must not delete an unrelated remembered session');
+  options.set('api-server', 'https://preserved-pro.test'); options.set('api-account-provider', 'official');
+  options.set('custom-rendezvous-server', 'preserved-id.test'); options.set('relay-server', 'preserved-relay.test'); options.set('key', 'preserved-public-key');
+  const endpointsBefore = ['custom-rendezvous-server', 'relay-server', 'key'].map(key => options.get(key));
+  const publicSwitch = new Api(); publicSwitch.configure(Api.PUBLIC_API, 'official', false);
+  respond({ type: 'access_token', access_token: 'public-switch-token' }); await publicSwitch.login('alice', 'password', false);
+  assert.equal(Api.defaultCustomServer('official'), 'https://preserved-pro.test');
+  assert.deepEqual(['custom-rendezvous-server', 'relay-server', 'key'].map(key => options.get(key)), endpointsBefore);
+  options.set('api-custom-third-party-server', 'https://preserved-third.test');
+  assert.equal(Api.defaultCustomServer('thirdParty'), 'https://preserved-third.test');
+  assert(Api.isPublicServer(Api.PUBLIC_API + '/api/'));
   const log = diagnostics.map(v => v.message).join('\n');
   for (const event of ['restore_start', 'restore_complete', 'restore_failed', 'restore_skip reason=api_changed',
     'prepare_bypass', 'prepare_failed', 'transport_auth_ready mode=public', 'transport_auth_skipped mode=public',
     'credential_invalidated', 'login_challenge', 'web_pending', 'web_complete', 'web_timeout',
-    'phase=cancelled', 'phase=response_limit', 'phase=transport', 'phase=response_format', 'phase=server_result', 'http=503', 'error_code=2300006']) {
+    'phase=cancelled', 'phase=response_limit', 'phase=transport', 'phase=response_format', 'phase=server_result', 'http=503', 'error_code=2300006',
+    'login_response kind=email_check', 'web_retry kind=temporary', 'web_retry kind=network', 'web_retry_recovered', 'failure_kind=verification_rejected']) {
     assert(log.includes(event), `missing diagnostic ${event}`);
   }
   for (const secret of ['private-token', 'private-password', 'official-token', 'book-token', 'challenge-secret',
     'one-time-secret', 'late-secret', 'web-token', 'web-user', 'alice', '123456', 'identity.example.test',
-    'private-poll-code', 'private-url', 'sensitive-network-secret', 'sensitive-error-code', 'sensitive-invalid-json', 'sensitive-server-refusal', 'Bearer ', 'https://']) {
+    'private-poll-code', 'private-url', 'sensitive-network-secret', 'sensitive-error-code', 'sensitive-invalid-json', 'sensitive-server-refusal',
+    'official-totp-secret', 'official-totp-token', 'official-email-secret', 'official-email-token', 'legacy-email-secret',
+    'not-remembered-token', 'unsupported-secret', 'future-private-kind', 'cancelled-token', 'incorrect-password',
+    '654321', '112233', 'sensitive-refusal-code', 'untrusted-kind-secret', 'prior-token', 'prior-user', 'public-switch-token',
+    'preserved-pro.test', 'preserved-id.test', 'preserved-relay.test', 'preserved-public-key', 'preserved-third.test', 'Bearer ', 'https://']) {
     assert(!log.includes(secret), `sensitive diagnostic content: ${secret}`);
   }
   options.set('diagnostic-log-enabled', '0');

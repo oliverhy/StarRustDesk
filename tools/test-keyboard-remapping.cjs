@@ -180,7 +180,11 @@ test('editor defaults disabled, saving is explicit, capture is local and rule la
   assert(!widget.includes('keyText') && !widget.includes('sendText'));
   assert(page.includes('this.peerPreferences !== preferences'));
   for(const name of ['handleNativeKeyInput','handleRemoteKey','handleNativeMouseInput','syncHardwareKeyState']) {
-    const body=page.slice(page.indexOf('\n  '+name+'(')); assert(body.slice(0,300).includes('showKeyboardMappingDialog'));
+    const body=extracted('pages/RemotePage',name);
+    const guard=body.indexOf('showKeyboardMappingDialog');
+    assert(guard>=0, name+' must gate keyboard mapping editor input');
+    const send=body.indexOf('ConnectionService.send');
+    assert(send<0 || guard<send, name+' must guard before sending remote input');
   }
   assert(page.includes("for (const code of held) ConnectionService.sendHardwareControlKey(code, 1, code)"));
 });

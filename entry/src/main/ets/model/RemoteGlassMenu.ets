@@ -6,6 +6,8 @@ export class RemoteGlassMenuState {
   keyboardItems: string[] = [];
   displayCount: number = 1;
   currentDisplay: number = 0;
+  canExtendDisplay: boolean = false;
+  extendedDisplay: number = -1;
   displaySwipe: boolean = true;
   inputMode: string = 'mouse';
   virtualMouse: boolean = false;
@@ -19,6 +21,10 @@ export class RemoteGlassMenuState {
   privacy: boolean = false;
   privacyPending: boolean = false;
   monitor: boolean = false;
+  gameMode: boolean = false;
+  highPerformance: boolean = false;
+  physicalGamepad: boolean = false;
+  virtualGamepad: boolean = false;
   transferBusy: boolean = false;
   canSendCtrlAltDel: boolean = false;
   modifiers: number = 0;
@@ -70,7 +76,7 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   const rowHeight = Math.ceil(baselineRow + 22 * (scale - 1));
   const headerHeight = Math.ceil(Math.max(26, 20 * scale + 6));
   const segmentHeight = Math.ceil((state.category === 'keyboard' ? 32 : 40) + 24 * (scale - 1));
-  const screenHeight = Math.ceil(Math.max(62, 28 * scale + 34));
+  const screenHeight = Math.ceil(Math.max(state.canExtendDisplay ? 88 : 62, 28 * scale + (state.canExtendDisplay ? 60 : 34)));
   const displayWidth = Math.ceil(70 + 50 * (scale - 1));
   const footerHeight = Math.ceil(Math.max(18 * scale,
     Number.isFinite(measuredFooterHeight) ? measuredFooterHeight : 0));
@@ -85,7 +91,7 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   switch (state.category) {
     case 'screens': content += screenHeight + 8 + rowHeight; break;
     case 'input': content += (stacked ? segmentHeight * 2 + 4 : segmentHeight) + 8 +
-      Math.max(0, state.items.length - 1) * rowHeight + 2 * rowHeight + 9; break;
+      Math.max(0, state.items.length - 1) * rowHeight + 3 * rowHeight + 9; break;
     case 'view': content += (state.items.length - (state.items.includes('zoomOut') ? 1 : 0)) * rowHeight + 9;
       if (state.desktop) content += segmentHeight + rowHeight * (state.desktopViewMode === 'custom' ? 5 : 4) + 9;
       break;

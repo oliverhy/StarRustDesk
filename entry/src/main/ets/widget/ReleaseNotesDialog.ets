@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '1.3.14'
-export const RELEASE_NOTES_BUILD: string = '1003014'
+export const RELEASE_NOTES_VERSION: string = '2.0.0'
+export const RELEASE_NOTES_BUILD: string = '2000000'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,15 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.0（2000000）· 多屏扩展与账号登录升级', [
+            '新增鸿蒙 PC 扩展屏显示：检测本地扩展屏和兼容的远端多屏，可将另一块远端屏幕独立显示到扩展屏；支持触摸、触控板、实体键盘及 VP9、H.264、H.265，实际能力取决于设备和远端。',
+            '账号登录拆分为官方公共服务器、自建 Server Pro、第三方 rustdesk-api；官方地址固定并自动加载登录方式，切换选项保留自建配置，不自动更改 ID、中继服务器或密钥。',
+            '修复身份验证器验证码被误判为邮箱验证码的问题；网页登录遇到临时网络故障时限时重试，完善取消、超时、错误分类及第三方登录界面。',
+            '新增游戏模式与高性能优先设置，可在连接前后配置；兼容条件下优先尝试 UDP，失败或持续异常时回退，不跳过加密与认证，不保证实际码率、帧率或延迟。',
+            '新增实体与虚拟手柄的键鼠映射、游戏悬浮控制台及可编辑屏幕按键，按远端保存；这不是原生手柄透传，实体手柄依赖设备和系统支持。',
+            '优化官方格式服务器配置导入和连接安全提示；未加密连接的七天免提醒需用户主动同意，仅对指定远端、服务器及风险类型生效。',
+            '完善多路解码、切屏、窗口尺寸与输入释放处理；补充连接、账号和扩展屏诊断，不记录密码、令牌、验证码或原始响应。'
+          ])
           this.buildSection('1.3.14（1003014）· 连接响应兼容性优化', [
             '修复等待远端连接响应时，已知 WebRTC 候选消息或空心跳先到可能导致连接提前报错的问题；在原有超时时间内继续等待有效响应。',
             '保持账号认证和加密校验，未知响应仍按错误处理；本次不包含完整的 WebRTC 增量候选支持。',
