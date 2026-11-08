@@ -5,10 +5,13 @@ import { SecondaryPoint, secondaryRemotePoint } from '../model/SecondaryPointerP
 import { isTouchOnlyMouseEvent } from '../model/PhysicalMousePolicy';
 import { RemoteWheelNormalizer, RemoteWheelStep } from '../model/RemoteWheelNormalizer';
 import { SecondaryTouchAction, SecondaryTouchGesture, SecondaryTouchPoint } from '../model/SecondaryTouchGesture';
+import { ExtendedDisplayFullscreen } from '../service/ExtendedDisplayFullscreen';
+import { translate } from '../utils/I18n';
 
 @Entry({ useSharedStorage: true })
 @Component
 struct ExtendedDisplayPage {
+  @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans';
   @LocalStorageProp('remoteDisplay') @Watch('onRemoteDisplayChanged') remoteDisplay: number = -1;
   @State statusText: string = '正在连接扩展画面…';
   @State offerVp9: boolean = false;
@@ -23,6 +26,10 @@ struct ExtendedDisplayPage {
   @State zoom: number = 1;
   @State panX: number = 0;
   @State panY: number = 0;
+  @State fullscreen: boolean = false;
+  @State fullscreenBusy: boolean = false;
+  private pageActive: boolean = false;
+  private fullscreenPolicy?: ExtendedDisplayFullscreen;
   private controller: XComponentController = new XComponentController();
   private timer: number = -1;
   private retryTimer: number = -1;
@@ -41,13 +48,60 @@ struct ExtendedDisplayPage {
   private touchGesture: SecondaryTouchGesture = new SecondaryTouchGesture();
   private longPressTimer: number = -1;
 
+  aboutToAppear(): void {
+    this.pageActive = true;
+    this.prepareFullscreen();
+  }
+
   aboutToDisappear(): void {
+    this.pageActive = false;
+    this.fullscreenPolicy?.dispose();
+    this.fullscreenPolicy = undefined;
     if (this.timer !== -1) clearInterval(this.timer);
     if (this.retryTimer !== -1) clearInterval(this.retryTimer);
     this.timer = -1;
     this.retryTimer = -1;
     this.releaseInputs();
     if (this.token > 0) RustDeskNapi.stopSecondaryDisplay(this.token);
+  }
+
+  private prepareFullscreen(): boolean {
+    if (!this.pageActive) return false;
+    if (this.fullscreenPolicy) return true;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      // The stage belongs to ExtendedDisplayAbility, not the primary window.
+      const target = context.windowStage.getMainWindowSync();
+      this.fullscreenPolicy = new ExtendedDisplayFullscreen(target, (fullscreen: boolean, busy: boolean) => {
+        if (this.pageActive) { this.fullscreen = fullscreen; this.fullscreenBusy = busy; }
+      });
+      this.fullscreenPolicy.start();
+      return true;
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('multi-display', 'fullscreen_window_unavailable');
+      return false;
+    }
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    if (this.fullscreenBusy) return;
+    if (!this.prepareFullscreen() || !this.fullscreenPolicy) {
+      this.showFullscreenFailure();
+      return;
+    }
+    this.releaseInputs();
+    if (this.keyboardFocused) this.keyboardFocus(false);
+    const policy = this.fullscreenPolicy;
+    const success = await policy.toggle();
+    if (!this.pageActive || this.fullscreenPolicy !== policy) return;
+    if (!success) this.showFullscreenFailure();
+    this.focusInput();
+  }
+
+  private showFullscreenFailure(): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: translate('全屏切换失败，请稍后重试', this.uiLanguage), duration: 2500 });
+    } catch (_error) {}
   }
 
   private close(): void {
@@ -345,11 +399,15 @@ struct ExtendedDisplayPage {
   }
 
   build() {
+    Stack({ alignContent: Alignment.TopEnd }) {
     Column() {
-      Row() {
-        Text(`远端屏幕 ${this.remoteDisplay + 1}`).fontColor(Color.White).fontSize(15).layoutWeight(1)
-        Button('关闭扩展').fontSize(14).onClick(() => this.close())
-      }.width('100%').height(48).padding({ left: 16, right: 16 }).backgroundColor('#172134')
+      if (!this.fullscreen) {
+        Row({ space: 8 }) {
+          Text(`远端屏幕 ${this.remoteDisplay + 1}`).fontColor(Color.White).fontSize(15).layoutWeight(1)
+          Button(translate('全屏', this.uiLanguage)).fontSize(14).focusable(false).enabled(!this.fullscreenBusy).onClick(() => { this.toggleFullscreen(); })
+          Button('关闭扩展').fontSize(14).focusable(false).onClick(() => this.close())
+        }.width('100%').height(48).padding({ left: 16, right: 16 }).backgroundColor('#172134')
+      }
       Stack({ alignContent: Alignment.Center }) {
         XComponent({ id: 'extended-remote-surface', type: XComponentType.SURFACE, controller: this.controller })
           .width(this.surfaceWidth()).height(this.surfaceHeight()).translate({ x: this.panX, y: this.panY })
@@ -378,10 +436,23 @@ struct ExtendedDisplayPage {
         .onAreaChange((_old: Area, area: Area) => {
           this.areaWidth = Math.max(1, Number(area.width));
           this.areaHeight = Math.max(1, Number(area.height));
+          const limitX = Math.max(0, (this.surfaceWidth() - this.areaWidth) / 2);
+          const limitY = Math.max(0, (this.surfaceHeight() - this.areaHeight) / 2);
+          this.panX = Math.max(-limitX, Math.min(limitX, this.panX));
+          this.panY = Math.max(-limitY, Math.min(limitY, this.panY));
+          if (this.touchCursorVisible && this.lastPoint) this.showTouchCursor(this.lastPoint);
         })
     }.width('100%').height('100%').backgroundColor('#090D14').id('extended-remote-input')
       .focusable(true).onFocus(() => this.keyboardFocus(true))
       .onBlur(() => { this.keyboardFocus(false); this.releaseInputs(); })
       .onKeyEvent((event: KeyEvent) => this.keyboard(event))
+    if (this.fullscreen) {
+      Button(translate('退出全屏', this.uiLanguage)).fontSize(13).fontColor(Color.White).backgroundColor('#C5223044')
+        .borderRadius(12).margin({ top: 10, right: 10 }).focusable(false).enabled(!this.fullscreenBusy)
+        .onTouch((event: TouchEvent) => { event.stopPropagation(); })
+        .onMouse((event: MouseEvent) => { event.stopPropagation(); })
+        .onClick(() => { this.toggleFullscreen(); }).zIndex(30)
+    }
+    }.width('100%').height('100%').backgroundColor('#090D14')
   }
 }

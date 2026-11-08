@@ -10,7 +10,7 @@ function method(s,name){const start=s.search(new RegExp(`\\n  (?:async )?${name}
 const names=['saveCurrentConnection','currentConnectionScope','findDuplicateConnection','showDuplicateConnection',
   'requestForCurrentForm','requestForSavedConnection','saveConnectionDraft','cloneSavedConnections','persistSavedConnections',
   'savedConnectionForPassword','hasSavedConnectionPassword','connectionPasswordForUse','connectSavedConnection',
-  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','saveEditedConnection','readEditorGameMode','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature','loadSavedConnections'];
+  'clearConnectionForm','normalizeRemoteId','confirmConnectionPassword','closeConnectionPasswordDialog','restorePasswordDialogKeyboardAvoidMode','saveEditedConnection','readEditorGameMode','onRemoteIdChanged','closeConnectionEditor','openNewSavedConnection','connectionFormSignature','loadSavedConnections'];
 function compile(s,ctx){const out=ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ES2021},reportDiagnostics:true});assert.equal(out.diagnostics.length,0);vm.runInContext(out.outputText,ctx);}
 const row=(id,remoteId,name='Office',password='old-secret')=>({id,remoteId,name,password,performancePreset:'smooth',groupId:'work'});
 function fixture(rows=[]){

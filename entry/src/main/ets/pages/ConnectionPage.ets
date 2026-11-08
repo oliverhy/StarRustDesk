@@ -2,7 +2,7 @@ import { readableInputHeight } from '../theme/ReadableLayout'
 import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
 import { common } from '@kit.AbilityKit'
-import { promptAction, router } from '@kit.ArkUI'
+import { KeyboardAvoidMode, promptAction, router } from '@kit.ArkUI'
 import { fileIo, picker } from '@kit.CoreFileKit'
 import { util } from '@kit.ArkTS'
 import { deviceInfo } from '@kit.BasicServicesKit'
@@ -16,6 +16,8 @@ import { RemotePeerPreferences } from '../service/RemotePeerPreferences'
 import { PeerOnlineResult, PeerOnlineState, RemoteSecurityOptions, RustDeskNapi } from '../service/RustDeskNapi'
 import { CredentialStore } from '../service/CredentialStore'
 import { RemoteSecurityStore } from '../service/RemoteSecurityStore'
+import { LanDiscoveryPeer } from '../model/LanDiscoveryProtocol'
+import { LanDiscoveryService, LanScanResult } from '../service/LanDiscoveryService'
 import { CloudSyncService } from '../service/CloudSyncService'
 import { ConnectionEditorGroup, ConnectionEditResult, SavedConnectionDraft, SavedConnectionEditing } from '../model/SavedConnectionEditing'
 import { SavedConnectionEditorDialog } from '../widget/SavedConnectionEditorDialog'
@@ -52,6 +54,7 @@ interface SavedConnectionRequest {
   draft: SavedConnectionDraft
   savedId: string
   serverScope: string
+  lanDiscovery?: boolean
 }
 
 interface SavedConnectionGroup {
@@ -83,6 +86,7 @@ class ConnectionSaveConflict extends Error {}
 
 @Component
 export struct ConnectionPage {
+  @Prop @Watch('onLanTabChanged') homeTabActive: boolean = true
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('uiFontScale') uiFontScale: number = 1
@@ -117,6 +121,9 @@ export struct ConnectionPage {
   private pendingFileOnly: boolean = false
   @State pageWidth: number = 0
   @State pageFullHeight: number = 0
+  @State pageVisibleHeight: number = 0
+  private passwordDialogPreviousAvoidMode: KeyboardAvoidMode = KeyboardAvoidMode.OFFSET
+  private passwordDialogAvoidModeChanged: boolean = false
   @State tabletEditorVisible: boolean = false
   @State savingConnection: boolean = false
   @State saveTipVisible: boolean = false
@@ -140,6 +147,15 @@ export struct ConnectionPage {
   private editingConnectionOriginal: SavedConnectionInfo | undefined = undefined
   private editingConnectionScope: string = ''
   private pendingConnectionRequest: SavedConnectionRequest | undefined = undefined
+  @State lanExpanded: boolean = true
+  @State lanScanning: boolean = false
+  @State lanPeers: LanDiscoveryPeer[] = []
+  @State lanStatus: string = 'ready'
+  @StorageLink('appForegroundEpoch') @Watch('onLanForeground') appForegroundEpoch: number = 0
+  private lanDiscovery: LanDiscoveryService = new LanDiscoveryService()
+  private lanScanEpoch: number = 0
+  private lanNetworkCheckBusy: boolean = false
+  private lanNextNetworkCheck: number = 0
   @State fullTextContent: string = ''
   private fullTextController: CustomDialogController = new CustomDialogController({
     builder: FullTextDialog({ title: '完整信息', content: this.fullTextContent, language: this.uiLanguage,
@@ -205,7 +221,7 @@ export struct ConnectionPage {
   @State groupPickerConnectionId: string = ''
   @State groupPickerForForm: boolean = false
   @State showBackupPasswordDialog: boolean = false
-  @State showConnectionPasswordDialog: boolean = false
+  @Link showConnectionPasswordDialog: boolean
   @State connectionPasswordDraft: string = ''
   @State rememberConnectionPassword: boolean = false
   @State connectionPasswordError: string = ''
@@ -238,10 +254,13 @@ export struct ConnectionPage {
     this.loadSavedConnections()
     this.syncConnectionState()
     this.startStatusPolling()
+    this.refreshLanDiscovery()
   }
 
   aboutToDisappear(): void {
     this.savePageActive = false
+    this.stopLanDiscovery()
+    this.restorePasswordDialogKeyboardAvoidMode()
     this.clearSaveTip()
     this.fullTextController?.close()
     this.closeConnectionEditor()
@@ -298,6 +317,12 @@ export struct ConnectionPage {
 
   startStatusPolling(): void {
     let poll = () => {
+      if (RemoteSessionBackgroundTask.isAppBackground()) {
+        if (this.lanScanning || this.lanPeers.length > 0) this.stopLanDiscovery()
+      } else if (!this.lanScanning && this.lanPeers.length > 0 && !this.lanNetworkCheckBusy &&
+        Date.now() >= this.lanNextNetworkCheck) {
+        this.checkLanNetwork()
+      }
       this.pollPeerOnlineStates()
       if (this.peerOnlineQueryEnabled && Date.now() >= this.nextPeerOnlineRefreshAt) {
         this.refreshSavedConnectionOnlineStates()
@@ -360,6 +385,7 @@ export struct ConnectionPage {
             Scroll() {
               Column() {
                 this.buildSavedConnections()
+                this.buildLanDiscovery()
               }
               .width('100%')
               .padding({ bottom: 94 })
@@ -390,6 +416,7 @@ export struct ConnectionPage {
             Scroll() {
               Column() {
                 this.buildSavedConnections()
+                this.buildLanDiscovery()
               }
               .width('100%')
               .padding({ bottom: 94 })
@@ -408,6 +435,7 @@ export struct ConnectionPage {
             Column({ space: 14 }) {
               this.buildConnectionForm()
               this.buildSavedConnections()
+              this.buildLanDiscovery()
             }
             .width('100%')
             .padding({ bottom: 94 })
@@ -500,6 +528,7 @@ export struct ConnectionPage {
       // IME resizing must not turn a portrait tablet into the landscape layout.
       const nextWidth: number = newValue.width as number
       const nextHeight: number = newValue.height as number
+      this.pageVisibleHeight = nextHeight
       this.pageFullHeight = Math.abs(nextWidth - this.pageWidth) > 32 ?
         nextHeight : Math.max(this.pageFullHeight, nextHeight)
       this.pageWidth = newValue.width as number
@@ -913,6 +942,185 @@ export struct ConnectionPage {
           .fontSize(12).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY).width('100%')
       }
     }.width('100%')
+  }
+
+  onLanForeground(): void {
+    if (this.savePageActive && this.homeTabActive && this.lanExpanded && !RemoteSessionBackgroundTask.isAppBackground()) {
+      this.refreshLanDiscovery()
+    }
+  }
+
+  onLanTabChanged(): void {
+    if (!this.homeTabActive) this.stopLanDiscovery()
+    else if (this.savePageActive && this.lanExpanded && !RemoteSessionBackgroundTask.isAppBackground()) {
+      this.refreshLanDiscovery()
+    }
+  }
+
+  stopLanDiscovery(): void {
+    this.lanScanEpoch++
+    this.lanDiscovery.cancel()
+    if (this.pendingConnectionRequest?.lanDiscovery === true) this.closeConnectionPasswordDialog()
+    this.lanScanning = false
+    this.lanPeers = []
+    this.lanStatus = 'ready'
+  }
+
+  async refreshLanDiscovery(): Promise<void> {
+    if (!this.savePageActive || !this.homeTabActive || !this.lanExpanded || RemoteSessionBackgroundTask.isAppBackground()) return
+    const epoch: number = ++this.lanScanEpoch
+    this.lanPeers = []
+    this.lanStatus = 'scanning'
+    this.lanScanning = true
+    const result: LanScanResult = await this.lanDiscovery.scan((peers: LanDiscoveryPeer[]) => {
+      if (epoch === this.lanScanEpoch && this.savePageActive && this.homeTabActive && !RemoteSessionBackgroundTask.isAppBackground()) {
+        this.lanPeers = peers
+      }
+    })
+    if (epoch !== this.lanScanEpoch || !this.savePageActive) return
+    this.lanScanning = false
+    this.lanPeers = result.peers
+    this.lanStatus = result.status
+    this.lanNextNetworkCheck = Date.now() + 5000
+  }
+
+  async checkLanNetwork(): Promise<void> {
+    this.lanNetworkCheckBusy = true
+    const epoch: number = this.lanScanEpoch
+    const current: boolean = await this.lanDiscovery.isCurrentNetwork()
+    this.lanNetworkCheckBusy = false
+    this.lanNextNetworkCheck = Date.now() + 5000
+    if (epoch === this.lanScanEpoch && this.savePageActive && !current) {
+      this.lanDiscovery.cancel()
+      this.lanPeers = []
+      this.lanStatus = 'network_changed'
+      RustDeskNapi.appendDiagnosticLog('lan-discovery', 'results_cleared reason=network_changed')
+    }
+  }
+
+  lanStatusText(): string {
+    if (this.lanStatus === 'scanning') return '正在搜索局域网设备…'
+    if (this.lanStatus === 'no_network') return '请连接 Wi-Fi 或有线局域网后刷新'
+    if (this.lanStatus === 'network_changed') return '网络已变化，请重新搜索'
+    if (this.lanStatus === 'error') return '搜索失败，请检查网络后重试'
+    if (this.lanStatus === 'cancelled') return '搜索已停止，请重新搜索'
+    if (this.lanStatus === 'complete') return '未发现设备，请确认远端已开启局域网发现'
+    return '点击刷新以搜索局域网设备'
+  }
+
+  async connectLanPeer(peer: LanDiscoveryPeer, direct: boolean): Promise<void> {
+    if (!this.savePageActive || !this.homeTabActive || !await this.lanDiscovery.isCurrentNetwork()) {
+      this.lanDiscovery.cancel()
+      this.lanPeers = []
+      this.lanStatus = 'network_changed'
+      RustDeskNapi.appendDiagnosticLog('lan-discovery', 'connect_blocked reason=network_changed')
+      return
+    }
+    // Never associate a broadcast result with a stored password or security policy.
+    const draft: SavedConnectionDraft = SavedConnectionEditing.empty()
+    draft.remoteId = direct ? peer.address : peer.id
+    draft.name = peer.hostname
+    const request: SavedConnectionRequest = { draft: draft, savedId: '', serverScope: this.currentConnectionScope(),
+      lanDiscovery: true }
+    RustDeskNapi.appendDiagnosticLog('lan-discovery', direct ? 'connect_requested mode=direct_ip' : 'connect_requested mode=peer_id')
+    this.onConnect(false, request)
+  }
+
+  @Builder
+  buildLanDiscovery() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Button() {
+          Image(this.lanExpanded ? $r('app.media.group_chevron_up') : $r('app.media.group_chevron_down'))
+            .width(12).height(12).objectFit(ImageFit.Contain)
+        }
+        .width(this.savedHeaderButtonSize()).height(this.savedHeaderButtonSize()).padding(0)
+        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
+        .borderRadius(8)
+        .accessibilityText(translate(this.lanExpanded ? '收起局域网设备' : '展开局域网设备', this.uiLanguage))
+        .onClick(() => {
+          this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
+            this.lanExpanded = !this.lanExpanded
+          })
+          if (this.lanExpanded) this.refreshLanDiscovery()
+          else this.stopLanDiscovery()
+        })
+        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+        Text(translate('局域网设备', this.uiLanguage))
+          .fontSize(20).fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY).layoutWeight(1)
+        Text(`${this.lanPeers.length}`).fontSize(12)
+          .fontColor(this.selectedControlText()).padding({ left: 8, right: 8, top: 3, bottom: 3 })
+          .backgroundColor(this.selectedControlBackground()).borderRadius(9)
+        Button(translate(this.lanScanning ? '搜索中' : '刷新', this.uiLanguage))
+          .fontSize(14).fontColor(this.selectedControlText())
+          .backgroundColor(this.selectedControlBackground()).borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+          .constraintSize({ minHeight: 40 }).enabled(!this.lanScanning && this.lanExpanded)
+          .onClick(() => { this.refreshLanDiscovery() })
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+      }.width('100%').alignItems(VerticalAlign.Center)
+      if (this.lanExpanded) {
+        Column({ space: 8 }) {
+          Text(translate('发现设备不代表已验证身份，请确认设备后再连接', this.uiLanguage))
+            .fontSize(12).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+            .width('100%')
+          if (this.lanPeers.length === 0) {
+            Text(translate(this.lanStatusText(), this.uiLanguage)).fontSize(13)
+              .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+              .width('100%').padding({ top: 12, bottom: 12 })
+          } else {
+            ForEach(this.lanPeers, (peer: LanDiscoveryPeer) => {
+              this.buildLanPeer(peer)
+            }, (peer: LanDiscoveryPeer) => `${peer.id}|${peer.address}`)
+          }
+        }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -8 }))
+          .animation({ duration: 240, curve: Curve.EaseInOut }))
+      }
+    }
+    .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
+    .margin({ bottom: 8 })
+  }
+
+  @Builder
+  buildLanPeer(peer: LanDiscoveryPeer) {
+    Row({ space: 8 }) {
+      Column() {
+        Image($r('app.media.remote_menu_screens')).width(20).height(20)
+          .fillColor(this.selectedControlText()).objectFit(ImageFit.Contain)
+      }
+      .width(36).height(36).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.selectedControlBackground()).borderRadius(10)
+      Column({ space: 3 }) {
+        Text(peer.hostname.length > 0 ? peer.hostname : peer.id).fontSize(15)
+          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY).width('100%')
+          .wordBreak(WordBreak.BREAK_ALL)
+        Text(`${peer.id} · ${peer.address}${peer.platform.length > 0 ? ' · ' + peer.platform : ''} · ${translate('本次搜索发现', this.uiLanguage)}`)
+          .fontSize(12).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+          .width('100%').wordBreak(WordBreak.BREAK_ALL)
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Button(translate('连接', this.uiLanguage)).fontSize(14).fontColor(this.selectedControlText())
+        .backgroundColor(this.selectedControlBackground()).borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
+        .constraintSize({ minHeight: 40 }).onClick(() => { this.connectLanPeer(peer, false) })
+        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+      Button('⋯').fontSize(22).fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_SECONDARY)
+        .width(40).height(40).padding(0).backgroundColor(Color.Transparent)
+        .accessibilityText(translate('更多选项', this.uiLanguage))
+        .bindMenu([
+          { value: translate('IP 直连（需远端开启直接 IP 访问）', this.uiLanguage), action: () => { this.connectLanPeer(peer, true) } },
+          { value: translate('查看完整信息', this.uiLanguage), action: () => {
+            this.showFullText(`${peer.hostname}\n${peer.id}\n${peer.address}\n${peer.platform}`)
+          } }
+        ])
+    }
+    .width('100%').padding({ top: 8, bottom: 8 })
+    .border({ width: { bottom: 1 }, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
   }
 
   @Builder
@@ -1778,16 +1986,26 @@ export struct ConnectionPage {
     .zIndex(11)
   }
 
+  connectionPasswordDialogHeight(): number {
+    // pageFullHeight intentionally ignores IME resizing for tablet layout; the
+    // password dialog must instead fit in the currently visible area.
+    const scale: number = Number.isFinite(this.uiFontScale) ? Math.max(1, this.uiFontScale) : 1
+    const preferred: number = Math.ceil(280 + (scale - 1) * 180)
+    return this.pageVisibleHeight > 0 ? Math.max(0, Math.min(preferred, this.pageVisibleHeight - 16)) : preferred
+  }
+
   @Builder
   buildConnectionPasswordDialog() {
     Column({ space: 12 }) {
+      Scroll() {
+        Column({ space: 12 }) {
       Text(translate('输入连接密码', this.uiLanguage))
         .fontSize(19)
         .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
         .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
         .width('100%')
 
-      Text(translate(`请输入远端设备 ${this.remoteId} 的连接密码`, this.uiLanguage))
+      Text(translate(`请输入远端设备 ${this.pendingConnectionRequest?.draft.remoteId ?? this.remoteId} 的连接密码`, this.uiLanguage))
         .fontSize(13)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
@@ -1840,6 +2058,15 @@ export struct ConnectionPage {
           .fontColor(RustDeskTheme.ERROR)
           .width('100%')
       }
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .align(Alignment.Top)
+      .scrollBar(BarState.Auto)
+      .edgeEffect(EdgeEffect.Spring)
 
       Row({ space: 10 }) {
         Button(translate('取消', this.uiLanguage))
@@ -1866,6 +2093,7 @@ export struct ConnectionPage {
       .width('100%')
     }
     .width(this.pageWidth >= 820 ? 420 : '88%')
+    .height(this.connectionPasswordDialogHeight())
     .padding(20)
     .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
     .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
@@ -2287,13 +2515,19 @@ export struct ConnectionPage {
 
   async onConnect(fileOnly: boolean = false, requested: SavedConnectionRequest | undefined = undefined): Promise<void> {
     if (this.preparingAccount) return
-    let password: string = this.connectionPasswordForUse()
     const request: SavedConnectionRequest = requested ?? this.requestForCurrentForm()
+    let password: string = requested === undefined ? this.connectionPasswordForUse() : request.draft.password
+    if (request.lanDiscovery === true && !await this.lanDiscovery.isCurrentNetwork()) {
+      this.lanPeers = []
+      this.lanStatus = 'network_changed'
+      this.connectionStatusText = '网络已变化，请重新搜索'
+      return
+    }
     let peerId: string = this.normalizeRemoteId(request.draft.remoteId)
     if (requested === undefined) {
       this.remoteId = peerId
       this.isIdEmpty = peerId.length === 0
-    } else password = request.draft.password
+    }
     if (request.serverScope !== this.currentConnectionScope()) {
       this.connectionStatusText = '此连接属于其他网络，请切换服务器后重试'
       return
@@ -2343,7 +2577,7 @@ export struct ConnectionPage {
             (request.draft.clearOsPassword ? '' : await RemoteSecurityStore.loadOsPassword(request.savedId))) : ''
         if (request.serverScope !== this.currentConnectionScope()) throw new Error('Connection network changed')
         status = await ConnectionService.connect(peerId, password, request.draft.performancePreset, fileOnly,
-          security, osPassword)
+          security, osPassword, request.lanDiscovery === true)
       } catch (_error) {
         this.preparingAccount = false
         this.connectionStatusText = '账号恢复失败或服务器配置已改变，请重试；必要时到设置中的 API 账号重新登录'
@@ -2899,22 +3133,46 @@ export struct ConnectionPage {
   }
 
   openConnectionPasswordDialog(): void {
-    let peerId: string = this.normalizeRemoteId(this.remoteId)
+    let peerId: string = this.normalizeRemoteId(this.pendingConnectionRequest?.draft.remoteId ?? this.remoteId)
     if (peerId.length <= 0) {
       this.connectionStatusText = '请输入远程 ID'
       this.connectionStatusColor = RustDeskTheme.ERROR
       return
     }
-    this.remoteId = peerId
+    if (this.pendingConnectionRequest === undefined) this.remoteId = peerId
     this.closeGroupDialogs()
     this.connectionPasswordDraft = ''
     this.rememberConnectionPassword = false
     this.connectionPasswordError = ''
+    this.applyPasswordDialogKeyboardAvoidMode()
     this.showConnectionPasswordDialog = true
+  }
+
+  applyPasswordDialogKeyboardAvoidMode(): void {
+    if (this.passwordDialogAvoidModeChanged) return
+    try {
+      const context = this.getUIContext()
+      this.passwordDialogPreviousAvoidMode = context.getKeyboardAvoidMode()
+      context.setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE)
+      this.passwordDialogAvoidModeChanged = true
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('connection-dialog', 'keyboard_avoid_resize_unavailable')
+    }
+  }
+
+  restorePasswordDialogKeyboardAvoidMode(): void {
+    if (!this.passwordDialogAvoidModeChanged) return
+    try {
+      this.getUIContext().setKeyboardAvoidMode(this.passwordDialogPreviousAvoidMode)
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('connection-dialog', 'keyboard_avoid_restore_failed')
+    }
+    this.passwordDialogAvoidModeChanged = false
   }
 
   closeConnectionPasswordDialog(): void {
     this.showConnectionPasswordDialog = false
+    this.restorePasswordDialogKeyboardAvoidMode()
     this.connectionPasswordDraft = ''
     this.rememberConnectionPassword = false
     this.connectionPasswordError = ''
@@ -2930,6 +3188,12 @@ export struct ConnectionPage {
     const request = this.pendingConnectionRequest
     if (request === undefined || request.serverScope !== this.currentConnectionScope()) {
       this.connectionPasswordError = '连接或服务器已改变，请重试'
+      return
+    }
+    if (request.lanDiscovery === true && !await this.lanDiscovery.isCurrentNetwork()) {
+      this.connectionPasswordError = '网络已变化，请重新搜索'
+      this.lanPeers = []
+      this.lanStatus = 'network_changed'
       return
     }
     let remember: boolean = this.rememberConnectionPassword

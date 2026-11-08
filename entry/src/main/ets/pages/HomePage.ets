@@ -16,6 +16,8 @@ import {
 struct HomePage {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @State currentTabIndex: number = 0
+  @State homePageVisible: boolean = true
+  @State showConnectionPasswordDialog: boolean = false
   @State pageWidth: number = 0
   @State tabBarWidth: number = 0
   @StorageLink('isDarkMode') isDarkMode: boolean = false
@@ -44,6 +46,10 @@ struct HomePage {
     }, 280)
   }
 
+  onPageShow(): void { this.homePageVisible = true }
+
+  onPageHide(): void { this.homePageVisible = false }
+
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
@@ -68,7 +74,8 @@ struct HomePage {
       .backgroundColor(this.isDarkMode ? RustDeskTheme.BG_DARK : RustDeskTheme.BG_LIGHT)
 
       Swiper(this.swiperController) {
-        ConnectionPage()
+        ConnectionPage({ homeTabActive: this.homePageVisible && this.currentTabIndex === 0,
+          showConnectionPasswordDialog: $showConnectionPasswordDialog })
         SettingsPage()
       }
       .indicator(false)
@@ -82,7 +89,7 @@ struct HomePage {
       .height('100%')
       .backgroundColor(Color.Transparent)
 
-      this.buildFloatingTabBar()
+      if (!this.showConnectionPasswordDialog) this.buildFloatingTabBar()
     }
     .width('100%')
     .height('100%')

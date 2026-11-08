@@ -11400,7 +11400,11 @@ struct RemotePage {
       return;
     }
     let remembered: boolean = false;
-    try { remembered = await InsecureConsentStore.has(getContext(this) as common.UIAbilityContext, scope); }
+    try {
+      if (!ConnectionService.requiresExplicitDiscoveryConsent()) {
+        remembered = await InsecureConsentStore.has(getContext(this) as common.UIAbilityContext, scope);
+      }
+    }
     catch (_error) { remembered = false; }
     if (!this.remotePageVisible || this.isLeavingAfterDisconnect) return;
     if (!ConnectionService.isInsecureConsentScopeCurrent(scope)) {
@@ -11425,7 +11429,13 @@ struct RemotePage {
         '无法验证自建服务器密钥。继续将无法验证远端身份，屏幕、输入和文件可能被窃听或篡改。');
     this.insecureFallbackController = new CustomDialogController({
       builder: InsecureConnectionDialog({ title: title, message: message,
-        onCancel: () => { RustDeskNapi.appendDiagnosticLog('connection-security', 'user_rejected_insecure_fallback'); },
+        canRemember: !ConnectionService.requiresExplicitDiscoveryConsent(),
+        onCancel: () => {
+          if (!this.remotePageVisible || this.isLeavingAfterDisconnect ||
+            !ConnectionService.isInsecureConsentScopeCurrent(scope)) return;
+          RustDeskNapi.appendDiagnosticLog('connection-security', 'user_rejected_insecure_fallback');
+          this.disconnectSession();
+        },
         onContinue: (remember: boolean) => { this.acceptInsecureConnection(scope, remember); } }),
       autoCancel: false, customStyle: true, alignment: DialogAlignment.Center,
     });
@@ -11434,7 +11444,7 @@ struct RemotePage {
 
   async acceptInsecureConnection(scope: InsecureConsentScope, remember: boolean): Promise<void> {
     if (!this.remotePageVisible || !ConnectionService.isInsecureConsentScopeCurrent(scope)) return;
-    if (remember) {
+    if (remember && !ConnectionService.requiresExplicitDiscoveryConsent()) {
       let saved: boolean = false;
       try {
         saved = await InsecureConsentStore.remember(getContext(this) as common.UIAbilityContext, scope,

@@ -96,6 +96,7 @@ export class ConnectionService {
   private static insecureRetryUsed: boolean = false
   private static insecureRetryReasons: number[] = []
   private static rememberedInsecureSession: boolean = false
+  private static discoveryRequiresConsent: boolean = false
   private static preparationGeneration: number = 0
   private static recoveryTimer: number = -1
   private static recoveryPending: boolean = false
@@ -319,7 +320,7 @@ export class ConnectionService {
 
   static async connect(remoteId: string, password: string, performancePreset: string = 'smooth', fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = ''): Promise<ConnectionStatus> {
+    osPassword: string = '', discoveryRequiresConsent: boolean = false): Promise<ConnectionStatus> {
     ConnectionService.cancelRecovery()
     ConnectionService.recoveryAttempts = 0
     ConnectionService.recoveryStartedAt = -1
@@ -364,6 +365,7 @@ export class ConnectionService {
     ConnectionService.insecureRetryUsed = false
     ConnectionService.insecureRetryReasons = []
     ConnectionService.rememberedInsecureSession = false
+    ConnectionService.discoveryRequiresConsent = discoveryRequiresConsent
     ConnectionService.sessionSettings = ConnectionService.authNetworkSnapshot()
     ConnectionService.sessionAccountRevision = AccountSession.getApi().sessionRevision()
     ConnectionService.fileOnly = fileOnly
@@ -619,6 +621,8 @@ export class ConnectionService {
 
   static isRememberedInsecureSession(): boolean { return ConnectionService.rememberedInsecureSession }
 
+  static requiresExplicitDiscoveryConsent(): boolean { return ConnectionService.discoveryRequiresConsent }
+
   static insecureConsentScope(): InsecureConsentScope | undefined {
     if (!ConnectionService.canRetryWithoutEncryption() ||
       ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot() ||
@@ -635,6 +639,7 @@ export class ConnectionService {
   }
 
   static retryWithoutEncryption(expectedReason: number = 0, remembered: boolean = false): boolean {
+    if (remembered && ConnectionService.discoveryRequiresConsent) return false
     if (!ConnectionService.canRetryWithoutEncryption()) {
       return false
     }

@@ -298,20 +298,26 @@ test('scope validation rejects peer, risk, network, account and attempt changes'
   Service.sessionSettings='changed'; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.sessionSettings='unchanged';
   Service.sessionAccountRevision=2; assert.equal(Service.isInsecureConsentScopeCurrent(scope),false); Service.sessionAccountRevision=1;
 });
-let riskPrompt, approvals=0, rejections=0;
+let riskPrompt, approvals=0, rejections=0, returns=0, currentRisk=true;
 const Prompt = subject(slice('entry/src/main/ets/pages/RemotePage.ets',
   '  showInsecureFallbackPrompt(scope:', '  async acceptInsecureConnection('), {
   InsecureConnectionDialog:value=>value,
   CustomDialogController:class { constructor(options){riskPrompt=options.builder;} open(){} },
+  ConnectionService:{requiresExplicitDiscoveryConsent:()=>false,isInsecureConsentScopeCurrent:()=>currentRisk},
   INSECURE_DIRECT_ENDPOINT:3,INSECURE_MISSING_SIGNATURE:2,DialogAlignment:{Center:0},
   RustDeskNapi:{appendDiagnosticLog:()=>{rejections++;}},
 });
 test('security prompt distinguishes direct and missing-signature paths; cancel never approves',()=>{
-  const page=Object.assign(new Prompt(),{uiLanguage:'zh',acceptInsecureConnection:()=>{approvals++;}});
+  const page=Object.assign(new Prompt(),{uiLanguage:'zh',remotePageVisible:true,isLeavingAfterDisconnect:false,
+    acceptInsecureConnection:()=>{approvals++;},disconnectSession:()=>{returns++;}});
   page.showInsecureFallbackPrompt({reason:2});
   assert.equal(riskPrompt.title,'无法验证远端身份');
   assert.match(riskPrompt.message,/文件可能被窃听或篡改/);
-  riskPrompt.onCancel(); assert.equal(rejections,1); assert.equal(approvals,0);
+  riskPrompt.onCancel(); assert.equal(rejections,1); assert.equal(returns,1); assert.equal(approvals,0);
+  currentRisk=false; riskPrompt.onCancel(); assert.equal(returns,1); assert.equal(rejections,1); currentRisk=true;
+  page.isLeavingAfterDisconnect=true; riskPrompt.onCancel(); assert.equal(returns,1);
+  page.isLeavingAfterDisconnect=false; page.remotePageVisible=false; riskPrompt.onCancel(); assert.equal(returns,1);
+  page.remotePageVisible=true;
   page.showInsecureFallbackPrompt({reason:3});
   assert.equal(riskPrompt.title,'直连未加密');
   assert.match(riskPrompt.message,/信任网络及远端设备/);

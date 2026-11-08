@@ -47,7 +47,9 @@ const fire = id => { const timer = timers.get(id); timers.delete(id); timer.fn()
   page.remoteId = '';
   await page.saveConnectionWithTip();
   assert.equal(failures.length, 1, 'empty ID does not save');
-  assert.match(source, /aboutToDisappear\(\): void \{\s*this\.savePageActive = false\s*this\.clearSaveTip\(\)/);
+  const cleanup = source.slice(source.indexOf('  aboutToDisappear(): void'), source.indexOf('  checkServerConfig(): void'));
+  assert.match(cleanup, /this\.savePageActive = false/);
+  assert.match(cleanup, /this\.clearSaveTip\(\)/);
   assert.match(source, /Text\(translate\('已保存', this\.uiLanguage\)\)[\s\S]*?hitTestBehavior\(HitTestMode.None\)/);
   console.log('PASS save tip: completion, repeat clicks, upward fade, cleanup and failure');
 })().catch(error => { console.error(error); process.exitCode = 1; });

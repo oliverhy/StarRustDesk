@@ -120,7 +120,7 @@ function pageSubject(mocks) {
   });
   await test('auto retry uses only the captured reason and stale lookups cannot connect',async()=>{
     let current=true, trusted=true, retries=[], prompts=0;
-    const connection={insecureConsentScope:()=>scope,isInsecureConsentScopeCurrent:()=>current,
+    const connection={insecureConsentScope:()=>scope,isInsecureConsentScopeCurrent:()=>current,requiresExplicitDiscoveryConsent:()=>false,
       retryWithoutEncryption:(reason,remembered)=>{retries.push([reason,remembered]);return true;}};
     const Page=pageSubject({ConnectionService:connection,InsecureConsentStore:{has:async()=>trusted},
       RustDeskNapi:{appendDiagnosticLog:()=>{}},getContext:()=>ctx,ConnectionStatus:{CONNECTING:1,FAILED:3}});
@@ -133,12 +133,30 @@ function pageSubject(mocks) {
   });
   await test('explicit cancel or unchecked continuation never stores a grant',async()=>{
     let saves=0, retries=0, current=true;
-    const connection={isInsecureConsentScopeCurrent:()=>current,retryWithoutEncryption:()=>{retries++;return true;}};
+    const connection={isInsecureConsentScopeCurrent:()=>current,requiresExplicitDiscoveryConsent:()=>false,
+      retryWithoutEncryption:()=>{retries++;return true;}};
     const Page=pageSubject({ConnectionService:connection,InsecureConsentStore:{remember:async()=>{saves++;return true;}},
       RustDeskNapi:{appendDiagnosticLog:()=>{}},getContext:()=>ctx,ConnectionStatus:{CONNECTING:1,FAILED:3}});
     const page=Object.assign(new Page(),{remotePageVisible:true,isLeavingAfterDisconnect:false,showFileToast:()=>{}});
     await page.acceptInsecureConnection(scope,false); assert.equal(saves,0); assert.equal(retries,1);
     current=false; await page.acceptInsecureConnection(scope,true); assert.equal(saves,0); assert.equal(retries,1);
+  });
+  await test('discovery never silently reuses or persists an insecure grant',async()=>{
+    let lookups=0, saves=0, prompts=0, retries=0;
+    const connection={insecureConsentScope:()=>scope,isInsecureConsentScopeCurrent:()=>true,
+      requiresExplicitDiscoveryConsent:()=>true,retryWithoutEncryption:()=>{retries++;return true;}};
+    const Page=pageSubject({ConnectionService:connection,InsecureConsentStore:{has:async()=>{lookups++;return true;},
+      remember:async()=>{saves++;return true;}},RustDeskNapi:{appendDiagnosticLog:()=>{}},getContext:()=>ctx,
+      ConnectionStatus:{CONNECTING:1,FAILED:3}});
+    const page=Object.assign(new Page(),{remotePageVisible:true,isLeavingAfterDisconnect:false,
+      showInsecureFallbackPrompt:()=>{prompts++;},showFileToast:()=>{}});
+    await page.checkInsecureFallback();
+    assert.equal(lookups,0); assert.equal(prompts,1); assert.equal(retries,0);
+    await page.acceptInsecureConnection(scope,true);
+    assert.equal(saves,0); assert.equal(retries,1);
+    assert.match(read('entry/src/main/ets/widget/InsecureConnectionDialog.ets'),/if \(this\.canRemember\)/);
+    assert.match(read('entry/src/main/ets/service/ConnectionService.ets'),
+      /if \(remembered && ConnectionService\.discoveryRequiresConsent\) return false/);
   });
   console.log(`${passed} insecure consent checks passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

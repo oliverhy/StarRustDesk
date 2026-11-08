@@ -11,6 +11,7 @@ export struct InsecureConnectionDialog {
   controller?: CustomDialogController
   title: string = ''
   message: string = ''
+  canRemember: boolean = true
   onCancel: () => void = () => {}
   onContinue: (remember: boolean) => void = () => {}
 
@@ -24,6 +25,7 @@ export struct InsecureConnectionDialog {
             .fontSize(19).fontWeight(FontWeight.Bold).layoutWeight(1)
             .fontColor(this.dark ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
             .wordBreak(WordBreak.BREAK_ALL)
+          if (this.canRemember) {
           Button() {
             Row({ space: 5 }) {
               Text(this.remember ? '☑' : '□').fontSize(16)
@@ -40,12 +42,19 @@ export struct InsecureConnectionDialog {
           .accessibilityText(translate('7天内不再提醒', this.uiLanguage) + ' ' +
             translate(this.remember ? '已选中' : '未选中', this.uiLanguage))
           .onClick(() => { this.remember = !this.remember })
+          }
         }
         .width('100%').alignItems(VerticalAlign.Center)
 
         Text(translate(this.message, this.uiLanguage))
           .fontSize(15).width('100%').wordBreak(WordBreak.BREAK_ALL)
           .fontColor(this.dark ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
+
+        if (!this.canRemember) {
+          Text(translate('局域网发现的设备身份未验证，本次需单独确认。', this.uiLanguage))
+            .fontSize(13).width('100%').wordBreak(WordBreak.BREAK_ALL)
+            .fontColor(this.dark ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.ACCENT)
+        }
 
         if (this.remember) {
           Text(translate('勾选并继续后，7天内仅对此远端、服务器及相同风险自动继续未加密连接。可在设置中清除。', this.uiLanguage))

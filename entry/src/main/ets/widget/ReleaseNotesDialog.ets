@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.0'
-export const RELEASE_NOTES_BUILD: string = '2000000'
+export const RELEASE_NOTES_VERSION: string = '2.0.1'
+export const RELEASE_NOTES_BUILD: string = '2000001'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.1（2000001）· 局域网发现与连接体验优化', [
+            '新增局域网设备发现，兼容官方 RustDesk 客户端的发现协议；无需修改服务器，可通过设备 ID 连接，或在远端允许时选择 IP 直连。',
+            '局域网发现不等于身份验证：连接前需确认设备，发现设备不会自动使用已保存密码；未加密连接保留风险提示并需单独确认。',
+            '鸿蒙 PC 扩展屏增加全屏和退出全屏操作，切换时释放已按下的输入并调整画面尺寸，实际效果取决于系统和设备支持。',
+            '修复横屏输入连接密码时软键盘及底部导航栏遮挡按钮的问题，支持在键盘打开时直接取消或连接。',
+            '取消未加密连接提示后直接返回首页，无需再点击返回；补充局域网发现和连接安全诊断，不记录密码、令牌或原始响应。'
+          ])
           this.buildSection('2.0.0（2000000）· 多屏扩展与账号登录升级', [
             '新增鸿蒙 PC 扩展屏显示：检测本地扩展屏和兼容的远端多屏，可将另一块远端屏幕独立显示到扩展屏；支持触摸、触控板、实体键盘及 VP9、H.264、H.265，实际能力取决于设备和远端。',
             '账号登录拆分为官方公共服务器、自建 Server Pro、第三方 rustdesk-api；官方地址固定并自动加载登录方式，切换选项保留自建配置，不自动更改 ID、中继服务器或密钥。',

@@ -11,6 +11,7 @@ const entry = read('entry/src/main/ets/entryability/EntryAbility.ets');
 const serverDialog = read('entry/src/main/ets/widget/ServerConfigDialog.ets');
 const serverConfigModel = read('entry/src/main/ets/model/ServerConfigModel.ets');
 const connectionPage = read('entry/src/main/ets/pages/ConnectionPage.ets');
+const homePage = read('entry/src/main/ets/pages/HomePage.ets');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -87,7 +88,9 @@ test('online status queries still use the rendezvous server', () => {
 });
 
 test('missing connection password opens an input dialog', () => {
-  assert.match(connectionPage, /@State showConnectionPasswordDialog: boolean = false/);
+  assert.match(homePage, /@State showConnectionPasswordDialog: boolean = false/);
+  assert.match(homePage, /showConnectionPasswordDialog: \$showConnectionPasswordDialog/);
+  assert.match(connectionPage, /@Link showConnectionPasswordDialog: boolean/);
   assert.match(connectionPage, /TextInput\(\{ placeholder: translate\('连接密码', this\.uiLanguage\)/);
   assert.match(connectionPage, /Toggle\(\{ type: ToggleType\.Checkbox, isOn: this\.rememberConnectionPassword \}\)/);
   assert.match(connectionPage, /if \(password\.length <= 0\) \{\s*this\.pendingFileOnly = fileOnly;?\s*this\.pendingConnectionRequest = request\s*this\.openConnectionPasswordDialog\(\)/);
