@@ -10,14 +10,35 @@ for (const file of ['GamepadMapping', 'GameScreenControls']) {
 }
 const config = c.defaultScreenGameConfig();
 assert.equal(config.profiles.length, 3);
-assert(config.profiles.every(profile => profile.keys.length === 0));
+assert.equal(config.profiles[0].keys.length, 7, 'new peers see a usable preset');
+assert(config.profiles.slice(1).every(profile => profile.keys.length === 0));
+assert(c.validScreenGameConfig(config));
+for (const [width, height] of [[240,160],[320,200],[360,720],[640,360],[1024,768]]) {
+  const keys = c.defaultScreenGameKeys(width, height);
+  const boxes = keys.map(key => ({ x: key.x * (width - key.size),
+    y: key.y * (height - key.size), size: key.size }));
+  assert(boxes[6].x + boxes[6].size <= boxes[5].x,
+    `${width}x${height}: space stays clear of the right-edge keyboard launcher`);
+  assert(boxes[1].x + 3 * (boxes[1].size + 6) >= boxes[3].x + boxes[3].size,
+    `${width}x${height}: WASD should remain compact`);
+  for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {
+    const a=boxes[i],b=boxes[j];
+    assert(!(a.x < b.x+b.size-0.01 && b.x < a.x+a.size-0.01 &&
+      a.y < b.y+b.size-0.01 && b.y < a.y+a.size-0.01), `${width}x${height}: preset overlap`);
+  }
+}
+const legacy = {version:1, active:0, profiles:[{name:'My empty layout',keys:[]},
+  {name:'Second',keys:[]},{name:'Third',keys:[]}]};
+assert.equal(c.decodeScreenGameConfig(JSON.stringify(legacy)).profiles[0].keys.length, 0,
+  'an explicitly saved empty profile is not silently replaced');
+config.profiles[0].keys = [];
 config.profiles[0].keys.push({ id: 1, target: 'k:26', x: 0, y: 1, size: 52, opacity: 70 });
 assert(c.validScreenGameConfig(config));
 const invalid = JSON.parse(JSON.stringify(config)); invalid.profiles[0].keys[0].x = 1.01;
 assert(!c.validScreenGameConfig(invalid), 'out of bounds positions rejected');
 invalid.profiles[0].keys[0].x = 0; invalid.profiles[0].keys[0].target = 'arbitrary';
 assert(!c.validScreenGameConfig(invalid), 'unrecognized actions rejected');
-assert.equal(c.decodeScreenGameConfig('broken').profiles[0].keys.length, 0);
+assert.equal(c.decodeScreenGameConfig('broken').profiles[0].keys.length, 7);
 c.Observed = value => value;
 vm.runInNewContext(ts.transpile(read('entry/src/main/ets/model/GameScreenRenderKey.ets').replace(/^import .*\n/gm, '')), c);
 Object.assign(c, c.exports);
@@ -25,7 +46,8 @@ const page = read('entry/src/main/ets/pages/RemotePage.ets');
 const syncStart = page.indexOf('\n  syncGameScreenKeys(');
 const syncSource = page.slice(syncStart, page.indexOf('\n  }', syncStart) + 4);
 vm.runInNewContext(ts.transpile('class Page {' + syncSource + '} exports.Page = Page;'), c);
-const pageObj = Object.assign(new c.exports.Page(), { gameScreenConfig: config, gameScreenKeys: [], gameScreenKeysProfile: -1 });
+const pageObj = Object.assign(new c.exports.Page(), { gameScreenConfig: config, gameScreenKeys: [], gameScreenKeysProfile: -1,
+  refreshGameScreenAvoidance() {} });
 pageObj.syncGameScreenKeys();
 const original = pageObj.gameScreenKeys[0];
 config.profiles[0].keys[0].target = 'mouse:left'; config.profiles[0].keys[0].size = 90;

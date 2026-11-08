@@ -5,6 +5,7 @@ const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmon
 const root = path.resolve(__dirname, '..');
 const widget = fs.readFileSync(path.join(root, 'entry/src/main/ets/widget/VirtualGamepad.ets'), 'utf8');
 const page = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
+const geometry = fs.readFileSync(path.join(root, 'entry/src/main/ets/model/VirtualGamepadGeometry.ets'), 'utf8');
 const method = name => {
   const start = widget.indexOf(`  ${name}(): number {`);
   assert(start >= 0, name);
@@ -13,6 +14,8 @@ const method = name => {
   return widget.slice(start, end + 2);
 };
 const context = { exports: {}, Math };
+vm.runInNewContext(ts.transpile(geometry), context);
+Object.assign(context, context.exports);
 vm.runInNewContext(ts.transpileModule('export class Layout {' +
   ['buttonSize', 'stickSize', 'padTop', 'faceLeft'].map(method).join('\n') + '\n}', {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS }
@@ -33,6 +36,15 @@ for (const [w, h] of [[240,160], [280,180], [320,200], [360,720], [640,360], [80
   add('left stick', 12, h - s - 12, s); add('right stick', w - s - 12, h - s - 12, s);
   add('L3', s + 20, h - b - 12, b); add('R3', w - s - b - 20, h - b - 12, b);
   add('C', w / 2 - b / 2, h - b - 12, b);
+  const actual = context.virtualGamepadRects(w, h);
+  assert.equal(actual.length, boxes.length, 'avoidance uses every real virtual control');
+  for (const box of boxes) {
+    const id = box.name === 'left stick' ? 'leftStick' : box.name === 'right stick' ? 'rightStick' : box.name;
+    const rect = actual.find(item => item.id === id);
+    assert(rect, `${w}x${h}: missing ${id}`);
+    for (const field of ['x', 'y', 'size']) assert(Math.abs(rect[field] - box[field]) < 0.01,
+      `${w}x${h}: shared geometry differs at ${box.name}.${field}`);
+  }
   for (const box of boxes) {
     assert(box.x >= -0.01 && box.y >= -0.01 && box.x + box.size <= w + 0.01 && box.y + box.size <= h + 0.01,
       `${w}x${h}: ${box.name} outside viewport`);

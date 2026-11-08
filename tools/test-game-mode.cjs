@@ -56,7 +56,7 @@ const pageObj = Object.assign(new ui.exports.Page(), {
   fileOnly: false, connectionStatus: 2, desktopWindowActive: true, pipSurfaceOwned: false,
   gameModeEnabled: false, gameModeAppliedFps: 0, gameModeRetryAfter: 0,
   showFileToast: msg => toast.push(msg), showGameReconnectChoice() {},
-  stopGamepadPolling() {}, startGamepadPolling() {}, finishGameScreenEdit() {}
+  stopGamepadPolling() {}, startGamepadPolling() {}, finishGameScreenEdit() {}, refreshGameScreenAvoidance() {}
 });
 pageObj.loadGameModePreference();
 assert.deepEqual(calls.pop(), ['mode', false], 'unconfigured peers default to off');

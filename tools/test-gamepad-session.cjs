@@ -39,11 +39,11 @@ const pageObj = Object.assign(new context.exports.Page(), { remotePageVisible: t
   showGestureHelp: false, showRemoteFileBrowser: false, showCommunicationPanel: false, showToolbarOrderEditor: false,
   showMobileActions: false, disconnectConfirmationVisible: false, showGamepadMappingDialog: false, showKeyboardMappingDialog: false,
   showKeyboardCalibration: false, showKeyboardSettings: false, showMouseSettings: false, showOrientationDialog: false,
-  physicalGamepadEnabled: false, virtualGamepadEnabled: false, gameScreenKeys: [], gamepadNativeStarted: false, gamepadRetryAt: 0,
+  physicalGamepadEnabled: false, virtualGamepadEnabled: false, gameScreenCoexistFits: true, gameScreenKeys: [], gamepadNativeStarted: false, gamepadRetryAt: 0,
   gamepadTimer: -1, gamepadGeneration: 0, remoteWidth: 1920, remoteHeight: 1080, lastAbsX: 10, lastAbsY: 20,
   relativeMouseEnabled: false, ensurePointerInitialized() {}, updatePointerFromDelta: (x, y) => ({ x, y }),
   peerPreferences: { get: key => values.get(key) || '', set: (key, value) => { values.set(key, value); return true; }, flush: () => true },
-  showFileToast: value => toasts.push(value)
+  showFileToast: value => toasts.push(value), refreshGameScreenAvoidance() {}, gamepadFloatingControlsPlan: () => ({ fits: true })
 });
 const fire = () => { const [id, fn] = timers.entries().next().value; timers.delete(id); now += 16; fn(); };
 pageObj.loadGamepadPreferences();

@@ -1,4 +1,6 @@
 import { translate } from '../utils/I18n'
+import { VirtualGamepadRect, virtualGamepadRect, virtualGamepadButtonSize, virtualGamepadStickSize,
+  virtualGamepadPadTop, virtualGamepadFaceLeft } from '../model/VirtualGamepadGeometry'
 
 // Transparent touch controls use the same logical codes as GameControllerKit.
 // The empty parts of the overlay do not consume remote-screen touches.
@@ -95,44 +97,42 @@ export struct VirtualGamepad {
 
   // Keep the top buttons, face buttons and sticks in separate vertical bands,
   // including short landscape windows. Full usability still needs device QA.
-  buttonSize(): number { return Math.max(20, Math.min(48, this.viewportWidth / 11, (this.viewportHeight - 85) / 4)) }
-  stickSize(): number { return Math.max(44, Math.min(116, this.viewportWidth * 0.22, this.viewportHeight * 0.27,
-    this.viewportHeight - this.buttonSize() * 4 - 24)) }
-  padTop(): number { return Math.max(this.buttonSize() + 8, this.viewportHeight - this.stickSize() - this.buttonSize() * 3 - 16) }
-  faceLeft(): number { return Math.max(0, this.viewportWidth - this.buttonSize() * 3 - 12) }
+  buttonSize(): number { return virtualGamepadButtonSize(this.viewportWidth, this.viewportHeight) }
+  stickSize(): number { return virtualGamepadStickSize(this.viewportWidth, this.viewportHeight) }
+  padTop(): number { return virtualGamepadPadTop(this.viewportWidth, this.viewportHeight) }
+  faceLeft(): number { return virtualGamepadFaceLeft(this.viewportWidth, this.viewportHeight) }
+  controlRect(id: string): VirtualGamepadRect { return virtualGamepadRect(id, this.viewportWidth, this.viewportHeight) }
 
   @Builder
-  button(label: string, code: number, x: number, y: number) {
+  button(label: string, code: number, id: string) {
     VirtualGamepadButton({ label, code, controlSize: this.buttonSize(), onButton: (key: number, down: boolean) => { this.onButton(key, down) } })
-      .position({ x, y })
+      .position({ x: this.controlRect(id).x, y: this.controlRect(id).y })
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      this.button('LT', 2309, 8, 8)
-      this.button('LB', 2307, 12 + this.buttonSize(), 8)
-      this.button('Select', 2311, Math.max(0, this.viewportWidth / 2 - this.buttonSize() * 1.6), 8)
-      this.button('Home', 2313, Math.max(0, this.viewportWidth / 2 - this.buttonSize() / 2), 8)
-      this.button('Start', 2312, this.viewportWidth / 2 + this.buttonSize() * 0.6, 8)
-      this.button('RB', 2308, this.viewportWidth - this.buttonSize() * 2 - 12, 8)
-      this.button('RT', 2310, this.viewportWidth - this.buttonSize() - 8, 8)
-      this.button('↑', 2012, 8 + this.buttonSize(), this.padTop())
-      this.button('←', 2014, 8, this.padTop() + this.buttonSize())
-      this.button('→', 2015, 8 + this.buttonSize() * 2, this.padTop() + this.buttonSize())
-      this.button('↓', 2013, 8 + this.buttonSize(), this.padTop() + this.buttonSize() * 2)
-      this.button('Y', 2305, this.faceLeft() + this.buttonSize(), this.padTop())
-      this.button('X', 2304, this.faceLeft(), this.padTop() + this.buttonSize())
-      this.button('B', 2302, this.faceLeft() + this.buttonSize() * 2, this.padTop() + this.buttonSize())
-      this.button('A', 2301, this.faceLeft() + this.buttonSize(), this.padTop() + this.buttonSize() * 2)
+      this.button('LT', 2309, 'LT')
+      this.button('LB', 2307, 'LB')
+      this.button('Select', 2311, 'Select')
+      this.button('Home', 2313, 'Home')
+      this.button('Start', 2312, 'Start')
+      this.button('RB', 2308, 'RB')
+      this.button('RT', 2310, 'RT')
+      this.button('↑', 2012, 'up')
+      this.button('←', 2014, 'left')
+      this.button('→', 2015, 'right')
+      this.button('↓', 2013, 'down')
+      this.button('Y', 2305, 'Y')
+      this.button('X', 2304, 'X')
+      this.button('B', 2302, 'B')
+      this.button('A', 2301, 'A')
       VirtualGamepadStick({ axis: 1, controlSize: this.stickSize(), onAxis: (axis: number, x: number, y: number) => { this.onAxis(axis, x, y) } })
-        .position({ x: 12, y: Math.max(0, this.viewportHeight - this.stickSize() - 12) })
+        .position({ x: this.controlRect('leftStick').x, y: this.controlRect('leftStick').y })
       VirtualGamepadStick({ axis: 2, controlSize: this.stickSize(), onAxis: (axis: number, x: number, y: number) => { this.onAxis(axis, x, y) } })
-        .position({ x: Math.max(0, this.viewportWidth - this.stickSize() - 12), y: Math.max(0, this.viewportHeight - this.stickSize() - 12) })
-      this.button('L3', 2314, this.stickSize() + 20, Math.max(0, this.viewportHeight - this.buttonSize() - 12))
-      this.button('R3', 2315, Math.max(0, this.viewportWidth - this.stickSize() - this.buttonSize() - 20),
-        Math.max(0, this.viewportHeight - this.buttonSize() - 12))
-      this.button('C', 2303, Math.max(0, this.viewportWidth / 2 - this.buttonSize() / 2),
-        Math.max(0, this.viewportHeight - this.buttonSize() - 12))
+        .position({ x: this.controlRect('rightStick').x, y: this.controlRect('rightStick').y })
+      this.button('L3', 2314, 'L3')
+      this.button('R3', 2315, 'R3')
+      this.button('C', 2303, 'C')
     // Only the controls participate in hit testing. They block the underlying
     // remote viewport; empty areas still allow normal remote touch interaction.
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)

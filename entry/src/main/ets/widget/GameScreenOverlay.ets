@@ -46,13 +46,21 @@ struct ScreenControlButton {
     }
   }
   label(): string { return GAMEPAD_TARGETS.find((target: GamepadTarget) => target.value === this.item.target)?.label ?? '?' }
+  displaySize(): number { return !this.editing && this.item.renderSize > 0 ? this.item.renderSize : this.item.size }
+  displayX(): number {
+    return !this.editing && this.item.renderX >= 0 ? this.item.renderX :
+      this.item.x * Math.max(0, this.viewportWidth - this.item.size)
+  }
+  displayY(): number {
+    return !this.editing && this.item.renderY >= 0 ? this.item.renderY :
+      this.item.y * Math.max(0, this.viewportHeight - this.item.size)
+  }
   build() {
     Stack({ alignContent: Alignment.Center }) {
       Text(this.label()).fontSize(this.label().length > 2 ? 11 : 16).fontColor(Color.White)
         .maxLines(2).textAlign(TextAlign.Center).hitTestBehavior(HitTestMode.None)
-    }.width(this.item.size).height(this.item.size).borderRadius(this.item.size / 2)
-      .position({ x: this.item.x * Math.max(0, this.viewportWidth - this.item.size),
-        y: this.item.y * Math.max(0, this.viewportHeight - this.item.size) })
+    }.width(this.displaySize()).height(this.displaySize()).borderRadius(this.displaySize() / 2)
+      .position({ x: this.displayX(), y: this.displayY() })
       .backgroundColor(this.pressed ? '#CC397FE1' : '#AA253C5B')
       .opacity(this.editing ? 1 : this.item.opacity / 100)
       .border({ width: this.selected && this.editing ? 3 : 1, color: this.selected && this.editing ? '#FF64AEFF' : '#AAC6DAFF' })

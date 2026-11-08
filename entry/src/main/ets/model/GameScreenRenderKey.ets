@@ -10,6 +10,11 @@ export class GameScreenRenderKey {
   y: number = 0;
   size: number = 52;
   opacity: number = 70;
+  // Absolute viewport positions for temporary coexistence with the gamepad.
+  // A negative value means to use the user's saved normalized layout.
+  renderX: number = -1;
+  renderY: number = -1;
+  renderSize: number = 0;
   constructor(key: ScreenGameKey) { this.apply(key); }
   apply(key: ScreenGameKey): void {
     this.id = key.id; this.target = key.target; this.x = key.x; this.y = key.y;

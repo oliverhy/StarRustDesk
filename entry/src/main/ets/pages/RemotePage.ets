@@ -11,8 +11,11 @@ import { RemoteWheelNormalizer, RemoteWheelStep } from '../model/RemoteWheelNorm
 import { GameModePolicy } from '../model/GameModePolicy';
 import { GameTransportHealth } from '../model/GameTransportHealth';
 import { GamepadMapper, GamepadMapping, GamepadTarget, GAMEPAD_TARGETS, decodeGamepadMapping, defaultGamepadMapping, validGamepadMapping } from '../model/GamepadMapping';
-import { ScreenGameConfig, ScreenGameKey, defaultScreenGameConfig, decodeScreenGameConfig } from '../model/GameScreenControls';
+import { ScreenGameConfig, ScreenGameKey, defaultScreenGameConfig, defaultScreenGameKeys, decodeScreenGameConfig } from '../model/GameScreenControls';
 import { GameScreenRenderKey } from '../model/GameScreenRenderKey';
+import { ScreenKeyAvoidanceResult, ScreenKeyPlacement, avoidVirtualGamepad } from '../model/GameScreenAvoidance';
+import { FloatingControlRect, FloatingControlPlan, avoidGamepadFloatingControls } from '../model/FloatingControlAvoidance';
+import { VirtualGamepadRect, virtualGamepadRects } from '../model/VirtualGamepadGeometry';
 import { GameScreenOverlay } from '../widget/GameScreenOverlay';
 import { GamepadMappingDialog } from '../widget/GamepadMappingDialog';
 import { VirtualGamepad } from '../widget/VirtualGamepad';
@@ -335,7 +338,13 @@ struct RemotePage {
   @State gameScreenSelected: number = -1;
   @State gameScreenConfig: ScreenGameConfig = defaultScreenGameConfig();
   @State gameScreenKeys: GameScreenRenderKey[] = [];
+  @State gameScreenCoexistFits: boolean = true;
+  @State gameScreenCoexistCompact: boolean = false;
+  private gameScreenAvoidanceLogState: string = '';
+  private gamepadFloatingPlanKey: string = '';
+  private gamepadFloatingPlanCache: FloatingControlPlan | undefined;
   private gameScreenKeysProfile: number = -1;
+  private gameScreenDefaultLayoutPending: boolean = false;
   private gameScreenBeforeEdit: string = '';
   private gameScreenEnabledBeforeEdit: boolean = false;
   @State gameRelativeSensitivity: number = 100;
@@ -2990,9 +2999,19 @@ struct RemotePage {
       if (this.showQualityMonitor) this.buildDraggableQualityMonitor();
       if (this.virtualGamepadEnabled && this.gamepadCanForward() && this.qualityViewportWidth > 0 && this.qualityViewportHeight > 0) {
         if (this.qualityViewportWidth >= 240 && this.qualityViewportHeight >= 160) {
-          VirtualGamepad({ viewportWidth: this.qualityViewportWidth, viewportHeight: this.qualityViewportHeight,
-            onButton: (code: number, down: boolean) => { this.gamepadVirtualButton(code, down) },
-            onAxis: (axis: number, x: number, y: number) => { this.gamepadVirtualAxis(axis, x, y) } })
+          if (this.gameScreenCoexistFits && this.gamepadFloatingControlsPlan().fits) {
+            VirtualGamepad({ viewportWidth: this.qualityViewportWidth, viewportHeight: this.qualityViewportHeight,
+              onButton: (code: number, down: boolean) => { this.gamepadVirtualButton(code, down) },
+              onAxis: (axis: number, x: number, y: number) => { this.gamepadVirtualAxis(axis, x, y) } })
+          } else if (!this.gameScreenCoexistFits) {
+            Text(translate('屏幕空间不足，虚拟手柄暂时隐藏；请放大窗口或减少屏幕按键', this.uiLanguage))
+              .fontSize(12).fontColor(Color.White).padding(8).backgroundColor('#B0283448')
+              .borderRadius(8).align(Alignment.Center).hitTestBehavior(HitTestMode.None)
+          } else {
+            Text(translate('屏幕空间不足，虚拟手柄暂时隐藏；请收起控制栏或放大窗口', this.uiLanguage))
+              .fontSize(12).fontColor(Color.White).padding(8).backgroundColor('#B0283448')
+              .borderRadius(8).align(Alignment.Center).hitTestBehavior(HitTestMode.None)
+          }
         } else {
           Text(translate('窗口过小，请放大窗口以使用虚拟手柄', this.uiLanguage))
             .fontSize(12).fontColor(Color.White).padding(8).backgroundColor('#B0283448')
@@ -3025,9 +3044,13 @@ struct RemotePage {
     .constraintSize({ maxHeight: this.getKeyboardViewportMaxHeight() })
     .clip(true)
     .onAreaChange((_oldValue: Area, newValue: Area) => {
+      const previousWidth: number = this.qualityViewportWidth;
       const previousHeight: number = this.qualityViewportHeight;
       this.qualityViewportWidth = Number(newValue.width);
       this.qualityViewportHeight = Number(newValue.height);
+      this.prepareDefaultGameScreenLayout();
+      if (Math.abs(previousWidth - this.qualityViewportWidth) > 0.5 ||
+        Math.abs(previousHeight - this.qualityViewportHeight) > 0.5) this.refreshGameScreenAvoidance();
       if (this.showKeyboardPanel && Math.abs(previousHeight - this.qualityViewportHeight) > 0.5) {
         this.traceRemoteKeyboardState('visible_viewport_changed');
       }
@@ -3567,8 +3590,8 @@ struct RemotePage {
       (this.controlMenu === 'orientation' ? 'view' : this.controlMenu));
     if (anchor) return { category: anchor.category, x: anchor.x - this.controlMenuPageOriginX,
       y: anchor.y - this.controlMenuPageOriginY, width: anchor.width, height: anchor.height };
-    return { category: this.controlMenu, x: this.getRemoteToolbarX(),
-      y: this.getRemoteToolbarY(), width: 48, height: 48 };
+    return { category: this.controlMenu, x: this.getRemoteToolbarDisplayX(),
+      y: this.getRemoteToolbarDisplayY(), width: 48, height: 48 };
   }
 
   isControlMenuBesideToolbar(): boolean {
@@ -3721,7 +3744,12 @@ struct RemotePage {
       case 'gameMode': this.setGameMode(!this.gameModeEnabled); return;
       case 'highPerformance': this.setHighPerformance(!this.highPerformanceEnabled); return;
       case 'physicalGamepad': this.setGamepadEnabled('physical', !this.physicalGamepadEnabled); return;
-      case 'virtualGamepad': this.setGamepadEnabled('virtual', !this.virtualGamepadEnabled); return;
+      case 'virtualGamepad':
+        this.setGamepadEnabled('virtual', !this.virtualGamepadEnabled);
+        // The menu suppresses remote input, so close it when enabling the
+        // virtual pad instead of leaving the newly enabled controls invisible.
+        if (this.virtualGamepadEnabled) this.setControlMenu('');
+        return;
       case 'gamepadSettings': this.openGamepadMappingDialog(); return;
       case 'privacy': if (this.privacyModeState !== 1) this.togglePrivacyMode(); return;
       case 'zoomIn': this.adjustZoom(0.25); return;
@@ -4266,7 +4294,7 @@ struct RemotePage {
     .borderRadius(16)
     .clip(true)
     .shadow({ radius: 12, color: '#26000000', offsetX: 0, offsetY: 4 })
-    .position({ x: this.getRemoteToolbarX(), y: this.getRemoteToolbarY() })
+    .position({ x: this.getRemoteToolbarDisplayX(), y: this.getRemoteToolbarDisplayY() })
     .zIndex(60)
   }
 
@@ -5787,15 +5815,12 @@ struct RemotePage {
     .shadow({ radius: 10, color: '#26000000', offsetX: 0, offsetY: 3 })
     .focusable(false)
     .accessibilityText(translate(this.showKeyboardPanel ? '收起键盘' : '打开键盘', this.uiLanguage))
-    .position({ x: this.getKeyboardLauncherBase(true) +
-      this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetX, true),
-      y: this.getKeyboardLauncherBase(false) +
-      this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetY, false) })
+    .position({ x: this.getKeyboardLauncherDisplayX(), y: this.getKeyboardLauncherDisplayY() })
     .zIndex(70)
     .gesture(PanGesture({ fingers: 1, direction: PanDirection.All, distance: 6 })
       .onActionStart(() => {
-        this.keyboardLauncherDragStartX = this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetX, true);
-        this.keyboardLauncherDragStartY = this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetY, false);
+        this.keyboardLauncherDragStartX = this.getKeyboardLauncherDisplayX() - this.getKeyboardLauncherBase(true);
+        this.keyboardLauncherDragStartY = this.getKeyboardLauncherDisplayY() - this.getKeyboardLauncherBase(false);
       })
       .onActionUpdate((event: GestureEvent) => {
         this.keyboardLauncherOffsetX = this.clampKeyboardLauncherOffset(
@@ -5870,72 +5895,197 @@ struct RemotePage {
       .position({ x: 0, y: 0 })
   }
 
+  gameConsoleWidth(): number {
+    const expandedWidth = 248 + Math.max(0, this.uiFontScale - 1) * 50;
+    const collapsedWidth = 146 + Math.max(0, this.uiFontScale - 1) * 28;
+    return Math.max(1, Math.min(this.gameConsoleExpanded ? Math.min(320, expandedWidth) : Math.min(190, collapsedWidth), this.qualityViewportWidth));
+  }
+
+  gameConsoleMaxY(): number {
+    const visibleHeight = this.gameConsoleExpanded ? Math.min(210, this.qualityViewportHeight) : Math.min(44, this.qualityViewportHeight);
+    return Math.max(0, this.qualityViewportHeight - visibleHeight);
+  }
+
+  gameConsoleUseTwoColumns(): boolean {
+    return this.gameConsoleWidth() >= 220 && this.uiFontScale <= 1.35;
+  }
+
+  toggleGameConsole(): void {
+    if (this.gameScreenEditing || Date.now() - this.gameConsoleDragAt <= 250) return;
+    try {
+      this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+        this.gameConsoleExpanded = !this.gameConsoleExpanded;
+      });
+    } catch (_error) {
+      this.gameConsoleExpanded = !this.gameConsoleExpanded;
+    }
+  }
+
+  gameConsoleActionLabel(key: string): string {
+    if (key === 'virtual') return '虚拟手柄';
+    if (key === 'screen') return '屏幕按键';
+    if (key === 'edit') return '编辑按键';
+    return '相对鼠标';
+  }
+
+  gameConsoleActionAccessibility(key: string): string {
+    if (key === 'virtual') return this.virtualGamepadEnabled ? '隐藏虚拟手柄' : '显示虚拟手柄';
+    if (key === 'screen') return this.gameScreenEnabled ? '隐藏屏幕按键' : '显示屏幕按键';
+    if (key === 'edit') return '编辑屏幕按键';
+    return this.relativeMouseEnabled ? '关闭相对鼠标' : '开启相对鼠标';
+  }
+
+  gameConsoleActionIcon(key: string): Resource {
+    if (key === 'virtual') return $r('app.media.game_console_gamepad');
+    if (key === 'screen') return $r('app.media.game_console_keys');
+    if (key === 'edit') return $r('app.media.game_console_edit');
+    return $r('app.media.glass_mouse');
+  }
+
+  gameConsoleActionSelected(key: string): boolean {
+    if (key === 'virtual') return this.virtualGamepadEnabled;
+    if (key === 'screen') return this.gameScreenEnabled;
+    return key === 'relative' && this.relativeMouseEnabled;
+  }
+
+  handleGameConsoleAction(key: string): void {
+    if (key === 'virtual') this.setGamepadEnabled('virtual', !this.virtualGamepadEnabled);
+    else if (key === 'screen') this.toggleGameScreenControls(!this.gameScreenEnabled);
+    else if (key === 'edit') this.beginGameScreenEdit();
+    else if (key === 'relative' && this.relativeMouseSupported) this.setRelativeMouse(!this.relativeMouseEnabled);
+  }
+
+  @Builder
+  buildGameConsoleAction(key: string) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 5 }) {
+        Image(this.gameConsoleActionIcon(key)).width(17).height(17).flexShrink(0)
+          .fillColor(this.gameConsoleActionSelected(key) ? this.controlSelectedTextColor() :
+            (this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON))
+          .hitTestBehavior(HitTestMode.None)
+        Text(translate(this.gameConsoleActionLabel(key), this.uiLanguage)).fontFamily(RemoteGlassStyle.FONT)
+          .fontSize(12).minFontSize(10).maxFontSize(12).maxLines(2).wordBreak(WordBreak.BREAK_ALL)
+          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST).layoutWeight(1)
+          .fontWeight(this.gameConsoleActionSelected(key) ? 600 : 500)
+          .fontColor(this.gameConsoleActionSelected(key) ? this.controlSelectedTextColor() : this.primaryTextColor())
+      }.width('100%').alignItems(VerticalAlign.Center)
+    }.id(`game-console-${key}`).layoutWeight(1).constraintSize({ minHeight: 42 })
+      .padding({ left: 7, right: 7, top: 4, bottom: 4 }).focusable(false)
+      .backgroundColor(this.gameConsoleActionSelected(key) ? this.controlSelectedBackgroundColor() :
+        (this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY))
+      .border({ width: 1, color: this.gameConsoleActionSelected(key) ? this.controlSelectedBorderColor() : this.themeBorderColor() })
+      .borderRadius(10).enabled(key !== 'relative' || this.relativeMouseSupported)
+      .opacity(key === 'relative' && !this.relativeMouseSupported ? 0.5 : 1)
+      .accessibilityText(translate(this.gameConsoleActionAccessibility(key), this.uiLanguage))
+      .onClick(() => { this.handleGameConsoleAction(key); })
+  }
+
   @Builder
   buildGameConsole() {
     Column({ space: 5 }) {
-      Row({ space: 6 }) {
-        Text('⋮⋮').fontSize(16).fontColor('#FFD5E5FF').width(24).height(34).textAlign(TextAlign.Center)
+      Row({ space: 4 }) {
+        Text('⋮⋮').fontSize(16).fontColor(this.secondaryTextColor()).width(24).height(34).textAlign(TextAlign.Center)
           .gesture(PanGesture({ fingers: 1, direction: PanDirection.All, distance: 4 })
-            .onActionStart(() => { this.gameConsoleDragX = this.gameConsoleX; this.gameConsoleDragY = this.gameConsoleY; })
+            .onActionStart(() => {
+              this.gameConsoleDragX = Math.max(0, Math.min(this.gameConsoleX, this.qualityViewportWidth - this.gameConsoleWidth()));
+              this.gameConsoleDragY = Math.max(0, Math.min(this.gameConsoleY, this.gameConsoleMaxY()));
+            })
             .onActionUpdate((event: GestureEvent) => {
               this.gameConsoleX = Math.max(0, Math.min(this.qualityViewportWidth - this.gameConsoleWidth(), this.gameConsoleDragX + event.offsetX));
-              this.gameConsoleY = Math.max(0, Math.min(this.qualityViewportHeight - 44, this.gameConsoleDragY + event.offsetY));
+              this.gameConsoleY = Math.max(0, Math.min(this.gameConsoleMaxY(), this.gameConsoleDragY + event.offsetY));
               this.gameConsoleDragAt = Date.now();
             }))
-        Text(translate('游戏', this.uiLanguage)).fontColor(Color.White).fontSize(13).fontWeight(FontWeight.Bold)
-          .layoutWeight(1).onClick(() => {
-            if (Date.now() - this.gameConsoleDragAt > 250 && !this.gameScreenEditing) this.gameConsoleExpanded = !this.gameConsoleExpanded;
-          })
-        Text(this.gameConsoleExpanded ? '−' : '+').fontColor(Color.White).fontSize(20).width(30).textAlign(TextAlign.Center)
-          .onClick(() => { if (!this.gameScreenEditing) this.gameConsoleExpanded = !this.gameConsoleExpanded; })
+        Image($r('app.media.game_console_gamepad')).width(19).height(19)
+          .fillColor(this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON)
+          .hitTestBehavior(HitTestMode.None)
+        Text(translate('游戏', this.uiLanguage)).fontFamily(RemoteGlassStyle.FONT).fontColor(this.primaryTextColor())
+          .fontSize(13).fontWeight(FontWeight.Bold).maxLines(1).minFontSize(10).maxFontSize(13).layoutWeight(1)
+          .onClick(() => { this.toggleGameConsole(); })
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.glass_chevron')).width(16).height(16)
+            .fillColor(this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON)
+            .rotate({ angle: this.gameConsoleExpanded ? 90 : 270 }).hitTestBehavior(HitTestMode.None)
+        }.id('game-console-collapse').width(32).height(34).padding(0).focusable(false)
+          .backgroundColor(Color.Transparent).borderRadius(8).enabled(!this.gameScreenEditing)
+          .accessibilityText(translate(this.gameConsoleExpanded ? '收起' : '展开', this.uiLanguage))
+          .onClick(() => { this.toggleGameConsole(); })
       }.width('100%').constraintSize({ minHeight: 34 })
       if (this.gameConsoleExpanded) {
         Scroll() {
           Column({ space: 7 }) {
-            Text(`${this.fpsText} · ${this.delayText} · ${this.routeText}`).fontSize(11).fontColor('#FFD6E5FA')
-              .width('100%').maxLines(2)
+            Text(`${this.fpsText} · ${this.delayText} · ${this.routeText}`).fontFamily(RemoteGlassStyle.FONT)
+              .fontSize(11).fontColor(this.secondaryTextColor()).width('100%').maxLines(2).wordBreak(WordBreak.BREAK_ALL)
             if (!this.gameScreenEditing) {
+              if (this.gameConsoleUseTwoColumns()) {
+                Row({ space: 6 }) { this.buildGameConsoleAction('virtual'); this.buildGameConsoleAction('screen'); }.width('100%')
+                Row({ space: 6 }) { this.buildGameConsoleAction('edit'); this.buildGameConsoleAction('relative'); }.width('100%')
+              } else {
+                Row() { this.buildGameConsoleAction('virtual'); }.width('100%')
+                Row() { this.buildGameConsoleAction('screen'); }.width('100%')
+                Row() { this.buildGameConsoleAction('edit'); }.width('100%')
+                Row() { this.buildGameConsoleAction('relative'); }.width('100%')
+              }
               if (this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length === 0) {
                 Text(translate('当前方案没有屏幕按键，请先编辑并添加', this.uiLanguage))
-                  .fontSize(11).fontColor('#FFD6E5FA').width('100%')
+                  .fontSize(11).fontColor(this.secondaryTextColor()).width('100%').wordBreak(WordBreak.BREAK_ALL)
               }
-              Button(translate(this.gameScreenEnabled ? '隐藏屏幕按键' : '显示屏幕按键', this.uiLanguage))
-                .fontSize(12).width('100%').onClick(() => { this.toggleGameScreenControls(!this.gameScreenEnabled); })
-              Button(translate('编辑屏幕按键', this.uiLanguage)).fontSize(12).width('100%')
-                .onClick(() => { this.beginGameScreenEdit(); })
-              Button(translate(this.relativeMouseEnabled ? '关闭相对鼠标' : '开启相对鼠标', this.uiLanguage))
-                .fontSize(12).width('100%').enabled(this.relativeMouseSupported)
-                .onClick(() => { this.setRelativeMouse(!this.relativeMouseEnabled); })
               if (!this.relativeMouseSupported) {
-                Text(translate('当前远端不支持相对鼠标', this.uiLanguage)).fontSize(11).fontColor('#FFCAD4E4').width('100%')
+                Text(translate('当前远端不支持相对鼠标', this.uiLanguage)).fontSize(11)
+                  .fontColor(this.secondaryTextColor()).width('100%').wordBreak(WordBreak.BREAK_ALL)
               }
-              Text(translate(`相对鼠标灵敏度 ${this.gameRelativeSensitivity}%`, this.uiLanguage))
-                .fontSize(11).fontColor(Color.White).width('100%')
-              Slider({ value: this.gameRelativeSensitivity, min: 25, max: 200, step: 5 }).width('100%')
+              Row({ space: 6 }) {
+                Text(translate('鼠标灵敏度', this.uiLanguage)).fontSize(11).fontColor(this.secondaryTextColor())
+                  .layoutWeight(1).wordBreak(WordBreak.BREAK_ALL)
+                Text(`${this.gameRelativeSensitivity}%`).fontSize(11).fontColor(this.secondaryTextColor())
+              }.width('100%')
+              Slider({ value: this.gameRelativeSensitivity, min: 25, max: 200, step: 5 }).width('100%').height(28)
                 .onChange((value: number) => {
                   this.gameRelativeSensitivity = Math.round(value / 5) * 5;
                   this.peerPreferences?.set('game-relative-sensitivity', this.gameRelativeSensitivity.toString());
                 })
-              Button(translate('手柄映射设置', this.uiLanguage)).fontSize(12).width('100%')
-                .onClick(() => { this.openGamepadMappingDialog(); })
+              Button({ type: ButtonType.Normal }) {
+                Row({ space: 7 }) {
+                  Image($r('app.media.game_console_gamepad')).width(17).height(17)
+                    .fillColor(this.isDarkMode ? RustDeskTheme.CONTROL_ICON_DARK : RustDeskTheme.CONTROL_ICON)
+                    .hitTestBehavior(HitTestMode.None)
+                  Text(translate('手柄映射设置', this.uiLanguage)).fontSize(12).fontColor(this.primaryTextColor())
+                    .layoutWeight(1).wordBreak(WordBreak.BREAK_ALL).heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+                  Image($r('app.media.glass_chevron')).width(14).height(14).fillColor(this.secondaryTextColor())
+                    .hitTestBehavior(HitTestMode.None)
+                }.width('100%')
+              }.id('game-console-mapping').width('100%').constraintSize({ minHeight: 42 }).padding({ left: 8, right: 8 })
+                .backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
+                .border({ width: 1, color: this.themeBorderColor() }).borderRadius(10).focusable(false)
+                .accessibilityText(translate('手柄映射设置', this.uiLanguage)).onClick(() => { this.openGamepadMappingDialog(); })
             } else {
               Text(translate('拖动按键调整位置，点击按键后修改', this.uiLanguage))
-                .fontSize(11).fontColor('#FFD6E5FA').width('100%')
+                .fontSize(11).fontColor(this.secondaryTextColor()).width('100%').wordBreak(WordBreak.BREAK_ALL)
               Select(this.gameScreenConfig.profiles.map((profile): SelectOption => ({ value: profile.name })))
                 .selected(this.gameScreenConfig.active).value(this.gameScreenConfig.profiles[this.gameScreenConfig.active].name)
-                .fontColor(Color.White).backgroundColor('#FF35475F')
+                .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
                 .width('100%').onSelect((index: number) => {
                   if (index >= 0 && index < 3) { this.gameScreenConfig.active = index; this.gameScreenSelected = -1; this.screenGameClone(); }
                 })
-              TextInput({ text: this.gameScreenConfig.profiles[this.gameScreenConfig.active].name, placeholder: '方案名称' })
-                .fontColor(Color.White).placeholderColor('#FFC2CFE0').backgroundColor('#FF35475F')
+              TextInput({ text: this.gameScreenConfig.profiles[this.gameScreenConfig.active].name, placeholder: translate('方案名称', this.uiLanguage) })
+                .fontColor(this.primaryTextColor()).placeholderColor(this.secondaryTextColor())
+                .backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
                 .width('100%').height(36).maxLength(16).onChange((value: string) => {
                   const name: string = value.trim();
                   this.gameScreenConfig.profiles[this.gameScreenConfig.active].name = name || `方案 ${this.gameScreenConfig.active + 1}`;
                 })
+              if (this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length === 0) {
+                Button(translate('加载默认按键', this.uiLanguage)).fontSize(11).width('100%')
+                  .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
+                  .border({ width: 1, color: this.themeBorderColor() }).borderRadius(9)
+                  .onClick(() => { this.loadDefaultGameScreenKeys(); })
+              }
               Row({ space: 5 }) {
-                Button(translate('添加按键', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.addGameScreenKey(); })
+                Button(translate('添加按键', this.uiLanguage)).fontSize(11).layoutWeight(1)
+                  .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
+                  .border({ width: 1, color: this.themeBorderColor() }).borderRadius(9).onClick(() => { this.addGameScreenKey(); })
                 Button(translate('删除', this.uiLanguage)).fontSize(11).layoutWeight(1).enabled(this.gameScreenSelected >= 0)
+                  .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
+                  .border({ width: 1, color: this.themeBorderColor() }).borderRadius(9)
                   .onClick(() => {
                     const profile = this.gameScreenConfig.profiles[this.gameScreenConfig.active];
                     profile.keys = profile.keys.filter((key: ScreenGameKey) => key.id !== this.gameScreenSelected);
@@ -5943,44 +6093,49 @@ struct RemotePage {
                   })
               }.width('100%')
               if (this.screenGameSelectedKey()) {
-                Text(translate('按键功能', this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Text(translate('按键功能', this.uiLanguage)).fontSize(11).fontColor(this.primaryTextColor()).width('100%')
                 Select(GAMEPAD_TARGETS.filter((target: GamepadTarget) => target.value !== 'none')
                   .map((target: GamepadTarget): SelectOption => ({ value: translate(target.label, this.uiLanguage) })))
                   .value(translate(GAMEPAD_TARGETS.find((target: GamepadTarget) => target.value === this.screenGameSelectedKey()?.target)?.label ?? '', this.uiLanguage))
-                  .fontColor(Color.White).backgroundColor('#FF35475F')
+                  .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
                   .width('100%').onSelect((index: number) => {
                     const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
                     const choices: GamepadTarget[] = GAMEPAD_TARGETS.filter((target: GamepadTarget) => target.value !== 'none');
                     if (key && index >= 0 && index < choices.length) { key.target = choices[index].value; this.screenGameClone(); }
                   })
-                Text(translate(`大小 ${this.screenGameSelectedKey()?.size ?? 52}`, this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Text(translate(`大小 ${this.screenGameSelectedKey()?.size ?? 52}`, this.uiLanguage)).fontSize(11).fontColor(this.primaryTextColor()).width('100%')
                 Slider({ value: this.screenGameSelectedKey()?.size ?? 52, min: 36, max: 100, step: 1 }).width('100%')
                   .onChange((value: number) => { const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
                     if (key) { key.size = Math.round(value); this.screenGameClone(); } })
-                Text(translate(`不透明度 ${this.screenGameSelectedKey()?.opacity ?? 70}%`, this.uiLanguage)).fontSize(11).fontColor(Color.White).width('100%')
+                Text(translate(`不透明度 ${this.screenGameSelectedKey()?.opacity ?? 70}%`, this.uiLanguage)).fontSize(11).fontColor(this.primaryTextColor()).width('100%')
                 Slider({ value: this.screenGameSelectedKey()?.opacity ?? 70, min: 20, max: 100, step: 1 }).width('100%')
                   .onChange((value: number) => { const key: ScreenGameKey | undefined = this.screenGameSelectedKey();
                     if (key) { key.opacity = Math.round(value); this.screenGameClone(); } })
               }
               Row({ space: 5 }) {
-                Button(translate('取消', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.finishGameScreenEdit(false); })
-                Button(translate('保存', this.uiLanguage)).fontSize(11).layoutWeight(1).onClick(() => { this.finishGameScreenEdit(true); })
+                Button(translate('取消', this.uiLanguage)).fontSize(11).layoutWeight(1)
+                  .fontColor(this.primaryTextColor()).backgroundColor(this.isDarkMode ? RemoteGlassStyle.KEY_DARK : RemoteGlassStyle.KEY)
+                  .border({ width: 1, color: this.themeBorderColor() }).borderRadius(9).onClick(() => { this.finishGameScreenEdit(false); })
+                Button(translate('保存', this.uiLanguage)).fontSize(11).layoutWeight(1)
+                  .fontColor(this.controlSelectedTextColor()).backgroundColor(this.controlSelectedBackgroundColor())
+                  .border({ width: 1, color: this.controlSelectedBorderColor() }).borderRadius(9).onClick(() => { this.finishGameScreenEdit(true); })
               }.width('100%')
             }
           }.width('100%')
         }.width('100%').constraintSize({ maxHeight: Math.max(1, this.qualityViewportHeight -
-          Math.max(0, Math.min(this.gameConsoleY, this.qualityViewportHeight - 44)) - 52) })
+          Math.max(0, Math.min(this.gameConsoleY, this.gameConsoleMaxY())) - 52) })
           .scrollBar(BarState.Auto)
       }
-    }.width(this.gameConsoleWidth()).padding(6).backgroundColor('#DE101D30').borderRadius(14)
-      .border({ width: 1, color: '#777DA9E2' })
+    }.id('game-console').width(this.gameConsoleWidth()).padding(8)
+      .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
+      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THIN, { colorMode: this.isDarkMode ? ThemeColorMode.DARK :
+        ThemeColorMode.LIGHT, adaptiveColor: AdaptiveColor.DEFAULT, scale: 0.35 })
+      .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' }).borderRadius(16)
+      .shadow({ radius: 12, color: '#26000000', offsetX: 0, offsetY: 4 })
       .position({ x: Math.max(0, Math.min(this.gameConsoleX, this.qualityViewportWidth - this.gameConsoleWidth())),
-        y: Math.max(0, Math.min(this.gameConsoleY, this.qualityViewportHeight - 44)) })
+        y: Math.max(0, Math.min(this.gameConsoleY, this.gameConsoleMaxY())) })
       .zIndex(45).hitTestBehavior(HitTestMode.Default)
-  }
-
-  gameConsoleWidth(): number {
-    return Math.max(1, Math.min(this.gameConsoleExpanded ? 230 : 100, this.qualityViewportWidth));
+      .onHover((hovered: boolean) => { this.handleNonRemoteHover(hovered); })
   }
 
   @Builder
@@ -6508,7 +6663,9 @@ struct RemotePage {
 
   loadGamepadPreferences(): void {
     this.gamepadMapping = decodeGamepadMapping(this.peerPreferences?.get('gamepad-map-v1') ?? '');
-    this.gameScreenConfig = decodeScreenGameConfig(this.peerPreferences?.get('game-screen-controls-v1') ?? '');
+    const savedScreenConfig: string = this.peerPreferences?.get('game-screen-controls-v1') ?? '';
+    this.gameScreenConfig = decodeScreenGameConfig(savedScreenConfig);
+    this.gameScreenDefaultLayoutPending = savedScreenConfig.length === 0;
     this.gameScreenKeysProfile = -1;
     this.syncGameScreenKeys();
     this.gameScreenEnabled = this.peerPreferences?.get('game-screen-enabled') === '1';
@@ -6519,6 +6676,10 @@ struct RemotePage {
     this.gamepadMapper.setMapping(this.gamepadMapping);
     this.physicalGamepadEnabled = !this.fileOnly && this.peerPreferences?.get('gamepad-physical') === '1';
     this.virtualGamepadEnabled = !this.fileOnly && this.peerPreferences?.get('gamepad-virtual') === '1';
+    this.refreshGameScreenAvoidance();
+    RustDeskNapi.appendDiagnosticLog('game-mode', `screen_layout_loaded configured=${savedScreenConfig.length > 0 ? 1 : 0} ` +
+      `profile=${this.gameScreenConfig.active + 1} keys=${this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length} ` +
+      `screen_enabled=${this.gameScreenEnabled ? 1 : 0} virtual_enabled=${this.virtualGamepadEnabled ? 1 : 0}`);
     if (this.physicalGamepadEnabled || this.virtualGamepadEnabled || (this.gameScreenEnabled && this.gameModeEnabled)) this.startGamepadPolling();
   }
 
@@ -6541,6 +6702,7 @@ struct RemotePage {
         RustDeskNapi.stopGamepadMonitor(); this.gamepadNativeStarted = false;
       }
     } else this.virtualGamepadEnabled = enabled;
+    this.refreshGameScreenAvoidance();
     let saved: boolean = this.peerPreferences?.set(kind === 'physical' ? 'gamepad-physical' : 'gamepad-virtual', enabled ? '1' : '0') ?? false;
     if (saved) saved = this.peerPreferences?.flush() ?? false;
     RustDeskNapi.appendDiagnosticLog('gamepad', `toggle kind=${kind} enabled=${enabled ? 1 : 0} saved=${saved ? 1 : 0}`);
@@ -6612,7 +6774,7 @@ struct RemotePage {
   }
 
   gamepadVirtualButton(code: number, down: boolean): void {
-    if (down && !this.gamepadCanForward()) return;
+    if (down && (!this.gamepadCanForward() || !this.gameScreenCoexistFits || !this.gamepadFloatingControlsPlan().fits)) return;
     this.gamepadMapper?.button(-1, code, down);
   }
 
@@ -6624,6 +6786,14 @@ struct RemotePage {
   screenGameClone(): void {
     this.gameScreenConfig = decodeScreenGameConfig(JSON.stringify(this.gameScreenConfig));
     this.syncGameScreenKeys();
+  }
+
+  prepareDefaultGameScreenLayout(): void {
+    if (!this.gameScreenDefaultLayoutPending || this.qualityViewportWidth <= 0 || this.qualityViewportHeight <= 0 ||
+      this.gameScreenEditing) return;
+    this.gameScreenDefaultLayoutPending = false;
+    this.gameScreenConfig.profiles[0].keys = defaultScreenGameKeys(this.qualityViewportWidth, this.qualityViewportHeight);
+    this.screenGameClone();
   }
 
   syncGameScreenKeys(): void {
@@ -6638,6 +6808,47 @@ struct RemotePage {
     const changed: boolean = next.length !== previous.length || next.some((item: GameScreenRenderKey, index: number) => item !== previous[index]);
     this.gameScreenKeysProfile = profile;
     if (changed || previous !== this.gameScreenKeys) this.gameScreenKeys = next;
+    this.refreshGameScreenAvoidance();
+  }
+
+  refreshGameScreenAvoidance(): void {
+    const active: boolean = this.gameModeEnabled && this.gameScreenEnabled && this.virtualGamepadEnabled &&
+      !this.gameScreenEditing && this.qualityViewportWidth >= 240 && this.qualityViewportHeight >= 160;
+    const plan: ScreenKeyAvoidanceResult | undefined = active ?
+      avoidVirtualGamepad(this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys,
+        this.qualityViewportWidth, this.qualityViewportHeight) : undefined;
+    const fits: boolean = !active || (plan !== undefined && plan.fits);
+    const compact: boolean = active && plan !== undefined && plan.fits && plan.resized > 0;
+    const oldFits: boolean = this.gameScreenCoexistFits;
+    const oldCompact: boolean = this.gameScreenCoexistCompact;
+    let changed: boolean = false;
+    for (const item of this.gameScreenKeys) {
+      const placement: ScreenKeyPlacement | undefined = active && plan?.fits ?
+        plan.placements.find((value: ScreenKeyPlacement): boolean => value.id === item.id) : undefined;
+      if (item.renderX !== (placement?.x ?? -1) || item.renderY !== (placement?.y ?? -1) ||
+        item.renderSize !== (placement?.size ?? 0)) changed = true;
+    }
+    // A moving button must not leave its remote key held down.
+    if (changed && !this.gameScreenEditing) this.gamepadMapper?.releaseDevice(-2);
+    for (const item of this.gameScreenKeys) {
+      const placement: ScreenKeyPlacement | undefined = active && plan?.fits ?
+        plan.placements.find((value: ScreenKeyPlacement): boolean => value.id === item.id) : undefined;
+      item.renderX = placement?.x ?? -1;
+      item.renderY = placement?.y ?? -1;
+      item.renderSize = placement?.size ?? 0;
+    }
+    this.gameScreenCoexistFits = fits;
+    this.gameScreenCoexistCompact = compact;
+    const signature: string = `${active ? 1 : 0}:${fits ? 1 : 0}:${compact ? 1 : 0}:${plan?.moved ?? 0}`;
+    if (signature !== this.gameScreenAvoidanceLogState) {
+      this.gameScreenAvoidanceLogState = signature;
+      RustDeskNapi.appendDiagnosticLog('game-mode', `control_layout coexist=${active ? 1 : 0} fits=${fits ? 1 : 0} ` +
+        `compact=${compact ? 1 : 0} moved=${plan?.moved ?? 0} keys=${this.gameScreenKeys.length}`);
+    }
+    if (active && this.remotePageVisible && this.connectionStatus === ConnectionStatus.CONNECTED) {
+      if (!fits && oldFits) this.showFileToast('屏幕空间不足，虚拟手柄暂时隐藏；请放大窗口或减少屏幕按键');
+      else if (compact && !oldCompact) this.showFileToast('屏幕空间有限，按键已临时缩小');
+    }
   }
 
   screenGameSelectedKey(): ScreenGameKey | undefined {
@@ -6654,13 +6865,28 @@ struct RemotePage {
 
   beginGameScreenEdit(): void {
     if (this.gameScreenEditing) return;
+    this.prepareDefaultGameScreenLayout();
     this.gamepadMapper?.releaseAll();
     this.gameScreenBeforeEdit = JSON.stringify(this.gameScreenConfig);
     this.gameScreenEnabledBeforeEdit = this.gameScreenEnabled;
     this.gameScreenEnabled = true;
     this.gameScreenSelected = -1;
     this.gameScreenEditing = true;
+    this.refreshGameScreenAvoidance();
+    RustDeskNapi.appendDiagnosticLog('game-mode', `screen_edit_started profile=${this.gameScreenConfig.active + 1} ` +
+      `keys=${this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length}`);
     this.startGamepadPolling();
+  }
+
+  loadDefaultGameScreenKeys(): void {
+    if (!this.gameScreenEditing) return;
+    const profile = this.gameScreenConfig.profiles[this.gameScreenConfig.active];
+    // Only fill an empty profile; never overwrite existing user mappings.
+    if (profile.keys.length > 0) return;
+    profile.keys = defaultScreenGameKeys(this.qualityViewportWidth, this.qualityViewportHeight);
+    this.gameScreenSelected = -1;
+    this.screenGameClone();
+    RustDeskNapi.appendDiagnosticLog('game-mode', `screen_preset_loaded profile=${this.gameScreenConfig.active + 1} keys=${profile.keys.length}`);
   }
 
   finishGameScreenEdit(save: boolean): void {
@@ -6677,6 +6903,7 @@ struct RemotePage {
         preferences?.set('game-screen-enabled', this.gameScreenEnabledBeforeEdit ? '1' : '0');
         this.showFileToast('屏幕按键保存失败，请重试'); return;
       }
+      this.gameScreenDefaultLayoutPending = false;
       RustDeskNapi.appendDiagnosticLog('game-mode', `screen_layout_saved profile=${this.gameScreenConfig.active + 1} keys=${this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length}`);
     } else {
       this.gameScreenConfig = decodeScreenGameConfig(this.gameScreenBeforeEdit);
@@ -6685,6 +6912,7 @@ struct RemotePage {
     }
     this.gamepadMapper?.releaseAll();
     this.gameScreenEditing = false; this.gameScreenSelected = -1;
+    this.refreshGameScreenAvoidance();
     if (!this.gameScreenEnabled && !this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
   }
 
@@ -6695,20 +6923,28 @@ struct RemotePage {
     while (keys.some((key: ScreenGameKey) => key.id === id)) id++;
     keys.push({ id, target: 'k:44', x: 0.7, y: 0.55, size: 52, opacity: 70 });
     this.gameScreenSelected = id; this.screenGameClone();
+    RustDeskNapi.appendDiagnosticLog('game-mode', `screen_key_added profile=${this.gameScreenConfig.active + 1} keys=${keys.length}`);
   }
 
   toggleGameScreenControls(enabled: boolean): void {
+    if (enabled) this.prepareDefaultGameScreenLayout();
     this.gamepadMapper?.releaseAll();
     this.gameScreenEnabled = enabled;
+    this.refreshGameScreenAvoidance();
     let saved: boolean = this.peerPreferences?.set('game-screen-enabled', enabled ? '1' : '0') ?? false;
     if (saved) saved = this.peerPreferences?.flush() ?? false;
     if (!saved) this.showFileToast('屏幕按键状态未保存');
+    else if (enabled && this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length === 0) {
+      this.showFileToast('当前方案没有屏幕按键，请先编辑并添加');
+    }
+    RustDeskNapi.appendDiagnosticLog('game-mode', `screen_controls_toggle enabled=${enabled ? 1 : 0} ` +
+      `keys=${this.gameScreenConfig.profiles[this.gameScreenConfig.active].keys.length} saved=${saved ? 1 : 0}`);
     if (enabled) this.startGamepadPolling();
     else if (!this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
   }
 
   gamepadVirtualAxis(axis: number, x: number, y: number): void {
-    if (!this.gamepadCanForward()) { x = 0; y = 0; }
+    if (!this.gamepadCanForward() || !this.gameScreenCoexistFits || !this.gamepadFloatingControlsPlan().fits) { x = 0; y = 0; }
     this.gamepadMapper?.axis(-1, axis, x, y);
   }
 
@@ -6832,6 +7068,7 @@ struct RemotePage {
       this.gameConsoleExpanded = false;
       if (!this.physicalGamepadEnabled && !this.virtualGamepadEnabled) this.stopGamepadPolling();
     } else if (this.gameScreenEnabled) this.startGamepadPolling();
+    this.refreshGameScreenAvoidance();
     ConnectionService.setGameTransportEnabled(enabled);
     this.gameTransportHealth.reset();
     this.gameModePolicy.reset();
@@ -10000,8 +10237,8 @@ struct RemotePage {
   beginRemoteToolbarDrag(): void {
     this.cancelPcToolbarAutoCollapse();
     this.remoteToolbarDragging = true;
-    this.remoteToolbarDragStartX = this.getRemoteToolbarX() - this.getRemoteToolbarBaseX();
-    this.remoteToolbarDragStartY = this.getRemoteToolbarY() - this.getRemoteToolbarBaseY();
+    this.remoteToolbarDragStartX = this.getRemoteToolbarDisplayX() - this.getRemoteToolbarBaseX();
+    this.remoteToolbarDragStartY = this.getRemoteToolbarDisplayY() - this.getRemoteToolbarBaseY();
   }
 
   updateRemoteToolbarDrag(offsetX: number, offsetY: number): void {
@@ -10071,6 +10308,46 @@ struct RemotePage {
       this.pageHeight > 0 ? this.pageHeight : 640, this.getRemoteToolbarCurrentHeight());
     return this.getRemoteToolbarBaseY() + this.clampRemoteToolbarOffsetY(this.remoteToolbarOffsetY);
   }
+
+  gamepadFloatingControlsPlan(): FloatingControlPlan {
+    const toolbar: FloatingControlRect = { x: this.getRemoteToolbarX(), y: this.getRemoteToolbarY(),
+      width: this.getRemoteToolbarCurrentWidth(), height: this.getRemoteToolbarCurrentHeight() };
+    const keyboard: FloatingControlRect = { x: this.getKeyboardLauncherBase(true) +
+      this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetX, true),
+      y: this.getKeyboardLauncherBase(false) + this.clampKeyboardLauncherOffset(this.keyboardLauncherOffsetY, false),
+      width: 52, height: 46 };
+    const original: FloatingControlPlan = { fits: true, toolbar, keyboard };
+    // Menus may temporarily hide the gamepad. Keep the floating positions
+    // stable while opening one, then restore them when the gamepad is off.
+    if (!this.virtualGamepadEnabled || this.fileOnly || this.pipSurfaceOwned || this.showKeyboardPanel ||
+      this.gameScreenEditing || !this.gameScreenCoexistFits || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      this.qualityViewportWidth < 240 || this.qualityViewportHeight < 160 || this.pageWidth <= 0 || this.pageHeight <= 0) return original;
+    const obstacles: FloatingControlRect[] = virtualGamepadRects(this.qualityViewportWidth, this.qualityViewportHeight)
+      .map((rect: VirtualGamepadRect): FloatingControlRect => ({ x: rect.x, y: rect.y, width: rect.size, height: rect.size }));
+    if (this.gameModeEnabled && this.gameScreenEnabled) {
+      for (const key of this.gameScreenKeys) {
+        const size: number = key.renderSize > 0 ? key.renderSize : key.size;
+        const x: number = key.renderX >= 0 ? key.renderX : key.x * Math.max(0, this.qualityViewportWidth - key.size);
+        const y: number = key.renderY >= 0 ? key.renderY : key.y * Math.max(0, this.qualityViewportHeight - key.size);
+        obstacles.push({ x, y, width: size, height: size });
+      }
+    }
+    const hasKeyboard: boolean = this.isHandheldDevice();
+    const key: string = `${this.pageWidth}:${this.pageHeight}:${hasKeyboard ? 1 : 0}:` +
+      `${toolbar.x}:${toolbar.y}:${toolbar.width}:${toolbar.height}:${keyboard.x}:${keyboard.y}:` +
+      obstacles.map((rect: FloatingControlRect): string => `${rect.x},${rect.y},${rect.width},${rect.height}`).join(';');
+    if (this.gamepadFloatingPlanCache && this.gamepadFloatingPlanKey === key) return this.gamepadFloatingPlanCache;
+    const plan: FloatingControlPlan = avoidGamepadFloatingControls(this.pageWidth, this.pageHeight,
+      toolbar, keyboard, hasKeyboard, obstacles);
+    this.gamepadFloatingPlanKey = key;
+    this.gamepadFloatingPlanCache = plan;
+    return plan;
+  }
+
+  getRemoteToolbarDisplayX(): number { return this.gamepadFloatingControlsPlan().toolbar.x; }
+  getRemoteToolbarDisplayY(): number { return this.gamepadFloatingControlsPlan().toolbar.y; }
+  getKeyboardLauncherDisplayX(): number { return this.gamepadFloatingControlsPlan().keyboard.x; }
+  getKeyboardLauncherDisplayY(): number { return this.gamepadFloatingControlsPlan().keyboard.y; }
 
   getKeyboardToolsWidth(): number {
     if (this.isHandheldLandscape()) {

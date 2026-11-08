@@ -31,6 +31,7 @@ function test(name, run) { run(); checks++; console.log('PASS ' + name); }
 test('screen controls are scoped, validated, and restore without pressed keys', () => {
   const h = harness(), a = h.make('srv', 'A'), b = h.make('srv', 'B');
   const config = h.context.defaultScreenGameConfig();
+  config.profiles[0].keys = [];
   config.profiles[0].name = '游戏 A';
   config.profiles[0].keys.push({ id: 1, target: 'mouse:left', x: 0.25, y: 0.75, size: 52, opacity: 70 });
   assert(a.set('game-screen-controls-v1', JSON.stringify(config)));

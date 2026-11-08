@@ -52,7 +52,9 @@ function page(type = 'phone', extra = {}, options = new Map()) {
     controlMenu: '', leftButtonHeld: false, rightButtonHeld: false, localPointerGestureActive: false,
     showKeyboardPanel: false, keyboardToolsCollapsed: true, keyboardLayoutHeight: 0,
     handheldLayoutInitialized: false, showVirtualMouse: false,
-    getUIContext: () => ({ animateTo(_options, apply) { apply(); } }), ...extra
+    getUIContext: () => ({ animateTo(_options, apply) { apply(); } }),
+    getRemoteToolbarDisplayX() { return this.getRemoteToolbarX(); },
+    getRemoteToolbarDisplayY() { return this.getRemoteToolbarY(); }, ...extra
   });
   return { p, writes, timers, logs, options, context,
     fire() { const pending = [...timers.values()]; timers.clear(); pending.forEach(({ fn }) => fn()); } };

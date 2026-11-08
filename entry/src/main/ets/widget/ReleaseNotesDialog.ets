@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.1'
-export const RELEASE_NOTES_BUILD: string = '2000001'
+export const RELEASE_NOTES_VERSION: string = '2.0.2'
+export const RELEASE_NOTES_BUILD: string = '2000002'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.2（2000002）· 游戏控制与悬浮布局优化', [
+            '重新设计游戏悬浮控制台，与远控功能栏统一风格；可快速切换虚拟手柄、屏幕按键和相对鼠标，并编辑按键或调整灵敏度。',
+            '修复新建游戏按键方案没有默认屏幕按键的问题，提供方向、鼠标及空格键预设；已有自定义或空方案不会被覆盖，空方案可手动加载默认按键。',
+            '虚拟手柄和屏幕按键同时开启时自动避让，尽量保留方向键组合排列；关闭手柄后恢复原位置，不改写已保存的按键方案。',
+            '悬浮键盘和“控”栏在手柄显示时自动避让手柄及屏幕按键，保留手动拖动与展开、折叠；空间不足时会提示并暂时隐藏手柄，避免遮挡误触。',
+            '优化屏幕按键编辑与取消流程，调整布局时释放已按下的屏幕键；补充布局诊断，不记录密码、令牌或输入内容。虚拟手柄仍通过键鼠映射操作，并非原生手柄透传。'
+          ])
           this.buildSection('2.0.1（2000001）· 局域网发现与连接体验优化', [
             '新增局域网设备发现，兼容官方 RustDesk 客户端的发现协议；无需修改服务器，可通过设备 ID 连接，或在远端允许时选择 IP 直连。',
             '局域网发现不等于身份验证：连接前需确认设备，发现设备不会自动使用已保存密码；未加密连接保留风险提示并需单独确认。',

@@ -80,6 +80,7 @@ function windowHarness(originalDecor = true, deviceType = 'pc') {
       getControlMenuLabelWidth: () => 0,
       isPcDevice: () => false, isHandheldDevice: () => true, isHandheldLandscape: () => false,
       isLargeLayout: () => false, getRemoteToolbarX: () => 8, getRemoteToolbarY: () => 620,
+      getRemoteToolbarDisplayX: () => 8, getRemoteToolbarDisplayY: () => 620,
       getSideToolbarHeight: () => 338
     });
     for (const [width, height, pc, landscape, fullscreen, immersive] of [
