@@ -11,13 +11,13 @@ const keyboard = (id = 7, uniq = 'test-only-keyboard-identity') => ({
   sources: ['keyboard'], isVirtual: false, type: 2,
 });
 function harness(disk = new Map()) {
-  const calls = [], logs = [], timers = new Map(), listeners = new Set(), states = [], applies = [];
+  const calls = [], logs = [], timers = new Map(), listeners = new Set(), states = [], applies = [], bindingStates = [];
   let timer = 0, devices = [keyboard()], list = null, failInfo = -1, failWrite = false, silentWrite = false, failListener = false;
   const context = vm.createContext({ exports: {}, hilog: { info() {} },
     setTimeout(fn, ms) { const id = ++timer; timers.set(id, { fn, ms }); return id; },
     clearTimeout(id) { timers.delete(id); },
     inputDevice: {
-      KeyboardType: { ALPHABETIC_KEYBOARD: 2 },
+      KeyboardType: { UNKNOWN: 1, ALPHABETIC_KEYBOARD: 2 },
       async getDeviceList() { return list ? list() : devices.map(d => d.id); },
       async getDeviceInfo(id) { if (id === failInfo) throw Error('test query failure'); return devices.find(d => d.id === id); },
       async getKeyboardType(id) { return devices.find(d => d.id === id).type; },
@@ -45,8 +45,10 @@ function harness(disk = new Map()) {
     vm.runInContext(compiled.outputText, context, { filename: file });
     Object.assign(context, context.exports);
   }
-  const service = new context.PhysicalKeyboardLayoutService(s => states.push(s), swap => applies.push(swap));
-  return { context, service, states, applies, calls, logs, disk, timers, listeners, S: context.ConnectionService,
+  const service = new context.PhysicalKeyboardLayoutService(s => states.push(s), (swap, bindings) => {
+    applies.push(swap); bindingStates.push(plain(bindings));
+  });
+  return { context, service, states, applies, bindingStates, calls, logs, disk, timers, listeners, S: context.ConnectionService,
     devices(value) { devices = value; }, list(value) { list = value; }, failInfo(value) { failInfo = value; },
     failWrite(value) { failWrite = value; }, silentWrite(value) { silentWrite = value; }, failListener(value) { failListener = value; },
     change() { for (const listener of listeners) listener({ type: 'change', deviceId: 7 }); },
@@ -136,10 +138,69 @@ test('multiple keyboards pause correction and reject calibration, including a ch
   await tick(); assert.equal(h.service.snapshot().count, 2); assert.equal(h.applies.at(-1), false);
   assert.equal(h.service.saveCalibration(h.service.snapshot(), true), false);
 });
-test('mouse, virtual and non-alphabetic devices do not masquerade as another full keyboard', async () => {
+test('multi-device capture uses only enumerated devices and accepts an explicitly confirmed composite keyboard', () => {
+  const h = harness(), c = new h.context.KeyboardLayoutCapture(-1, [7, 9], true); c.begin();
+  c.input(2045, 0, 99); assert.equal(c.error, 'device'); assert.equal(c.phase, 'command');
+  c.input(2017, 0, 7); assert.equal(c.error, 'modifier');
+  c.input(2045, 0, 7); c.input(2045, 1, 9); assert.equal(c.phase, 'command-release');
+  c.input(2045, 1, 7); c.input(2076, 0, 9); c.input(2076, 1, 9);
+  assert.equal(c.result(), true); assert.deepEqual(plain(c.devices()), [7, 9]);
+  c.begin(); assert.deepEqual(plain(c.devices()), [], 'restarting calibration discards the previous capture');
+});
+test('multi-keyboard calibration is scoped per device and restores only stable identities', async () => {
+  const h = harness(); h.devices([keyboard(7, 'first'), keyboard(9, 'second')]);
+  h.service.start('apple'); await tick(); const revision = h.service.snapshot().revision;
+  assert(h.service.saveCalibrationForDevices(revision, [7], true));
+  assert.deepEqual(h.bindingStates.at(-1), [
+    { deviceId:7, swap:true, calibrated:true }, { deviceId:9, swap:false, calibrated:false }]);
+  assert.equal(h.applies.at(-1), false, 'unknown devices do not inherit a multi-device swap');
+  h.service.stop(); const next = harness(h.disk);
+  next.devices([keyboard(17, 'first'), keyboard(19, 'second')]); next.service.start('auto'); await tick();
+  assert.deepEqual(next.bindingStates.at(-1), [
+    { deviceId:17, swap:true, calibrated:true }, { deviceId:19, swap:false, calibrated:false }]);
+  next.service.setMode('system'); assert.deepEqual(next.bindingStates.at(-1), []);
+  next.service.setMode('auto'); assert.equal(next.bindingStates.at(-1)[0].swap, true);
+});
+test('composite calibration is atomic, rejects stale devices and preserves ambiguous identities only for the session', async () => {
+  const h = harness(); h.devices([keyboard(7, 'same'), keyboard(9, 'same'), keyboard(11, 'other')]);
+  h.service.start('apple'); await tick(); const revision = h.service.snapshot().revision;
+  for (const ids of [[7, 7], [7, 99], [], [7, 9, 11]])
+    assert.equal(h.service.saveCalibrationForDevices(revision, ids, true), false);
+  assert(h.service.saveCalibrationForDevices(revision, [7, 9], true));
+  assert.equal(h.disk.size, 0, 'duplicate fingerprints cannot be persisted');
+  assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap), [true, true, false]);
+  h.change(); await tick(); assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap), [false, false, false]);
+  assert.equal(h.service.saveCalibrationForDevices(revision, [7], true), false, 'stale inventories are rejected');
+  assert(h.logs.every(entry => !entry.join(' ').includes('same') && !entry.join(' ').includes('Logitech')));
+});
+test('distinct composite devices save together or leave all mappings unchanged on storage failure', async () => {
+  const h = harness(); h.devices([keyboard(7, 'first'), keyboard(9, 'second')]);
+  h.service.start('apple'); await tick(); const revision = h.service.snapshot().revision;
+  h.failWrite(true); assert.equal(h.service.saveCalibrationForDevices(revision, [7, 9], true), false);
+  assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap), [false, false]);
+  h.failWrite(false); assert(h.service.saveCalibrationForDevices(revision, [7, 9], true));
+  assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap), [true, true]);
+  assert(![...h.disk.values()].join('').includes('first') && ![...h.disk.values()].join('').includes('second'));
+});
+test('device change releases held mapped keys and a reused device ID cannot inherit another keyboard profile', async () => {
+  const h = harness(); h.devices([keyboard(7, 'first'), keyboard(9, 'second')]);
+  const service = new h.context.PhysicalKeyboardLayoutService(()=>{}, (swap, bindings)=>h.S.configureHardwareKeyboardLayout(swap, bindings));
+  service.start('apple'); await tick(); assert(service.saveCalibrationForDevices(service.snapshot().revision, [7], true));
+  h.clear(); h.S.sendHardwareControlKey(18,0,2045,'native',7);
+  assert(h.keys().some(k=>k[0]===91&&k[1]===0));
+  h.devices([keyboard(7, 'replacement'), keyboard(9, 'second')]); h.change();
+  assert(h.keys().some(k=>k[0]===91&&k[1]===1), 'inventory invalidation releases held keys before rebinding');
+  await tick(); h.clear(); h.S.sendHardwareControlKey(18,0,2045,'native',7);
+  assert.equal(h.keys().at(-1)[0],18, 'reused runtime ID with a different identity remains system-original');
+  service.stop();
+});
+test('keyboard-source unknown devices may be calibrated, while mouse, virtual and keypad devices are excluded', async () => {
   const h = harness(); h.devices([keyboard(), { ...keyboard(8), sources: ['mouse'] },
-    { ...keyboard(9), isVirtual: true }, { ...keyboard(10), type: 1 }]);
-  h.service.start('auto'); await tick(); assert.equal(h.service.snapshot().count, 1);
+    { ...keyboard(9), isVirtual: true }, { ...keyboard(10, 'unknown-interface'), type: 1 },
+    { ...keyboard(11), type: 3 }]);
+  h.service.start('auto'); await tick(); assert.equal(h.service.snapshot().count, 2);
+  assert.deepEqual(plain(h.service.calibrationDeviceIds()), [7, 10]);
+  assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap), [false, false]);
 });
 test('incomplete enumeration fails closed rather than applying a calibration to an uncertain keyboard', async () => {
   const h = harness(); h.service.start('apple'); await tick(); assert(h.service.saveCalibration(h.service.snapshot(), true));
@@ -209,6 +270,51 @@ test('virtual modifiers remain independent and are not corrected as physical key
   h.S.sendHardwareControlKey(18,1,2045); h.S.sendMouseEvent(0,0,1); assert.equal(h.calls.at(-1)[4],4);
   h.S.sendKeyEvent(18,1,10018); h.S.sendMouseEvent(0,0,1); assert.equal(h.calls.at(-1)[4],0);
 });
+test('only the calibrated keyboard swaps modifiers while another keyboard and virtual controls stay independent', () => {
+  const h = harness(); h.S.configureHardwareKeyboardLayout(false, [
+    {deviceId:7,swap:true,calibrated:true}, {deviceId:9,swap:false,calibrated:false}]); h.clear();
+  h.S.syncNativeModifierState(4);
+  assert.equal(h.keys().length, 0, 'ambiguous global snapshot cannot create a phantom modifier');
+  h.S.sendHardwareControlKey(18,0,2045,'native',7); h.S.sendLetterKeyEvent('c',6,0,4);
+  assert(h.keys().some(k=>k[0]===91&&k[1]===0)); assert.equal(h.calls.find(c=>c[0]==='sendPhysicalKeyEvent')[3],8);
+  h.S.sendHardwareControlKey(18,0,2045,'ark',7);
+  assert.equal(h.keys().filter(k=>k[0]===91&&k[1]===0).length,1, 'same-device native/ArkUI events deduplicate');
+  h.S.sendHardwareControlKey(18,0,2045,'native',9); h.S.sendMouseEvent(0,0,1);
+  assert.equal(h.calls.at(-1)[4],12, 'both keyboards can hold their own modifier');
+  h.S.sendHardwareControlKey(18,1,2045,'native',7); h.S.sendMouseEvent(0,0,1);
+  assert.equal(h.calls.at(-1)[4],4, 'releasing one keyboard leaves the other held');
+  h.S.sendHardwareControlKey(18,1,2045,'native',9); h.S.sendMouseEvent(0,0,1);
+  assert.equal(h.calls.at(-1)[4],0);
+  h.S.sendHardwareControlKey(18,0,2045,'native',-1); assert.equal(h.keys().at(-1)[0],18, 'unknown device stays system-original');
+  h.S.releaseModifiers(); h.clear(); h.S.sendKeyEvent(18,0,10018); h.S.sendMouseEvent(0,0,1);
+  assert.equal(h.calls.at(-1)[4],4, 'virtual modifier remains unmodified');
+  assert(h.logs.every(entry=>!entry.join(' ').includes('2045') && !entry.join(' ').includes('deviceId')));
+});
+test('two keyboards holding the same modifier release it only after both release', () => {
+  const h = harness(); h.S.configureHardwareKeyboardLayout(false, [
+    {deviceId:7,swap:true,calibrated:true}, {deviceId:9,swap:false,calibrated:false}]); h.clear();
+  h.S.sendHardwareControlKey(17,0,2072,'native',7); h.S.sendHardwareControlKey(17,0,2072,'native',9);
+  assert.equal(h.keys().filter(k=>k[0]===17&&k[1]===0).length,1);
+  h.S.sendHardwareControlKey(17,1,2072,'native',7); assert.equal(h.keys().filter(k=>k[0]===17&&k[1]===1).length,0);
+  h.S.sendHardwareControlKey(17,1,2072,'native',9); assert.equal(h.keys().filter(k=>k[0]===17&&k[1]===1).length,1);
+});
+test('a missing or unknown event device never inherits even a single calibrated keyboard', () => {
+  const h = harness(); h.S.configureHardwareKeyboardLayout(true, [{deviceId:7,swap:true,calibrated:true}]);
+  h.clear(); h.S.syncNativeModifierState(4); assert.equal(h.keys().length,0);
+  h.S.sendHardwareControlKey(18,0,2045,'native',99); assert.equal(h.keys().at(-1)[0],18);
+  h.S.sendHardwareControlKey(18,1,2045,'native',99); h.S.sendHardwareControlKey(18,0,2045,'native',-1);
+  assert.equal(h.keys().at(-1)[0],18); h.S.releaseModifiers(); h.clear();
+  h.S.sendHardwareControlKey(18,0,2045,'native',7); assert.equal(h.keys().at(-1)[0],91);
+});
+test('layout diagnostics disclose only bounded status, never hardware identifiers or key contents', () => {
+  const h = harness(); h.S.configureHardwareKeyboardLayout(false, [
+    {deviceId:43872,swap:true,calibrated:true}, {deviceId:98103,swap:false,calibrated:false}]); h.clear();
+  h.S.syncNativeModifierState(4); h.S.sendHardwareControlKey(18,0,2045,'native',43872);
+  h.S.sendHardwareControlKey(18,1,2045,'native',43872);
+  const logs = h.logs.map(entry=>entry.join(' ')).join('\n');
+  assert(logs.includes('snapshot_suppressed') && logs.includes('device_route'));
+  for (const forbidden of ['43872','98103','2045','keyCode','deviceId']) assert(!logs.includes(forbidden));
+});
 test('layout changes release old keys and leave Ctrl, Shift, Chinese text and shortcuts unchanged', () => {
   const h = harness(); h.S.configureHardwareKeyboardLayout(true); h.clear();
   h.S.sendHardwareControlKey(18,0,2045); h.S.configureHardwareKeyboardLayout(false);
@@ -249,6 +355,32 @@ test('calibration dialog consumes key events locally and cannot save an incomple
   assert(widget.includes('this.onClose(); this.controller?.close()'));
   assert(!/sendText|keyText|appendDiagnosticLog/.test(widget), 'text and key contents are never recorded');
 });
+test('composite-keyboard dialog requires a completed capture and forwards both confirmed devices', () => {
+  const h = harness(), ctx = h.context; ctx.KeyType = {Down:0,Up:1};
+  vm.runInContext(ts.transpile('class Dialog {' + ['begin','handleKey','prompt','save'].map(n => method('widget/KeyboardLayoutCalibrationDialog',n)).join('\n') + '} exports.Dialog=Dialog;'),ctx);
+  let saved;
+  const dialog = Object.assign(new ctx.exports.Dialog(), { capture:new ctx.KeyboardLayoutCapture(-1,[7,9],true),
+    phase:'idle',ready:false,swap:false,composite:false,error:'',onSave:(swap,ids)=>{saved={swap,ids:plain(ids)};return true;},close(){} });
+  dialog.begin();
+  for (const [keyCode,type,deviceId] of [[2045,0,7],[2045,1,7],[2076,0,9],[2076,1,9]])
+    assert(dialog.handleKey({keyCode,type,deviceId}));
+  assert.equal(dialog.ready,true); assert.equal(dialog.composite,true); dialog.save();
+  assert.deepEqual(saved,{swap:true,ids:[7,9]});
+  assert(read('widget/KeyboardLayoutCalibrationDialog').includes('请确认两次按键来自同一把键盘'));
+});
+test('native key events forward the identified device through the real keyboard mapper', () => {
+  const h = harness(), ctx = h.context; ctx.ConnectionStatus={CONNECTED:2}; ctx.isNavigationControlKey=()=>false;
+  vm.runInContext(ts.transpile('class Page {'+method('pages/RemotePage','handleNativeKeyInput')+'} exports.InputPage=Page;'),ctx);
+  const page = Object.assign(new ctx.exports.InputPage(), {connectionStatus:2,desktopWindowActive:true,
+    secondaryHeldKeys:[], mapControlKeyCode:code=>code===2045?18:0,
+    mapHarmonyKeyCodeToUsbHidCode:()=>6,mapHarmonyKeyCodeToLetter:()=> 'c'});
+  h.S.configureHardwareKeyboardLayout(false,[{deviceId:7,swap:true,calibrated:true},{deviceId:9,swap:false,calibrated:false}]); h.clear();
+  page.handleNativeKeyInput({source:1,deviceId:7,keyCode:2045,action:0,modifierValid:false,capsLockValid:false});
+  page.handleNativeKeyInput({source:1,deviceId:7,keyCode:2019,action:0,modifierValid:true,modifierMask:4,capsLockValid:false});
+  assert(h.keys().some(k=>k[0]===91&&k[1]===0));
+  assert.equal(h.calls.find(c=>c[0]==='sendPhysicalKeyEvent')[3],8);
+  assert(h.logs.every(entry=>!entry.join(' ').includes('2045') && !entry.join(' ').includes('deviceId')));
+});
 test('UI has an independent input-settings entrance and blocks all remote routes during calibration', () => {
   const source=read('pages/RemotePage'), settings=method('pages/RemotePage','buildKeyboardSettingsOptions');
   assert(source.includes("case 'keyboardSettings': this.openKeyboardSettings()"));
@@ -256,6 +388,7 @@ test('UI has an independent input-settings entrance and blocks all remote routes
   assert(settings.indexOf("'键盘模式'") < settings.indexOf("'键盘布局'"));
   assert(settings.indexOf("'键盘布局'") < settings.indexOf("'自定义键盘映射：已开启'"));
   assert(settings.includes("this.keyboardLayoutMode === 'apple'"));
+  assert(settings.includes('this.keyboardLayoutState.count > 0'), 'multiple devices may start explicit calibration');
   for (const name of ['handleNativeKeyInput','handleRemoteKey','handleNativeMouseInput','syncHardwareKeyState',
     'handleRemoteTouch','handleRemoteMouse','handleRemoteClickFallback','handleRemoteAxis','handleRemoteHover']) {
     assert(method('pages/RemotePage',name).includes('this.showKeyboardCalibration'),name);
@@ -298,6 +431,17 @@ test('page calibration rejects stale inventories and stale peers, while cancella
   assert.equal(page.showKeyboardSettings,true); assert.equal(h.disk.size,0);
   page.openKeyboardLayoutCalibration(); assert(overlays[1].onSave(true)); overlays[1].onClose();
   assert.equal(page.showKeyboardSettings,true); assert.equal(page.showKeyboardCalibration,false);
+});
+test('page opens multi-keyboard calibration and saves only the explicitly captured devices', async () => {
+  const h=harness(), page=pageHarness(h), overlays=[];
+  h.devices([keyboard(7,'first'),keyboard(9,'second'),keyboard(11,'third')]);
+  h.context.KeyboardLayoutCalibrationDialog=options=>{overlays.push(options);return options;};
+  h.context.CustomDialogController=class{constructor(options){this.options=options;}open(){}};
+  h.service.start('apple'); await tick(); page.keyboardLayoutMode='apple'; page.openKeyboardLayoutCalibration();
+  assert.equal(page.showKeyboardCalibration,true); assert.deepEqual(plain(overlays[0].deviceIds),[7,9,11]);
+  assert.equal(overlays[0].onSave(true,[7,99]),false);
+  assert.equal(overlays[0].onSave(true,[7,9]),true);
+  assert.deepEqual(h.bindingStates.at(-1).map(b=>b.swap),[true,true,false]);
 });
 test('modal open failures restore input, and opening settings balances held keys before capture', async () => {
   const h=harness(), page=pageHarness(h);

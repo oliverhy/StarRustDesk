@@ -102,6 +102,7 @@ export interface NativeKeyInputEvent {
   keyCode: number
   action: number
   source?: number
+  deviceId?: number
   timestamp: number
   modifierMask: number
   modifierValid: boolean
@@ -312,8 +313,8 @@ export class RustDeskNapi {
   }
 
   static queueSecondaryKey(token: number, code: number, action: number, mask: number,
-    valid: boolean, caps: number): number {
-    return (rustdeskNapi as ESObject).queueSecondaryKey(token, code, action, mask, valid, caps)
+    valid: boolean, caps: number, deviceId: number = -1): number {
+    return (rustdeskNapi as ESObject).queueSecondaryKey(token, code, action, mask, valid, caps, deviceId)
   }
 
   // Deprecated: unordered across devices; throws ERR_NATIVE_INPUT_RESET on overflow.

@@ -101,7 +101,7 @@ p.releaseVirtualModifiers();
 packets.length = 0;
 buttons[0].onClick();
 assert.deepEqual(packets, [[39, 2, 0]], 'Release must clear all latched modifiers');
-assert(logs.some(entry => entry[0] === 'input-shortcut' && entry[1] === 'virtual_key=Up code=38'));
+assert(logs.some(entry => entry[0] === 'input-shortcut' && entry[1] === 'virtual_key=redacted'));
 console.log('PASS 256 mobile direction cases: orientation, IME visibility, all modifier combinations, clicks and long-press sorting');
 
 // Existing user order must survive the upgrade; new keys are appended only once.

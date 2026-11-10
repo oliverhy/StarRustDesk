@@ -8,6 +8,8 @@ const service = fs.readFileSync('entry/src/main/ets/service/ConnectionService.et
 assert(!service.includes('InputTrace letter char='), 'typed characters must not be logged');
 assert(cpp.includes('token == g_secondaryToken.load() && g_secondaryKeyboardFocused') &&
   cpp.includes('EndSecondaryKeyboardInternal();'), 'native bridge is focus and session-token guarded');
+assert(cpp.includes('OH_NativeXComponent_GetKeyEventDeviceId(event, &deviceId)') &&
+  cpp.includes('napi_set_named_property(env, object, "deviceId", deviceId)'), 'native keyboard preserves device identity');
 const extract = (text, pattern) => { const start = text.indexOf(pattern); assert(start >= 0, pattern);
   return text.slice(start, text.indexOf('\n  }', start) + 4); };
 const events = [];
@@ -21,9 +23,11 @@ const c = { exports: {}, KeySource:{ JOYSTICK:4 }, KeyType:{Down:0,Up:1},
 const keyboard = extract(sec, '  private keyboard(event: KeyEvent)');
 vm.runInNewContext(ts.transpile('class Secondary {'+keyboard+'} globalThis.Secondary=Secondary;'),c);
 const s = Object.assign(new c.Secondary(), {keyboardFocused:true, frameReady:true, token:7});
-const e = { keySource:1, type:0, keyCode:2017, isCapsLockOn:false,
+const e = { keySource:1, type:0, keyCode:2017, deviceId:42, isCapsLockOn:false,
   getModifierKeyState: names => names[0] === 'Ctrl' };
-assert.equal(s.keyboard(e), true); assert.deepEqual(events.pop(), ['queue',7,2017,0,1,true,0]);
+assert.equal(s.keyboard(e), true); assert.deepEqual(events.pop(), ['queue',7,2017,0,1,true,0,42]);
+assert.equal(s.keyboard({...e, deviceId:undefined}), true);
+assert.deepEqual(events.pop(), ['queue',7,2017,0,1,true,0,-1], 'unavailable device IDs fail closed');
 s.keyboardFocused = false; assert.equal(s.keyboard(e), false); assert.equal(events.length,0);
 const handler = extract(main, '  handleNativeKeyInput(event: NativeKeyInputEvent)');
 const release = extract(main, '  releaseSecondaryKeyboardKeys(): void');
@@ -31,10 +35,16 @@ vm.runInNewContext(ts.transpile('class Main {'+handler+release+'} globalThis.Mai
 const m = Object.assign(new c.Main(), { desktopWindowActive:false, controlMenu:'screens',
   connectionStatus:2, secondaryHeldKeys:[], mapControlKeyCode:()=>0, mapHarmonyKeyCodeToUsbHidCode:()=>4,
   mapHarmonyKeyCodeToLetter:()=> 'a', releaseRemoteNavigationKeys:()=>events.push(['release-navigation']) });
-m.handleNativeKeyInput({source:1001, action:0, keyCode:2017, modifierValid:false, capsLockValid:false});
+m.handleNativeKeyInput({source:1001, action:0, keyCode:2017, deviceId:42, modifierValid:false, capsLockValid:false});
 assert.deepEqual(events.pop(), ['letter','a',4,0,undefined]);
 m.handleNativeKeyInput({source:1001,action:-1});
 assert.deepEqual(events.splice(0), [['letter','a',4,1],['sync',0]],
   'focus loss balances secondary keys without globally releasing other owners');
+m.mapControlKeyCode = () => 18;
+m.handleNativeKeyInput({source:1001,action:0,keyCode:2045,deviceId:42,modifierValid:false,capsLockValid:false});
+assert.deepEqual(events.pop(), ['control',18,0,2045,'native',42]);
+m.handleNativeKeyInput({source:1001,action:-1});
+assert.deepEqual(events.splice(0), [['control',18,1,2045,'native',42],['sync',0]],
+  'secondary focus loss releases the same physical keyboard');
 m.handleNativeKeyInput({source:1,action:0,keyCode:2017}); assert.equal(events.length,0);
 console.log('PASS secondary keyboard: focus/token gate, existing mapper and ordered release');

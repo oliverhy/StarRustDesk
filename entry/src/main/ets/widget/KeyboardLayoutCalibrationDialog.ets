@@ -12,17 +12,19 @@ export struct KeyboardLayoutCalibrationDialog {
   controller?: CustomDialogController;
   deviceId: number = -1;
   deviceName: string = '';
-  onSave: (swap: boolean) => boolean = () => false;
+  deviceIds: number[] = [];
+  onSave: (swap: boolean, deviceIds?: number[]) => boolean = () => false;
   onClose: () => void = () => {};
   @State phase: string = 'idle';
   @State error: string = '';
   @State ready: boolean = false;
   @State swap: boolean = false;
+  @State composite: boolean = false;
   private capture: KeyboardLayoutCapture = new KeyboardLayoutCapture(-1);
 
-  aboutToAppear(): void { this.capture = new KeyboardLayoutCapture(this.deviceId); }
+  aboutToAppear(): void { this.capture = new KeyboardLayoutCapture(this.deviceId, this.deviceIds, true); }
   begin(): void {
-    this.capture.begin(); this.phase = this.capture.phase; this.error = ''; this.ready = false;
+    this.capture.begin(); this.phase = this.capture.phase; this.error = ''; this.ready = false; this.composite = false;
   }
   handleKey(event: KeyEvent): boolean {
     if (event.type !== KeyType.Down && event.type !== KeyType.Up) return true;
@@ -30,7 +32,8 @@ export struct KeyboardLayoutCalibrationDialog {
     this.phase = this.capture.phase;
     const result: boolean | undefined = this.capture.result();
     this.ready = result !== undefined; this.swap = result ?? false;
-    this.error = this.capture.error === 'device' ? '请使用正在校准的同一把键盘' :
+    this.composite = this.capture.devices().length > 1;
+    this.error = this.capture.error === 'device' ? '未识别到此键盘，请重新连接后重试' :
       this.capture.error === 'modifier' ? '请按左侧 Command 或 Option，不要按字母键' :
       this.capture.error === 'same' ? '两个按键被识别为同一个键，请检查键盘模式后重试' : '';
     return true;
@@ -46,7 +49,7 @@ export struct KeyboardLayoutCalibrationDialog {
   save(): void {
     const result: boolean | undefined = this.capture.result();
     if (result === undefined) return;
-    if (this.onSave(result)) this.close();
+    if (this.onSave(result, this.capture.devices())) this.close();
     else this.error = '保存校准失败或键盘已改变，请重新校准';
   }
   build() {
@@ -55,12 +58,19 @@ export struct KeyboardLayoutCalibrationDialog {
         .fontColor(this.dark ? '#EFF4FB' : RustDeskTheme.TEXT_PRIMARY).width('100%')
       Scroll() {
         Column({ space: 12 }) {
-          Text(this.deviceName).fontSize(14).wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
+          Text(this.deviceName || translate('请使用需要校准的键盘操作', this.uiLanguage)).fontSize(14)
+            .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
             .fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
           Text(translate('只识别两个修饰键，不记录文字，也不会将校准按键发送到远端。取消不改变设置。', this.uiLanguage))
             .fontSize(12).fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
+          Text(translate('请始终使用同一把实体键盘完成校准', this.uiLanguage))
+            .fontSize(12).fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
           Text(translate(this.prompt(), this.uiLanguage)).fontSize(16).fontWeight(FontWeight.Medium)
             .fontColor(this.dark ? '#AFCBFF' : RustDeskTheme.ACCENT).width('100%')
+          if (this.composite) {
+            Text(translate('系统报告了多个输入设备。请确认两次按键来自同一把键盘；保存后将同时校准这些设备。', this.uiLanguage))
+              .fontSize(12).fontColor(this.dark ? '#B8C5D9' : RustDeskTheme.TEXT_SECONDARY).width('100%')
+          }
           Button(translate(this.phase === 'idle' ? '开始校准' : '重新校准', this.uiLanguage))
             .id('keyboardLayoutCapture').width('100%').constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 })
             .fontSize(14).focusable(true).focusOnTouch(true).onClick(() => { this.begin(); })

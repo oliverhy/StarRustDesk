@@ -4,6 +4,10 @@
 
 Previously **StarRustDesk**. Existing application identity, data and backup formats are retained. The repository URL and internal project names remain unchanged.
 
+## 2.0.3
+
+优化 Mac 实体键盘识别与校准、远控重连选屏和键盘诊断隐私，改善部分多屏设备在登录阶段黑屏的问题。具体使用方法与验证边界见 [2.0.3 更新说明](docs/releases/2.0.3-2000003.md)。
+
 ## 2.0.0
 
 新增鸿蒙 PC 多屏扩展显示、三类账号登录入口、游戏与高性能优先设置、键鼠映射手柄及屏幕按键编辑；完善二次验证、网页登录、连接安全与诊断。功能条件和验证边界见 [2.0.0 更新说明](docs/releases/2.0.0-2000000.md)。

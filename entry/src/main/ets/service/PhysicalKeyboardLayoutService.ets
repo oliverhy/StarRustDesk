@@ -1,6 +1,6 @@
 import inputDevice from '@ohos.multimodalInput.inputDevice';
 import { RustDeskNapi } from './RustDeskNapi';
-import { KeyboardLayoutRecord, KeyboardLayoutSnapshot, PhysicalKeyboardDescriptor,
+import { KeyboardLayoutBinding, KeyboardLayoutRecord, KeyboardLayoutSnapshot, PhysicalKeyboardDescriptor,
   decodeKeyboardLayoutRecords, physicalKeyboardFingerprint, validKeyboardLayoutMode } from '../model/PhysicalKeyboardLayout';
 
 const CALIBRATION_OPTION: string = 'physical-keyboard-layout-v1';
@@ -12,13 +12,14 @@ export class PhysicalKeyboardLayoutService {
   private mode: string = 'auto';
   private devices: PhysicalKeyboardDescriptor[] = [];
   private records: KeyboardLayoutRecord[] = [];
-  private sessionRecord: KeyboardLayoutRecord | undefined = undefined;
+  private sessionRecords: KeyboardLayoutBinding[] = [];
   private ready: boolean = false;
   private listener: (event: inputDevice.DeviceListener) => void = () => { this.refresh(); };
   private onChange: (state: KeyboardLayoutSnapshot) => void;
-  private apply: (swap: boolean) => void;
+  private apply: (swap: boolean, bindings: KeyboardLayoutBinding[]) => void;
 
-  constructor(onChange: (state: KeyboardLayoutSnapshot) => void, apply: (swap: boolean) => void) {
+  constructor(onChange: (state: KeyboardLayoutSnapshot) => void,
+    apply: (swap: boolean, bindings: KeyboardLayoutBinding[]) => void) {
     this.onChange = onChange; this.apply = apply;
   }
 
@@ -35,12 +36,12 @@ export class PhysicalKeyboardLayoutService {
 
   stop(): void {
     this.active = false; this.epoch++; this.ready = false;
-    this.devices = []; this.sessionRecord = undefined;
+    this.devices = []; this.sessionRecords = [];
     if (this.subscribed) {
       try { inputDevice.off('change', this.listener); } catch (_error) {}
       this.subscribed = false;
     }
-    try { this.apply(false); } catch (_error) { this.log('state_apply_failed'); }
+    try { this.apply(false, []); } catch (_error) { this.log('state_apply_failed'); }
   }
 
   setMode(mode: string): void {
@@ -51,12 +52,31 @@ export class PhysicalKeyboardLayoutService {
 
   snapshot(): KeyboardLayoutSnapshot {
     const device: PhysicalKeyboardDescriptor | undefined = this.ready && this.devices.length === 1 ? this.devices[0] : undefined;
-    const fingerprint: string = device ? physicalKeyboardFingerprint(device) : '';
-    const record: KeyboardLayoutRecord | undefined = device ?
-      (fingerprint ? this.records.find((item: KeyboardLayoutRecord) => item.fingerprint === fingerprint) : this.sessionRecord) : undefined;
+    const fingerprint: string = device ? this.uniqueFingerprint(device) : '';
+    const record: KeyboardLayoutBinding | undefined = device ? this.binding(device) : undefined;
     return { revision: this.epoch, ready: this.ready, count: this.devices.length,
       deviceId: device?.id ?? -1, deviceName: device?.name ?? '', fingerprint,
-      calibrated: record !== undefined, swap: record?.swap ?? false };
+      calibrated: record?.calibrated ?? false, swap: record?.swap ?? false };
+  }
+
+  calibrationDeviceIds(): number[] {
+    return this.active && this.ready ? this.devices.map((device: PhysicalKeyboardDescriptor) => device.id) : [];
+  }
+
+  private uniqueFingerprint(device: PhysicalKeyboardDescriptor): string {
+    const fingerprint: string = physicalKeyboardFingerprint(device);
+    if (!fingerprint) return '';
+    return this.devices.filter((item: PhysicalKeyboardDescriptor) =>
+      physicalKeyboardFingerprint(item) === fingerprint).length === 1 ? fingerprint : '';
+  }
+
+  private binding(device: PhysicalKeyboardDescriptor): KeyboardLayoutBinding {
+    const session = this.sessionRecords.find((item: KeyboardLayoutBinding) => item.deviceId === device.id);
+    const fingerprint: string = this.uniqueFingerprint(device);
+    const record: KeyboardLayoutRecord | undefined = fingerprint ?
+      this.records.find((item: KeyboardLayoutRecord) => item.fingerprint === fingerprint) : undefined;
+    return { deviceId: device.id, swap: session?.swap ?? record?.swap ?? false,
+      calibrated: session !== undefined || record !== undefined };
   }
 
   saveCalibration(captured: KeyboardLayoutSnapshot, swap: boolean): boolean {
@@ -66,11 +86,26 @@ export class PhysicalKeyboardLayoutService {
       captured.fingerprint !== current.fingerprint) {
       this.log('calibration_rejected stale_or_ambiguous=1'); return false;
     }
-    const record: KeyboardLayoutRecord = { fingerprint: current.fingerprint, swap };
-    if (current.fingerprint) {
+    return this.saveCalibrationForDevices(captured.revision, [captured.deviceId], swap);
+  }
+
+  saveCalibrationForDevices(revision: number, deviceIds: number[], swap: boolean): boolean {
+    const unique: number[] = Array.from(new Set(deviceIds));
+    if (!this.active || !this.ready || this.mode !== 'apple' || revision !== this.epoch || typeof swap !== 'boolean' ||
+      unique.length < 1 || unique.length > 2 || unique.length !== deviceIds.length ||
+      unique.some((id: number) => !Number.isSafeInteger(id) || id < 0 ||
+        !this.devices.some((device: PhysicalKeyboardDescriptor) => device.id === id))) {
+      this.log('calibration_rejected stale_or_ambiguous=1'); return false;
+    }
+    const fingerprints: string[] = unique.map((id: number) => {
+      const device = this.devices.find((item: PhysicalKeyboardDescriptor) => item.id === id);
+      return device ? this.uniqueFingerprint(device) : '';
+    });
+    const persistent: string[] = fingerprints.filter((fingerprint: string) => fingerprint.length > 0);
+    if (persistent.length > 0) {
       const next: KeyboardLayoutRecord[] = this.records.filter((item: KeyboardLayoutRecord) =>
-        item.fingerprint !== current.fingerprint);
-      next.push(record);
+        !persistent.includes(item.fingerprint));
+      persistent.forEach((fingerprint: string) => { next.push({ fingerprint, swap }); });
       const bounded: KeyboardLayoutRecord[] = next.slice(-24);
       try {
         const value: string = JSON.stringify(bounded);
@@ -80,19 +115,22 @@ export class PhysicalKeyboardLayoutService {
         }
       } catch (_error) { this.log('calibration_save_failed'); return false; }
       this.records = bounded;
-    } else {
-      // Unidentified keyboards are session-only; never restore onto another device.
-      this.sessionRecord = record;
     }
+    // Unidentified or ambiguous fingerprints are tied only to these device IDs
+    // for this inventory revision; never restore them onto another keyboard.
+    this.sessionRecords = this.sessionRecords.filter((item: KeyboardLayoutBinding) => !unique.includes(item.deviceId));
+    unique.forEach((id: number, index: number) => {
+      if (!fingerprints[index]) this.sessionRecords.push({ deviceId: id, swap, calibrated: true });
+    });
     this.publish();
-    this.log(`calibration_saved swap=${swap ? 1 : 0} persistent=${current.fingerprint ? 1 : 0}`);
+    this.log(`calibration_saved devices=${unique.length} persistent=${persistent.length} session_only=${unique.length - persistent.length}`);
     return true;
   }
 
   async refresh(): Promise<void> {
     if (!this.active) return;
     const epoch: number = ++this.epoch;
-    this.ready = false; this.devices = []; this.sessionRecord = undefined;
+    this.ready = false; this.devices = []; this.sessionRecords = [];
     this.publish();
     let timeout: number = -1;
     try {
@@ -104,7 +142,9 @@ export class PhysicalKeyboardLayoutService {
           const info: inputDevice.InputDeviceData = await inputDevice.getDeviceInfo(id);
           if (!info.sources.includes('keyboard') || info.isVirtual === true) return undefined;
           const type: inputDevice.KeyboardType = await inputDevice.getKeyboardType(id);
-          if (type !== inputDevice.KeyboardType.ALPHABETIC_KEYBOARD) return undefined;
+          // Some composite keyboards report the modifier interface as UNKNOWN.
+          // Such devices cannot acquire a mapping without explicit calibration.
+          if (type !== inputDevice.KeyboardType.ALPHABETIC_KEYBOARD && type !== inputDevice.KeyboardType.UNKNOWN) return undefined;
           return { id, name: info.name.slice(0, 256), vendor: info.vendor, product: info.product,
             bus: info.bus, uniq: typeof info.uniq === 'string' ? info.uniq : '',
             phys: typeof info.phys === 'string' ? info.phys : '' };
@@ -117,7 +157,8 @@ export class PhysicalKeyboardLayoutService {
       if (!this.active || epoch !== this.epoch) return;
       discovered.forEach((device: PhysicalKeyboardDescriptor | undefined) => { if (device) devices.push(device); });
       this.devices = devices; this.ready = true; this.publish();
-      this.log(`devices_ready count=${devices.length} calibrated=${this.snapshot().calibrated ? 1 : 0}`);
+      const calibrated: number = devices.filter((device: PhysicalKeyboardDescriptor) => this.binding(device).calibrated).length;
+      this.log(`devices_ready count=${devices.length} calibrated=${calibrated}`);
     } catch (_error) {
       if (!this.active || epoch !== this.epoch) return;
       // An incomplete list must not look like one safely identified keyboard.
@@ -128,9 +169,11 @@ export class PhysicalKeyboardLayoutService {
   private publish(): void {
     if (!this.active) return;
     const state: KeyboardLayoutSnapshot = this.snapshot();
-    // Brand names never authorize an automatic swap. Multiple/unknown devices
-    // fail closed because the native XComponent route has no keyboard device ID.
-    try { this.apply(this.mode !== 'system' && state.ready && state.count === 1 && state.calibrated && state.swap); }
+    // Per-device bindings require confirmed calibration. Unknown IDs and
+    // ambiguous fingerprints never inherit another keyboard's calibration.
+    const bindings: KeyboardLayoutBinding[] = state.ready && this.mode !== 'system' ?
+      this.devices.map((device: PhysicalKeyboardDescriptor) => this.binding(device)) : [];
+    try { this.apply(this.mode !== 'system' && state.ready && state.count === 1 && state.calibrated && state.swap, bindings); }
     catch (_error) { this.log('state_apply_failed'); }
     try { this.onChange(state); } catch (_error) { this.log('state_publish_failed'); }
   }

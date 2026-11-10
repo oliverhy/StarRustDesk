@@ -165,7 +165,8 @@ struct ExtendedDisplayPage {
     }
     const caps = event.isCapsLockOn === undefined ? -1 : event.isCapsLockOn ? 1 : 0;
     return RustDeskNapi.queueSecondaryKey(this.token, event.keyCode,
-      event.type === KeyType.Down ? 0 : 1, mask, valid, caps) === 0;
+      event.type === KeyType.Down ? 0 : 1, mask, valid, caps,
+      Number.isSafeInteger(event.deviceId) && event.deviceId >= 0 ? event.deviceId : -1) === 0;
   }
 
   private showTouchCursor(point: SecondaryPoint): void {

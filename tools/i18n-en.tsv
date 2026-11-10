@@ -1,4 +1,17 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+2.0.3（2000003）· Mac 键盘与远控选屏优化	2.0.3 (2000003) · Mac keyboard and display selection improvements
+优化实体键盘设备识别与 Mac 键盘布局校准，多把键盘可分别校准；同一把键盘被识别为多个设备时，可确认后一起校准。	Improved physical keyboard identification and Mac layout calibration. Calibrate keyboards separately, or confirm and calibrate multiple input devices belonging to the same keyboard together.
+首次连接跟随远端默认屏幕，重连时尽量恢复之前选择的屏幕，改善部分多屏设备在锁屏或登录阶段黑屏的问题。	Initial connections follow the remote default display; reconnecting attempts to restore the previously selected display, improving some lock-screen or sign-in black screens on multi-display devices.
+完善主屏和扩展屏的键盘来源识别、按键释放与异常处理，保留原有软键盘、中文输入和自定义快捷键设置。	Improved keyboard source identification, key release and error handling on main and extended displays while preserving the existing on-screen keyboard, Chinese input and custom shortcuts.
+键盘诊断不记录按键内容或扫描码；重新导出应用内旧诊断日志时会再次脱敏，补充选屏与键盘校准状态诊断。	Keyboard diagnostics do not record key contents or scan codes. Existing in-app diagnostic logs are redacted again when exported, and display-selection and keyboard-calibration status diagnostics were added.
+检测到多个键盘输入设备，可按目标键盘上的按键进行校准	Multiple keyboard input devices detected. Use the target keyboard to calibrate.
+检测到多个键盘，可选择苹果布局修正进行校准	Multiple keyboards detected. Select Apple layout correction to calibrate.
+尚未校准，请点击下方按钮开始校准	Not calibrated. Use the button below to start calibration.
+未识别到此键盘，请重新连接后重试	This keyboard was not recognized. Reconnect it and try again.
+请使用需要校准的键盘操作	Use the keyboard you want to calibrate.
+请始终使用同一把实体键盘完成校准	Use the same physical keyboard throughout calibration.
+系统报告了多个输入设备。请确认两次按键来自同一把键盘；保存后将同时校准这些设备。	Multiple input devices were reported. Confirm that both keys belong to the same keyboard; saving calibrates both devices.
+在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘可以分别校准；无法识别来源时保持系统原样。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。	Choose a keyboard layout under Controls > Input > Keyboard settings. Auto restores only confirmed calibrations; System layout ignores layout calibration.\nIf the Apple keyboard's Command and Option keys are swapped, select Apple layout correction > Calibrate Command / Option. Press and release each left modifier as instructed, then save.\nReliably identified keyboards remember calibration; unidentified keyboards use it for this session only. Calibrate each keyboard separately. Unknown event sources keep the system layout. Recalibrate after changing the keyboard's hardware Mac/PC mode.\nOnly physical modifiers are corrected. Explicit custom rules take priority. Chinese text, pasted content and shortcut-bar buttons are unchanged.
 2.0.1（2000001）· 局域网发现与连接体验优化	2.0.1 (2000001) · LAN discovery and connection improvements
 新增局域网设备发现，兼容官方 RustDesk 客户端的发现协议；无需修改服务器，可通过设备 ID 连接，或在远端允许时选择 IP 直连。	Added LAN device discovery compatible with official RustDesk clients. No server changes are required; connect by device ID or use direct IP access when allowed by the remote device.
 局域网发现不等于身份验证：连接前需确认设备，发现设备不会自动使用已保存密码；未加密连接保留风险提示并需单独确认。	LAN discovery does not verify identity. Check the device before connecting; saved passwords are not automatically reused for discovered devices, and unencrypted connections require a separate warning and confirmation.

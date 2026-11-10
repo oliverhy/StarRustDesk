@@ -60,7 +60,7 @@ import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition }
 import { RemotePeerPreferences } from '../service/RemotePeerPreferences';
 import { KeyboardMappingDialog } from '../widget/KeyboardMappingDialog';
 import { KeyboardLayoutCalibrationDialog } from '../widget/KeyboardLayoutCalibrationDialog';
-import { KeyboardLayoutSnapshot } from '../model/PhysicalKeyboardLayout';
+import { KeyboardLayoutBinding, KeyboardLayoutSnapshot } from '../model/PhysicalKeyboardLayout';
 import { PhysicalKeyboardLayoutService } from '../service/PhysicalKeyboardLayoutService';
 import { decodeKeyboardRemap } from '../model/KeyboardRemapping';
 import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
@@ -90,6 +90,7 @@ class DisplaySwitchPaintCallback extends FrameCallback {
 
 interface UploadQueueItem { path: string; name: string; size: number; }
 interface FileOperationResult { id: number; ok: boolean; }
+interface SecondaryHeldKey { keyCode: number; deviceId: number; }
 interface RemotePoint {
   x: number;
   y: number;
@@ -449,7 +450,7 @@ struct RemotePage {
   @State keyboardInput: string = KEYBOARD_CAPTURE_SENTINEL;
   private keyboardComposing: boolean = false;
   private navigationKeys: RemoteNavigationKeys = new RemoteNavigationKeys();
-  private secondaryHeldKeys: number[] = [];
+  private secondaryHeldKeys: SecondaryHeldKey[] = [];
   @State showCursor: boolean = false;
   @State projectedPhysicalPointer: boolean = false;
   @State remoteCursorEmbedded: boolean = false;
@@ -651,6 +652,7 @@ struct RemotePage {
   // A reconnect is the same viewing session: keep the display the user was
   // watching, but never carry it into a fresh connection or another peer.
   private reconnectPreferredDisplay: number = -1;
+  private displayRestoreRetryPending: boolean = false;
   private mobileActionsDragStartX: number = 0;
   private mobileActionsDragStartY: number = 0;
   private keyboardToolsDragStartX: number = 0;
@@ -1088,22 +1090,7 @@ struct RemotePage {
         this.displayCount = Math.max(1, RustDeskNapi.getDisplayCount());
         this.multiDisplayMonitor?.setRemoteCount(this.displayCount);
         if (this.isPcDevice()) this.extendedRemoteDisplay = RustDeskNapi.getSecondaryDisplayState().display;
-        if (!this.displayStateInitialized) {
-          // A fresh session starts on screen 1. Reconnection must resume the
-          // screen being viewed, since another screen may be off or black.
-          const requestedDisplay: number = this.reconnectPreferredDisplay;
-          this.currentDisplay = requestedDisplay >= 0 && requestedDisplay < this.displayCount ? requestedDisplay : 0;
-          this.reconnectPreferredDisplay = -1;
-          this.displayStateInitialized = true;
-          const switchResult: number = RustDeskNapi.switchDisplay(this.currentDisplay);
-          RustDeskNapi.appendDiagnosticLog('video-layout',
-            `display_restore requested=${requestedDisplay} selected=${this.currentDisplay} count=${this.displayCount} result=${switchResult}`);
-          if (switchResult === 0) {
-            RustDeskNapi.refreshVideo();
-          } else {
-            hilog.error(LOG_DOMAIN, 'StarRustDesk', `Initial display switch failed result=${switchResult}`);
-          }
-        }
+        this.initializeRemoteDisplay();
         this.updateConnectionRoute();
         this.isPeerAndroid = RustDeskNapi.isPeerAndroid();
         this.canSendCtrlAltDel = ConnectionService.canSendCtrlAltDel();
@@ -1121,7 +1108,9 @@ struct RemotePage {
         if (this.showKeyboardPanel) this.closeRemoteKeyboard();
         this.navigationKeys.reset();
         this.keyboardComposing = false;
+        this.rememberDisplayForReconnect();
         this.displayStateInitialized = false;
+        this.displayRestoreRetryPending = false;
         this.isPeerAndroid = false;
         this.privacyModeState = 0;
         this.canSendCtrlAltDel = false;
@@ -1273,6 +1262,7 @@ struct RemotePage {
   }
 
   resetRemoteViewportForSession(): void {
+    this.displayRestoreRetryPending = false;
     this.clearKeyboardInputAnchor('session_reset');
     this.pointerInitialized = false;
     this.lastAbsX = 0;
@@ -1400,6 +1390,44 @@ struct RemotePage {
   rememberDisplayForReconnect(): void {
     if (this.displayStateInitialized && this.currentDisplay >= 0 && this.currentDisplay < this.displayCount) {
       this.reconnectPreferredDisplay = this.currentDisplay;
+      RustDeskNapi.appendDiagnosticLog('video-layout',
+        `display_reconnect_saved selected=${this.currentDisplay} count=${this.displayCount}`);
+    }
+  }
+
+  initializeRemoteDisplay(): void {
+    if (this.displayStateInitialized) return;
+    // The peer's login response identifies its default/primary display. Screen
+    // index 0 can be a secondary monitor that is black on the Windows logon desktop.
+    const remoteDefault: number = RustDeskNapi.getCurrentDisplay();
+    const requested: number = this.reconnectPreferredDisplay;
+    const requestedValid: boolean = Number.isInteger(requested) && requested >= 0 && requested < this.displayCount;
+    const remoteValid: boolean = Number.isInteger(remoteDefault) && remoteDefault >= 0 && remoteDefault < this.displayCount;
+    const selected: number = requestedValid ? requested : remoteValid ? remoteDefault : 0;
+    const source: string = requestedValid ? 'reconnect' : remoteValid ? 'remote_default' : 'first_available';
+    const reason: string = requestedValid ? 'previous_selection' : requested >= 0 ?
+      'previous_display_unavailable' : remoteValid ? 'fresh_session' : 'remote_default_invalid';
+    // A failed native request may already have updated its local selection.
+    // Retry explicitly instead of mistaking that value for a successful switch.
+    const switchRequired: boolean = selected !== remoteDefault || this.displayRestoreRetryPending;
+    const result: number = switchRequired ? RustDeskNapi.switchDisplay(selected) : 0;
+    RustDeskNapi.appendDiagnosticLog('video-layout',
+      `display_restore requested=${requested} remote_default=${remoteDefault} selected=${selected} ` +
+      `count=${this.displayCount} source=${source} reason=${reason} switch_required=${switchRequired} result=${result} ` +
+      `retry_pending=${this.displayRestoreRetryPending}`);
+    if (result !== 0) {
+      this.displayRestoreRetryPending = true;
+      hilog.error(LOG_DOMAIN, 'StarRustDesk', `Initial display switch failed result=${result}`);
+      return;
+    }
+    this.currentDisplay = selected;
+    this.reconnectPreferredDisplay = -1;
+    this.displayRestoreRetryPending = false;
+    this.displayStateInitialized = true;
+    if (switchRequired) {
+      const refreshResult: number = RustDeskNapi.refreshVideo();
+      RustDeskNapi.appendDiagnosticLog('video-layout',
+        `display_restore_refresh selected=${selected} result=${refreshResult}`);
     }
   }
 
@@ -1839,9 +1867,12 @@ struct RemotePage {
     if (event.action !== 0 && event.action !== 1) {
       return;
     }
+    const deviceId: number = event.deviceId !== undefined && Number.isSafeInteger(event.deviceId) && event.deviceId >= 0 ?
+      event.deviceId : -1;
     if (secondaryKeyboard) {
-      const index = this.secondaryHeldKeys.indexOf(event.keyCode);
-      if (event.action === 0 && index < 0) this.secondaryHeldKeys.push(event.keyCode);
+      const index = this.secondaryHeldKeys.findIndex((item: SecondaryHeldKey) =>
+        item.keyCode === event.keyCode && item.deviceId === deviceId);
+      if (event.action === 0 && index < 0) this.secondaryHeldKeys.push({ keyCode: event.keyCode, deviceId });
       if (event.action === 1 && index >= 0) this.secondaryHeldKeys.splice(index, 1);
     }
     if (event.capsLockValid) {
@@ -1851,7 +1882,7 @@ struct RemotePage {
     const controlCode: number = this.mapControlKeyCode(event.keyCode);
     if (isNavigationControlKey(controlCode)) {
       if (event.modifierValid) ConnectionService.syncNativeModifierState(event.modifierMask);
-      this.forwardRemoteNavigationKey(controlCode, action === 0, 'native');
+      this.forwardRemoteNavigationKey(controlCode, action === 0, 'native', deviceId);
       return;
     }
     if (this.showKeyboardPanel && !secondaryKeyboard) return;
@@ -1860,7 +1891,7 @@ struct RemotePage {
       return;
     }
     if (controlCode > 0) {
-      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'native');
+      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'native', deviceId);
       return;
     }
     if (event.modifierValid) {
@@ -1877,23 +1908,24 @@ struct RemotePage {
       }
       if (action === 0 && !secondaryKeyboard) {
         RustDeskNapi.appendDiagnosticLog('input',
-          `native_key_forwarded code=${event.keyCode} hid=${hidCode} modifiers=${event.modifierMask} ` +
+          `native_key_forwarded key=redacted modifiers=${event.modifierMask} ` +
           `modifier_valid=${event.modifierValid ? 1 : 0}`);
       }
     }
   }
 
   releaseSecondaryKeyboardKeys(): void {
-    const held: number[] = this.secondaryHeldKeys.slice();
+    const held: SecondaryHeldKey[] = this.secondaryHeldKeys.slice();
     this.secondaryHeldKeys = [];
-    for (const keyCode of held) {
+    for (const item of held) {
+      const keyCode: number = item.keyCode;
       const control: number = this.mapControlKeyCode(keyCode);
       if (isNavigationControlKey(control)) {
-        this.forwardRemoteNavigationKey(control, false, 'native');
+        this.forwardRemoteNavigationKey(control, false, 'native', item.deviceId);
       } else if (control === 20) {
         ConnectionService.sendCapsLockEvent(1);
       } else if (control > 0) {
-        ConnectionService.sendHardwareControlKey(control, 1, keyCode, 'native');
+        ConnectionService.sendHardwareControlKey(control, 1, keyCode, 'native', item.deviceId);
       } else {
         const hid = this.mapHarmonyKeyCodeToUsbHidCode(keyCode);
         const letter = this.mapHarmonyKeyCodeToLetter(keyCode);
@@ -5194,7 +5226,7 @@ struct RemotePage {
         this.buildGestureHelpSection('自定义实体键盘映射', $r('app.media.guide_keymap'),
           '在“控 → 输入 → 键盘设置”中打开“自定义键盘映射”。默认关闭，按服务器和远端分别保存。\n可选择或录入源按键，再选择目标按键；首版支持修饰键、F1–F12、方向及编辑键。选中修饰键可让一个普通按键发送一次完整组合键，长按不重复触发组合键。\nMac 预设包括 Ctrl→Command、Ctrl 与 Win/Cmd 互换、F3→Ctrl+↑。选择预设只替换草稿规则，不会自动启用；点击保存后生效，取消不改变现有设置。\n仅映射实际转发的实体按键；中文输入、粘贴和快捷栏按钮保持原意。Fn 等被系统或键盘硬件处理的按键可能无法录入。')
         this.buildGestureHelpSection('实体键盘布局与校准', $r('app.media.guide_calibration'),
-          '在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘同时连接时暂停布局修正。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。')
+          '在“控 → 输入 → 键盘设置”中选择键盘布局。自动只恢复已校准的键盘；系统原样不应用布局校准。\n苹果键盘的 Command / Option 对不上时，选择“苹果布局修正 → 校准 Command / Option”，依提示分别按下并松开左侧两个按键，再保存。\n稳定识别的键盘会记住校准；无法稳定识别时仅用于本次会话。多个键盘可以分别校准；无法识别来源时保持系统原样。更改键盘硬件的 Mac / PC 模式后需重新校准。\n布局只修正实体修饰键，自定义映射中明确设置的对应键优先；中文输入、粘贴和快捷栏保持原意。')
         this.buildGestureHelpSection('悬浮功能栏与移动画面', $r('app.media.guide_toolbar'),
           '竖屏时“控”保持底部横向工具栏；横屏时默认移动到右上角并向下展开。点击收起后保留“控”按钮。\n未开启虚拟鼠标时，画面放大后可使用“移动画面”模式；开启虚拟鼠标后，直接单指拖动画面空白区域即可平移，鼠标本体专门控制远端指针。\n全屏三指上滑用于打开本地键盘，不是滚动手势；滚动请使用双指平行滑动。')
         }
@@ -7546,9 +7578,9 @@ struct RemotePage {
     if (!this.keyboardLayoutService) {
       this.keyboardLayoutService = new PhysicalKeyboardLayoutService((state: KeyboardLayoutSnapshot) => {
         if (this.remotePageVisible && this.peerPreferences === preferences) this.keyboardLayoutState = state;
-      }, (swap: boolean) => {
+      }, (swap: boolean, bindings: KeyboardLayoutBinding[]) => {
         if (this.remotePageVisible && this.peerPreferences === preferences)
-          ConnectionService.configureHardwareKeyboardLayout(swap);
+          ConnectionService.configureHardwareKeyboardLayout(swap, bindings);
       });
     }
     this.keyboardLayoutService.start(this.keyboardLayoutMode);
@@ -7557,9 +7589,11 @@ struct RemotePage {
   keyboardLayoutStatus(): string {
     const state = this.keyboardLayoutState;
     if (!state.ready) return '无法可靠读取键盘信息，保持系统原样';
-    if (state.count > 1) return '检测到多个键盘，请只连接待校准的键盘；暂不自动修正';
     if (state.count === 0) return '连接实体键盘后可校准 Command / Option';
     if (this.keyboardLayoutMode === 'system') return '当前按系统原样发送，不应用布局校准';
+    if (state.count > 1) return this.keyboardLayoutMode === 'apple' ?
+      '检测到多个键盘输入设备，可按目标键盘上的按键进行校准' : '检测到多个键盘，可选择苹果布局修正进行校准';
+    if (!state.calibrated && this.keyboardLayoutMode === 'apple') return '尚未校准，请点击下方按钮开始校准';
     if (!state.calibrated) return '尚未校准，保持原样；键位不对时请选择苹果布局修正';
     if (!state.fingerprint) return '此键盘无法稳定识别，校准只用于本次会话';
     return state.swap ? '已恢复校准：Command / Option 互换' : '已恢复校准：Command / Option 原样';
@@ -7613,17 +7647,20 @@ struct RemotePage {
     if (!preferences || !service || this.showKeyboardCalibration ||
       this.connectionStatus !== ConnectionStatus.CONNECTED || this.keyboardLayoutMode !== 'apple') return;
     const captured: KeyboardLayoutSnapshot = service.snapshot();
-    if (!captured.ready || captured.count !== 1 || captured.deviceId < 0) return;
+    const candidates: number[] = service.calibrationDeviceIds();
+    if (!captured.ready || candidates.length === 0) return;
     this.releaseRemoteNavigationKeys('layout_calibration'); this.releaseVirtualModifiers();
     ConnectionService.releaseModifiers(); this.setControlMenu('');
     this.showKeyboardSettings = false; this.showKeyboardCalibration = true;
     try {
       this.keyboardCalibrationDialog = new CustomDialogController({
-        builder: KeyboardLayoutCalibrationDialog({ deviceId: captured.deviceId, deviceName: captured.deviceName,
-          onSave: (swap: boolean): boolean => {
+        builder: KeyboardLayoutCalibrationDialog({ deviceId: -1, deviceIds: candidates, deviceName: captured.deviceName,
+          onSave: (swap: boolean, deviceIds?: number[]): boolean => {
             if (!this.remotePageVisible || this.peerPreferences !== preferences ||
-              this.keyboardLayoutService !== service || this.connectionStatus !== ConnectionStatus.CONNECTED) return false;
-            return service.saveCalibration(captured, swap);
+              this.keyboardLayoutService !== service || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+              this.keyboardLayoutMode !== 'apple') return false;
+            const selected: number[] = deviceIds ?? (captured.deviceId >= 0 ? [captured.deviceId] : []);
+            return service.saveCalibrationForDevices(captured.revision, selected, swap);
           },
           onClose: () => {
             this.showKeyboardCalibration = false;
@@ -7746,8 +7783,7 @@ struct RemotePage {
     if (this.keyboardLayoutMode === 'apple') {
       Button(translate('校准 Command / Option', this.uiLanguage))
         .width('100%').constraintSize({ minHeight: 44 + Math.max(0, this.uiFontScale - 1) * 18 }).fontSize(13)
-        .enabled(this.keyboardLayoutState.ready && this.keyboardLayoutState.count === 1 &&
-          this.keyboardLayoutState.deviceId >= 0)
+        .enabled(this.keyboardLayoutState.ready && this.keyboardLayoutState.count > 0)
         .onClick(() => { this.openKeyboardLayoutCalibration(); })
         .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
     }
@@ -8992,6 +9028,7 @@ struct RemotePage {
     }
     if (event.type !== KeyType.Down && event.type !== KeyType.Up) return false;
 
+    const deviceId: number = Number.isSafeInteger(event.deviceId) && event.deviceId >= 0 ? event.deviceId : -1;
     let controlCode: number = this.mapControlKeyCode(event.keyCode);
     let action: number = event.type === KeyType.Down ? 0 : 1;
     if (controlCode === 20) {
@@ -9005,17 +9042,17 @@ struct RemotePage {
       }
     }
     if (isNavigationControlKey(controlCode)) {
-      return this.forwardRemoteNavigationKey(controlCode, action === 0, 'ark');
+      return this.forwardRemoteNavigationKey(controlCode, action === 0, 'ark', deviceId);
     }
     if (this.showKeyboardPanel) {
       if (this.isModifierControlCode(controlCode)) {
-        ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark');
+        ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark', deviceId);
         return true;
       }
       return false;
     }
     if (controlCode > 0) {
-      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark');
+      ConnectionService.sendHardwareControlKey(controlCode, action, event.keyCode, 'ark', deviceId);
       return true;
     }
 
@@ -9043,11 +9080,11 @@ struct RemotePage {
     return false;
   }
 
-  forwardRemoteNavigationKey(controlCode: number, down: boolean, source: string): boolean {
+  forwardRemoteNavigationKey(controlCode: number, down: boolean, source: string, deviceId: number = -1): boolean {
     const composing: boolean = this.showKeyboardPanel && this.keyboardComposing;
     const action: number = this.navigationKeys.route(controlCode, down, source, composing);
     if (action >= 0) {
-      ConnectionService.sendHardwareControlKey(controlCode, action, controlCode, source);
+      ConnectionService.sendHardwareControlKey(controlCode, action, controlCode, source, deviceId);
     }
     // Navigation names contain no typed text, passwords or candidate contents.
     RustDeskNapi.appendDiagnosticLog('input-navigation',
@@ -9840,7 +9877,7 @@ struct RemotePage {
       if (modifierMask !== 0 && keyCode > 0) {
         ConnectionService.sendPrintableShortcutKey(keyCode, modifierMask);
         RustDeskNapi.appendDiagnosticLog('input-shortcut',
-          `soft_key key=${keyCode} modifiers=${modifierMask}`);
+          `soft_key key=redacted modifiers=${modifierMask}`);
         return;
       }
     }
@@ -10483,7 +10520,7 @@ struct RemotePage {
     this.setVirtualModifierSelected(keyCode, selected);
     ConnectionService.sendKeyEvent(keyCode, selected ? 0 : 1, 10000 + keyCode);
     RustDeskNapi.appendDiagnosticLog('input-shortcut',
-      `modifier_toggle key=${keyCode} selected=${selected ? 1 : 0}`);
+      `modifier_toggle kind=modifier selected=${selected ? 1 : 0}`);
   }
 
   isVirtualModifierSelected(keyCode: number): boolean {
@@ -10573,7 +10610,7 @@ struct RemotePage {
 
   sendVirtualControlKey(keyCode: number, label: string): void {
     ConnectionService.sendKeyEvent(keyCode, 2);
-    RustDeskNapi.appendDiagnosticLog('input-shortcut', `virtual_key=${label} code=${keyCode}`);
+    RustDeskNapi.appendDiagnosticLog('input-shortcut', 'virtual_key=redacted');
   }
 
   sendPresetShortcut(keyCode: number, modifierMask: number, label: string): void {

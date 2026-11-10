@@ -111,6 +111,7 @@ struct NativeKeyInputEvent {
     bool capsLockOn{false};
     bool capsLockValid{false};
     int32_t source{-1};
+    int64_t deviceId{-1};
 };
 
 enum class NativeInputKind { Mouse, Key, Reset };
@@ -411,6 +412,10 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
     OH_NativeXComponent_GetKeyEventTimestamp(event, &timestamp);
     OH_NativeXComponent_EventSourceType source = OH_NATIVEXCOMPONENT_SOURCE_TYPE_UNKNOWN;
     OH_NativeXComponent_GetKeyEventSourceType(event, &source);
+    int64_t deviceId = -1;
+    if (OH_NativeXComponent_GetKeyEventDeviceId(event, &deviceId) != OH_NATIVEXCOMPONENT_RESULT_SUCCESS || deviceId < 0) {
+        deviceId = -1;
+    }
     int32_t modifierMask = 0;
     bool capsLockOn = false;
     bool modifierValid = TryGetNativeKeyModifiers(event, modifierMask);
@@ -429,7 +434,7 @@ static void DispatchNativeKeyEvent(OH_NativeXComponent* component, void*) {
     }
     const bool capsLockValid = TryGetNativeCapsLockState(event, capsLockOn);
     const uint64_t sequence = QueueNativeKeyInput({static_cast<int32_t>(code), static_cast<int32_t>(action), timestamp,
-        modifierMask, modifierValid, capsLockOn, capsLockValid, static_cast<int32_t>(source)});
+        modifierMask, modifierValid, capsLockOn, capsLockValid, static_cast<int32_t>(source), deviceId});
     if (code == KEY_CTRL_LEFT || code == KEY_CTRL_RIGHT || code == KEY_SHIFT_LEFT ||
         code == KEY_SHIFT_RIGHT || code == KEY_ALT_LEFT || code == KEY_ALT_RIGHT ||
         code == KEY_META_LEFT || code == KEY_META_RIGHT || code == KEY_CAPS_LOCK) {
@@ -1192,11 +1197,11 @@ static napi_value SendKeyEvent(napi_env env, napi_callback_info info) {
     if (keyCode == 16 || keyCode == 17 || keyCode == 18 || keyCode == 20 || keyCode == 91 ||
         (keyCode >= 'A' && keyCode <= 'Z') || (keyCode >= 'a' && keyCode <= 'z')) {
         OH_LOG_INFO(LOG_APP,
-            "InputTrace napi_key key=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
-            keyCode, action, modifierMask, result);
+            "InputTrace napi_key key=redacted action=%{public}d modifiers=%{public}d result=%{public}d",
+            action, modifierMask, result);
     }
     if (result != 0) {
-        OH_LOG_WARN(LOG_APP, "SendKeyEvent key=%{public}d action=%{public}d result=%{public}d", keyCode, action, result);
+        OH_LOG_WARN(LOG_APP, "SendKeyEvent key=redacted action=%{public}d result=%{public}d", action, result);
     }
     napi_value ret;
     napi_create_int32(env, result, &ret);
@@ -1245,10 +1250,10 @@ static napi_value SendPhysicalKeyEvent(napi_env env, napi_callback_info info) {
     }
     int result = rust_send_physical_key_event(hidCode, action, modifierMask);
     OH_LOG_INFO(LOG_APP,
-        "InputTrace napi_physical hid=%{public}d action=%{public}d modifiers=%{public}d result=%{public}d",
-        hidCode, action, modifierMask, result);
+        "InputTrace napi_physical key=redacted action=%{public}d modifiers=%{public}d result=%{public}d",
+        action, modifierMask, result);
     if (result != 0) {
-        OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent hid=%{public}d action=%{public}d result=%{public}d", hidCode, action, result);
+        OH_LOG_WARN(LOG_APP, "SendPhysicalKeyEvent key=redacted action=%{public}d result=%{public}d", action, result);
     }
     napi_value ret;
     napi_create_int32(env, result, &ret);
@@ -2390,11 +2395,13 @@ static napi_value SetSecondaryKeyboardFocus(napi_env env, napi_callback_info inf
 }
 
 static napi_value QueueSecondaryKey(napi_env env, napi_callback_info info) {
-    size_t argc = 6; napi_value args[6] = {}; int32_t token = 0, code = 0, action = -1, mask = 0, caps = -1;
+    size_t argc = 7; napi_value args[7] = {}; int32_t token = 0, code = 0, action = -1, mask = 0, caps = -1;
+    int64_t deviceId = -1;
     bool valid = false;
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     int result = -1;
-    if (argc == 6 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
+    if ((argc == 6 || argc == 7) && (argc == 6 || napi_get_value_int64(env, args[6], &deviceId) == napi_ok) &&
+        deviceId >= -1 && napi_get_value_int32(env, args[0], &token) == napi_ok &&
         napi_get_value_int32(env, args[1], &code) == napi_ok &&
         napi_get_value_int32(env, args[2], &action) == napi_ok &&
         napi_get_value_int32(env, args[3], &mask) == napi_ok &&
@@ -2407,6 +2414,7 @@ static napi_value QueueSecondaryKey(napi_env env, napi_callback_info info) {
             NativeKeyInputEvent key;
             key.keyCode = code; key.action = action; key.modifierMask = mask; key.modifierValid = valid;
             key.capsLockValid = caps >= 0; key.capsLockOn = caps == 1; key.source = SECONDARY_KEY_SOURCE;
+            key.deviceId = deviceId;
             QueueNativeKeyInput(key);
             result = 0;
         }
@@ -2647,6 +2655,9 @@ static napi_value NativeKeyInputToJs(napi_env env, const NativeKeyInputEvent& in
     napi_value source;
     napi_create_int32(env, input.source, &source);
     napi_set_named_property(env, object, "source", source);
+    napi_value deviceId;
+    napi_create_int64(env, input.deviceId, &deviceId);
+    napi_set_named_property(env, object, "deviceId", deviceId);
     return object;
 }
 

@@ -77,5 +77,5 @@ assert.match(cpp, /rust_send_printable_shortcut_key\(keyCode, modifierMask\)/);
 assert.match(cpp, /"sendPrintableShortcutKey", nullptr, SendPrintableShortcutKey/);
 assert.match(header, /int rust_send_printable_shortcut_key\(int key_code, int modifier_mask\)/);
 assert.match(rust, /input_compat::printable_shortcut_key\(key_code, modifier_mask\)/);
-assert(logs.some(v => v[1].includes('printable_key=81 modifiers=1 result=0')));
+assert(logs.some(v => v[1].includes('printable_key=redacted modifiers=1 result=0')));
 console.log('PASS separate ArkTS/NAPI/Rust route and shortcut-only diagnostic metadata');

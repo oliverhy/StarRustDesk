@@ -6,12 +6,14 @@ import { hilog } from '@kit.PerformanceAnalysisKit'
 import { connection } from '@kit.NetworkKit'
 import { BusinessError } from '@kit.BasicServicesKit'
 import { KeyboardRemapConfig, decodeKeyboardRemap, keyboardModifierBit, keyboardRemapRule } from '../model/KeyboardRemapping'
+import { KeyboardLayoutBinding } from '../model/PhysicalKeyboardLayout'
 import { RemoteSecurityOptions } from './RustDeskNapi'
 import { InsecureConsentScope, insecureReasonForError } from '../model/InsecureConsent'
 import { RemotePeerPreferences } from './RemotePeerPreferences'
 
 interface MappedHardwarePress {
   identity: number
+  deviceId: number
   source: number
   target: number
   modifiers: number
@@ -21,8 +23,13 @@ interface MappedHardwarePress {
 export class ConnectionService {
   private static keyboardRemap: KeyboardRemapConfig = { version: 1, enabled: false, rules: [] }
   private static hardwareKeyboardLayoutSwap: boolean = false
+  private static hardwareKeyboardBindings: KeyboardLayoutBinding[] = []
+  private static lastKeyboardLayoutRoute: string = ''
+  private static keyboardLayoutRouteLogCount: number = 0
+  private static keyboardLayoutSnapshotWarning: boolean = false
   private static mappedHardwarePresses: MappedHardwarePress[] = []
   private static physicalModifierSourceCodes: number[] = []
+  private static physicalModifierDeviceIds: number[] = []
   private static keyboardMode: number = 0
   private static relativeMouse: boolean = false
   private static relativeRemainderX: number = 0
@@ -684,19 +691,62 @@ export class ConnectionService {
       `configured enabled=${ConnectionService.keyboardRemap.enabled ? 1 : 0} rules=${ConnectionService.keyboardRemap.rules.length}`)
   }
 
-  static configureHardwareKeyboardLayout(swap: boolean): void {
-    if (ConnectionService.hardwareKeyboardLayoutSwap === swap) return
+  static configureHardwareKeyboardLayout(swap: boolean, bindings: KeyboardLayoutBinding[] = []): void {
+    const next: KeyboardLayoutBinding[] = bindings.filter((item: KeyboardLayoutBinding) =>
+      Number.isSafeInteger(item.deviceId) && item.deviceId >= 0).map((item: KeyboardLayoutBinding): KeyboardLayoutBinding =>
+      ({ deviceId: item.deviceId, swap: item.swap && item.calibrated, calibrated: item.calibrated }))
+      .sort((a: KeyboardLayoutBinding, b: KeyboardLayoutBinding) => a.deviceId - b.deviceId)
+    if (ConnectionService.hardwareKeyboardLayoutSwap === swap &&
+      JSON.stringify(ConnectionService.hardwareKeyboardBindings) === JSON.stringify(next)) return
     ConnectionService.releaseModifiers()
     ConnectionService.hardwareKeyboardLayoutSwap = swap
-    RustDeskNapi.appendDiagnosticLog('input-layout', `applied swap=${swap ? 1 : 0}`)
+    ConnectionService.hardwareKeyboardBindings = next
+    ConnectionService.keyboardLayoutSnapshotWarning = false
+    RustDeskNapi.appendDiagnosticLog('input-layout', `policy_applied devices=${next.length} ` +
+      `calibrated=${next.filter((item: KeyboardLayoutBinding) => item.calibrated).length} ` +
+      `corrected=${next.filter((item: KeyboardLayoutBinding) => item.swap).length} ` +
+      `source_required=${next.length > 0 ? 1 : 0}`)
   }
 
-  private static hardwareControlTarget(source: number): number {
+  private static hasHardwareLayoutMapping(): boolean {
+    return ConnectionService.hardwareKeyboardLayoutSwap ||
+      ConnectionService.hardwareKeyboardBindings.some((item: KeyboardLayoutBinding) => item.swap)
+  }
+
+  private static hardwareDeviceSwap(deviceId?: number): boolean {
+    if (deviceId !== undefined && Number.isSafeInteger(deviceId) && deviceId >= 0) {
+      const binding = ConnectionService.hardwareKeyboardBindings.find((item: KeyboardLayoutBinding) => item.deviceId === deviceId)
+      if (binding !== undefined) return binding.swap
+      if (ConnectionService.hardwareKeyboardBindings.length > 0) return false
+    }
+    if (ConnectionService.hardwareKeyboardBindings.length > 0) return false
+    return ConnectionService.hardwareKeyboardLayoutSwap
+  }
+
+  private static logHardwareLayoutRoute(deviceId: number): void {
+    const valid: boolean = Number.isSafeInteger(deviceId) && deviceId >= 0
+    const binding = valid ? ConnectionService.hardwareKeyboardBindings.find((item: KeyboardLayoutBinding) =>
+      item.deviceId === deviceId) : undefined
+    const summary: string = `identity=${valid ? 1 : 0} matched=${binding ? 1 : 0} ` +
+      `calibrated=${binding?.calibrated ? 1 : 0} correction=${ConnectionService.hardwareDeviceSwap(deviceId) ? 1 : 0}`
+    if (summary === ConnectionService.lastKeyboardLayoutRoute || ConnectionService.keyboardLayoutRouteLogCount >= 24) return
+    ConnectionService.lastKeyboardLayoutRoute = summary
+    ConnectionService.keyboardLayoutRouteLogCount++
+    RustDeskNapi.appendDiagnosticLog('input-layout', `device_route ${summary}`)
+  }
+
+  private static modifierIndex(identity: number, deviceId: number): number {
+    return ConnectionService.physicalModifierKeys.findIndex((key: number, index: number) =>
+      key === identity && (ConnectionService.physicalModifierDeviceIds[index] === deviceId ||
+        ConnectionService.physicalModifierDeviceIds[index] < 0 || deviceId < 0))
+  }
+
+  private static hardwareControlTarget(source: number, deviceId?: number): number {
     // Explicit raw-source rules win. Never remap a calibrated target again:
     // Ctrl->Command and existing Alt<->Command workarounds remain single-pass.
     const rule = keyboardRemapRule(ConnectionService.keyboardRemap, source)
     if (rule !== undefined) return rule.target
-    if (!ConnectionService.hardwareKeyboardLayoutSwap) return source
+    if (!ConnectionService.hardwareDeviceSwap(deviceId)) return source
     switch (source) {
       case 18: return 91
       case 165: return 92
@@ -706,25 +756,28 @@ export class ConnectionService {
     }
   }
 
-  static sendHardwareControlKey(source: number, action: number, physicalKeyCode?: number, route: string = 'hardware'): void {
-    if ((!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) || source === 20) {
-      ConnectionService.sendKeyEvent(source, action, physicalKeyCode)
+  static sendHardwareControlKey(source: number, action: number, physicalKeyCode?: number, route: string = 'hardware',
+    deviceId: number = -1): void {
+    ConnectionService.logHardwareLayoutRoute(deviceId)
+    if ((!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareDeviceSwap(deviceId)) || source === 20) {
+      ConnectionService.sendKeyEvent(source, action, physicalKeyCode, undefined, deviceId)
       return
     }
     const identity: number = physicalKeyCode ?? source
     const rule = keyboardRemapRule(ConnectionService.keyboardRemap, source)
     if (ConnectionService.getModifierBit(source) !== 0) {
-      const heldIndex: number = ConnectionService.physicalModifierKeys.indexOf(identity)
+      const heldIndex: number = ConnectionService.modifierIndex(identity, deviceId)
       const target: number = action === 1 && heldIndex >= 0 ? ConnectionService.physicalModifierControlCodes[heldIndex] :
-        ConnectionService.hardwareControlTarget(source)
-      ConnectionService.sendKeyEvent(target, action, identity, source)
+        ConnectionService.hardwareControlTarget(source, deviceId)
+      ConnectionService.sendKeyEvent(target, action, identity, source, deviceId)
       return
     }
     if (!ConnectionService.keyboardRemap.enabled) {
-      ConnectionService.sendKeyEvent(source, action, physicalKeyCode)
+      ConnectionService.sendKeyEvent(source, action, physicalKeyCode, undefined, deviceId)
       return
     }
-    const index: number = ConnectionService.mappedHardwarePresses.findIndex((press: MappedHardwarePress) => press.identity === identity)
+    const index: number = ConnectionService.mappedHardwarePresses.findIndex((press: MappedHardwarePress) =>
+      press.identity === identity && (press.deviceId === deviceId || press.deviceId < 0 || deviceId < 0))
     let press: MappedHardwarePress | undefined = index >= 0 ? ConnectionService.mappedHardwarePresses[index] : undefined
     if (action === 1) {
       if (press === undefined) return
@@ -735,7 +788,7 @@ export class ConnectionService {
     }
     if (action !== 0 && action !== 2) return
     if (press === undefined) {
-      press = { identity, source, target: rule?.target ?? source, modifiers: rule?.modifiers ?? 0, route }
+      press = { identity, deviceId, source, target: rule?.target ?? source, modifiers: rule?.modifiers ?? 0, route }
       if (action === 0) ConnectionService.mappedHardwarePresses.push(press)
       if (press.modifiers !== 0) {
         ConnectionService.sendShortcutKey(press.target, press.modifiers | ConnectionService.getKeyModifierMask())
@@ -751,7 +804,8 @@ export class ConnectionService {
     ConnectionService.sendKeyEvent(press.target, action)
   }
 
-  static sendKeyEvent(keyCode: number, action: number, physicalKeyCode?: number, originalSourceCode?: number): void {
+  static sendKeyEvent(keyCode: number, action: number, physicalKeyCode?: number, originalSourceCode?: number,
+    deviceId: number = -1): void {
     if (keyCode === 20) {
       ConnectionService.sendCapsLockEvent(action)
       return
@@ -759,7 +813,7 @@ export class ConnectionService {
     let modifierBit: number = ConnectionService.getModifierBit(keyCode)
     if (modifierBit !== 0) {
       const identity: number = physicalKeyCode ?? keyCode
-      const index: number = ConnectionService.physicalModifierKeys.indexOf(identity)
+      const index: number = ConnectionService.modifierIndex(identity, deviceId)
       if (action === 0) {
         if (index >= 0) {
           return
@@ -768,6 +822,7 @@ export class ConnectionService {
         ConnectionService.physicalModifierBits.push(modifierBit)
         ConnectionService.physicalModifierControlCodes.push(keyCode)
         ConnectionService.physicalModifierSourceCodes.push(originalSourceCode ?? keyCode)
+        ConnectionService.physicalModifierDeviceIds.push(deviceId)
         ConnectionService.directModifierMask |= modifierBit
       } else if (action === 1) {
         if (index < 0) {
@@ -778,17 +833,18 @@ export class ConnectionService {
         ConnectionService.physicalModifierControlCodes.splice(index, 1)
         const original: number = ConnectionService.physicalModifierSourceCodes[index] ?? keyCode
         ConnectionService.physicalModifierSourceCodes.splice(index, 1)
+        ConnectionService.physicalModifierDeviceIds.splice(index, 1)
         if (!ConnectionService.physicalModifierBits.includes(modifierBit)) {
           // A real key-up is authoritative. Clear stale snapshots from pointer
           // and polling sources as well so a modifier cannot remain stuck.
           ConnectionService.directModifierMask &= ~modifierBit
-          if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) {
+          if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hasHardwareLayoutMapping()) {
             ConnectionService.pointerModifierMask &= ~modifierBit
             ConnectionService.nativeModifierMask &= ~modifierBit
             ConnectionService.hardwareModifierMask &= ~modifierBit
           }
         }
-        if ((ConnectionService.keyboardRemap.enabled || ConnectionService.hardwareKeyboardLayoutSwap) && identity < 10000 &&
+        if ((ConnectionService.keyboardRemap.enabled || ConnectionService.hasHardwareLayoutMapping()) && identity < 10000 &&
           !ConnectionService.physicalModifierSourceCodes.some((code: number, i: number) =>
             ConnectionService.physicalModifierKeys[i] < 10000 && keyboardModifierBit(code) === keyboardModifierBit(original))) {
           const sourceBit: number = keyboardModifierBit(original)
@@ -849,7 +905,7 @@ export class ConnectionService {
       RustDeskNapi.sendText(shiftedSymbol)
       ConnectionService.sendRawModifierEvent(16, 0, 'shift-symbol-restore')
       RustDeskNapi.appendDiagnosticLog('input',
-        `shifted_number_forwarded hid=${hidCode} repeat=${trackedSymbolIndex >= 0 ? 1 : 0}`)
+        `shifted_number_forwarded key=redacted repeat=${trackedSymbolIndex >= 0 ? 1 : 0}`)
       return
     }
     if (action === 1 && trackedSymbolIndex >= 0) {
@@ -976,7 +1032,7 @@ export class ConnectionService {
   static sendShortcutKey(keyCode: number, modifierMask: number): number {
     const result: number = RustDeskNapi.sendKeyEvent(keyCode, 2, modifierMask)
     RustDeskNapi.appendDiagnosticLog('input-shortcut',
-      `key=${keyCode} modifiers=${modifierMask} result=${result}`)
+      `key=redacted modifiers=${modifierMask} result=${result}`)
     return result
   }
 
@@ -985,7 +1041,7 @@ export class ConnectionService {
     // Keep this separate from control keys (for example lowercase q = F2's VK).
     const result: number = RustDeskNapi.sendPrintableShortcutKey(keyCode, modifierMask)
     RustDeskNapi.appendDiagnosticLog('input-shortcut',
-      `printable_key=${keyCode} modifiers=${modifierMask} result=${result}`)
+      `printable_key=redacted modifiers=${modifierMask} result=${result}`)
     return result
   }
 
@@ -1033,6 +1089,7 @@ export class ConnectionService {
     ConnectionService.physicalModifierBits = []
     ConnectionService.physicalModifierControlCodes = []
     ConnectionService.physicalModifierSourceCodes = []
+    ConnectionService.physicalModifierDeviceIds = []
     ConnectionService.mappedHardwarePresses = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
@@ -1094,6 +1151,10 @@ export class ConnectionService {
 
   private static resetTransientInputState(): void {
     ConnectionService.hardwareKeyboardLayoutSwap = false
+    ConnectionService.hardwareKeyboardBindings = []
+    ConnectionService.lastKeyboardLayoutRoute = ''
+    ConnectionService.keyboardLayoutRouteLogCount = 0
+    ConnectionService.keyboardLayoutSnapshotWarning = false
     ConnectionService.keyboardRemap = { version: 1, enabled: false, rules: [] }
     ConnectionService.mappedHardwarePresses = []
     ConnectionService.directModifierMask = 0
@@ -1103,6 +1164,7 @@ export class ConnectionService {
     ConnectionService.physicalModifierBits = []
     ConnectionService.physicalModifierControlCodes = []
     ConnectionService.physicalModifierSourceCodes = []
+    ConnectionService.physicalModifierDeviceIds = []
     ConnectionService.sentModifierControlCodes = []
     ConnectionService.hardwareModifierMask = 0
     ConnectionService.heldModifierMask = 0
@@ -1155,7 +1217,7 @@ export class ConnectionService {
   }
 
   private static mapHardwareModifierMask(mask: number): number {
-    if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hardwareKeyboardLayoutSwap) return mask
+    if (!ConnectionService.keyboardRemap.enabled && !ConnectionService.hasHardwareLayoutMapping()) return mask
     let result: number = mask & ~15
     for (const source of [17, 16, 18, 91]) {
       const bit: number = keyboardModifierBit(source)
@@ -1167,7 +1229,19 @@ export class ConnectionService {
           identified = true
         }
       })
-      if (!identified) result |= keyboardModifierBit(ConnectionService.hardwareControlTarget(source))
+      if (!identified) {
+        // Modifier snapshots are global, not attributable to a particular device.
+        // Do not guess which keyboard owns an unattributed Alt/Meta snapshot.
+        // Real key events restore the correct per-device state.
+        const ambiguous: boolean = ConnectionService.hardwareKeyboardBindings.length > 0 &&
+          ConnectionService.hasHardwareLayoutMapping() && (source === 18 || source === 91) &&
+          keyboardRemapRule(ConnectionService.keyboardRemap, source) === undefined
+        if (!ambiguous) result |= keyboardModifierBit(ConnectionService.hardwareControlTarget(source))
+        else if (!ConnectionService.keyboardLayoutSnapshotWarning) {
+          ConnectionService.keyboardLayoutSnapshotWarning = true
+          RustDeskNapi.appendDiagnosticLog('input-layout', 'snapshot_suppressed reason=unattributed_device')
+        }
+      }
     }
     return result
   }
@@ -1208,9 +1282,9 @@ export class ConnectionService {
       if (action === 1 && index >= 0) ConnectionService.sentModifierControlCodes.splice(index, 1)
     }
     RustDeskNapi.appendDiagnosticLog('input-modifier',
-      `source=${source} key=${keyCode} action=${action} mask=${packetMask} result=${result}`)
+      `source=${source} kind=modifier action=${action} mask=${packetMask} result=${result}`)
     hilog.info(ConnectionService.LOG_DOMAIN, 'StarRustDesk',
-      'InputTrace modifier source=%{public}s key=%{public}d action=%{public}d mask=%{public}d result=%{public}d',
-      source, keyCode, action, packetMask, result)
+      'InputTrace modifier source=%{public}s kind=modifier action=%{public}d mask=%{public}d result=%{public}d',
+      source, action, packetMask, result)
   }
 }

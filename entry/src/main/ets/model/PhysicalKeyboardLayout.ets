@@ -11,6 +11,8 @@ export interface PhysicalKeyboardDescriptor {
 }
 
 export interface KeyboardLayoutRecord { fingerprint: string; swap: boolean; }
+// Device IDs are ephemeral and remain in memory. They are never persisted or logged.
+export interface KeyboardLayoutBinding { deviceId: number; swap: boolean; calibrated: boolean; }
 export interface KeyboardLayoutSnapshot {
   revision: number;
   ready: boolean;
@@ -67,34 +69,55 @@ export class KeyboardLayoutCapture {
   private command: number = 0;
   private option: number = 0;
   private deviceId: number;
+  private allowedDeviceIds: number[];
+  private allowComposite: boolean;
+  private heldDevice: number = -1;
+  private capturedDevices: number[] = [];
 
-  constructor(deviceId: number) { this.deviceId = deviceId; }
+  constructor(deviceId: number, allowedDeviceIds: number[] = [], allowComposite: boolean = false) {
+    this.deviceId = deviceId;
+    this.allowedDeviceIds = allowedDeviceIds.slice();
+    this.allowComposite = allowComposite;
+  }
 
   begin(): void {
     this.phase = 'command'; this.error = ''; this.held = this.command = this.option = 0;
+    this.heldDevice = -1; this.capturedDevices = [];
   }
 
   input(harmonyCode: number, action: number, deviceId: number): void {
     if (this.phase === 'idle' || this.phase === 'done') return;
-    if (deviceId !== this.deviceId) { this.error = 'device'; return; }
+    if (!Number.isSafeInteger(deviceId) || deviceId < 0 ||
+      (this.deviceId >= 0 && deviceId !== this.deviceId) ||
+      (this.deviceId < 0 && !this.allowedDeviceIds.includes(deviceId))) {
+      this.error = 'device'; return;
+    }
     const code: number = keyboardRemapHarmonyCode(harmonyCode);
     if (action === 1) {
-      if (code !== this.held || this.held === 0) return;
-      this.held = 0;
+      if (code !== this.held || this.held === 0 || deviceId !== this.heldDevice) return;
+      this.held = 0; this.heldDevice = -1;
       if (this.phase === 'command-release') this.phase = 'option';
       else if (this.phase === 'option-release') this.phase = 'done';
       return;
     }
     if (action !== 0 || this.held !== 0) return;
     if (code !== 18 && code !== 91) { this.error = 'modifier'; return; }
+    if (!this.allowComposite && this.capturedDevices.length > 0 && !this.capturedDevices.includes(deviceId)) {
+      this.error = 'device'; return;
+    }
     this.error = '';
     if (this.phase === 'command') {
-      this.command = code; this.held = code; this.phase = 'command-release';
+      this.command = code; this.held = code; this.heldDevice = deviceId;
+      this.capturedDevices = [deviceId]; this.phase = 'command-release';
     } else if (this.phase === 'option') {
       if (code === this.command) { this.error = 'same'; return; }
-      this.option = code; this.held = code; this.phase = 'option-release';
+      this.option = code; this.held = code; this.heldDevice = deviceId;
+      if (!this.capturedDevices.includes(deviceId)) this.capturedDevices.push(deviceId);
+      this.phase = 'option-release';
     }
   }
+
+  devices(): number[] { return this.phase === 'done' ? this.capturedDevices.slice() : []; }
 
   result(): boolean | undefined {
     if (this.phase !== 'done') return undefined;

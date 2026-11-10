@@ -30,6 +30,45 @@ std::string lowerCopy(const std::string& value) {
     });
     return lowered;
 }
+
+// Also used when exporting files written by an older version. Numeric keyboard
+// positions are sensitive even if the original character was never logged.
+std::string redactKeyboardRecord(std::string value) {
+    std::string lowered = lowerCopy(value);
+    const bool keyboard = (lowered.find("input-trace:") != std::string::npos &&
+                           lowered.find("type=key") != std::string::npos) ||
+        lowered.find("inputtrace") != std::string::npos ||
+        lowered.find("sendkeyevent") != std::string::npos ||
+        lowered.find("sendphysicalkeyevent") != std::string::npos ||
+        lowered.find("native_key_forwarded") != std::string::npos ||
+        lowered.find("shifted_number_forwarded") != std::string::npos ||
+        lowered.find("keyboard map unsupported") != std::string::npos ||
+        lowered.find("[input-shortcut]") != std::string::npos ||
+        lowered.find("[input-modifier]") != std::string::npos ||
+        lowered.find("printable_key=") != std::string::npos ||
+        lowered.find("virtual_key=") != std::string::npos;
+    if (!keyboard) return value;
+    const char* fields[] = {"key=", "code=", "hid=", "keycode=", "key_code=", "hid_code=",
+        "scan_code=", "scancode=", "char=", "unicode=", "printable_key=", "virtual_key="};
+    for (const char* field : fields) {
+        const std::string needle(field);
+        size_t position = 0;
+        while ((position = lowered.find(needle, position)) != std::string::npos) {
+            if (position > 0 && (std::isalnum(static_cast<unsigned char>(lowered[position - 1])) ||
+                                lowered[position - 1] == '_')) {
+                position += needle.size();
+                continue;
+            }
+            const size_t start = position + needle.size();
+            size_t end = value.find_first_of(" ,;]}\r\n\t", start);
+            if (end == std::string::npos) end = value.size();
+            value.replace(start, end - start, "redacted");
+            lowered = lowerCopy(value);
+            position = start + 8;
+        }
+    }
+    return value;
+}
 }
 
 DiagnosticLog& DiagnosticLog::instance() {
@@ -85,23 +124,31 @@ std::string DiagnosticLog::exportText() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream output;
     output << "芝麻远控 diagnostic log\n"
-           << "Passwords, verification codes, clipboard content and cryptographic secrets are not recorded.\n";
+           << "Passwords, verification codes, clipboard content and cryptographic secrets are not recorded.\n"
+           << "Keyboard content, physical key positions and scan codes are redacted.\n";
+    const auto appendArchive = [this, &output](const std::string& text) {
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) output << sanitize(line) << '\n';
+    };
     if (!previousPath_.empty()) {
         std::string previous = readFile(previousPath_);
         if (!previous.empty()) {
-            output << "\n===== PREVIOUS LOG =====\n" << previous;
+            output << "\n===== PREVIOUS LOG =====\n";
+            appendArchive(previous);
         }
     }
     if (!currentPath_.empty()) {
         std::string current = readFile(currentPath_);
         if (!current.empty()) {
-            output << "\n===== CURRENT LOG =====\n" << current;
+            output << "\n===== CURRENT LOG =====\n";
+            appendArchive(current);
         }
     }
     if (!initialized_ && !pendingLines_.empty()) {
         output << "\n===== IN-MEMORY LOG =====\n";
         for (const std::string& line : pendingLines_) {
-            output << line;
+            appendArchive(line);
         }
     }
     return output.str();
@@ -169,7 +216,7 @@ std::string DiagnosticLog::sanitize(const std::string& message) const {
             position = valueStart + 10;
         }
     }
-    return sanitized;
+    return redactKeyboardRecord(std::move(sanitized));
 }
 
 void DiagnosticLog::appendLineLocked(const std::string& line) {

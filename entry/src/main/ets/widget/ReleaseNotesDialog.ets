@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.2'
-export const RELEASE_NOTES_BUILD: string = '2000002'
+export const RELEASE_NOTES_VERSION: string = '2.0.3'
+export const RELEASE_NOTES_BUILD: string = '2000003'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.3（2000003）· Mac 键盘与远控选屏优化', [
+            '优化实体键盘设备识别与 Mac 键盘布局校准，多把键盘可分别校准；同一把键盘被识别为多个设备时，可确认后一起校准。',
+            '首次连接跟随远端默认屏幕，重连时尽量恢复之前选择的屏幕，改善部分多屏设备在锁屏或登录阶段黑屏的问题。',
+            '完善主屏和扩展屏的键盘来源识别、按键释放与异常处理，保留原有软键盘、中文输入和自定义快捷键设置。',
+            '键盘诊断不记录按键内容或扫描码；重新导出应用内旧诊断日志时会再次脱敏，补充选屏与键盘校准状态诊断。'
+          ])
           this.buildSection('2.0.2（2000002）· 游戏控制与悬浮布局优化', [
             '重新设计游戏悬浮控制台，与远控功能栏统一风格；可快速切换虚拟手柄、屏幕按键和相对鼠标，并编辑按键或调整灵敏度。',
             '修复新建游戏按键方案没有默认屏幕按键的问题，提供方向、鼠标及空格键预设；已有自定义或空方案不会被覆盖，空方案可手动加载默认按键。',

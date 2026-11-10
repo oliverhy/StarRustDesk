@@ -6,6 +6,7 @@ mod refusal_diagnostics;
 mod performance;
 mod session_recording;
 mod input_compat;
+mod input_diagnostics;
 mod session_health;
 mod file_transfer_state;
 mod session_recovery;
@@ -1667,8 +1668,7 @@ pub extern "C" fn rust_send_physical_key_event(
     let Some(peer_code) = map_usb_hid_to_peer_code(usb_hid_code.max(0) as u32, &peer_platform)
     else {
         emit_event(&format!(
-            "keyboard map unsupported hid={} peer_platform={}",
-            usb_hid_code,
+            "keyboard map unsupported key=redacted peer_platform={}",
             if peer_platform.is_empty() {
                 "unknown"
             } else {
@@ -7243,43 +7243,8 @@ fn modifier_mask_to_controls(modifier_mask: i32) -> Vec<EnumOrUnknown<ControlKey
 }
 
 fn trace_input_message(stage: &str, msg: &PeerMessage) {
-    match &msg.union {
-        Some(message::Union::MouseEvent(event)) if event.mask & 7 != 0 => {
-            let modifiers = event
-                .modifiers
-                .iter()
-                .map(|modifier| modifier.value().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            emit_event(&format!(
-                "input-trace: stage={stage} type=mouse mask={} x={} y={} modifiers=[{}]",
-                event.mask, event.x, event.y, modifiers
-            ));
-        }
-        Some(message::Union::KeyEvent(event)) => {
-            let key = match &event.union {
-                Some(key_event::Union::ControlKey(control)) => {
-                    format!("control:{}", control.value())
-                }
-                Some(key_event::Union::Chr(chr)) => format!("scan:{chr}"),
-                Some(_) => "other".to_string(),
-                None => "none".to_string(),
-            };
-            let modifiers = event
-                .modifiers
-                .iter()
-                .map(|modifier| modifier.value().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            emit_event(&format!(
-                "input-trace: stage={stage} type=key key={key} down={} press={} mode={} modifiers=[{}]",
-                event.down,
-                event.press,
-                event.mode.value(),
-                modifiers
-            ));
-        }
-        _ => {}
+    if let Some(summary) = input_diagnostics::trace_summary(stage, msg) {
+        emit_event(&summary);
     }
 }
 
