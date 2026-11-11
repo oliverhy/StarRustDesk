@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.3'
-export const RELEASE_NOTES_BUILD: string = '2000003'
+export const RELEASE_NOTES_VERSION: string = '2.0.4'
+export const RELEASE_NOTES_BUILD: string = '2000004'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.4（2000004）· 远控软键盘体验优化', [
+            '新增“提交后收起键盘”选项，默认关闭并按远端设备保存；开启后输入法提交会发送回车并收起键盘，关闭时保留连续输入方式。',
+            '优化中文输入法组词与提交顺序，等待候选内容确认后再处理提交，减少输入中途收起键盘的情况。',
+            '安全清理应用临时输入缓存，防止输入法清空隐藏输入框时误向远端发送大量退格，并过滤过期输入回调。',
+            '完善键盘提交与收起状态诊断，不记录密码、输入文字或输入法候选内容。'
+          ])
           this.buildSection('2.0.3（2000003）· Mac 键盘与远控选屏优化', [
             '优化实体键盘设备识别与 Mac 键盘布局校准，多把键盘可分别校准；同一把键盘被识别为多个设备时，可确认后一起校准。',
             '首次连接跟随远端默认屏幕，重连时尽量恢复之前选择的屏幕，改善部分多屏设备在锁屏或登录阶段黑屏的问题。',

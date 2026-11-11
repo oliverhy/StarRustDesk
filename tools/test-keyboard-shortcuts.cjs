@@ -32,7 +32,7 @@ assert.match(page, /if \(this\.connectionStatus === ConnectionStatus\.CONNECTED 
   'Shortcut access must not depend on opening the local software keyboard');
 assert.match(page, /this\.toggleControlMenu\(category\)/,
   'Unified keyboard button must open the paged shortcut popup without opening the IME');
-assert.match(page, /if \(this\.showKeyboardPanel && this\.connectionStatus === ConnectionStatus\.CONNECTED\) \{\s*this\.buildKeyboardCapture\(\);/,
+assert.match(page, /if \(this\.showKeyboardPanel && this\.connectionStatus === ConnectionStatus\.CONNECTED\) \{\s*this\.buildKeyboardCapture\(this\.remoteKeyboardFocusGeneration\);/,
   'The IME capture must remain opt-in instead of opening on connection');
 const close = page.slice(page.indexOf('  closeRemoteKeyboard():'), page.indexOf('  applyKeyboardResizeMode():'));
 assert(!close.includes('this.keyboardToolsCollapsed ='), 'Closing software keyboard preserves the independent shortcut panel');

@@ -25,7 +25,8 @@ function method(name) {
 }
 const methods = ['mapControlKeyCode', 'isModifierControlCode', 'handleRemoteKey',
   'handleNativeKeyInput', 'forwardRemoteNavigationKey', 'releaseRemoteNavigationKeys',
-  'handleDirectKeyboardChange', 'resetKeyboardCaptureBuffer'].map(method).join('\n');
+  'handleDirectKeyboardChange', 'resetKeyboardCaptureBuffer', 'handleRemoteKeyboardSubmit',
+  'finishRemoteKeyboardSubmit'].map(method).join('\n');
 const context = vm.createContext({
   ConnectionService: service, ConnectionStatus: { CONNECTED: 2 }, KeyType: { Down: 0, Up: 1 },
   RustDeskNapi: { appendDiagnosticLog: (tag, value) => logs.push([tag, value]) },
@@ -39,12 +40,14 @@ function setup(panel = false) {
   packets.length = texts.length = logs.length = 0;
   modifierMask = 0;
   const p = new context.Probe();
-  p.connectionStatus = 2; p.showKeyboardPanel = panel; p.showCommunicationPanel = false;
+  p.connectionStatus = 2; p.remotePageVisible = true; p.showKeyboardPanel = panel; p.showCommunicationPanel = false;
   p.navigationKeys = new context.RemoteNavigationKeys(); p.keyboardComposing = false;
   p.drainNativeInputEvents = () => {};
   p.syncModifiersFromKeyEvent = e => { modifierMask = e.mask || 0; };
   p.sendKeyboardText = text => texts.push(text);
   p.sendControlKey = key => packets.push([key, 2, modifierMask]);
+  p.traceRemoteKeyboardState = () => {};
+  p.closeRemoteKeyboard = () => { p.showKeyboardPanel = false; p.resetKeyboardCaptureBuffer(); };
   p.resetKeyboardCaptureBuffer();
   return p;
 }
@@ -110,6 +113,55 @@ test('IME composing and candidate selection stay local; committed Chinese sent o
   ark(p, 2012); ark(p, 2012, 1);
   assert.deepEqual(packets, [[38,0,0],[38,1,0]]);
   assert(!JSON.stringify(logs).includes('zhong') && !JSON.stringify(logs).includes('中'));
+});
+for (const hide of [false, true]) {
+  test(`submit waits for committed Chinese and sends exactly one Enter; hide=${hide}`, () => {
+    const p = setup(true); p.keyboardHideOnSubmit = hide;
+    const base = p.keyboardInput; let kept = 0;
+    p.handleDirectKeyboardChange(base + 'zhong', { value: 'zhong' });
+    p.handleRemoteKeyboardSubmit({ keepEditableState() { kept++; } });
+    assert.equal(kept, 1); assert.equal(packets.length, 0); assert.equal(texts.length, 0);
+    assert(p.showKeyboardPanel); assert(p.keyboardSubmitPending);
+    p.handleDirectKeyboardChange(base + '中', { value: '' });
+    assert.deepEqual(texts, ['中']); assert.deepEqual(packets, [[13, 2, 0]]);
+    assert.equal(p.showKeyboardPanel, !hide); assert.equal(p.keyboardSubmitPending, false);
+    assert.equal(p.keyboardInput, base); assert.equal(p.directKeyboardCommittedText, base);
+    assert(!JSON.stringify(logs).includes('zhong') && !JSON.stringify(logs).includes('中'));
+  });
+}
+test('cancelled composition or a closed capture cannot trigger deferred Enter or remote deletion', () => {
+  const p = setup(true); const base = p.keyboardInput;
+  p.handleDirectKeyboardChange(base + 'ni', { value: 'ni' });
+  p.handleRemoteKeyboardSubmit({ keepEditableState() {} });
+  p.handleDirectKeyboardChange(base, { value: '' });
+  assert.deepEqual(packets, []); assert.deepEqual(texts, []); assert(!p.keyboardSubmitPending);
+  p.closeRemoteKeyboard();
+  p.handleDirectKeyboardChange('', { value: '' }); p.handleRemoteKeyboardSubmit();
+  assert.deepEqual(packets, []); assert.deepEqual(texts, []);
+  assert.equal(p.keyboardInput, base); assert.equal(p.directKeyboardCommittedText, base);
+});
+test('IME whole-field clear never translates the private sentinel into remote Backspaces', () => {
+  const p = setup(true); const base = p.keyboardInput;
+  p.handleDirectKeyboardChange('', { value: '' });
+  assert.deepEqual(packets, []); assert.deepEqual(texts, []); assert.equal(p.keyboardInput, base);
+  p.handleDirectKeyboardChange(base + 'ni', { value: 'ni' });
+  p.handleRemoteKeyboardSubmit({ keepEditableState() {} });
+  p.handleDirectKeyboardChange('', { value: '' });
+  assert.deepEqual(packets, []); assert.deepEqual(texts, []); assert(!p.keyboardSubmitPending);
+  assert.equal(p.directKeyboardCommittedText, base);
+});
+test('repeated submits during composition coalesce and never leak into a disconnected session', () => {
+  const p = setup(true); const base = p.keyboardInput;
+  p.handleDirectKeyboardChange(base + 'ni', { value: 'ni' });
+  p.handleRemoteKeyboardSubmit({ keepEditableState() {} });
+  p.handleRemoteKeyboardSubmit({ keepEditableState() {} });
+  p.handleDirectKeyboardChange(base + '你', { value: '' });
+  assert.deepEqual(texts, ['你']); assert.deepEqual(packets, [[13, 2, 0]]);
+  packets.length = texts.length = 0;
+  p.handleDirectKeyboardChange(base + 'hao', { value: 'hao' });
+  p.handleRemoteKeyboardSubmit({ keepEditableState() {} }); p.connectionStatus = 0;
+  p.handleDirectKeyboardChange(base + '好', { value: '' });
+  assert.deepEqual(packets, []); assert.deepEqual(texts, []);
 });
 test('a remote-held arrow still releases if composition starts before key-up', () => {
   const p = setup(true); ark(p, 2014);

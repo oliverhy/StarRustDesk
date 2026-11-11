@@ -136,6 +136,18 @@ test('display swipe preference defaults on and is isolated by remote and server'
   p.loadDisplaySwipePreference(); assert.equal(p.displaySwipeEnabled, true);
   p.peerPreferences = h.make('srv', 'A'); p.loadDisplaySwipePreference(); assert.equal(p.displaySwipeEnabled, false);
 });
+test('hide-on-submit defaults off and is scoped to each remote and server', () => {
+  const h = harness(), a = h.make('srv', 'A');
+  assert.equal(a.get('keyboard-hide-on-submit'), '');
+  assert(a.set('keyboard-hide-on-submit', '1')); assert(a.flush());
+  assert.equal(h.make('srv', 'A').get('keyboard-hide-on-submit'), '1');
+  assert.equal(h.make('srv', 'B').get('keyboard-hide-on-submit'), '');
+  assert.equal(h.make('other', 'A').get('keyboard-hide-on-submit'), '');
+  assert(!a.set('keyboard-hide-on-submit', 'maybe'));
+  const page = read('entry/src/main/ets/pages/RemotePage.ets');
+  assert(page.includes("this.loadKeyboardSubmitPreference()"));
+  assert(page.includes("translate('提交后收起键盘', this.uiLanguage)"));
+});
 test('sliders batch updates; disposal flushes the latest value once and rejects stale writes', () => {
   const h = harness(), a = h.make('srv', 'A');
   for (let percent = 25; percent <= 300; percent++) a.set('desktop-custom-percent', String(percent));
@@ -184,15 +196,17 @@ const method = name => {
 };
 function pageHarness(h, server, id, pc = false) {
   const names = ['inputModeOptionKey', 'compatibilityOptionKey', 'loadInputMode', 'loadLocalCursorPreference',
+    'loadKeyboardSubmitPreference', 'setKeyboardSubmitPreference',
     'loadEdgeAutoPanPreference', 'loadVirtualMousePreference', 'loadToolbarOrderPreferences', 'readToolbarOrder',
     'loadInputCompatibility', 'loadRemoteToolbarPosition', 'loadPeerToolbarState', 'resetRemoteViewportForSession',
     'resetViewportTransform', 'setInputMode', 'setLocalCursorPreference', 'saveToolbarOrder'];
   const constants = ['CONTROL_TOOLBAR_DEFAULT_ORDER', 'KEYBOARD_TOOLBAR_DEFAULT_ORDER', 'KEYBOARD_MORE_DEFAULT_ORDER']
     .map(name => pageSource.match(new RegExp(`const ${name}: string\\[\\] = \\[[\\s\\S]*?\\];`))[0]).join('\n');
-  Object.assign(h.context, { INPUT_MODE_MOUSE: 'mouse', INPUT_MODE_TOUCH: 'touch' });
+  Object.assign(h.context, { INPUT_MODE_MOUSE: 'mouse', INPUT_MODE_TOUCH: 'touch', ConnectionStatus: { CONNECTED: 2 } });
   vm.runInNewContext(ts.transpile(constants + '\nclass Page {' + names.map(method).join('\n') + '} exports.Page = Page;'), h.context);
   return Object.assign(new h.context.exports.Page(), {
     peerPreferences: h.make(server, id), peerPreferenceServer: server, connectedPeerId: id,
+    remotePageVisible: true, connectionStatus: 2, keyboardHideOnSubmit: false, showFileToast() {},
     isPcDevice: () => pc, isHandheldLandscape: () => false, inputMode: 'mouse', relativeMouseEnabled: false,
     cancelActiveTouchGesture() {}, stopEdgeAutoPan() {}, ensurePointerInitialized() {}, updateSystemPointerVisibility() {},
     applyInputCompatibility() {}, startKeyboardLayout() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
@@ -201,6 +215,24 @@ function pageHarness(h, server, id, pc = false) {
     virtualCtrlSelected: false, virtualShiftSelected: false
   });
 }
+test('page saves submit behavior transactionally and leaves the prior setting on failure', () => {
+  const h = harness(), p = pageHarness(h, 'srv', 'A');
+  p.loadKeyboardSubmitPreference(); assert.equal(p.keyboardHideOnSubmit, false);
+  p.setKeyboardSubmitPreference(true); assert.equal(p.keyboardHideOnSubmit, true);
+  assert.equal(h.make('srv', 'A').get('keyboard-hide-on-submit'), '1');
+  h.failWrite(true); let toast = ''; p.showFileToast = text => { toast = text; };
+  p.setKeyboardSubmitPreference(false);
+  assert.equal(p.keyboardHideOnSubmit, true); assert.equal(p.peerPreferences.get('keyboard-hide-on-submit'), '1');
+  assert(toast.includes('失败'));
+  h.failWrite(false); p.peerPreferences.flush();
+  assert.equal(h.make('srv', 'A').get('keyboard-hide-on-submit'), '1');
+  const other = pageHarness(h, 'srv', 'B'); other.loadKeyboardSubmitPreference();
+  assert.equal(other.keyboardHideOnSubmit, false);
+  const missing = pageHarness(h, 'srv', ''); let missingToast = '';
+  missing.showFileToast = text => { missingToast = text; };
+  missing.setKeyboardSubmitPreference(true);
+  assert.equal(missing.keyboardHideOnSubmit, false); assert(missingToast.includes('失败'));
+});
 test('production page restores isolated input, toolbar order/state/positions and view scale', () => {
   const h = harness(new Map([['show-local-cursor', '1']]));
   const a = pageHarness(h, 'srv', 'A');

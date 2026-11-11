@@ -1,4 +1,12 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+2.0.4（2000004）· 远控软键盘体验优化	2.0.4 (2000004) · Remote on-screen keyboard improvements
+新增“提交后收起键盘”选项，默认关闭并按远端设备保存；开启后输入法提交会发送回车并收起键盘，关闭时保留连续输入方式。	Added an optional hide-after-submit setting, off by default and saved per remote device. When enabled, submitting sends Enter and hides the keyboard; when disabled, continuous input remains available.
+优化中文输入法组词与提交顺序，等待候选内容确认后再处理提交，减少输入中途收起键盘的情况。	Improved Chinese IME composition and submission ordering: candidate text is committed before submission is processed, reducing premature keyboard dismissal.
+安全清理应用临时输入缓存，防止输入法清空隐藏输入框时误向远端发送大量退格，并过滤过期输入回调。	Safely clear the app's temporary input buffer, avoid sending unwanted Backspaces when the hidden input is cleared, and ignore stale input callbacks.
+完善键盘提交与收起状态诊断，不记录密码、输入文字或输入法候选内容。	Improved keyboard submission and dismissal diagnostics without recording passwords, typed text, or IME candidates.
+提交后收起键盘	Hide keyboard after submit
+开启后，输入法提交会发送回车并收起键盘；关闭时点击远端仍可连续输入。设置按远端设备保存。	When enabled, the keyboard's submit action sends Enter and closes the keyboard. When disabled, tap remote fields to continue typing. Saved per remote device.
+保存键盘设置失败，请重试	Could not save keyboard settings. Please try again.
 2.0.3（2000003）· Mac 键盘与远控选屏优化	2.0.3 (2000003) · Mac keyboard and display selection improvements
 优化实体键盘设备识别与 Mac 键盘布局校准，多把键盘可分别校准；同一把键盘被识别为多个设备时，可确认后一起校准。	Improved physical keyboard identification and Mac layout calibration. Calibrate keyboards separately, or confirm and calibrate multiple input devices belonging to the same keyboard together.
 首次连接跟随远端默认屏幕，重连时尽量恢复之前选择的屏幕，改善部分多屏设备在锁屏或登录阶段黑屏的问题。	Initial connections follow the remote default display; reconnecting attempts to restore the previously selected display, improving some lock-screen or sign-in black screens on multi-display devices.

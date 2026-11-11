@@ -438,6 +438,7 @@ struct RemotePage {
   @State showMouseSettings: boolean = false;
   @State showKeyboardCalibration: boolean = false;
   @State keyboardLayoutMode: string = 'auto';
+  @State keyboardHideOnSubmit: boolean = false;
   @State keyboardLayoutState: KeyboardLayoutSnapshot = { revision: 0, ready: false, count: 0,
     deviceId: -1, deviceName: '', fingerprint: '', calibrated: false, swap: false };
   private keyboardLayoutService: PhysicalKeyboardLayoutService | undefined = undefined;
@@ -449,6 +450,8 @@ struct RemotePage {
   @State showLeftButtonHoldIndicator: boolean = false;
   @State keyboardInput: string = KEYBOARD_CAPTURE_SENTINEL;
   private keyboardComposing: boolean = false;
+  private keyboardSubmitPending: boolean = false;
+  private remoteKeyboardController: TextInputController = new TextInputController();
   private navigationKeys: RemoteNavigationKeys = new RemoteNavigationKeys();
   private secondaryHeldKeys: SecondaryHeldKey[] = [];
   @State showCursor: boolean = false;
@@ -809,6 +812,7 @@ struct RemotePage {
     this.peerPreferenceServer = RustDeskNapi.getOption('custom-rendezvous-server');
     this.peerPreferences?.dispose();
     this.peerPreferences = new RemotePeerPreferences(this.peerPreferenceServer, this.connectedPeerId);
+    this.loadKeyboardSubmitPreference();
     this.loadGameModePreference();
     this.loadHighPerformancePreference();
     this.loadGamepadPreferences();
@@ -893,6 +897,7 @@ struct RemotePage {
     this.stopRemoteKeyboardTracking();
     this.showKeyboardPanel = false;
     this.remoteKeyboardEditing = false;
+    this.resetKeyboardCaptureBuffer();
     this.waylandPermissionEpoch++;
     this.uploadGeneration++;
     SessionRecording.stop(1);
@@ -2065,7 +2070,7 @@ struct RemotePage {
         this.buildKeyboardShortcutOverlay();
       }
       if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
-        this.buildKeyboardCapture();
+        this.buildKeyboardCapture(this.remoteKeyboardFocusGeneration);
       }
       if (this.showGestureHelp && this.connectionStatus === ConnectionStatus.CONNECTED) {
         this.buildGestureHelpOverlay();
@@ -5887,8 +5892,8 @@ struct RemotePage {
   }
 
   @Builder
-  buildKeyboardCapture() {
-    TextInput({ text: this.keyboardInput })
+  buildKeyboardCapture(captureGeneration: number) {
+    TextInput({ text: this.keyboardInput, controller: this.remoteKeyboardController })
       .id('remoteKeyboardCapture')
       .width(2)
       .height(2)
@@ -5903,26 +5908,30 @@ struct RemotePage {
       .defaultFocus(true)
       .enablePreviewText(true)
       .onEditChange((editing: boolean) => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
         this.handleRemoteKeyboardEditingChange(editing);
       })
       .onKeyPreIme((event: KeyEvent) => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return false;
         // Only navigation bypasses the hidden text field. Letters, Enter and
         // Backspace retain the IME's composition/commit path.
         if (!isNavigationControlKey(this.mapControlKeyCode(event.keyCode))) return false;
         return this.handleRemoteKey(event);
       })
       .onBlur(() => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
         this.releaseRemoteNavigationKeys('keyboard_blur');
         this.keyboardComposing = false;
+        this.keyboardSubmitPending = false;
         this.handleRemoteKeyboardEditingChange(false);
       })
       .onChange((value: string, previewText?: PreviewText) => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
         this.handleDirectKeyboardChange(value, previewText);
       })
-      .onSubmit(() => {
-        this.sendControlKey(13);
-        this.resetKeyboardCaptureBuffer();
-        this.traceRemoteKeyboardState('submit');
+      .onSubmit((_key: EnterKeyType, event: SubmitEvent) => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
+        this.handleRemoteKeyboardSubmit(event);
       })
       .position({ x: 0, y: 0 })
   }
@@ -7599,6 +7608,27 @@ struct RemotePage {
     return state.swap ? '已恢复校准：Command / Option 互换' : '已恢复校准：Command / Option 原样';
   }
 
+  loadKeyboardSubmitPreference(): void {
+    this.keyboardHideOnSubmit = this.peerPreferences?.get('keyboard-hide-on-submit') === '1';
+  }
+
+  setKeyboardSubmitPreference(enabled: boolean): void {
+    const preferences = this.peerPreferences;
+    if (!preferences || !this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    const previous: string = preferences.get('keyboard-hide-on-submit') || '0';
+    if (!preferences.set('keyboard-hide-on-submit', enabled ? '1' : '0')) {
+      this.showFileToast('保存键盘设置失败，请重试');
+      return;
+    }
+    if (!preferences.flush()) {
+      preferences.set('keyboard-hide-on-submit', previous);
+      this.showFileToast('保存键盘设置失败，请重试');
+      return;
+    }
+    this.keyboardHideOnSubmit = enabled;
+    RustDeskNapi.appendDiagnosticLog('input-keyboard', `hide_on_submit=${enabled ? 1 : 0}`);
+  }
+
   setKeyboardLayoutMode(mode: string): void {
     const preferences = this.peerPreferences;
     if (!preferences || !['auto', 'system', 'apple'].includes(mode) ||
@@ -7747,6 +7777,15 @@ struct RemotePage {
 
   @Builder
   buildKeyboardSettingsOptions() {
+    Row({ space: 8 }) {
+      Text(translate('提交后收起键盘', this.uiLanguage)).fontSize(14)
+        .fontColor(this.primaryTextColor()).layoutWeight(1)
+      Toggle({ type: ToggleType.Switch, isOn: this.keyboardHideOnSubmit })
+        .accessibilityText(translate('提交后收起键盘', this.uiLanguage))
+        .onChange((value: boolean) => { this.setKeyboardSubmitPreference(value); })
+    }.width('100%')
+    Text(translate('开启后，输入法提交会发送回车并收起键盘；关闭时点击远端仍可连续输入。设置按远端设备保存。', this.uiLanguage))
+      .fontSize(11).fontColor(this.secondaryTextColor()).width('100%')
     Row() {
       Text(translate('键盘模式', this.uiLanguage)).fontSize(14).fontColor(this.primaryTextColor()).layoutWeight(1)
       Select([{ value: translate('自动', this.uiLanguage) }, { value: translate('1:1 映射', this.uiLanguage) }, { value: translate('传统', this.uiLanguage) }])
@@ -10109,6 +10148,12 @@ struct RemotePage {
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
     }
+    if (this.showKeyboardPanel) {
+      // Reopening an active capture must not erase a composing IME or
+      // invalidate the callbacks belonging to the mounted text field.
+      this.refocusRemoteKeyboard();
+      return;
+    }
     if (!this.remoteKeyboardWindow) this.startRemoteKeyboardTracking();
     this.releaseRemoteNavigationKeys('keyboard_open');
     this.cancelRemoteKeyboardClose();
@@ -10121,8 +10166,8 @@ struct RemotePage {
     }
     this.resetKeyboardCaptureBuffer();
     this.applyKeyboardResizeMode();
-    this.showKeyboardPanel = true;
     const generation: number = ++this.remoteKeyboardFocusGeneration;
+    this.showKeyboardPanel = true;
     this.traceRemoteKeyboardState('open');
     setTimeout(() => {
       if (generation !== this.remoteKeyboardFocusGeneration || !this.remotePageVisible ||
@@ -10136,6 +10181,7 @@ struct RemotePage {
 
   closeRemoteKeyboard(): void {
     const generation: number = ++this.remoteKeyboardFocusGeneration;
+    const wasOpen: boolean = this.showKeyboardPanel;
     this.cancelRemoteKeyboardClose();
     this.cancelRemoteKeyboardRefocus();
     this.remoteKeyboardPointerHandoffUntil = 0;
@@ -10144,6 +10190,11 @@ struct RemotePage {
     // Software keyboard visibility is independent of the modifier/F-key panel.
     this.showKeyboardPanel = false;
     this.remoteKeyboardEditing = false;
+    if (wasOpen) {
+      try { this.remoteKeyboardController?.stopEditing(); } catch (_error) {
+        RustDeskNapi.appendDiagnosticLog('input-keyboard', 'stop_editing_failed');
+      }
+    }
     this.showKeyboardFunctionKeys = false;
     this.showKeyboardMoreKeys = false;
     this.resetKeyboardCaptureBuffer();
@@ -10604,8 +10655,36 @@ struct RemotePage {
 
   resetKeyboardCaptureBuffer(): void {
     this.keyboardComposing = false;
+    this.keyboardSubmitPending = false;
     this.keyboardInput = KEYBOARD_CAPTURE_SENTINEL;
     this.directKeyboardCommittedText = KEYBOARD_CAPTURE_SENTINEL;
+  }
+
+  isCurrentKeyboardCapture(generation: number): boolean {
+    return generation === this.remoteKeyboardFocusGeneration && this.remotePageVisible &&
+      this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED;
+  }
+
+  handleRemoteKeyboardSubmit(event?: SubmitEvent): void {
+    if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    if (this.keyboardComposing) {
+      // Do not erase the IME's in-progress composition or send Enter before its
+      // committed text. If the IME cancels, no deferred Enter is sent.
+      this.keyboardSubmitPending = true;
+      try { event?.keepEditableState(); } catch (_error) {}
+      RustDeskNapi.appendDiagnosticLog('input-keyboard', 'submit_waiting_for_composition');
+      return;
+    }
+    this.finishRemoteKeyboardSubmit();
+  }
+
+  finishRemoteKeyboardSubmit(): void {
+    if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    this.keyboardSubmitPending = false;
+    this.sendControlKey(13);
+    this.resetKeyboardCaptureBuffer();
+    this.traceRemoteKeyboardState('submit');
+    if (this.keyboardHideOnSubmit) this.closeRemoteKeyboard();
   }
 
   sendVirtualControlKey(keyCode: number, label: string): void {
@@ -10626,6 +10705,7 @@ struct RemotePage {
   }
 
   handleDirectKeyboardChange(value: string, previewText?: PreviewText): void {
+    if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
     this.keyboardInput = value;
     const composing: boolean = previewText !== undefined && previewText.value.length > 0;
     if (composing !== this.keyboardComposing) {
@@ -10636,7 +10716,16 @@ struct RemotePage {
       return;
     }
 
+    const hadPendingSubmit: boolean = this.keyboardSubmitPending;
     let previous: string = this.directKeyboardCommittedText;
+    if (value.length === 0 && previous.startsWith(KEYBOARD_CAPTURE_SENTINEL)) {
+      // A whole-field clear can be emitted by an IME during blur/reset. The
+      // private sentinel is not remote content; never turn its removal into
+      // dozens of Backspace events in the remote document.
+      this.resetKeyboardCaptureBuffer();
+      RustDeskNapi.appendDiagnosticLog('input-keyboard', 'empty_capture_reset');
+      return;
+    }
     if (previous.startsWith(KEYBOARD_CAPTURE_SENTINEL) && value.length > 0 && value.charAt(0) !== '1') {
       // Some IMEs replace the whole hidden field when pasting. In that case the
       // missing sentinel is not a request to erase the remote document.
@@ -10657,6 +10746,16 @@ struct RemotePage {
       this.sendKeyboardText(addedText);
     }
     this.directKeyboardCommittedText = value;
+
+    if (hadPendingSubmit) {
+      this.keyboardSubmitPending = false;
+      if (removedLength > 0 || addedText.length > 0) {
+        this.finishRemoteKeyboardSubmit();
+      } else {
+        RustDeskNapi.appendDiagnosticLog('input-keyboard', 'submit_composition_cancelled');
+      }
+      return;
+    }
 
     if (value.length < 16 || value.length >= 160) {
       this.resetKeyboardCaptureBuffer();

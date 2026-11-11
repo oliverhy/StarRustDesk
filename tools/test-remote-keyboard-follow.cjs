@@ -61,6 +61,7 @@ const names = ['isHandheldDevice', 'shouldFollowTouchMouse', 'touchMouseFollowBl
   'canKeepRemoteKeyboardForPointer', 'keepRemoteKeyboardForPointer', 'refocusRemoteKeyboard',
   'cancelRemoteKeyboardRefocus', 'requestRemoteInputFocus',
   'toggleRemoteKeyboard', 'openRemoteKeyboard', 'closeRemoteKeyboard',
+  'isCurrentKeyboardCapture', 'handleRemoteKeyboardSubmit', 'finishRemoteKeyboardSubmit',
   'snapshotRemoteKeyboardViewport', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
   'getKeyboardAvoidance', 'selectKeyboardInputAnchor',
   'applyKeyboardResizeMode', 'restoreKeyboardAvoidMode', 'buildKeyboardCapture',
@@ -92,7 +93,12 @@ function page({ queryFails = false } = {}) {
     markLocalPointerInput() {}, ensurePointerInitialized() {}, updateCursorOverlayFromPosition() {},
     sendControlKey: key => sent.push(key),
   });
-  p.startRemoteKeyboardTracking(); p.buildKeyboardCapture();
+  const open = p.openRemoteKeyboard.bind(p);
+  p.openRemoteKeyboard = () => {
+    open();
+    if (p.showKeyboardPanel) p.buildKeyboardCapture(p.remoteKeyboardFocusGeneration);
+  };
+  p.startRemoteKeyboardTracking();
   return { p, owner, ui };
 }
 let passed = 0;
@@ -112,6 +118,39 @@ test('Windows password submission does not force-close a still-visible IME', () 
   const { p, owner } = page(); p.openRemoteKeyboard(); callbacks.onEditChange(true); owner.emit(300);
   callbacks.onSubmit(); assert.deepEqual(sent, [13]); assert(p.showKeyboardPanel);
   assert(!p.shouldFollowTouchMouse()); advance(200); assert(p.showKeyboardPanel);
+});
+test('opt-in submit hides keyboard and cancels pending focus recovery', () => {
+  const { p, owner } = page(); p.keyboardHideOnSubmit = true;
+  let stopped = 0; p.remoteKeyboardController = { stopEditing() { stopped++; } };
+  p.openRemoteKeyboard(); callbacks.onEditChange(true); owner.emit(300);
+  p.keepRemoteKeyboardForPointer(); callbacks.onSubmit();
+  assert.deepEqual(sent, [13]); assert.equal(p.showKeyboardPanel, false);
+  assert.equal(stopped, 1); assert.equal(p.remoteKeyboardPointerHandoffUntil, 0);
+  advance(400); assert(!focused.includes('remoteKeyboardCapture'));
+});
+test('keyboard close is safe if the system rejects stopEditing', () => {
+  const { p } = page(); p.keyboardHideOnSubmit = true;
+  p.remoteKeyboardController = { stopEditing() { throw Error('unavailable'); } };
+  p.openRemoteKeyboard(); callbacks.onSubmit();
+  assert.equal(p.showKeyboardPanel, false); assert.deepEqual(sent, [13]);
+  assert(logs.some(([, message]) => message === 'stop_editing_failed'));
+});
+test('callbacks from closed capture cannot affect a newly opened session', () => {
+  const { p } = page(); p.openRemoteKeyboard();
+  const old = { ...callbacks }; p.closeRemoteKeyboard(); p.openRemoteKeyboard();
+  let changed = 0; p.handleDirectKeyboardChange = () => { changed++; };
+  old.onChange('old-input'); old.onSubmit(); old.onBlur();
+  assert.equal(changed, 0); assert.deepEqual(sent, []); assert(p.showKeyboardPanel);
+  callbacks.onChange('fresh-input'); assert.equal(changed, 1);
+});
+test('opening an already visible keyboard preserves active capture and composition', () => {
+  const { p } = page(); p.openRemoteKeyboard();
+  const generation = p.remoteKeyboardFocusGeneration;
+  p.keyboardInput = 'COMPOSING_BUFFER'; p.keyboardComposing = true;
+  p.resetKeyboardCaptureBuffer = () => { throw Error('must not reset an active IME'); };
+  p.openRemoteKeyboard();
+  assert.equal(p.remoteKeyboardFocusGeneration, generation);
+  assert.equal(p.keyboardInput, 'COMPOSING_BUFFER'); assert.equal(p.keyboardComposing, true);
 });
 test('system hide restores center follow immediately and cleans capture without zoom reset', () => {
   const { p, owner } = page(); p.openRemoteKeyboard(); callbacks.onEditChange(true); owner.emit(300);
