@@ -166,14 +166,14 @@ test('relay route never retries relay again',()=>{
   assert.equal(Service.retryDirectViaRelay('test'),false);
 });
 
-test('fast direct secure failure immediately retries over encrypted relay',()=>{
+test('unclassified direct security failure does not trigger another retry',()=>{
   status=3; route=1; lastConnectionError='与远端安全握手失败';
   Object.assign(Service,{retryPeer:'test',retryPassword:'test-only',retryRendezvous:'server',retryRelay:'relay',
     relayRetryUsed:false,rendezvousRetryCount:0,relayFailureRetryCount:0});
-  assert.match(Service.retryRecoverableConnectionFailure(lastConnectionError),/加密中继/);
-  assert.equal(Service.relayRetryUsed,true);
-  assert.equal(forcedConnections,2);
+  const before=forcedConnections;
   assert.equal(Service.retryRecoverableConnectionFailure(lastConnectionError),'');
+  assert.equal(Service.relayRetryUsed,false);
+  assert.equal(forcedConnections,before);
 });
 test('rendezvous retry preserves forced relay after direct secure failure',()=>{
   status=3; route=0; lastConnectionError='ID 服务器未响应';

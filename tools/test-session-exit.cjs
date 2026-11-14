@@ -15,6 +15,7 @@ function fixture(){
  vm.runInContext(pageCode,c);
  const p=Object.assign(new c.exports.Page(),{connectionStatus:2,remotePageVisible:true,isLeavingAfterDisconnect:false,pipDisconnectPending:false,
   disconnectConfirmationVisible:false,disconnectConfirmationEpoch:0,retryRequestGeneration:0,transferActive:false,uploadStaging:false,recordingActive:false,
+  pendingKeyboardText:'',showPendingKeyboardTextDialog:()=>events.push('pending-input'),
   controlMenu:'',connectionError:'',getUIContext:()=>({showAlertDialog:options=>{if(failUI)throw Error('unavailable');shows++;dialog=options;}}),
   disconnectSession:()=>{exits++;p.isLeavingAfterDisconnect=true;},
   releaseHeldMouseButtons:()=>events.push('mouse-release'),releaseRemoteNavigationKeys:()=>events.push('keys-release'),
@@ -25,6 +26,11 @@ function fixture(){
 }
 let count=0;async function test(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
+ await test('pending input blocks disconnect until the user handles it',()=>{
+  const f=fixture();f.p.pendingKeyboardText='待处理\n原文';f.p.requestDisconnect();
+  assert(f.events.includes('pending-input'));assert.equal(f.shows(),0);assert.equal(f.exits(),0);
+  assert.equal(f.p.pendingKeyboardText,'待处理\n原文');
+ });
  await test('live session shows confirmation; cancel and backdrop keep the connection',()=>{
   for(const cancel of ['primaryButton','cancel']){const f=fixture();f.p.requestDisconnect();assert.equal(f.shows(),1);assert.equal(f.exits(),0);
    if(cancel==='cancel')f.dialog().cancel();else f.dialog().primaryButton.action();assert.equal(f.exits(),0);assert(!f.p.disconnectConfirmationVisible);}

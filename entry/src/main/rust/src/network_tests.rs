@@ -1057,6 +1057,299 @@ fn rendezvous_eof_is_not_a_timeout_and_never_retries_a_dead_socket() {
 }
 
 #[test]
+fn punch_retry_candidates_preserve_tls_and_the_configured_server() {
+    let (alternate, same) = rendezvous_retry_target_groups(
+        "test.example.invalid:21116", RendezvousTransport::Tcp, false,
+    );
+    assert_eq!(same, vec!["test.example.invalid:21116"]);
+    assert_eq!(alternate, vec!["wss://test.example.invalid/ws/id",
+        "ws://test.example.invalid:21118/ws/id", "ws://test.example.invalid/ws/id"]);
+    assert!(alternate.iter().chain(&same).all(|target| target.contains("test.example.invalid")));
+
+    let (alternate, same) = rendezvous_retry_target_groups(
+        "test.example.invalid:21116", RendezvousTransport::WebSocketTls, true,
+    );
+    assert!(alternate.is_empty());
+    assert_eq!(same, vec!["wss://test.example.invalid/ws/id"]);
+    let (alternate, same) = rendezvous_retry_target_groups(
+        "wss://test.example.invalid/custom", RendezvousTransport::WebSocketTls, true,
+    );
+    assert!(alternate.is_empty());
+    assert_eq!(same, vec!["wss://test.example.invalid/custom"]);
+    let (alternate, same) = rendezvous_retry_target_groups(
+        "[2001:db8::8]:21116", RendezvousTransport::Tcp, false,
+    );
+    assert_eq!(same, vec!["[2001:db8::8]:21116"]);
+    assert_eq!(alternate, vec!["ws://[2001:db8::8]:21118"]);
+}
+
+pub(super) async fn punch_test_adjacent_listeners() -> (tokio::net::TcpListener, tokio::net::TcpListener) {
+    for _ in 0..100 {
+        let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = primary.local_addr().unwrap().port();
+        if let Some(alternate_port) = port.checked_add(2) {
+            if let Ok(alternate) = tokio::net::TcpListener::bind(("127.0.0.1", alternate_port)).await {
+                return (primary, alternate);
+            }
+        }
+    }
+    panic!("could not allocate adjacent loopback test ports");
+}
+
+#[test]
+fn punch_eof_reconnects_using_a_working_websocket_without_leaking_diagnostics() {
+    use hbb_common::futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    extern "C" fn capture(value: *const c_char) {
+        if let Some(value) = cstr_to_string(value) { EVENTS.lock().unwrap().push(value); }
+    }
+    struct Restore(Option<EventCallback>);
+    impl Drop for Restore { fn drop(&mut self) { *EVENT_CALLBACK.lock().unwrap() = self.0; } }
+    EVENTS.lock().unwrap().clear();
+    let _restore = Restore(EVENT_CALLBACK.lock().unwrap().replace(capture));
+    runtime().block_on(async {
+        let (primary, alternate) = punch_test_adjacent_listeners().await;
+        let endpoint = primary.local_addr().unwrap();
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = primary.accept().await.unwrap();
+        let mut original = Stream::from(socket, addr);
+        let server = tokio::spawn(async move {
+            let request = RendezvousMessage::parse_from_bytes(&original.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request.punch_hole_request().id, "TEST_PEER_DO_NOT_LOG");
+            assert_eq!(request.punch_hole_request().udp_port, 40000);
+            assert!(!request.punch_hole_request().force_relay);
+            assert_eq!(request.punch_hole_request().nat_type.enum_value().unwrap(), NatType::UNKNOWN_NAT);
+            drop(original);
+            let (socket, addr) = tokio::time::timeout(Duration::from_secs(3), primary.accept()).await.unwrap().unwrap();
+            let mut second = Stream::from(socket, addr);
+            let request = RendezvousMessage::parse_from_bytes(&second.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request.punch_hole_request().id, "TEST_PEER_DO_NOT_LOG");
+            assert!(!request.punch_hole_request().force_relay);
+            drop(second);
+            let (socket, _) = tokio::time::timeout(Duration::from_secs(3), alternate.accept()).await.unwrap().unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let bytes = websocket.next().await.unwrap().unwrap().into_data();
+            let request = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+            assert_eq!(request.punch_hole_request().id, "TEST_PEER_DO_NOT_LOG");
+            assert_eq!(request.punch_hole_request().licence_key, "TEST_KEY_DO_NOT_LOG");
+            assert!(request.punch_hole_request().force_relay);
+            assert_eq!(request.punch_hole_request().nat_type.enum_value().unwrap(), NatType::SYMMETRIC);
+            assert_eq!(request.punch_hole_request().udp_port, 0);
+            assert!(request.punch_hole_request().socket_addr_v6.is_empty());
+            let mut response = RendezvousMessage::new();
+            response.set_punch_hole_response(PunchHoleResponse::new());
+            websocket.send(WsMessage::binary(response.write_to_bytes().unwrap())).await.unwrap();
+        });
+        let request = punch_hole_request("TEST_PEER_DO_NOT_LOG", "TEST_KEY_DO_NOT_LOG",
+            ConnType::DEFAULT_CONN, false, NatType::UNKNOWN_NAT, 40000, vec![1, 2, 3], String::new());
+        let epoch = AtomicU64::new(7);
+        let (winner, response) = tokio::time::timeout(Duration::from_secs(7),
+            send_punch_with_recovery(client, &endpoint.to_string(), "TEST_KEY_DO_NOT_LOG",
+                &request, false, 7, &epoch)).await.unwrap().unwrap();
+        assert_eq!(rendezvous_stream_transport(&winner), RendezvousTransport::WebSocket);
+        assert!(matches!(response.union, Some(rendezvous_message::Union::PunchHoleResponse(_))));
+        server.await.unwrap();
+    });
+    let log = EVENTS.lock().unwrap().join("\n");
+    assert!(log.contains("phase=punch action=eof"));
+    assert!(log.contains("phase=punch_recovery action=reconnect attempt=2"));
+    assert!(log.contains("phase=punch_recovery outcome=response attempt=3 path=websocket"));
+    for secret in ["TEST_PEER_DO_NOT_LOG", "TEST_KEY_DO_NOT_LOG", "127.0.0.1"] {
+        assert!(!log.contains(secret), "recovery diagnostics exposed an address or credential");
+    }
+}
+
+#[test]
+fn punch_retry_tls_floor_rejects_a_plain_tcp_candidate_before_sending() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, addr) = listener.accept().await.unwrap();
+            let mut peer = Stream::from(socket, addr);
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(1), peer.next()).await,
+                Ok(None) | Ok(Some(Err(_)))));
+        });
+        let result = connect_punch_retry_group(vec![endpoint.to_string()], true, 2).await;
+        assert!(result.is_none());
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn relay_rendezvous_does_not_drop_a_tls_floor_when_no_tls_route_exists() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let result = request_relay_with_type("test-peer", "test-relay", &endpoint.to_string(),
+            true, "test-key", "test-token", ConnType::DEFAULT_CONN, true).await;
+        assert!(result.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(300), listener.accept()).await.is_err(),
+            "relay rendezvous silently opened a plaintext fallback");
+    });
+}
+
+#[test]
+fn punch_server_refusal_is_not_retried_or_converted_to_a_fallback() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, addr);
+            assert!(peer.next().await.is_some());
+            let mut response = RendezvousMessage::new();
+            response.set_punch_hole_response(PunchHoleResponse {
+                other_failure: "synthetic refusal".into(), ..Default::default()
+            });
+            peer.send(&response).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err());
+        });
+        let request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        let epoch = AtomicU64::new(1);
+        let (_, response) = send_punch_with_recovery(client, &endpoint.to_string(), "",
+            &request, false, 1, &epoch).await.unwrap();
+        assert_eq!(response.punch_hole_response().other_failure, "synthetic refusal");
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn punch_response_timeout_remains_owned_by_existing_session_retry() {
+    runtime().block_on(async {
+        let (listener, unused_alternate) = punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, addr);
+            for _ in 0..PUNCH_REPLY_TIMEOUTS.len() {
+                assert!(tokio::time::timeout(Duration::from_secs(4), peer.next()).await.unwrap().is_some());
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(4_500), listener.accept()).await.is_err(),
+                "response timeouts must not multiply the existing session retry budget");
+        });
+        let request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        let epoch = AtomicU64::new(1);
+        let result = tokio::time::timeout(Duration::from_secs(10), send_punch_with_recovery(
+            client, &endpoint.to_string(), "", &request, false, 1, &epoch)).await.unwrap();
+        assert!(matches!(result, Err(-7)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn punch_recovery_stops_after_bounded_fresh_sockets() {
+    runtime().block_on(async {
+        let (listener, unused_alternate) = punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, addr);
+            assert!(peer.next().await.is_some());
+            drop(peer);
+            for _ in 0..PUNCH_RECOVERY_MAX_RETRIES {
+                let (socket, addr) = tokio::time::timeout(Duration::from_secs(4), listener.accept()).await.unwrap().unwrap();
+                let mut peer = Stream::from(socket, addr);
+                assert!(peer.next().await.is_some());
+                drop(peer);
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err());
+        });
+        let request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        let epoch = AtomicU64::new(3);
+        let result = tokio::time::timeout(Duration::from_secs(8), send_punch_with_recovery(
+            client, &endpoint.to_string(), "", &request, false, 3, &epoch)).await.unwrap();
+        assert!(matches!(result, Err(-28)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn punch_recovery_respects_session_cancellation_before_retry() {
+    runtime().block_on(async {
+        let (listener, unused_alternate) = punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let epoch = Arc::new(AtomicU64::new(3));
+        let server_epoch = epoch.clone();
+        let server = tokio::spawn(async move {
+            let mut peer = Stream::from(socket, addr);
+            assert!(peer.next().await.is_some());
+            server_epoch.store(4, Ordering::SeqCst);
+            drop(peer);
+            assert!(tokio::time::timeout(Duration::from_millis(500), listener.accept()).await.is_err());
+        });
+        let request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        let result = send_punch_with_recovery(client, &endpoint.to_string(), "",
+            &request, false, 3, &epoch).await;
+        assert!(matches!(result, Err(-19)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn punch_recovery_cancellation_closes_an_inflight_retry_socket() {
+    runtime().block_on(async {
+        let (listener, unused_alternate) = punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let epoch = Arc::new(AtomicU64::new(3));
+        let server_epoch = epoch.clone();
+        let server = tokio::spawn(async move {
+            let mut first = Stream::from(socket, addr);
+            assert!(first.next().await.is_some());
+            drop(first);
+            let (socket, addr) = tokio::time::timeout(Duration::from_secs(4), listener.accept()).await.unwrap().unwrap();
+            let mut retry = Stream::from(socket, addr);
+            assert!(retry.next().await.is_some());
+            server_epoch.store(4, Ordering::SeqCst);
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(1), retry.next()).await,
+                Ok(None) | Ok(Some(Err(_)))), "cancelled retry kept its socket open");
+        });
+        let request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), String::new());
+        let result = await_connection_attempt(3, &epoch, Duration::from_secs(5),
+            send_punch_with_recovery(client, &endpoint.to_string(), "", &request, false, 3, &epoch)).await;
+        assert!(matches!(result, Err(ConnectionAttemptError::Cancelled)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn punch_recovery_never_sends_token_or_offer_over_an_unsecured_initial_socket() {
+    runtime().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let mut peer = Stream::from(socket, addr);
+        let mut request = punch_hole_request("test", "", ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), "test-offer".into());
+        api_account::attach(&mut request, "test-token");
+        let epoch = AtomicU64::new(1);
+        let result = send_punch_with_recovery(client, &endpoint.to_string(), "",
+            &request, false, 1, &epoch).await;
+        assert!(matches!(result, Err(-33)));
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(1), peer.next()).await,
+            Ok(None) | Ok(Some(Err(_)))));
+    });
+}
+
+#[test]
 fn unencrypted_server_messages_do_not_authorize_token_or_ice_disclosure() {
     runtime().block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

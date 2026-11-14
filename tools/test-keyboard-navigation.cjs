@@ -41,10 +41,11 @@ function setup(panel = false) {
   modifierMask = 0;
   const p = new context.Probe();
   p.connectionStatus = 2; p.remotePageVisible = true; p.showKeyboardPanel = panel; p.showCommunicationPanel = false;
+  p.pendingKeyboardText = '';
   p.navigationKeys = new context.RemoteNavigationKeys(); p.keyboardComposing = false;
   p.drainNativeInputEvents = () => {};
   p.syncModifiersFromKeyEvent = e => { modifierMask = e.mask || 0; };
-  p.sendKeyboardText = text => texts.push(text);
+  p.sendKeyboardText = text => { texts.push(text); return 0; };
   p.sendControlKey = key => packets.push([key, 2, modifierMask]);
   p.traceRemoteKeyboardState = () => {};
   p.closeRemoteKeyboard = () => { p.showKeyboardPanel = false; p.resetKeyboardCaptureBuffer(); };

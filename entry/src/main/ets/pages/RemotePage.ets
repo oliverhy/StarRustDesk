@@ -31,7 +31,7 @@ import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
 import { ConnectionService } from '../service/ConnectionService';
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask';
-import { FileDownloadRequest, FileTransferStatus, GamepadInputEvent, HardwareKeyState, NativeInputEvent, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
+import { ClipboardImportReadResult, FileDownloadRequest, FileTransferStatus, GamepadInputEvent, HardwareKeyState, NativeInputEvent, NativeKeyInputEvent, NativeMouseInputEvent, RemoteCursorPosition, RemoteDirectoryEntry, RemoteDirectoryResult, RustDeskNapi, VideoFrameInfo } from '../service/RustDeskNapi';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
@@ -698,11 +698,26 @@ struct RemotePage {
   private viewportPanLastX: number = 0;
   private viewportPanLastY: number = 0;
   private directKeyboardCommittedText: string = KEYBOARD_CAPTURE_SENTINEL;
+  // Unsent input stays in memory only. It is never included in diagnostics.
+  private pendingKeyboardText: string = '';
+  private pendingKeyboardContextText: string = '';
+  private pendingKeyboardNeedsReview: boolean = false;
+  private pendingKeyboardReason: string = '';
+  private pendingKeyboardRevision: number = 0;
+  private pendingKeyboardDialogVisible: boolean = false;
+  private pendingKeyboardCopying: boolean = false;
   private clipboardPolling: boolean = false;
   private lastLocalClipboardText: string = '';
-  private lastRemoteClipboardText: string = '';
-  private suppressClipboardText: string = '';
   private clipboardBaselineInitialized: boolean = false;
+  private clipboardGeneration: number = 0;
+  private clipboardChangeRevision: number = 0;
+  private clipboardListener: (() => void) | undefined = undefined;
+  private clipboardObserverAttempted: boolean = false;
+  private clipboardPollRequested: boolean = false;
+  private clipboardPendingRemoteText: string = '';
+  private clipboardReadDiagnostic: string = '';
+  private clipboardWriteDiagnostic: string = '';
+  private clipboardSendDiagnostic: string = '';
   private isLeavingAfterDisconnect: boolean = false;
   @State reconnecting: boolean = false;
   @State reconnectAttempt: number = 0;
@@ -863,6 +878,11 @@ struct RemotePage {
   }
 
   aboutToDisappear(): void {
+    this.pendingKeyboardText = '';
+    this.pendingKeyboardContextText = '';
+    this.pendingKeyboardRevision++;
+    this.pendingKeyboardDialogVisible = false;
+    this.pendingKeyboardCopying = false;
     if (this.isPcDevice()) RustDeskNapi.stopSecondaryDisplay();
     this.multiDisplayMonitor?.stop();
     this.multiDisplayMonitor = undefined;
@@ -1230,6 +1250,8 @@ struct RemotePage {
     if (status !== ConnectionStatus.CONNECTED) {
       return;
     }
+    this.clipboardChangeRevision++;
+    this.requestClipboardPoll();
     RustDeskNapi.appendDiagnosticLog('remote-page', `foreground_resume epoch=${this.appForegroundEpoch}`)
     this.showRemoteSurface = true;
     setTimeout(() => {
@@ -2502,6 +2524,7 @@ struct RemotePage {
     if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
       if (this.desktopWindowActive) this.desktopReturnInputFocus = this.pointerOverRemoteViewport || this.pointerCaptureFocused;
       this.desktopWindowActive = false;
+      this.clipboardChangeRevision++;
       if (this.displaySwitchActive) this.clearDisplaySwitchTransition();
       this.finishRemoteToolbarDrag();
       this.cancelPcToolbarAutoCollapse();
@@ -2524,6 +2547,8 @@ struct RemotePage {
       // The inactive poll already discards old events. Do not clear here:
       // the pointer press that activated this window may already be queued.
       this.desktopWindowActive = true;
+      this.clipboardChangeRevision++;
+      this.requestClipboardPoll();
       this.relativePointerSampleValid = false;
       this.refreshDesktopDensity();
       this.syncDesktopViewScale();
@@ -3775,6 +3800,8 @@ struct RemotePage {
       case 'displaySwipe': this.setDisplaySwipeEnabled(!this.displaySwipeEnabled); return;
       case 'virtualMouse': this.setVirtualMouseEnabled(!this.showVirtualMouse); return;
       case 'clipboard': this.toggleClipboardSync(); return;
+      case 'clipboard-paste-authorized': this.syncClipboardFromUserPaste(); return;
+      case 'clipboard-paste-denied': this.showFileToast('无法读取剪贴板，请检查系统权限后重试'); return;
       case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
       case 'edgePan': if (this.canPanViewport()) this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled); return;
       case 'monitor': this.showQualityMonitor = !this.showQualityMonitor; return;
@@ -5928,6 +5955,10 @@ struct RemotePage {
       .onChange((value: string, previewText?: PreviewText) => {
         if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
         this.handleDirectKeyboardChange(value, previewText);
+      })
+      .onPaste((value: string, event: PasteEvent) => {
+        if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
+        this.handleRemoteKeyboardPaste(value, event);
       })
       .onSubmit((_key: EnterKeyType, event: SubmitEvent) => {
         if (!this.isCurrentKeyboardCapture(captureGeneration)) return;
@@ -9884,43 +9915,27 @@ struct RemotePage {
     return false;
   }
 
-  sendKeyboardText(text: string): void {
-    if (!this.allowWaylandText()) return;
-    if (text.length <= 0) {
-      return;
-    }
-    let segmentStart: number = 0;
-    for (let index: number = 0; index < text.length; index++) {
-      let character: string = text.charAt(index);
-      if (character !== '\n' && character !== '\r') {
-        continue;
-      }
-      if (index > segmentStart) {
-        this.sendKeyboardTextSegment(text.substring(segmentStart, index));
-      }
-      if (character === '\r' && index + 1 < text.length && text.charAt(index + 1) === '\n') {
-        index++;
-      }
-      this.sendControlKey(13);
-      segmentStart = index + 1;
-    }
-    if (segmentStart < text.length) {
-      this.sendKeyboardTextSegment(text.substring(segmentStart));
-    }
+  sendKeyboardText(text: string): number {
+    if (text.length <= 0) return 0;
+    // A text newline is not a physical Enter. Different RustDesk hosts inject
+    // text differently, so an unverified multiline sequence must be staged.
+    if (text.includes('\n') || text.includes('\r')) return -2;
+    if (!this.allowWaylandText()) return -1;
+    return this.sendKeyboardTextSegment(text);
   }
 
-  sendKeyboardTextSegment(text: string): void {
+  sendKeyboardTextSegment(text: string): number {
     if (text.length === 1) {
       const modifierMask: number = this.getVirtualModifierMask();
       const keyCode: number = this.getPrintableShortcutKeyCode(text);
       if (modifierMask !== 0 && keyCode > 0) {
-        ConnectionService.sendPrintableShortcutKey(keyCode, modifierMask);
+        const result: number = ConnectionService.sendPrintableShortcutKey(keyCode, modifierMask);
         RustDeskNapi.appendDiagnosticLog('input-shortcut',
           `soft_key key=redacted modifiers=${modifierMask}`);
-        return;
+        return result;
       }
     }
-    ConnectionService.sendText(text);
+    return ConnectionService.sendText(text);
   }
 
   orientationModeLabel(): string {
@@ -10144,6 +10159,10 @@ struct RemotePage {
   }
 
   openRemoteKeyboard(): void {
+    if (this.pendingKeyboardText.length > 0) {
+      this.showPendingKeyboardTextDialog();
+      return;
+    }
     if (!this.allowWaylandText(() => { this.openRemoteKeyboard(); })) return;
     if (this.connectionStatus !== ConnectionStatus.CONNECTED) {
       return;
@@ -10660,6 +10679,154 @@ struct RemotePage {
     this.directKeyboardCommittedText = KEYBOARD_CAPTURE_SENTINEL;
   }
 
+  handleRemoteKeyboardPaste(value: string, event?: PasteEvent): void {
+    if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      value.length === 0) return;
+    const multiline: boolean = value.includes('\n') || value.includes('\r');
+    // Let the IME finish ordinary composition itself. Keep a multiline paste
+    // and any in-progress IME buffer separately: the caret/selection is unknown.
+    if (this.keyboardComposing && !multiline) return;
+    let intercepted: boolean = false;
+    try {
+      if (event?.preventDefault) { event.preventDefault(); intercepted = true; }
+    } catch (_error) {}
+    if (!intercepted && !multiline) return;
+    if (multiline) {
+      let context: string = '';
+      const review: boolean = this.keyboardComposing;
+      if (review) {
+        context = this.keyboardInput.startsWith(KEYBOARD_CAPTURE_SENTINEL) ?
+          this.keyboardInput.substring(KEYBOARD_CAPTURE_SENTINEL.length) : this.keyboardInput;
+      }
+      this.stagePendingKeyboardText(value, review, 'multiline', context);
+      return;
+    }
+    const result: number = this.allowWaylandText() ? ConnectionService.sendText(value) : -1;
+    RustDeskNapi.appendDiagnosticLog('input-keyboard',
+      `paste outcome=${result === 0 ? 'queued' : 'not_queued'} multiline=0`);
+    if (result !== 0) this.stagePendingKeyboardText(value, false, 'queue_failed');
+  }
+
+  stagePendingKeyboardText(text: string, needsReview: boolean, reason: string, context: string = ''): void {
+    if (text.length === 0 || this.pendingKeyboardText.length > 0) return;
+    this.pendingKeyboardText = text;
+    this.pendingKeyboardContextText = context;
+    this.pendingKeyboardNeedsReview = needsReview;
+    this.pendingKeyboardReason = reason === 'multiline' ? 'multiline' : 'queue_failed';
+    this.pendingKeyboardRevision++;
+    this.keyboardSubmitPending = false;
+    RustDeskNapi.appendDiagnosticLog('input-keyboard',
+      `pending_text outcome=staged reason=${this.pendingKeyboardReason} review=${needsReview ? 1 : 0}`);
+    // Invalidate the capture callbacks before showing a dialog, so a following
+    // IME onChange/onSubmit cannot repeat the text or send a stray Enter.
+    if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+    this.showPendingKeyboardTextDialog();
+  }
+
+  showPendingKeyboardTextDialog(): void {
+    if (this.pendingKeyboardText.length === 0 || this.pendingKeyboardDialogVisible) return;
+    if (this.pendingKeyboardCopying) { this.showFileToast('正在复制待处理文字'); return; }
+    const revision: number = this.pendingKeyboardRevision;
+    this.pendingKeyboardDialogVisible = true;
+    let message: string = this.pendingKeyboardReason === 'multiline' ?
+      '远端可能把换行当成发送。待输入文字已保留在本机，没有作为按键发送。复制后可手动同步并在远端粘贴，请先核对已有内容；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。' :
+      '文字未能加入发送队列，已保留在本机。请复制后手动处理，并核对远端已有内容；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。';
+    if (this.pendingKeyboardNeedsReview) {
+      message = '输入法正在替换或组合文字，远端可能已有部分内容。待处理文字已保留在本机，请复制后先核对再手动粘贴；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。';
+    }
+    if (this.pendingKeyboardContextText.length > 0) {
+      message = '输入法组合文字和粘贴的原文已分别保留在本机，插入位置无法确认。请分别复制并核对远端已有内容；复制后可再次点击键盘继续处理。剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。';
+    }
+    const later = (): void => { if (revision === this.pendingKeyboardRevision) this.pendingKeyboardDialogVisible = false; };
+    try {
+      if (this.pendingKeyboardContextText.length > 0) {
+        this.getUIContext().showAlertDialog({
+          title: translate('待处理的输入文字', this.uiLanguage),
+          message: translate(message, this.uiLanguage), autoCancel: false, cancel: later,
+          buttons: [
+            { value: translate('稍后处理', this.uiLanguage), action: later },
+            { value: translate('复制粘贴原文', this.uiLanguage), action: () => {
+              later(); this.copyPendingKeyboardText(revision, false);
+            } },
+            { value: translate('复制组合文字', this.uiLanguage), action: () => {
+              later(); this.copyPendingKeyboardText(revision, true);
+            } },
+            { value: translate('结束处理', this.uiLanguage), action: () => {
+              later(); this.confirmDiscardPendingKeyboardText(revision);
+            } }
+          ]
+        });
+        return;
+      }
+      this.getUIContext().showAlertDialog({
+        title: translate('待处理的输入文字', this.uiLanguage),
+        message: translate(message, this.uiLanguage), autoCancel: false, cancel: later,
+        buttons: [
+          { value: translate('稍后处理', this.uiLanguage), action: later },
+          { value: translate('复制并继续', this.uiLanguage), action: () => {
+            later(); this.copyPendingKeyboardText(revision);
+          } },
+          { value: translate('丢弃', this.uiLanguage), fontColor: RustDeskTheme.ERROR, action: () => {
+            later(); this.confirmDiscardPendingKeyboardText(revision);
+          } }
+        ]
+      });
+    } catch (_error) {
+      this.pendingKeyboardDialogVisible = false;
+      RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=dialog_unavailable');
+      this.showFileToast('待处理文字已保留，请再次点击键盘');
+    }
+  }
+
+  async copyPendingKeyboardText(revision: number, context: boolean = false): Promise<void> {
+    if (revision !== this.pendingKeyboardRevision || this.pendingKeyboardText.length === 0 || this.pendingKeyboardCopying) return;
+    if (context && this.pendingKeyboardContextText.length === 0) return;
+    this.pendingKeyboardCopying = true;
+    const text: string = context ? this.pendingKeyboardContextText : this.pendingKeyboardText;
+    try {
+      const result: number = await RustDeskNapi.setClipboardTextAsync(text);
+      if (revision !== this.pendingKeyboardRevision) return;
+      if (result === 0) {
+        if (this.pendingKeyboardContextText.length === 0) {
+          this.pendingKeyboardText = '';
+          this.pendingKeyboardNeedsReview = false;
+          this.pendingKeyboardReason = '';
+          this.pendingKeyboardRevision++;
+        }
+        RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=copied_local');
+        this.showFileToast('已复制到本机剪贴板，请核对后在远端粘贴');
+      } else {
+        RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=copy_failed');
+        this.showFileToast('复制失败，待处理文字仍保留');
+      }
+    } catch (_error) {
+      if (revision === this.pendingKeyboardRevision) {
+        RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=copy_failed');
+        this.showFileToast('复制失败，待处理文字仍保留');
+      }
+    } finally { this.pendingKeyboardCopying = false; }
+  }
+
+  confirmDiscardPendingKeyboardText(revision: number): void {
+    if (revision !== this.pendingKeyboardRevision || this.pendingKeyboardText.length === 0) return;
+    try {
+      this.getUIContext().showAlertDialog({ title: translate('丢弃待处理文字？', this.uiLanguage),
+        message: translate('请先确认远端内容。清除本机暂存后无法恢复。', this.uiLanguage),
+        primaryButton: { value: translate('保留', this.uiLanguage), action: () => {} },
+        secondaryButton: { value: translate('丢弃', this.uiLanguage), fontColor: RustDeskTheme.ERROR, action: () => {
+          if (revision !== this.pendingKeyboardRevision) return;
+          this.pendingKeyboardText = '';
+          this.pendingKeyboardContextText = '';
+          this.pendingKeyboardNeedsReview = false;
+          this.pendingKeyboardReason = '';
+          this.pendingKeyboardRevision++;
+          RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=discarded_by_user');
+        } } });
+    } catch (_error) {
+      RustDeskNapi.appendDiagnosticLog('input-keyboard', 'pending_text outcome=discard_dialog_unavailable');
+    }
+  }
+
   isCurrentKeyboardCapture(generation: number): boolean {
     return generation === this.remoteKeyboardFocusGeneration && this.remotePageVisible &&
       this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED;
@@ -10667,6 +10834,11 @@ struct RemotePage {
 
   handleRemoteKeyboardSubmit(event?: SubmitEvent): void {
     if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    if (this.pendingKeyboardText.length > 0) {
+      try { event?.keepEditableState(); } catch (_error) {}
+      RustDeskNapi.appendDiagnosticLog('input-keyboard', 'submit_blocked_pending_text');
+      return;
+    }
     if (this.keyboardComposing) {
       // Do not erase the IME's in-progress composition or send Enter before its
       // committed text. If the IME cancels, no deferred Enter is sent.
@@ -10706,6 +10878,7 @@ struct RemotePage {
 
   handleDirectKeyboardChange(value: string, previewText?: PreviewText): void {
     if (!this.remotePageVisible || !this.showKeyboardPanel || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    if (this.pendingKeyboardText.length > 0) return;
     this.keyboardInput = value;
     const composing: boolean = previewText !== undefined && previewText.value.length > 0;
     if (composing !== this.keyboardComposing) {
@@ -10726,7 +10899,8 @@ struct RemotePage {
       RustDeskNapi.appendDiagnosticLog('input-keyboard', 'empty_capture_reset');
       return;
     }
-    if (previous.startsWith(KEYBOARD_CAPTURE_SENTINEL) && value.length > 0 && value.charAt(0) !== '1') {
+    if (previous.startsWith(KEYBOARD_CAPTURE_SENTINEL) && value.length > 0 &&
+      !value.startsWith(KEYBOARD_CAPTURE_SENTINEL) && !KEYBOARD_CAPTURE_SENTINEL.startsWith(value)) {
       // Some IMEs replace the whole hidden field when pasting. In that case the
       // missing sentinel is not a request to erase the remote document.
       previous = '';
@@ -10738,12 +10912,26 @@ struct RemotePage {
     }
 
     let removedLength: number = previous.length - commonLength;
+    let addedText: string = value.substring(commonLength);
+    if (addedText.includes('\n') || addedText.includes('\r')) {
+      // No deletion or text has been sent for this edit. If the IME replaced
+      // earlier text, keep the full new value so the user can reconcile it.
+      const pending: string = removedLength > 0 ?
+        (value.startsWith(KEYBOARD_CAPTURE_SENTINEL) ? value.substring(KEYBOARD_CAPTURE_SENTINEL.length) : value) : addedText;
+      this.stagePendingKeyboardText(pending, removedLength > 0, 'multiline');
+      return;
+    }
     for (let index: number = 0; index < removedLength; index++) {
       this.sendControlKey(8);
     }
-    let addedText: string = value.substring(commonLength);
     if (addedText.length > 0) {
-      this.sendKeyboardText(addedText);
+      const result: number = this.sendKeyboardText(addedText);
+      if (result !== 0) {
+        const pending: string = removedLength > 0 ?
+          (value.startsWith(KEYBOARD_CAPTURE_SENTINEL) ? value.substring(KEYBOARD_CAPTURE_SENTINEL.length) : value) : addedText;
+        this.stagePendingKeyboardText(pending, removedLength > 0, 'queue_failed');
+        return;
+      }
     }
     this.directKeyboardCommittedText = value;
 
@@ -10757,7 +10945,9 @@ struct RemotePage {
       return;
     }
 
-    if (value.length < 16 || value.length >= 160) {
+    // Keep the committed shadow until an explicit submit/close or an empty
+    // field. Resetting on length alone makes a repeated IME callback resend it.
+    if (value.length === 0) {
       this.resetKeyboardCaptureBuffer();
     }
   }
@@ -10840,8 +11030,7 @@ struct RemotePage {
       return;
     }
     let result: number = RustDeskNapi.sendClipboardText(text);
-    this.lastLocalClipboardText = text;
-    hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Manual clipboard sent result=%{public}d', result);
+    this.recordClipboardDiagnostic('send', result === 0 ? 'manual_queued' : 'manual_queue_failed');
   }
 
   async stageUploadFolder(source: string, destination: string, generation: number, depth: number = 0): Promise<void> {
@@ -11914,6 +12103,7 @@ struct RemotePage {
 
   requestDisconnect(): void {
     if (this.isLeavingAfterDisconnect || this.pipDisconnectPending || this.disconnectConfirmationVisible) return;
+    if (this.pendingKeyboardText.length > 0) { this.showPendingKeyboardTextDialog(); return; }
     if (this.connectionStatus !== ConnectionStatus.CONNECTED && !ConnectionService.isReconnecting() &&
       !this.transferActive && !this.uploadStaging && !this.recordingActive) {
       this.disconnectSession();
@@ -12027,13 +12217,10 @@ struct RemotePage {
   }
 
   startClipboardSync(): void {
+    this.pauseClipboardSync();
     this.clipboardSyncEnabled = true;
-    this.lastLocalClipboardText = '';
-    this.lastRemoteClipboardText = '';
-    this.suppressClipboardText = '';
-    this.clipboardBaselineInitialized = false;
     if (this.connectionStatus === ConnectionStatus.CONNECTED) {
-      this.scheduleClipboardPoll(100);
+      this.ensureClipboardSyncRunning();
     }
   }
 
@@ -12043,7 +12230,18 @@ struct RemotePage {
   }
 
   pauseClipboardSync(): void {
+    this.clipboardGeneration++;
+    this.clipboardChangeRevision++;
     this.clipboardPolling = false;
+    this.clipboardPollRequested = false;
+    this.clipboardPendingRemoteText = '';
+    this.lastLocalClipboardText = '';
+    this.clipboardBaselineInitialized = false;
+    this.clipboardObserverAttempted = false;
+    if (this.clipboardListener) {
+      RustDeskNapi.stopObservingClipboardChanges(this.clipboardListener);
+      this.clipboardListener = undefined;
+    }
     if (this.clipboardTimer !== -1) {
       clearTimeout(this.clipboardTimer);
       this.clipboardTimer = -1;
@@ -12051,10 +12249,40 @@ struct RemotePage {
   }
 
   ensureClipboardSyncRunning(): void {
-    if (!this.clipboardSyncEnabled || this.clipboardPolling || this.clipboardTimer !== -1) {
-      return;
+    if (!this.clipboardSyncEnabled) return;
+    if (!this.clipboardListener && !this.clipboardObserverAttempted) {
+      this.clipboardObserverAttempted = true;
+      const listener = (): void => {
+        this.clipboardChangeRevision++;
+        if (this.clipboardCanAccess()) this.requestClipboardPoll();
+      };
+      if (RustDeskNapi.observeClipboardChanges(listener)) {
+        this.clipboardListener = listener;
+      } else {
+        this.recordClipboardDiagnostic('read', 'change_listener_unavailable');
+      }
     }
-    this.scheduleClipboardPoll(100);
+    if (!this.clipboardPolling && this.clipboardTimer === -1) this.scheduleClipboardPoll(100);
+  }
+
+  clipboardCanAccess(): boolean {
+    return this.remotePageVisible && !this.isLeavingAfterDisconnect && this.clipboardSyncEnabled &&
+      this.connectionStatus === ConnectionStatus.CONNECTED && !RemoteSessionBackgroundTask.isAppBackground() &&
+      (!this.isPcDevice() || this.desktopWindowActive);
+  }
+
+  recordClipboardDiagnostic(kind: string, state: string): void {
+    let previous: string = '';
+    if (kind === 'read') { previous = this.clipboardReadDiagnostic; this.clipboardReadDiagnostic = state; }
+    else if (kind === 'write') { previous = this.clipboardWriteDiagnostic; this.clipboardWriteDiagnostic = state; }
+    else { previous = this.clipboardSendDiagnostic; this.clipboardSendDiagnostic = state; }
+    if (previous !== state) RustDeskNapi.appendDiagnosticLog('clipboard-sync', `${kind}=${state}`);
+  }
+
+  requestClipboardPoll(): void {
+    if (!this.clipboardSyncEnabled || this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    if (this.clipboardPolling) { this.clipboardPollRequested = true; return; }
+    this.scheduleClipboardPoll(50);
   }
 
   scheduleClipboardPoll(delayMs: number): void {
@@ -12066,6 +12294,50 @@ struct RemotePage {
     }, delayMs);
   }
 
+  // Called only from the system PasteButton after an explicit user gesture.
+  // The temporary authorization is consumed immediately, not by a timer.
+  async syncClipboardFromUserPaste(): Promise<void> {
+    if (!this.clipboardCanAccess()) return;
+    if ((RustDeskNapi.getInputCapabilities() & 4) !== 0 && !this.waylandTextAllowed) {
+      this.showFileToast('请先允许远端文字输入');
+      return;
+    }
+    const generation: number = this.clipboardGeneration;
+    const revision: number = ++this.clipboardChangeRevision;
+    try {
+      const read: ClipboardImportReadResult = await RustDeskNapi.getClipboardTextForSyncAsync();
+      if (generation !== this.clipboardGeneration || !this.clipboardCanAccess()) return;
+      if (revision !== this.clipboardChangeRevision) {
+        this.showFileToast('剪贴板内容已变化，请重新同步');
+        this.requestClipboardPoll();
+        return;
+      }
+      if (read.failed) {
+        this.recordClipboardDiagnostic('read', 'user_read_unavailable');
+        this.showFileToast('无法读取剪贴板，请检查系统权限后重试');
+      } else if (read.text.length === 0) {
+        this.showFileToast('剪贴板没有可同步的文字');
+      } else {
+        this.clipboardPendingRemoteText = '';
+        const result: number = RustDeskNapi.sendClipboardText(read.text);
+        this.recordClipboardDiagnostic('send', result === 0 ? 'user_queued' : 'user_queue_failed');
+        if (result === 0) {
+          this.lastLocalClipboardText = read.text;
+          this.clipboardBaselineInitialized = true;
+          this.showFileToast('已请求同步，请在远端粘贴');
+        } else {
+          this.showFileToast('剪贴板同步失败，请重试');
+        }
+      }
+    } catch (_e) {
+      if (generation === this.clipboardGeneration && this.clipboardCanAccess()) {
+        this.recordClipboardDiagnostic('read', 'user_read_failed');
+        this.showFileToast('无法读取剪贴板，请检查系统权限后重试');
+      }
+    }
+    this.requestClipboardPoll();
+  }
+
   async pollClipboardSync(): Promise<void> {
     this.clipboardTimer = -1;
     if (!this.clipboardSyncEnabled || this.clipboardPolling || this.connectionStatus !== ConnectionStatus.CONNECTED) {
@@ -12075,42 +12347,69 @@ struct RemotePage {
       this.scheduleClipboardPoll(1000);
       return;
     }
+    if (!this.clipboardCanAccess()) { this.scheduleClipboardPoll(1000); return; }
     this.clipboardPolling = true;
+    this.clipboardPollRequested = false;
+    const generation: number = this.clipboardGeneration;
     try {
-      let remoteText: string = RustDeskNapi.takeRemoteClipboardText();
-      if (remoteText.length > 0 && remoteText !== this.lastRemoteClipboardText) {
-        this.lastRemoteClipboardText = remoteText;
-        this.lastLocalClipboardText = remoteText;
-        this.suppressClipboardText = remoteText;
-        this.clipboardBaselineInitialized = true;
-        RustDeskNapi.setClipboardText(remoteText);
-      }
-
-      let localText: string = await RustDeskNapi.getClipboardTextAsync();
-      if (!this.clipboardBaselineInitialized) {
-        this.lastLocalClipboardText = localText;
-        this.clipboardBaselineInitialized = true;
-        if (localText.length > 0 && localText !== this.suppressClipboardText) {
-          let result: number = RustDeskNapi.sendClipboardText(localText);
-          hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Initial local clipboard synced result=%{public}d', result);
-        } else if (localText === this.suppressClipboardText) {
-          this.suppressClipboardText = '';
+      const remoteText: string = RustDeskNapi.takeRemoteClipboardText();
+      if (remoteText.length > 0) this.clipboardPendingRemoteText = remoteText;
+      const revision: number = this.clipboardChangeRevision;
+      const read: ClipboardImportReadResult = await RustDeskNapi.getClipboardTextForSyncAsync();
+      if (generation !== this.clipboardGeneration || !this.clipboardCanAccess()) return;
+      if (revision !== this.clipboardChangeRevision) { this.clipboardPollRequested = true; return; }
+      this.recordClipboardDiagnostic('read', read.failed ? `unavailable_code_${Math.max(0, Math.min(999999999, Math.trunc(read.code)))}` : 'available');
+      const localText: string = read.text;
+      const changed: boolean = !read.failed && this.clipboardBaselineInitialized &&
+        localText !== this.lastLocalClipboardText;
+      if (changed) {
+        // A fresh local copy wins over a queued remote update; never overwrite
+        // the user's new clipboard with an older remote value.
+        this.clipboardPendingRemoteText = '';
+        if (localText.length === 0) this.lastLocalClipboardText = '';
+        else {
+          const result: number = RustDeskNapi.sendClipboardText(localText);
+          this.recordClipboardDiagnostic('send', result === 0 ? 'queued' : 'queue_failed');
+          if (result === 0) this.lastLocalClipboardText = localText;
         }
-      } else if (localText.length > 0 && localText !== this.lastLocalClipboardText) {
-        this.lastLocalClipboardText = localText;
-        if (localText === this.suppressClipboardText) {
-          this.suppressClipboardText = '';
+      } else if (this.clipboardPendingRemoteText.length > 0) {
+        const pending: string = this.clipboardPendingRemoteText;
+        if (!read.failed && pending === localText) {
+          this.lastLocalClipboardText = localText;
+          this.clipboardBaselineInitialized = true;
+          this.clipboardPendingRemoteText = '';
         } else {
-          let result: number = RustDeskNapi.sendClipboardText(localText);
-          hilog.info(LOG_DOMAIN, 'StarRustDesk', 'Local clipboard synced result=%{public}d', result);
+          const result: number = await RustDeskNapi.setClipboardTextAsync(pending);
+          if (generation !== this.clipboardGeneration || !this.clipboardCanAccess()) return;
+          this.recordClipboardDiagnostic('write', result === 0 ? 'applied' : 'failed');
+          if (result === 0) {
+            this.lastLocalClipboardText = pending;
+            this.clipboardBaselineInitialized = true;
+            if (this.clipboardPendingRemoteText === pending) this.clipboardPendingRemoteText = '';
+          }
+        }
+      } else if (!read.failed && !this.clipboardBaselineInitialized) {
+        if (localText.length === 0) {
+          this.lastLocalClipboardText = '';
+          this.clipboardBaselineInitialized = true;
+        } else {
+          const result: number = RustDeskNapi.sendClipboardText(localText);
+          this.recordClipboardDiagnostic('send', result === 0 ? 'initial_queued' : 'initial_queue_failed');
+          if (result === 0) {
+            this.lastLocalClipboardText = localText;
+            this.clipboardBaselineInitialized = true;
+          }
         }
       }
     } catch (_e) {
-      hilog.warn(LOG_DOMAIN, 'StarRustDesk', 'Clipboard sync poll failed');
-    }
-    this.clipboardPolling = false;
-    if (this.clipboardSyncEnabled) {
-      this.scheduleClipboardPoll(1000);
+      if (generation === this.clipboardGeneration) this.recordClipboardDiagnostic('read', 'poll_failed');
+    } finally {
+      if (generation === this.clipboardGeneration) {
+        this.clipboardPolling = false;
+        if (this.clipboardSyncEnabled && this.connectionStatus === ConnectionStatus.CONNECTED) {
+          this.scheduleClipboardPoll(this.clipboardPollRequested ? 50 : 1000);
+        }
+      }
     }
   }
 

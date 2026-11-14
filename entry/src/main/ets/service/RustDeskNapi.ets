@@ -445,6 +445,25 @@ export class RustDeskNapi {
     }
   }
 
+  // The remote synchronizer must distinguish an empty clipboard from a
+  // permission/read failure, without logging or persisting clipboard contents.
+  static async getClipboardTextForSyncAsync(): Promise<ClipboardImportReadResult> {
+    return await RustDeskNapi.getClipboardTextForImportAsync()
+  }
+
+  static observeClipboardChanges(callback: () => void): boolean {
+    try {
+      systemPasteboard.on('update', callback)
+      return true
+    } catch (_e) {
+      return false
+    }
+  }
+
+  static stopObservingClipboardChanges(callback: () => void): void {
+    try { systemPasteboard.off('update', callback) } catch (_e) {}
+  }
+
   private static getPlainTextFromRecord(record: pasteboard.PasteDataRecord): string {
     const plainText: string = record.plainText ?? ''
     if (plainText.length > 0) {

@@ -18,6 +18,9 @@ tokio = { version = "1", features = ["rt", "macros", "sync"] }
 log = "0.4"
 protobuf = "3"
 
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+
 [patch.crates-io]
 machine-uid = { path = "vendor/machine_uid" }
 webrtc-util = { path = "vendor/webrtc_util_ohos" }

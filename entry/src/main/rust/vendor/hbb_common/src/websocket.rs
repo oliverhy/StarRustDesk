@@ -182,6 +182,13 @@ impl WsFramedStream {
         self.addr
     }
 
+    /// Whether the underlying WebSocket transport is protected by TLS.  This
+    /// is distinct from the RustDesk message-layer encryption in `is_secured`.
+    #[inline]
+    pub fn is_tls_protected(&self) -> bool {
+        !matches!(self.stream.get_ref(), MaybeTlsStream::Plain(_))
+    }
+
     #[inline]
     pub fn set_send_timeout(&mut self, ms: u64) {
         self.send_timeout = ms;

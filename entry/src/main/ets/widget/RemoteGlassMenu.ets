@@ -323,6 +323,21 @@ export struct RemoteGlassMenu {
     ForEach(this.state.items.filter((key: string) => key !== 'input' && key !== 'gestureHelp'), (key: string) => {
       this.action(key)
     }, (key: string) => key)
+    if (this.state.clipboard && this.state.items.includes('clipboard')) {
+      Column({ space: 4 }) {
+        Text(translate('同步本机文字到远端', this.language)).fontFamily(Style.FONT).fontSize(12)
+          .fontColor(this.textColor()).width('100%').wordBreak(WordBreak.BREAK_ALL)
+        // This system security component grants a temporary read only on a
+        // real user tap. A normal button cannot grant clipboard access.
+        PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
+          .fontSize(13).fontColor(this.blue()).backgroundColor(this.keyColor()).borderRadius(7)
+          .width('100%').constraintSize({ minHeight: Math.max(40, this.metrics.rowHeight) })
+          .id('glass-clipboard-paste')
+          .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+            this.onAction(result === PasteButtonOnClickResult.SUCCESS ? 'clipboard-paste-authorized' : 'clipboard-paste-denied')
+          })
+      }.width('100%').padding({ top: 4, bottom: 4 })
+    }
     this.divider()
     this.action('gestureHelp')
     this.action('keyboardSettings')

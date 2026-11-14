@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.4'
-export const RELEASE_NOTES_BUILD: string = '2000004'
+export const RELEASE_NOTES_VERSION: string = '2.0.6'
+export const RELEASE_NOTES_BUILD: string = '2000006'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,18 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.6（2000006）· 输入与连接优化', [
+            '优化多行文字输入：检测到换行时先保留原文并提示手动处理，避免直接转换为远端回车。',
+            '优化长文字和中文输入处理，保留手动回车与组合键；输入未能加入发送队列时提示处理。',
+            '优化连接中断后的重试与备用路径，保留服务器密钥验证和现有加密要求。',
+            '完善输入和连接诊断，不记录输入文字、密码或令牌。'
+          ])
+          this.buildSection('2.0.5（2000005）· 剪贴板同步优化', [
+            '修复重复复制相同文字或发送失败后不再重试的问题，改善鸿蒙 PC 向 Mac 远控时文字同步不稳定的情况。',
+            '优化远端文字写入、本地读取和窗口焦点切换的处理，减少双向同步过程中的状态冲突。',
+            '新增主动同步本机文字入口：在“控 → 输入”中使用系统粘贴按钮授权，适用于系统限制自动读取剪贴板的情况。',
+            '完善剪贴板同步状态诊断，不记录剪贴板文字；当前同步支持文字，不代表支持图片或文件剪贴板。'
+          ])
           this.buildSection('2.0.4（2000004）· 远控软键盘体验优化', [
             '新增“提交后收起键盘”选项，默认关闭并按远端设备保存；开启后输入法提交会发送回车并收起键盘，关闭时保留连续输入方式。',
             '优化中文输入法组词与提交顺序，等待候选内容确认后再处理提交，减少输入中途收起键盘的情况。',

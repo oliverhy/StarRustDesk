@@ -91,7 +91,9 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   switch (state.category) {
     case 'screens': content += screenHeight + 8 + rowHeight; break;
     case 'input': content += (stacked ? segmentHeight * 2 + 4 : segmentHeight) + 8 +
-      Math.max(0, state.items.length - 1) * rowHeight + 3 * rowHeight + 9; break;
+      Math.max(0, state.items.length - 1) * rowHeight + 3 * rowHeight + 9;
+      if (state.clipboard && state.items.includes('clipboard')) content += rowHeight * 2 + 12;
+      break;
     case 'view': content += (state.items.length - (state.items.includes('zoomOut') ? 1 : 0)) * rowHeight + 9;
       if (state.desktop) content += segmentHeight + rowHeight * (state.desktopViewMode === 'custom' ? 5 : 4) + 9;
       break;

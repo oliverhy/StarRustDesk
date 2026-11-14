@@ -69,8 +69,13 @@ assert.match(page, /sendKeyboardTextSegment\(text: string\)/,
   'Committed text must be routed separately from control keys');
 assert.match(page, /modifierMask !== 0 && keyCode > 0/,
   'Printable soft-keyboard shortcuts must preserve latched toolbar modifiers');
-assert.match(page, /character !== '\\n' && character !== '\\r'/,
-  'Newlines from an IME must be converted to remote Enter events');
+const textStart = page.indexOf('  sendKeyboardText(text: string):');
+const textEnd = page.indexOf('\n  }', textStart);
+const sendTextMethod = page.slice(textStart, textEnd);
+assert.match(sendTextMethod, /text\.includes\('\\n'\).*text\.includes\('\\r'\)/,
+  'Text containing a newline must not be treated as manual Enter');
+assert.doesNotMatch(sendTextMethod, /sendControlKey\(13\)/,
+  'Text input must not automatically emit remote Enter events');
 assert.match(page, /if \(this\.canSendCtrlAltDel\)/,
   'Ctrl+Alt+Del should follow the peer capability reported by RustDesk');
 

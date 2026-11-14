@@ -512,14 +512,9 @@ export class ConnectionService {
       }
       return ''
     }
-    if ((message === '与远端安全握手失败' || message === 'Peer secure handshake failed') &&
-      route === 1 && !ConnectionService.relayRetryUsed) {
-      ConnectionService.relayRetryUsed = true
-      if (ConnectionService.restartConnection(true, 'direct_secure_handshake_failed', 1, 1)) {
-        return '直连安全握手失败，正在通过加密中继重试'
-      }
-      return ''
-    }
+    // The native layer already performs one bounded encrypted relay retry for
+    // classified transport failures. An unclassified security error can be an
+    // invalid identity/signature and must not trigger another automatic retry.
 
     if ((message === 'ID 服务器未响应' || message === 'Rendezvous server did not respond') &&
       ConnectionService.rendezvousRetryCount < 2) {
@@ -1021,8 +1016,8 @@ export class ConnectionService {
       action, ConnectionService.capsLockEnabled ? 1 : 0)
   }
 
-  static sendText(text: string): void {
-    RustDeskNapi.sendText(text)
+  static sendText(text: string): number {
+    return RustDeskNapi.sendText(text)
   }
 
   static sendCtrlAltDel(): number {

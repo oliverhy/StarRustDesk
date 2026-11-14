@@ -56,7 +56,7 @@ for (const text of ['q','Q','你好','去','hello','🙂','']) {
 for (const text of ['你好','去','hello','🙂']) {
   assert.deepEqual(send(text, 1), [['text',text]], 'IME commit must not be converted to shortcuts');
 }
-console.log('PASS normal text, uppercase, Chinese IME commits and multiline segments keep their text path');
+console.log('PASS normal text, uppercase, Chinese IME commits and single-line multi-character text keep their text path');
 for (const [code, mods] of [[46,3], [27,3], [115,4], [38,1]]) {
   packets.length = 0;
   context.ConnectionService.sendShortcutKey(code, mods);

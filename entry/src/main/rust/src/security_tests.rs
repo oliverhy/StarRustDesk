@@ -261,6 +261,104 @@ async fn accept_verified_test_handshake(peer: &mut Stream, signer: &sign::Secret
 }
 
 #[test]
+fn punch_recovery_reauthenticates_before_resending_token_or_ice_offer() {
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    extern "C" fn capture(value: *const c_char) {
+        if let Some(value) = cstr_to_string(value) { EVENTS.lock().unwrap().push(value); }
+    }
+    struct Restore(Option<EventCallback>);
+    impl Drop for Restore { fn drop(&mut self) { *EVENT_CALLBACK.lock().unwrap() = self.0; } }
+    EVENTS.lock().unwrap().clear();
+    let _restore = Restore(EVENT_CALLBACK.lock().unwrap().replace(capture));
+    runtime().block_on(async {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let key = base64::encode(&sign_pk.0, Variant::Original);
+        let (listener, unused_alternate) = super::network_tests::punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let mut client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let mut first = Stream::from(socket, addr);
+        let server = tokio::spawn(async move {
+            accept_verified_test_handshake(&mut first, &sign_sk).await;
+            let initial = RendezvousMessage::parse_from_bytes(&first.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(initial.punch_hole_request().token, "TEST_RECOVERY_TOKEN_DO_NOT_LOG");
+            drop(first);
+            let (socket, addr) = tokio::time::timeout(Duration::from_secs(4), listener.accept()).await.unwrap().unwrap();
+            let mut retry = Stream::from(socket, addr);
+            assert!(tokio::time::timeout(Duration::from_millis(30), retry.next()).await.is_err(),
+                "retry disclosed data before server authentication");
+            accept_verified_test_handshake(&mut retry, &sign_sk).await;
+            assert!(retry.is_secured());
+            let received = RendezvousMessage::parse_from_bytes(&retry.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(received.punch_hole_request().token, "TEST_RECOVERY_TOKEN_DO_NOT_LOG");
+            assert_eq!(received.punch_hole_request().webrtc_sdp_offer, "TEST_RECOVERY_OFFER_DO_NOT_LOG");
+            let mut response = RendezvousMessage::new();
+            response.set_punch_hole_response(hbb_common::rendezvous_proto::PunchHoleResponse::new());
+            retry.send(&response).await.unwrap();
+        });
+        secure_rendezvous_connection(&mut client, &key, RendezvousHandshakeContext::Account).await.unwrap();
+        let mut request = punch_hole_request("TEST_RECOVERY_PEER_DO_NOT_LOG", &key,
+            ConnType::DEFAULT_CONN, false, NatType::UNKNOWN_NAT, 0, Vec::new(),
+            "TEST_RECOVERY_OFFER_DO_NOT_LOG".into());
+        api_account::attach(&mut request, "TEST_RECOVERY_TOKEN_DO_NOT_LOG");
+        let epoch = AtomicU64::new(9);
+        let (winner, _) = tokio::time::timeout(Duration::from_secs(6), send_punch_with_recovery(
+            client, &endpoint.to_string(), &key, &request, false, 9, &epoch)).await.unwrap().unwrap();
+        assert!(winner.is_secured());
+        server.await.unwrap();
+    });
+    let log = EVENTS.lock().unwrap().join("\n");
+    assert!(log.contains("phase=punch_recovery action=authenticate attempt=2"));
+    assert!(log.contains("phase=punch_recovery outcome=response attempt=2"));
+    for secret in ["TEST_RECOVERY_TOKEN_DO_NOT_LOG", "TEST_RECOVERY_OFFER_DO_NOT_LOG",
+        "TEST_RECOVERY_PEER_DO_NOT_LOG", "127.0.0.1"] {
+        assert!(!log.contains(secret), "recovery diagnostics exposed sensitive data");
+    }
+}
+
+#[test]
+fn punch_recovery_stops_on_invalid_server_signature_without_disclosing_credentials() {
+    runtime().block_on(async {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let (_, wrong_sign_sk) = sign::gen_keypair();
+        let key = base64::encode(&sign_pk.0, Variant::Original);
+        let (listener, unused_alternate) = super::network_tests::punch_test_adjacent_listeners().await;
+        let endpoint = listener.local_addr().unwrap();
+        drop(unused_alternate);
+        let mut client = connect_tcp(endpoint, 1_000).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let mut first = Stream::from(socket, addr);
+        let server = tokio::spawn(async move {
+            accept_verified_test_handshake(&mut first, &sign_sk).await;
+            assert!(first.next().await.is_some());
+            drop(first);
+            let (socket, addr) = tokio::time::timeout(Duration::from_secs(4), listener.accept()).await.unwrap().unwrap();
+            let mut retry = Stream::from(socket, addr);
+            let (server_pk, _) = box_::gen_keypair();
+            let mut exchange = RendezvousMessage::new();
+            exchange.set_key_exchange(KeyExchange {
+                keys: vec![sign::sign(&server_pk.0, &wrong_sign_sk).into()], ..Default::default()
+            });
+            retry.send(&exchange).await.unwrap();
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(1), retry.next()).await,
+                Ok(None) | Ok(Some(Err(_)))), "token or offer sent after failed signature");
+            assert!(tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err(),
+                "invalid signatures must not be retried");
+        });
+        secure_rendezvous_connection(&mut client, &key, RendezvousHandshakeContext::Account).await.unwrap();
+        let mut request = punch_hole_request("test-peer", &key, ConnType::DEFAULT_CONN, false,
+            NatType::UNKNOWN_NAT, 0, Vec::new(), "test-offer".into());
+        api_account::attach(&mut request, "test-token");
+        let epoch = AtomicU64::new(11);
+        let result = tokio::time::timeout(Duration::from_secs(6), send_punch_with_recovery(
+            client, &endpoint.to_string(), &key, &request, false, 11, &epoch)).await.unwrap();
+        assert!(matches!(result, Err(-33)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
 fn weak_network_account_handshake_hedges_safely_and_only_sends_token_after_verification() {
     static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
     extern "C" fn capture(value: *const c_char) {
@@ -517,6 +615,271 @@ fn signed_identity(id: &str, pk: [u8; 32], signer: &sign::SecretKey) -> Vec<u8> 
         ..Default::default()
     };
     sign::sign(&payload.write_to_bytes().unwrap(), signer)
+}
+
+#[test]
+fn peer_handshake_distinguishes_timeout_from_closed_stream_without_leaking_payloads() {
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    extern "C" fn capture(value: *const c_char) {
+        if let Some(value) = cstr_to_string(value) { EVENTS.lock().unwrap().push(value); }
+    }
+    struct Restore(Option<EventCallback>);
+    impl Drop for Restore { fn drop(&mut self) { *EVENT_CALLBACK.lock().unwrap() = self.0; } }
+    let _restore = Restore(EVENT_CALLBACK.lock().unwrap().replace(capture));
+    EVENTS.lock().unwrap().clear();
+    runtime().block_on(async {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (peer_pk, _) = sign::gen_keypair();
+        let key = base64::encode(&server_pk.0, Variant::Original);
+        let signed = signed_identity("private-test-peer", peer_pk.0, &server_sk);
+        let (mut client, peer) = stream_pair().await;
+        drop(peer);
+        let closed = secure_peer_connection_with_timeout("private-test-peer", &signed, &key,
+            &mut client, INSECURE_NONE, 500).await.unwrap_err();
+        assert_eq!(closed.downcast_ref::<PeerHandshakeTransportError>(),
+            Some(&PeerHandshakeTransportError::ReceiveClosed));
+        let (mut client, _peer) = stream_pair().await;
+        let timed_out = secure_peer_connection_with_timeout("private-test-peer", &signed, &key,
+            &mut client, INSECURE_NONE, 30).await.unwrap_err();
+        assert_eq!(timed_out.downcast_ref::<PeerHandshakeTransportError>(),
+            Some(&PeerHandshakeTransportError::ReceiveTimeout));
+        for error in [PeerHandshakeTransportError::ReceiveError, PeerHandshakeTransportError::SendTimeout,
+            PeerHandshakeTransportError::SendError] {
+            let boxed = hbb_common::anyhow::Error::new(error);
+            assert_eq!(boxed.downcast_ref::<PeerHandshakeTransportError>(), Some(&error));
+        }
+        assert_eq!(peer_io_error_kind(std::io::ErrorKind::ConnectionReset), "connection_reset");
+        assert_eq!(peer_io_error_kind(std::io::ErrorKind::BrokenPipe), "broken_pipe");
+        assert_eq!(peer_io_error_kind(std::io::ErrorKind::InvalidData), "other");
+        let log = EVENTS.lock().unwrap().join("\n");
+        assert!(log.contains("step=wait_signed_id outcome=receive_closed"));
+        assert!(log.contains("step=wait_signed_id outcome=receive_timeout"));
+        assert!(!log.contains("private-test-peer"));
+        assert!(!log.contains(&key));
+        assert!(!log.contains("wait signed id timeout"));
+    });
+}
+
+#[test]
+fn transient_peer_handshake_retries_once_via_fresh_authenticated_relay() {
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    extern "C" fn capture(value: *const c_char) {
+        if let Some(value) = cstr_to_string(value) { EVENTS.lock().unwrap().push(value); }
+    }
+    struct Restore(Option<EventCallback>);
+    impl Drop for Restore { fn drop(&mut self) { *EVENT_CALLBACK.lock().unwrap() = self.0; } }
+    let _restore = Restore(EVENT_CALLBACK.lock().unwrap().replace(capture));
+    runtime().block_on(async {
+        for initial_route in [1, 2] {
+            EVENTS.lock().unwrap().clear();
+            let (server_pk, server_sk) = sign::gen_keypair();
+            let (peer_pk, peer_sk) = sign::gen_keypair();
+            let (encryption_pk, _) = box_::gen_keypair();
+            let key = base64::encode(&server_pk.0, Variant::Original);
+            let signed = signed_identity("test-peer", peer_pk.0, &server_sk);
+            let peer_signed = signed_identity("test-peer", encryption_pk.0, &peer_sk);
+            let rendezvous = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let rv_addr = rendezvous.local_addr().unwrap();
+            let relay_addr = relay.local_addr().unwrap();
+            let (uuid_tx, uuid_rx) = tokio::sync::oneshot::channel();
+            let rv_task = tokio::spawn(async move {
+                let (socket, address) = rendezvous.accept().await.unwrap();
+                let mut stream = Stream::from(socket, address);
+                let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+                let message = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+                let req = message.request_relay();
+                assert_eq!(req.id, "test-peer");
+                assert!(req.secure, "re-pair must request an encrypted peer session");
+                assert!(req.token.is_empty());
+                assert!(!req.uuid.is_empty());
+                uuid_tx.send(req.uuid.clone()).unwrap();
+                let mut response = RendezvousMessage::new();
+                response.set_relay_response(hbb_common::rendezvous_proto::RelayResponse::default());
+                stream.send(&response).await.unwrap();
+                assert!(tokio::time::timeout(Duration::from_millis(150), rendezvous.accept()).await.is_err(),
+                    "recovery must not make a second relay request");
+            });
+            let relay_key = key.clone();
+            let relay_task = tokio::spawn(async move {
+                let (socket, address) = relay.accept().await.unwrap();
+                let mut stream = Stream::from(socket, address);
+                let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+                let create = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+                let request = create.request_relay();
+                assert_eq!(request.id, "test-peer");
+                assert_eq!(request.uuid, uuid_rx.await.unwrap());
+                assert_eq!(request.licence_key, relay_key);
+                let mut signed_message = PeerMessage::new();
+                signed_message.set_signed_id(SignedId { id: peer_signed.into(), ..Default::default() });
+                stream.send(&signed_message).await.unwrap();
+                let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+                assert!(matches!(PeerMessage::parse_from_bytes(&bytes).unwrap().union,
+                    Some(message::Union::PublicKey(_))));
+            });
+            let (client, peer) = stream_pair().await;
+            drop(peer); // A closed transport is the real first-attempt failure.
+            let selected = ConnectedTransport { stream: client, kcp: None, label: "TCP",
+                route: initial_route, transport: TRANSPORT_TCP };
+            let current = AtomicU64::new(1);
+            let route = AtomicI32::new(0);
+            let transport = AtomicI32::new(0);
+            let rv_endpoint = rv_addr.to_string();
+            let relay_endpoint = relay_addr.to_string();
+            let context = PeerSecurityRecoveryContext { peer: "test-peer", signed_id_pk: &signed,
+                key: &key, relay_server: &relay_endpoint, rendezvous_server: &rv_endpoint, token: "",
+                require_tls: false, insecure_reason: INSECURE_NONE, session_id: 1, current_session: &current,
+                attempt_route: &route, attempt_transport: &transport };
+            let (connected, encrypted) = tokio::time::timeout(Duration::from_secs(3),
+                secure_transport_with_recovery(selected, &context)).await.unwrap().unwrap();
+            assert!(encrypted && connected.stream.is_secured());
+            assert_eq!(connected.route, 2);
+            assert_eq!(route.load(Ordering::SeqCst), 2);
+            assert_eq!(transport.load(Ordering::SeqCst), TRANSPORT_TCP);
+            relay_task.await.unwrap();
+            rv_task.await.unwrap();
+            let log = EVENTS.lock().unwrap().join("\n");
+            assert!(log.contains("phase=peer_security_retry action=request_relay reason=receive_closed"));
+            assert!(log.contains("phase=peer_security_retry outcome=secured attempt=2"));
+            assert!(!log.contains("test-peer"));
+            assert!(!log.contains(&key));
+            assert!(!log.contains(&rv_endpoint));
+            assert!(!log.contains(&relay_endpoint));
+        }
+    });
+}
+
+#[test]
+fn closed_relay_during_recovery_stops_after_one_retry() {
+    runtime().block_on(async {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (peer_pk, _) = sign::gen_keypair();
+        let key = base64::encode(&server_pk.0, Variant::Original);
+        let signed = signed_identity("test-peer", peer_pk.0, &server_sk);
+        let rendezvous = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rv_endpoint = rendezvous.local_addr().unwrap().to_string();
+        let relay_endpoint = relay.local_addr().unwrap().to_string();
+        let rv_task = tokio::spawn(async move {
+            let (socket, address) = rendezvous.accept().await.unwrap();
+            let mut stream = Stream::from(socket, address);
+            let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+            let request = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
+            assert!(request.request_relay().secure);
+            let mut response = RendezvousMessage::new();
+            response.set_relay_response(hbb_common::rendezvous_proto::RelayResponse::default());
+            stream.send(&response).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(300), rendezvous.accept()).await.is_err(),
+                "a second handshake failure must not start an unbounded retry loop");
+        });
+        let relay_task = tokio::spawn(async move {
+            let (socket, address) = relay.accept().await.unwrap();
+            let mut stream = Stream::from(socket, address);
+            let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+            assert!(matches!(RendezvousMessage::parse_from_bytes(&bytes).unwrap().union,
+                Some(rendezvous_message::Union::RequestRelay(_))));
+            // Simulate the relay closing before any signed peer identity.
+        });
+        let (client, peer) = stream_pair().await;
+        drop(peer);
+        let selected = ConnectedTransport { stream: client, kcp: None, label: "TCP", route: 2,
+            transport: TRANSPORT_TCP };
+        let current = AtomicU64::new(1);
+        let route = AtomicI32::new(0);
+        let transport = AtomicI32::new(0);
+        let context = PeerSecurityRecoveryContext { peer: "test-peer", signed_id_pk: &signed, key: &key,
+            relay_server: &relay_endpoint, rendezvous_server: &rv_endpoint, token: "", require_tls: false,
+            insecure_reason: INSECURE_NONE, session_id: 1, current_session: &current,
+            attempt_route: &route, attempt_transport: &transport };
+        let result = tokio::time::timeout(Duration::from_secs(3),
+            secure_transport_with_recovery(selected, &context)).await.unwrap();
+        assert_eq!(result.err(), Some(-16));
+        assert_eq!(route.load(Ordering::SeqCst), 2);
+        relay_task.await.unwrap();
+        rv_task.await.unwrap();
+    });
+}
+
+#[test]
+fn cancelling_during_peer_relay_recovery_closes_pending_socket() {
+    runtime().block_on(async {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (peer_pk, _) = sign::gen_keypair();
+        let key = base64::encode(&server_pk.0, Variant::Original);
+        let signed = signed_identity("test-peer", peer_pk.0, &server_sk);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let current = Arc::new(AtomicU64::new(1));
+        let server_session = current.clone();
+        let server = tokio::spawn(async move {
+            let (socket, address) = listener.accept().await.unwrap();
+            let mut stream = Stream::from(socket, address);
+            let bytes = stream.next_timeout(1000).await.unwrap().unwrap();
+            assert!(RendezvousMessage::parse_from_bytes(&bytes).unwrap().request_relay().secure);
+            server_session.store(2, Ordering::SeqCst);
+            let closed = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+            assert!(matches!(closed, Ok(None) | Ok(Some(Err(_)))),
+                "cancellation must close the pending relay request socket");
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let (client, peer) = stream_pair().await;
+        drop(peer);
+        let selected = ConnectedTransport { stream: client, kcp: None, label: "TCP", route: 2,
+            transport: TRANSPORT_TCP };
+        let route = AtomicI32::new(0);
+        let transport = AtomicI32::new(0);
+        let context = PeerSecurityRecoveryContext { peer: "test-peer", signed_id_pk: &signed, key: &key,
+            relay_server: &endpoint, rendezvous_server: &endpoint, token: "", require_tls: false,
+            insecure_reason: INSECURE_NONE, session_id: 1, current_session: &current,
+            attempt_route: &route, attempt_transport: &transport };
+        let result = await_connection_attempt(1, &current, Duration::from_secs(3),
+            secure_transport_with_recovery(selected, &context)).await;
+        assert!(matches!(result, Err(ConnectionAttemptError::Cancelled)));
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn peer_security_recovery_never_retries_identity_errors_or_insecure_consent() {
+    runtime().block_on(async {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (peer_pk, peer_sk) = sign::gen_keypair();
+        let key = base64::encode(&server_pk.0, Variant::Original);
+        let signed = signed_identity("test-peer", peer_pk.0, &server_sk);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let current = AtomicU64::new(1);
+        let route = AtomicI32::new(0);
+        let transport = AtomicI32::new(0);
+        for scenario in 0..3 {
+            let (client, mut peer) = stream_pair().await;
+            if scenario == 0 {
+                let mut message = PeerMessage::new();
+                message.set_signed_id(SignedId {
+                    id: signed_identity("wrong-peer", peer_pk.0, &peer_sk).into(), ..Default::default()
+                });
+                peer.send(&message).await.unwrap();
+            } else {
+                drop(peer);
+            }
+            let selected = ConnectedTransport { stream: client, kcp: None, label: "TCP",
+                route: 1, transport: TRANSPORT_TCP };
+            let context = PeerSecurityRecoveryContext { peer: "test-peer", signed_id_pk: &signed, key: &key,
+                relay_server: &endpoint, rendezvous_server: &endpoint, token: "", require_tls: false,
+                insecure_reason: if scenario == 1 { INSECURE_SERVER_KEY } else { INSECURE_NONE },
+                session_id: if scenario == 2 { 2 } else { 1 }, current_session: &current,
+                attempt_route: &route, attempt_transport: &transport };
+            let result = secure_transport_with_recovery(selected, &context).await;
+            assert_eq!(result.err(), Some(if scenario == 2 { -19 } else { -16 }));
+            if scenario != 2 {
+                assert_eq!(route.load(Ordering::SeqCst), 1,
+                    "a failed direct handshake must retain the attempted route");
+                assert_eq!(transport.load(Ordering::SeqCst), TRANSPORT_TCP);
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err(),
+                "identity failure, insecure consent or cancellation must not start relay recovery");
+        }
+    });
 }
 
 #[test]

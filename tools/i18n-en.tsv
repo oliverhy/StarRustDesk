@@ -1,4 +1,32 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+2.0.6（2000006）· 输入与连接优化	2.0.6 (2000006) · Input and connection improvements
+优化多行文字输入：检测到换行时先保留原文并提示手动处理，避免直接转换为远端回车。	Improved multiline input: when a line break is detected, keep the original text and prompt for manual handling instead of converting it directly to remote Enter.
+优化长文字和中文输入处理，保留手动回车与组合键；输入未能加入发送队列时提示处理。	Improved long-text and Chinese input handling while retaining manual Enter and shortcuts. A prompt appears if input cannot be queued.
+优化连接中断后的重试与备用路径，保留服务器密钥验证和现有加密要求。	Improved retry and fallback paths after connection interruptions while retaining server-key verification and existing encryption requirements.
+完善输入和连接诊断，不记录输入文字、密码或令牌。	Improved input and connection diagnostics without recording typed text, passwords or tokens.
+正在复制待处理文字	Copying pending text
+待处理的输入文字	Pending input
+远端可能把换行当成发送。待输入文字已保留在本机，没有作为按键发送。复制后可手动同步并在远端粘贴，请先核对已有内容；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。	The remote app may treat line breaks as Send. The pending text remains on this device and has not been sent as keystrokes. Copy it, check existing remote content, then manually sync and paste it. Clipboard synchronization may send it to the remote device. The temporary copy lasts only while this page remains open.
+文字未能加入发送队列，已保留在本机。请复制后手动处理，并核对远端已有内容；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。	The text could not be queued and remains on this device. Copy it and handle it manually after checking the remote content. Clipboard synchronization may send it to the remote device. The temporary copy lasts only while this page remains open.
+输入法正在替换或组合文字，远端可能已有部分内容。待处理文字已保留在本机，请复制后先核对再手动粘贴；剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。	The input method was replacing or composing text, and some content may already be on the remote device. The pending text remains on this device. Copy it, check the remote content, then paste it manually. Clipboard synchronization may send it to the remote device. The temporary copy lasts only while this page remains open.
+输入法组合文字和粘贴的原文已分别保留在本机，插入位置无法确认。请分别复制并核对远端已有内容；复制后可再次点击键盘继续处理。剪贴板同步开启时可能同步到远端。暂存仅在当前页面有效。	The input method's composition and the original pasted text are kept separately on this device because the insertion position is unknown. Copy each part and check the remote content; tap the keyboard again to continue. Clipboard synchronization may send copied text to the remote device. Temporary copies last only while this page remains open.
+稍后处理	Handle later
+复制并继续	Copy and continue
+复制粘贴原文	Copy original paste
+复制组合文字	Copy composition
+结束处理	Finish handling
+丢弃	Discard
+待处理文字已保留，请再次点击键盘	Pending text is saved here; tap the keyboard again
+已复制到本机剪贴板，请核对后在远端粘贴	Copied locally. Check the remote content before pasting.
+复制失败，待处理文字仍保留	Copy failed; the pending text is still here
+丢弃待处理文字？	Discard pending text?
+请先确认远端内容。清除本机暂存后无法恢复。	Check the remote content first. The local temporary copy cannot be recovered after clearing.
+保留	Keep
+2.0.5（2000005）· 剪贴板同步优化	2.0.5 (2000005) · Clipboard sync improvements
+修复重复复制相同文字或发送失败后不再重试的问题，改善鸿蒙 PC 向 Mac 远控时文字同步不稳定的情况。	Fixed duplicate text copies and failed sends not being retried, improving text synchronization from HarmonyOS PCs to remote Macs.
+优化远端文字写入、本地读取和窗口焦点切换的处理，减少双向同步过程中的状态冲突。	Improved remote text writes, local reads, and window-focus handling to reduce two-way synchronization conflicts.
+新增主动同步本机文字入口：在“控 → 输入”中使用系统粘贴按钮授权，适用于系统限制自动读取剪贴板的情况。	Added a manual local-text sync action: use the system Paste button in Controls → Input when automatic clipboard access is restricted.
+完善剪贴板同步状态诊断，不记录剪贴板文字；当前同步支持文字，不代表支持图片或文件剪贴板。	Improved clipboard sync diagnostics without logging clipboard text. Synchronization supports text, not necessarily image or file clipboard data.
 2.0.4（2000004）· 远控软键盘体验优化	2.0.4 (2000004) · Remote on-screen keyboard improvements
 新增“提交后收起键盘”选项，默认关闭并按远端设备保存；开启后输入法提交会发送回车并收起键盘，关闭时保留连续输入方式。	Added an optional hide-after-submit setting, off by default and saved per remote device. When enabled, submitting sends Enter and hides the keyboard; when disabled, continuous input remains available.
 优化中文输入法组词与提交顺序，等待候选内容确认后再处理提交，减少输入中途收起键盘的情况。	Improved Chinese IME composition and submission ordering: candidate text is committed before submission is processed, reducing premature keyboard dismissal.
@@ -1667,5 +1695,11 @@ StarRustDesk 正式更名为“芝麻远控”，更新应用名称、远控窗�
 补充切屏方向、图片准备、动画开始与结束、超时和取消阶段诊断；遵循诊断开关，不记录画面内容、密码或输入文字。	Added opt-in diagnostics for swipe direction, image preparation, animation start and finish, timeouts and cancellation. No screen contents, passwords or typed text are recorded.
 保存三指切屏设置失败，请重试	Could not save the display swipe setting. Please try again.
 屏幕切换失败，请重试	Could not switch displays. Please try again.
+同步本机文字到远端	Sync local text to remote
+请先允许远端文字输入	Allow remote text input first.
+剪贴板内容已变化，请重新同步	The clipboard changed. Please sync again.
+剪贴板没有可同步的文字	There is no text to sync in the clipboard.
+已请求同步，请在远端粘贴	Sync requested. Paste on the remote device.
+剪贴板同步失败，请重试	Clipboard sync failed. Please try again.
 屏幕 {0} / {1}	Display {0} / {1}
 在“控 → 屏幕”中设置“三指切屏”，默认开启，按远端独立保存。远端有多个屏幕时，在远控画面上三指左滑切换下一屏、右滑切换上一屏，首尾循环。每次抬手只切换一次；双指滚动、捏合缩放和全屏三指上滑打开键盘保持不变。\n适用于触控屏。系统可能接管平板或电脑的多指手势；触控板三指事件未开放给应用时，请使用“控 → 屏幕”按钮切换。	Enable Three-finger display swipe in Controls > Displays. It is on by default and saved separately for each remote device. With multiple remote displays, swipe left with three fingers on the remote view for the next display, or right for the previous one, wrapping at either end. Each release switches once. Two-finger scrolling, pinch zoom and the fullscreen three-finger swipe up for the keyboard are unchanged.\nFor touchscreens. The system may intercept multi-finger gestures on tablets or computers. If touchpad three-finger events are not delivered to the app, use the buttons in Controls > Displays.

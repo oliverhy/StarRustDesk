@@ -47,7 +47,7 @@ function pageHarness(extra = {}, names = []) {
     remoteWidth: 1920, remoteHeight: 1080, componentWidth: 1000, componentHeight: 600,
     desktopViewMode: 'adaptive', desktopCustomPercent: 100, desktopDensity: 1, zoomScale: 1,
     offsetX: 0, offsetY: 0, pcToolbarPinned: false, remoteToolbarCollapsed: false,
-    desktopWindowActive: true, desktopWindowRequestId: 0, pcToolbarCollapseTimer: -1,
+    desktopWindowActive: true, desktopWindowRequestId: 0, pcToolbarCollapseTimer: -1, clipboardChangeRevision: 0,
     controlMenu: '', immersiveWindow: true, isFullScreen: false,
     getUIContext: () => ({ vp2px: n => n }),
     cancelActiveTouchGesture: () => calls.push('gestures_release'), stopEdgeAutoPan() {},
@@ -57,6 +57,7 @@ function pageHarness(extra = {}, names = []) {
     releaseRemoteNavigationKeys: () => calls.push('navigation_release'),
     physicalMouseDeduplicator: { clear: () => calls.push('dedup_clear') },
     setSystemPointerHidden: v => calls.push(['system_pointer_hidden', v]),
+    requestClipboardPoll: () => calls.push('clipboard_poll_requested'),
     requestRemoteInputFocus: () => calls.push('request_focus'),
     setFloatingPanelCollapsed(_keyboard, collapsed) { this.remoteToolbarCollapsed = collapsed; calls.push('collapse'); },
     ...extra
@@ -147,6 +148,7 @@ function policyHarness() {
     assert(h.calls.some(c => Array.isArray(c) && c[0] === 'system_pointer_hidden' && c[1] === false));
     p.handleDesktopWindowEvent(4); p.handleDesktopWindowEvent(2);
     assert.equal(p.desktopWindowActive, true); assert(h.calls.includes('request_focus'));
+    assert(h.calls.includes('clipboard_poll_requested')); assert(p.clipboardChangeRevision >= 2);
     h.calls.length = 0; p.pointerOverRemoteViewport = false; p.pointerCaptureFocused = false;
     p.handleDesktopWindowEvent(3); p.handleDesktopWindowEvent(2); assert(!h.calls.includes('request_focus'));
   });

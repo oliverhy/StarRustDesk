@@ -76,7 +76,7 @@ function page({ queryFails = false } = {}) {
     getFocusController: () => ({ requestFocus: id => focused.push(id) }),
   };
   const p = Object.assign(new context.Page(), {
-    remotePageVisible: true, connectionStatus: 2, showKeyboardPanel: false,
+    remotePageVisible: true, connectionStatus: 2, showKeyboardPanel: false, pendingKeyboardText: '',
     remoteKeyboardVisible: false, remoteKeyboardEditing: false, remoteKeyboardVisibilityKnown: false,
     remoteKeyboardFocusGeneration: 0, remoteKeyboardCloseTimer: -1,
     remoteKeyboardRefocusTimer: -1, remoteKeyboardPointerHandoffUntil: 0,

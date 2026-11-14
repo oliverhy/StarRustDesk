@@ -21,6 +21,8 @@ mod network_tests;
 mod security_tests;
 #[cfg(test)]
 mod file_transfer_tests;
+#[cfg(test)]
+mod clipboard_tests;
 use std::ffi::{CStr, CString};
 use std::net::{IpAddr, SocketAddr};
 use std::os::raw::{c_char, c_uchar};
@@ -121,7 +123,6 @@ static REMOTE_CURSOR_IMAGE_ID: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static REMOTE_CURSOR_IMAGE_VALID: AtomicBool = AtomicBool::new(false);
 static REMOTE_CLIPBOARD_TEXT: Mutex<Option<String>> = Mutex::new(None);
-static LAST_SENT_CLIPBOARD_TEXT: Mutex<String> = Mutex::new(String::new());
 static REMOTE_DIRECTORY_RESULT: Mutex<String> = Mutex::new(String::new());
 static FILE_TRANSFER_STATUS: Mutex<String> = Mutex::new(String::new());
 static PEER_ONLINE_RESULT: Mutex<String> = Mutex::new(String::new());
@@ -183,6 +184,9 @@ const ADAPTIVE_DIRECT_RETRY_MAX_TIMEOUT: u64 = 3_500;
 const ADAPTIVE_DIRECT_ONLY_MAX_TIMEOUT: u64 = 8_000;
 const SERVER_CONNECT_TIMEOUT: u64 = 8_000;
 const RENDEZVOUS_REPLY_TIMEOUT: u64 = 6_000;
+// Re-pair once after a transient peer-handshake transport failure. The outer
+// connection deadline and cancellation still bound the whole operation.
+const PEER_RELAY_RETRY_BUDGET_MS: u64 = 8_000;
 // A second, independently verified ID-server channel may rescue a stalled
 // handshake without shortening the original 18-second read window. Neither
 // attempt receives an account token until one has been verified and selected.
@@ -192,6 +196,11 @@ const ONLINE_QUERY_DEADLINE: Duration = Duration::from_secs(10);
 // RustDesk wire-protocol compatibility version, not the HarmonyOS package version.
 const RUSTDESK_PROTOCOL_VERSION: &str = "1.5.0";
 const PUNCH_REPLY_TIMEOUTS: [u64; 3] = [1_500, 2_500, 4_000];
+// Recovery never reuses a closed signal socket or changes the configured ID
+// server. The outer connection deadline and session cancellation still apply.
+const PUNCH_RECOVERY_MAX_RETRIES: usize = 2;
+const PUNCH_RECOVERY_CONNECT_TIMEOUT_MS: u64 = 4_000;
+const PUNCH_RECOVERY_DELAYS_MS: [u64; PUNCH_RECOVERY_MAX_RETRIES] = [100, 250];
 // ICE trickle messages are side-band, not the punch result. This client uses
 // non-trickle SDP and cannot authenticate/apply them yet; bound how many it
 // will ignore while waiting for the actual response.
@@ -816,19 +825,17 @@ pub extern "C" fn rust_connect(
             return -33;
         }
         api_account::attach(&mut req, &account_token);
-        let local_addr = rv_conn.local_addr();
         let punch_started = Instant::now();
-        let response = match send_punch_request(&mut rv_conn, &req, public_server).await {
-            Ok(Some(msg)) => {
+        let (rv_conn, response) = match send_punch_with_recovery(
+            rv_conn, &active_rendezvous_addr, &key, &req, public_server, session_id, &SESSION_ID,
+        ).await {
+            Ok((conn, msg)) => {
                 emit_event("rendezvous response received");
-                msg
-            }
-            Ok(None) => {
-                emit_event("rendezvous response timeout");
-                return -7;
+                (conn, msg)
             }
             Err(code) => return code,
         };
+        let local_addr = rv_conn.local_addr();
         let punch_elapsed_ms = punch_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         log_peer_signature_response("control", &response.union);
 
@@ -952,6 +959,11 @@ pub extern "C" fn rust_connect(
         // The TCP punch reuses the rendezvous connection's local endpoint.
         // The UDP/KCP sockets and WebRTC ICE sockets were prepared independently.
         let rendezvous_authenticated = rv_conn.is_secured();
+        let rendezvous_tls_required = rendezvous_stream_transport(&rv_conn) == RendezvousTransport::WebSocketTls;
+        // TCP punching relies on reusing the signaling socket's local TCP
+        // address. A WebSocket signaling connection cannot be reused that way;
+        // keep UDP/WebRTC and authenticated relay fallback available instead.
+        let rendezvous_tcp_punch_allowed = matches!(&rv_conn, Stream::Tcp(_));
         drop(rv_conn);
 
         let mut udp_socket = udp_candidate.map(|candidate| candidate.socket);
@@ -1002,7 +1014,14 @@ pub extern "C" fn rust_connect(
         emit_event(&format!("rv_diag phase=direct_policy punch_ms={} peer_nat={} local_nat={} relay_available={} recent_failures={} timeout_ms={}",
             punch_elapsed_ms, peer_nat_type.value(), nat_type.value(), !relay_from_server.is_empty(),
             direct_failures, direct_timeout));
-        let tcp_peer = if force_relay == 0 && !peer_is_udp { peer_addr } else { None };
+        let tcp_peer = if force_relay == 0 && !peer_is_udp && rendezvous_tcp_punch_allowed {
+            peer_addr
+        } else {
+            None
+        };
+        if !rendezvous_tcp_punch_allowed && peer_addr.is_some() && !peer_is_udp {
+            emit_event("rv_diag phase=direct_candidates action=skip_tcp reason=non_tcp_signaling");
+        }
         emit_event(&format!(
             "rv_diag phase=direct_candidates tcp={} udp_kcp={} ipv6_kcp={} webrtc={} timeout_ms={direct_timeout}",
             tcp_peer.is_some(),
@@ -1035,7 +1054,7 @@ pub extern "C" fn rust_connect(
             emit_event("rv_diag phase=relay_preconnect outcome=not_needed request_sent=false");
         }
 
-        let mut selected = match direct_result {
+        let selected = match direct_result {
             Ok(transport) => {
                 emit_event(&format!("transport connected type={}", transport.label));
                 transport
@@ -1067,6 +1086,7 @@ pub extern "C" fn rust_connect(
                         !signed_id_pk.is_empty(),
                         &key,
                         &account_token,
+                        rendezvous_tls_required,
                     ).await
                 };
                 match relay_result {
@@ -1093,64 +1113,24 @@ pub extern "C" fn rust_connect(
             }
         };
 
-        let secure_result = secure_peer_connection(
-            &peer,
-            &signed_id_pk,
-            &key,
-            &mut selected.stream,
+        let security_context = PeerSecurityRecoveryContext {
+            peer: &peer,
+            signed_id_pk: &signed_id_pk,
+            key: &key,
+            relay_server: &relay_from_server,
+            rendezvous_server: &active_rendezvous_addr,
+            token: &account_token,
+            require_tls: rendezvous_tls_required,
             insecure_reason,
-        ).await;
-        let mut peer_encrypted = secure_result.as_ref().copied().unwrap_or(false);
-        if let Err(error) = secure_result {
-            // Reusing the same unsigned identity via a different transport
-            // cannot make it authenticated. Ask before any retry instead.
-            if error.to_string() == MISSING_PEER_SIGNATURE {
-                return -34;
-            }
-            if selected.stream.is_webrtc() && !relay_from_server.is_empty() {
-                emit_event(&format!("webrtc secure handshake failed: {error}; try relay"));
-                record_peer_direct_failure(&peer, now_ms());
-                selected.stream.close_webrtc().await;
-                let mut relay = match request_relay(
-                    &peer,
-                    &relay_from_server,
-                    &active_rendezvous_addr,
-                    !signed_id_pk.is_empty(),
-                    &key,
-                    &account_token,
-                ).await {
-                    Ok(stream) => stream,
-                    Err(relay_error) => {
-                        emit_event(&format!("webrtc relay fallback failed: {relay_error}"));
-                        return -15;
-                    }
-                };
-                peer_encrypted = match secure_peer_connection(
-                    &peer,
-                    &signed_id_pk,
-                    &key,
-                    &mut relay,
-                    insecure_reason,
-                ).await {
-                    Ok(encrypted) => encrypted,
-                    Err(error) => {
-                        emit_event("secure relay fallback failed");
-                        return peer_security_error_code(&error);
-                    }
-                };
-                let transport = stream_transport_code(&relay);
-                selected = ConnectedTransport {
-                    stream: relay,
-                    kcp: None,
-                    label: stream_transport_label(transport),
-                    route: 2,
-                    transport,
-                };
-            } else {
-                emit_event("secure fallback failed");
-                return peer_security_error_code(&error);
-            }
-        }
+            session_id,
+            current_session: &SESSION_ID,
+            attempt_route: &CONNECTION_ROUTE,
+            attempt_transport: &CONNECTION_TRANSPORT,
+        };
+        let (mut selected, peer_encrypted) = match secure_transport_with_recovery(selected, &security_context).await {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
         emit_event("secure fallback completed");
 
         if SESSION_ID.load(Ordering::SeqCst) != session_id {
@@ -1872,26 +1852,27 @@ pub extern "C" fn rust_send_clipboard_text(text: *const c_char) -> i32 {
         return -1;
     }
     let text = match unsafe { CStr::from_ptr(text) }.to_str() {
-        Ok(value) => value.to_string(),
+        Ok(value) => value,
         Err(_) => return -2,
     };
+    enqueue_clipboard_text(text, queue_peer_message)
+}
+
+// Do not deduplicate clipboard values here. The same value can be copied again
+// after the other peer changes its clipboard, or after an enqueue failure.
+fn enqueue_clipboard_text<F>(text: &str, enqueue: F) -> i32
+where
+    F: FnOnce(PeerMessage) -> i32,
+{
     if text.is_empty() {
         return 0;
     }
-
-    if let Ok(mut guard) = LAST_SENT_CLIPBOARD_TEXT.lock() {
-        if *guard == text {
-            return 0;
-        }
-        *guard = text.clone();
-    }
-
     let compressed = hbb_common::compress::compress(text.as_bytes());
     let compress = compressed.len() < text.as_bytes().len();
     let content = if compress {
         compressed
     } else {
-        text.into_bytes()
+        text.as_bytes().to_vec()
     };
     let clipboard = Clipboard {
         compress,
@@ -1901,8 +1882,11 @@ pub extern "C" fn rust_send_clipboard_text(text: *const c_char) -> i32 {
     };
     let mut msg = PeerMessage::new();
     msg.set_clipboard(clipboard);
-    emit_event("local clipboard text sent");
-    queue_peer_message(msg)
+    let result = enqueue(msg);
+    if result == 0 {
+        emit_event("local clipboard text queued");
+    }
+    result
 }
 
 fn queue_mouse_mask(mask: i32) -> i32 {
@@ -3650,6 +3634,132 @@ async fn connect_rendezvous(candidates: &[String]) -> Result<(Stream, String), S
         .map_err(|error| error.to_string())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RendezvousTransport {
+    Tcp,
+    WebSocket,
+    WebSocketTls,
+    Other,
+}
+
+impl RendezvousTransport {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::WebSocket => "websocket",
+            Self::WebSocketTls => "websocket_tls",
+            Self::Other => "other",
+        }
+    }
+}
+
+fn rendezvous_stream_transport(stream: &Stream) -> RendezvousTransport {
+    match stream {
+        Stream::Tcp(_) => RendezvousTransport::Tcp,
+        Stream::WebSocket(ws) if ws.is_tls_protected() => RendezvousTransport::WebSocketTls,
+        Stream::WebSocket(_) => RendezvousTransport::WebSocket,
+        Stream::WebRTC(_) => RendezvousTransport::Other,
+    }
+}
+
+fn rendezvous_target_transport(target: &str) -> RendezvousTransport {
+    if target.starts_with("wss://") {
+        RendezvousTransport::WebSocketTls
+    } else if target.starts_with("ws://") {
+        RendezvousTransport::WebSocket
+    } else if target.contains("://") {
+        RendezvousTransport::Other
+    } else {
+        RendezvousTransport::Tcp
+    }
+}
+
+// Only derive candidates from the selected logical server, never from a
+// public bootstrap when a custom server was configured. A TLS-protected
+// signaling connection may only be retried over TLS, even if the ordinary
+// connector also knows about plaintext alternatives.
+fn rendezvous_retry_target_groups(
+    endpoint: &str, current: RendezvousTransport, require_tls: bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut targets = vec![endpoint.to_owned()];
+    targets.extend(websocket_fallback_candidates(endpoint, EndpointRole::Rendezvous));
+    let mut alternate = Vec::new();
+    let mut same = Vec::new();
+    for target in targets {
+        let kind = rendezvous_target_transport(&target);
+        if require_tls && kind != RendezvousTransport::WebSocketTls {
+            continue;
+        }
+        let group = if kind == current { &mut same } else { &mut alternate };
+        if !group.contains(&target) {
+            group.push(target);
+        }
+    }
+    (alternate, same)
+}
+
+async fn connect_punch_retry_group(
+    targets: Vec<String>, require_tls: bool, attempt: usize,
+) -> Option<Stream> {
+    connect_rendezvous_candidate_group(
+        targets, require_tls, attempt, "punch_recovery", PUNCH_RECOVERY_CONNECT_TIMEOUT_MS,
+    ).await
+}
+
+async fn connect_rendezvous_candidate_group(
+    targets: Vec<String>, require_tls: bool, attempt: usize, phase: &'static str, timeout_ms: u64,
+) -> Option<Stream> {
+    if targets.is_empty() {
+        return None;
+    }
+    let attempts: Vec<BoxFuture<'static, Result<Stream, ()>>> = targets.into_iter().map(|target| {
+        async move {
+            let kind = rendezvous_target_transport(&target).label();
+            let started = Instant::now();
+            emit_event(&format!("rv_diag phase={phase} action=candidate_start attempt={attempt} path={kind}"));
+            let result = connect_tcp(target, timeout_ms).await;
+            match result {
+                Ok(stream) if !require_tls || rendezvous_stream_transport(&stream) == RendezvousTransport::WebSocketTls => {
+                    emit_event(&format!("rv_diag phase={phase} action=candidate_result attempt={attempt} path={} outcome=connected elapsed_ms={}",
+                        rendezvous_stream_transport(&stream).label(), started.elapsed().as_millis()));
+                    Ok(stream)
+                }
+                Ok(_) => {
+                    emit_event(&format!("rv_diag phase={phase} action=candidate_result attempt={attempt} path={kind} outcome=tls_floor_blocked"));
+                    Err(())
+                }
+                Err(_) => {
+                    // Never format a transport error: it may contain an address,
+                    // URL, credentials, or server-controlled response text.
+                    emit_event(&format!("rv_diag phase={phase} action=candidate_result attempt={attempt} path={kind} outcome=connect_failed elapsed_ms={}",
+                        started.elapsed().as_millis()));
+                    Err(())
+                }
+            }
+        }.boxed()
+    }).collect();
+    match tokio::time::timeout(
+        Duration::from_millis(timeout_ms), select_ok(attempts),
+    ).await {
+        Ok(Ok((stream, _))) => Some(stream),
+        _ => None,
+    }
+}
+
+async fn connect_punch_retry(
+    endpoint: &str, current: RendezvousTransport, require_tls: bool, attempt: usize,
+) -> Option<Stream> {
+    let (alternate, same) = rendezvous_retry_target_groups(endpoint, current, require_tls);
+    // First retry reopens the existing route, avoiding an unnecessary relay for
+    // a transient close. If it fails again, prefer an allowed alternate path.
+    // Each candidate group has a bounded deadline.
+    let (first, second) = if attempt == 2 { (same, alternate) } else { (alternate, same) };
+    if let Some(stream) = connect_punch_retry_group(first, require_tls, attempt).await {
+        return Some(stream);
+    }
+    connect_punch_retry_group(second, require_tls, attempt).await
+}
+
 struct ConnectedTransport {
     stream: Stream,
     kcp: Option<KcpStream>,
@@ -4129,6 +4239,122 @@ async fn send_punch_request(
         }
     }
     Ok(None)
+}
+
+// Retry only transport failures. The UI already performs bounded fresh-session
+// retries on a response timeout; duplicating that budget here would multiply
+// user-visible wait time. A refusal or invalid response is returned to the
+// normal response handler, not converted
+// into a retry or an insecure direct/relay connection. The winning socket must
+// be returned because TCP hole punching reuses its local endpoint.
+async fn send_punch_with_recovery(
+    initial: Stream, endpoint: &str, key: &str, request: &RendezvousMessage,
+    allow_config_updates: bool, session_id: u64, current_session: &AtomicU64,
+) -> Result<(Stream, RendezvousMessage), i32> {
+    let started = Instant::now();
+    let has_token = !request.punch_hole_request().token.is_empty();
+    let has_offer = !request.punch_hole_request().webrtc_sdp_offer.is_empty();
+    let require_secure = initial.is_secured() || has_token || has_offer;
+    let mut current_path = rendezvous_stream_transport(&initial);
+    let mut require_tls = current_path == RendezvousTransport::WebSocketTls;
+    let mut stream = Some(initial);
+    let mut last_error = -28;
+
+    for attempt in 1..=(PUNCH_RECOVERY_MAX_RETRIES + 1) {
+        if current_session.load(Ordering::SeqCst) != session_id {
+            emit_event("rv_diag phase=punch_recovery outcome=cancelled");
+            return Err(-19);
+        }
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_millis(PUNCH_RECOVERY_DELAYS_MS[attempt - 2])).await;
+            if current_session.load(Ordering::SeqCst) != session_id {
+                emit_event("rv_diag phase=punch_recovery outcome=cancelled");
+                return Err(-19);
+            }
+            emit_event(&format!("rv_diag phase=punch_recovery action=reconnect attempt={attempt} tls_required={} message_security_required={}",
+                require_tls, require_secure));
+            let Some(mut replacement) = connect_punch_retry(endpoint, current_path, require_tls, attempt).await else {
+                emit_event(&format!("rv_diag phase=punch_recovery action=reconnect_result attempt={attempt} outcome=connect_failed"));
+                continue;
+            };
+            current_path = rendezvous_stream_transport(&replacement);
+            // Once a TLS transport has been selected, a later retry may not
+            // silently fall back to plaintext even when the first path was TCP.
+            require_tls |= current_path == RendezvousTransport::WebSocketTls;
+            if require_secure {
+                let context = if has_token { RendezvousHandshakeContext::Account }
+                    else { RendezvousHandshakeContext::WebRtc };
+                emit_event(&format!("rv_diag phase=punch_recovery action=authenticate attempt={attempt} path={}", current_path.label()));
+                if let Err(error) = secure_rendezvous_connection(&mut replacement, key, context).await {
+                    last_error = error.connection_result();
+                    emit_event(&format!("rv_diag phase=punch_recovery action=authenticate_result attempt={attempt} outcome={} transient={} token_sent=false",
+                        error.as_str(), error.is_transient()));
+                    if !error.is_transient() {
+                        return Err(last_error);
+                    }
+                    continue;
+                }
+            }
+            stream = Some(replacement);
+        }
+        let Some(mut candidate) = stream.take() else { return Err(last_error); };
+        if require_secure && !candidate.is_secured() {
+            emit_event("rv_diag phase=punch_recovery outcome=unsecured_request_blocked token_sent=false");
+            return Err(-33);
+        }
+        if current_session.load(Ordering::SeqCst) != session_id {
+            emit_event("rv_diag phase=punch_recovery outcome=cancelled");
+            return Err(-19);
+        }
+        emit_event(&format!("rv_diag phase=punch_recovery action=send attempt={attempt} path={} family={} encrypted={} tls={}",
+            current_path.label(), if candidate.local_addr().is_ipv4() { "ipv4" } else { "ipv6" },
+            candidate.is_secured(), require_tls));
+        let mut attempt_request = request.clone();
+        if matches!(current_path, RendezvousTransport::WebSocket | RendezvousTransport::WebSocketTls) {
+            // Like the official WebSocket path, classic socket punching cannot
+            // reuse this signaling connection. Request a relay instead; a
+            // separately protected WebRTC offer may still negotiate its own path.
+            let punch = attempt_request.mut_punch_hole_request();
+            punch.force_relay = true;
+            // Older hbbs releases forward nat_type but do not understand the
+            // newer force_relay field. Match upstream's symmetric-NAT marker so
+            // the controlled peer also requests relay on those servers.
+            punch.nat_type = NatType::SYMMETRIC.into();
+            punch.udp_port = 0;
+            punch.socket_addr_v6.clear();
+            emit_event("rv_diag phase=punch_recovery action=relay_requested reason=websocket_signaling");
+        }
+        match send_punch_request(&mut candidate, &attempt_request, allow_config_updates).await {
+            Ok(Some(response)) => {
+                if current_session.load(Ordering::SeqCst) != session_id {
+                    emit_event("rv_diag phase=punch_recovery outcome=cancelled");
+                    return Err(-19);
+                }
+                emit_event(&format!("rv_diag phase=punch_recovery outcome=response attempt={attempt} path={} elapsed_ms={}",
+                    current_path.label(), started.elapsed().as_millis()));
+                return Ok((candidate, response));
+            }
+            Ok(None) => {
+                emit_event(&format!("rv_diag phase=punch_recovery outcome=timeout attempt={attempt} owner=session_retry"));
+                return Err(-7);
+            }
+            Err(error @ (-2 | -28)) => {
+                last_error = error;
+                emit_event(&format!("rv_diag phase=punch_recovery action=retry_decision attempt={attempt} reason={}",
+                    if error == -2 { "send_error" } else { "receive_closed_or_error" }));
+            }
+            Err(error) => {
+                emit_event(&format!("rv_diag phase=punch_recovery outcome=terminal attempt={attempt} category=protocol_error"));
+                return Err(error);
+            }
+        }
+        // Drop this exact socket before retrying: reusing its closed connection
+        // or local punch endpoint would not create a valid new attempt.
+        drop(candidate);
+    }
+    emit_event(&format!("rv_diag phase=punch_recovery outcome=exhausted attempts={} elapsed_ms={}",
+        PUNCH_RECOVERY_MAX_RETRIES + 1, started.elapsed().as_millis()));
+    Err(last_error)
 }
 
 // Keep the original per-attempt deadline while consuming known side-band ICE
@@ -4800,6 +5026,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
                 &config.key,
                 &account_token,
                 ConnType::FILE_TRANSFER,
+                false,
             )
             .await
             .map_err(|error| error.to_string())?,
@@ -4814,6 +5041,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
             &config.key,
             &account_token,
             ConnType::FILE_TRANSFER,
+            false,
         )
         .await
         .map_err(|error| error.to_string())?
@@ -4839,6 +5067,7 @@ async fn request_relay(
     secure: bool,
     key: &str,
     token: &str,
+    require_tls: bool,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
     request_relay_with_type(
         peer,
@@ -4848,6 +5077,7 @@ async fn request_relay(
         key,
         token,
         ConnType::DEFAULT_CONN,
+        require_tls,
     )
     .await
 }
@@ -4860,6 +5090,7 @@ async fn request_relay_with_type(
     key: &str,
     token: &str,
     conn_type: ConnType,
+    require_tls: bool,
 ) -> Result<Stream, hbb_common::anyhow::Error> {
     let mut last_error = "relay request timeout".to_string();
 
@@ -4867,23 +5098,42 @@ async fn request_relay_with_type(
         // hbbs pairs every retry by a fresh source socket and UUID. Reusing the
         // first rendezvous socket can leave a valid peer waiting on another
         // relay slot, which is why the official clients reconnect per attempt.
-        let mut rv_conn = match connect_transport_endpoint(
-            rendezvous_server.to_string(),
-            EndpointRole::Rendezvous,
-            SERVER_CONNECT_TIMEOUT,
-        )
-        .await
-        {
-            Ok(conn) => conn,
-            Err(error) => {
-                last_error = error.to_string();
-                emit_event(&format!("relay request attempt={attempt}/3 tcp_failed"));
+        let connection = if require_tls {
+            let (mut alternate, same) = rendezvous_retry_target_groups(
+                rendezvous_server, RendezvousTransport::WebSocketTls, true,
+            );
+            alternate.extend(same);
+            connect_rendezvous_candidate_group(alternate, true, attempt,
+                "relay_rendezvous", SERVER_CONNECT_TIMEOUT).await
+        } else {
+            connect_transport_endpoint(
+                rendezvous_server.to_string(), EndpointRole::Rendezvous, SERVER_CONNECT_TIMEOUT,
+            ).await.ok()
+        };
+        let mut rv_conn = match connection {
+            Some(conn) => conn,
+            None => {
+                last_error = "relay rendezvous transport failed".to_string();
+                emit_event(&format!("rv_diag phase=relay_rendezvous outcome=connect_failed attempt={attempt} tls_required={require_tls}"));
                 continue;
             }
         };
         if !token.is_empty() {
-            rv_conn = secure_rendezvous_with_retry(rv_conn, rendezvous_server, key,
-                RendezvousHandshakeContext::RelayAccount).await?;
+            if require_tls {
+                // The generic handshake hedge may pick a different transport.
+                // Do not let it replace a TLS-only rendezvous connection.
+                if let Err(error) = secure_rendezvous_connection(&mut rv_conn, key,
+                    RendezvousHandshakeContext::RelayAccount).await {
+                    if error.is_transient() {
+                        last_error = "relay rendezvous authentication transport failed".to_string();
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            } else {
+                rv_conn = secure_rendezvous_with_retry(rv_conn, rendezvous_server, key,
+                    RendezvousHandshakeContext::RelayAccount).await?;
+            }
             if !rv_conn.is_secured() {
                 hbb_common::bail!("account relay channel was not secured");
             }
@@ -5352,6 +5602,156 @@ async fn create_relay_with_standby(
 
 const MISSING_PEER_SIGNATURE: &str = "peer signature unavailable";
 
+// Only these fixed, transport-level failures are eligible for automatic
+// recovery. Never turn a failed identity or signature check into a retry or
+// an implicit insecure connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerHandshakeTransportError {
+    ReceiveTimeout,
+    ReceiveClosed,
+    ReceiveError,
+    SendTimeout,
+    SendError,
+}
+
+impl PeerHandshakeTransportError {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReceiveTimeout => "receive_timeout",
+            Self::ReceiveClosed => "receive_closed",
+            Self::ReceiveError => "receive_error",
+            Self::SendTimeout => "send_timeout",
+            Self::SendError => "send_error",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerHandshakeTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "peer handshake transport {}", self.label())
+    }
+}
+
+impl std::error::Error for PeerHandshakeTransportError {}
+
+// Log only stable error classes, never OS error text (which can include
+// endpoints or other sensitive network details).
+fn peer_io_error_kind(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::ConnectionReset => "connection_reset",
+        ErrorKind::ConnectionAborted => "connection_aborted",
+        ErrorKind::ConnectionRefused => "connection_refused",
+        ErrorKind::BrokenPipe => "broken_pipe",
+        ErrorKind::TimedOut => "timed_out",
+        ErrorKind::UnexpectedEof => "unexpected_eof",
+        ErrorKind::NotConnected => "not_connected",
+        ErrorKind::PermissionDenied => "permission_denied",
+        _ => "other",
+    }
+}
+
+struct PeerSecurityRecoveryContext<'a> {
+    peer: &'a str,
+    signed_id_pk: &'a [u8],
+    key: &'a str,
+    relay_server: &'a str,
+    rendezvous_server: &'a str,
+    token: &'a str,
+    require_tls: bool,
+    insecure_reason: i32,
+    session_id: u64,
+    current_session: &'a AtomicU64,
+    attempt_route: &'a AtomicI32,
+    attempt_transport: &'a AtomicI32,
+}
+
+async fn secure_transport_with_recovery(
+    mut selected: ConnectedTransport,
+    context: &PeerSecurityRecoveryContext<'_>,
+) -> Result<(ConnectedTransport, bool), i32> {
+    let mut retried = false;
+    loop {
+        if context.current_session.load(Ordering::SeqCst) != context.session_id {
+            emit_event("rv_diag phase=peer_security_retry outcome=cancelled");
+            return Err(-19);
+        }
+        // Publish the attempted route before verification, not just after a
+        // successful handshake. This must not mark the connection active.
+        context.attempt_route.store(selected.route, Ordering::SeqCst);
+        context.attempt_transport.store(selected.transport, Ordering::SeqCst);
+        emit_event(&format!("rv_diag phase=peer_security_retry action=handshake route={} attempt={}",
+            selected.route, if retried { 2 } else { 1 }));
+        match secure_peer_connection(context.peer, context.signed_id_pk, context.key,
+            &mut selected.stream, context.insecure_reason).await {
+            Ok(encrypted) => {
+                if retried && !encrypted {
+                    // Defensive invariant: automatic recovery is encrypted only.
+                    emit_event("rv_diag phase=peer_security_retry outcome=unencrypted_blocked");
+                    return Err(-16);
+                }
+                if retried {
+                    emit_event("rv_diag phase=peer_security_retry outcome=secured attempt=2");
+                }
+                return Ok((selected, encrypted));
+            }
+            Err(error) => {
+                let transient = error.downcast_ref::<PeerHandshakeTransportError>().copied();
+                if retried || transient.is_none() || context.insecure_reason != INSECURE_NONE ||
+                    context.relay_server.is_empty() || !(selected.route == 1 || selected.route == 2) {
+                    emit_event(&format!("rv_diag phase=peer_security_retry outcome=stopped class={} attempt={}",
+                        transient.map(|value| value.label()).unwrap_or("identity_or_protocol"),
+                        if retried { 2 } else { 1 }));
+                    return Err(peer_security_error_code(&error));
+                }
+                let class = transient.unwrap().label();
+                emit_event(&format!("rv_diag phase=peer_security_retry action=request_relay reason={} previous_route={} attempt=2 security=required tls_required={}",
+                    class, selected.route, context.require_tls));
+                selected.stream.close_webrtc().await;
+                // Drop both the stream and any KCP worker before creating a
+                // fresh rendezvous socket and UUID for the relay retry.
+                drop(selected);
+                if context.current_session.load(Ordering::SeqCst) != context.session_id {
+                    emit_event("rv_diag phase=peer_security_retry outcome=cancelled");
+                    return Err(-19);
+                }
+                retried = true;
+                let started = Instant::now();
+                let relay = tokio::time::timeout(Duration::from_millis(PEER_RELAY_RETRY_BUDGET_MS),
+                    request_relay(context.peer, context.relay_server, context.rendezvous_server,
+                        true, context.key, context.token, context.require_tls)).await;
+                if context.current_session.load(Ordering::SeqCst) != context.session_id {
+                    emit_event("rv_diag phase=peer_security_retry outcome=cancelled");
+                    return Err(-19);
+                }
+                let stream = match relay {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(_)) => {
+                        emit_event(&format!("rv_diag phase=peer_security_retry outcome=relay_request_failed elapsed_ms={} raw_redacted=true",
+                            started.elapsed().as_millis()));
+                        return Err(-16);
+                    }
+                    Err(_) => {
+                        emit_event(&format!("rv_diag phase=peer_security_retry outcome=relay_request_timeout elapsed_ms={}",
+                            started.elapsed().as_millis()));
+                        return Err(-16);
+                    }
+                };
+                let transport = stream_transport_code(&stream);
+                emit_event(&format!("rv_diag phase=peer_security_retry outcome=relay_requested elapsed_ms={} pairing_confirmed=false",
+                    started.elapsed().as_millis()));
+                selected = ConnectedTransport {
+                    stream,
+                    kcp: None,
+                    label: stream_transport_label(transport),
+                    route: 2,
+                    transport,
+                };
+            }
+        }
+    }
+}
+
 fn peer_security_error_code(error: &hbb_common::anyhow::Error) -> i32 {
     match error.to_string().as_str() {
         MISSING_PEER_SIGNATURE => -34,
@@ -5366,6 +5766,17 @@ async fn secure_peer_connection(
     key: &str,
     conn: &mut Stream,
     insecure_reason: i32,
+) -> Result<bool, hbb_common::anyhow::Error> {
+    secure_peer_connection_with_timeout(peer_id, signed_id_pk, key, conn, insecure_reason, READ_TIMEOUT).await
+}
+
+async fn secure_peer_connection_with_timeout(
+    peer_id: &str,
+    signed_id_pk: &[u8],
+    key: &str,
+    conn: &mut Stream,
+    insecure_reason: i32,
+    timeout_ms: u64,
 ) -> Result<bool, hbb_common::anyhow::Error> {
     emit_event(&format!("rv_diag phase=peer_security signature_present={} insecure_reason={}",
         !signed_id_pk.is_empty(), insecure_reason));
@@ -5421,10 +5832,23 @@ async fn secure_peer_connection(
         return Ok(false);
     };
 
-    let Some(Ok(bytes)) = conn.next_timeout(READ_TIMEOUT).await else {
-        emit_event("secure peer: wait signed id timeout");
-        hbb_common::bail!("peer did not send signed id");
-    };
+    let started = Instant::now();
+    let mut io_kind = "none";
+    let bytes = match tokio::time::timeout(Duration::from_millis(timeout_ms), conn.next()).await {
+        Err(_) => Err(PeerHandshakeTransportError::ReceiveTimeout),
+        Ok(None) => Err(PeerHandshakeTransportError::ReceiveClosed),
+        Ok(Some(Err(error))) => {
+            io_kind = peer_io_error_kind(error.kind());
+            Err(PeerHandshakeTransportError::ReceiveError)
+        }
+        Ok(Some(Ok(bytes))) => Ok(bytes),
+    }.map_err(|error| {
+        emit_event(&format!("rv_diag phase=peer_security step=wait_signed_id outcome={} io_kind={} elapsed_ms={}",
+            error.label(), io_kind, started.elapsed().as_millis()));
+        error
+    })?;
+    emit_event(&format!("rv_diag phase=peer_security step=wait_signed_id outcome=received elapsed_ms={}",
+        started.elapsed().as_millis()));
 
     let msg = match PeerMessage::parse_from_bytes(&bytes) {
         Ok(msg) => msg,
@@ -5447,7 +5871,21 @@ async fn secure_peer_connection(
                 symmetric_value,
                 ..Default::default()
             });
-            conn.send(&msg_out).await?;
+            let started = Instant::now();
+            let mut io_kind = "none";
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), conn.send(&msg_out)).await {
+                Err(_) => Err(PeerHandshakeTransportError::SendTimeout),
+                Ok(Err(error)) => {
+                    io_kind = error.downcast_ref::<std::io::Error>()
+                        .map(|error| peer_io_error_kind(error.kind())).unwrap_or("other");
+                    Err(PeerHandshakeTransportError::SendError)
+                }
+                Ok(Ok(())) => Ok(()),
+            }.map_err(|error| {
+                emit_event(&format!("rv_diag phase=peer_security step=send_client_key outcome={} io_kind={} elapsed_ms={}",
+                    error.label(), io_kind, started.elapsed().as_millis()));
+                error
+            })?;
             conn.set_key(key);
             emit_event("secure peer: encrypted stream enabled");
         }
@@ -6482,13 +6920,6 @@ fn handle_remote_clipboards(clipboards: Vec<Clipboard>) {
     if text.is_empty() {
         return;
     }
-    if LAST_SENT_CLIPBOARD_TEXT
-        .try_lock()
-        .map(|guard| *guard == text)
-        .unwrap_or(false)
-    {
-        return;
-    }
     if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.try_lock() {
         *guard = Some(text);
     }
@@ -6498,9 +6929,6 @@ fn handle_remote_clipboards(clipboards: Vec<Clipboard>) {
 fn clear_clipboard_state() {
     if let Ok(mut guard) = REMOTE_CLIPBOARD_TEXT.try_lock() {
         *guard = None;
-    }
-    if let Ok(mut guard) = LAST_SENT_CLIPBOARD_TEXT.try_lock() {
-        guard.clear();
     }
 }
 
