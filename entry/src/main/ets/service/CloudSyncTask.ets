@@ -66,6 +66,9 @@ STAGES.push('request_state', 'request_disabled', 'request_waiting_confirmation',
   'home_reload_start', 'home_reload_empty', 'home_reload_complete', 'home_reload_stale', 'home_reload_failed')
 STAGES.push('retention_list', 'retention_inventory', 'retention_validate', 'retention_delete',
   'retention_wait', 'retention_verified', 'retention_failed')
+STAGES.push('restore_server_plan', 'restore_prepare', 'restore_stage_credentials', 'restore_commit',
+  'restore_commit_failed', 'restore_aborted', 'restore_mirror_deferred', 'restore_ui_deferred', 'restore_readback_deferred',
+  'restore_committed', 'restore_commit_recovered', 'restore_discard_deferred')
 
 // Only fixed numeric/boolean metadata can cross this boundary. Neither strings
 // nor arbitrary dictionaries are accepted, including filenames, tickets or hashes.
@@ -111,6 +114,11 @@ export interface CloudSyncTraceDetails {
   retentionLimit?: number
   deletedCount?: number
   remainingCount?: number
+  serverWillRestore?: boolean
+  serverKeyIncluded?: boolean
+  serverKeyConflict?: boolean
+  serverEmptyFieldsKept?: boolean
+  stagedCredentials?: number
 }
 
 interface SafeTraceField {
@@ -154,7 +162,12 @@ export class CloudSyncTrace {
         { key: 'last_state', value: details.systemState }, { key: 'load_generation', value: details.loadGeneration },
         { key: 'cloud_revision', value: details.cloudRevision }, { key: 'parent_op_id', value: details.parentOpId },
         { key: 'retention_limit', value: details.retentionLimit }, { key: 'deleted_count', value: details.deletedCount },
-        { key: 'remaining_count', value: details.remainingCount }
+        { key: 'remaining_count', value: details.remainingCount },
+        { key: 'server_will_restore', value: details.serverWillRestore },
+        { key: 'server_key_included', value: details.serverKeyIncluded },
+        { key: 'server_key_conflict', value: details.serverKeyConflict },
+        { key: 'server_empty_fields_kept', value: details.serverEmptyFieldsKept },
+        { key: 'staged_credentials', value: details.stagedCredentials }
       ]
       let suffix = ''
       for (const field of fields) {

@@ -1095,6 +1095,12 @@ struct RemotePage {
         this.lastLoggedConnectionStatus = status
       }
       this.updateSystemPointerVisibility();
+      if (status === ConnectionStatus.WAITING_2FA || status === ConnectionStatus.CONNECTED) {
+        let trustNotice: number = RustDeskNapi.takeTrustedDeviceNotice();
+        if (trustNotice === 1) this.showFileToast('已信任此设备');
+        else if (trustNotice === 2) this.showFileToast('登录成功，但未能保存信任，下次仍需验证码');
+        else if (trustNotice === 3) this.showFileToast('系统安全存储不可用，暂无法保存可信设备');
+      }
       if (status === ConnectionStatus.WAITING_2FA) {
         this.enableTrustedDevices = RustDeskNapi.getEnableTrustedDevices();
         let message: string = ConnectionService.getLastConnectionError();
@@ -2327,6 +2333,9 @@ struct RemotePage {
   }
 
   prepareTwoFactorInput(): void {
+    // A new challenge must not inherit a trust selection from an earlier
+    // connection. Keep the user's choice only while retrying a wrong code.
+    if (ConnectionService.getLastConnectionError() !== 'Wrong 2FA Code') this.trustThisDevice = false;
     this.setControlMenu('');
     this.closeRemoteKeyboard();
     RustDeskNapi.appendDiagnosticLog('input-2fa', 'local_input_ready remote_key_capture=false');

@@ -634,6 +634,8 @@ static bool IsSafeRustLifecycleEvent(const std::string& text) {
         "secure peer: first peer msg not SignedId; use non-secure connection",
         "receive loop spawned",
         "peer-login: ",
+        // Only fixed phase/mode/outcome labels; never credential data.
+        "trusted-device phase=",
         "peer message:",
         "login request sent",
         "login response: ok/",
@@ -1335,10 +1337,13 @@ static napi_value Send2FA(napi_env env, napi_callback_info info) {
     int result = -3;
     if (g_connectionStatus.load() == 4) {
         trustThisDevice = trustThisDevice && g_enableTrustedDevices.load();
-        std::string clientHwid = trustThisDevice ? GetOrCreateClientHwid() : "";
-        Config::instance().set("trust-this-device", trustThisDevice ? "Y" : "");
-        Config::instance().save();
-        result = rust_send_2fa(code, clientHwid.c_str());
+        int trustMode = rust_get_2fa_trust_mode();
+        std::string clientHwid = trustThisDevice && trustMode == 1 ? GetOrCreateClientHwid() : "";
+        result = rust_send_2fa(code, clientHwid.c_str(), trustThisDevice ? 1 : 0);
+        if (result == 0 && trustMode == 1) {
+            Config::instance().set("trust-this-device", trustThisDevice ? "Y" : "");
+            Config::instance().save();
+        }
         if (result == 0) {
             SetLastConnectionMessage("");
             g_connectionStatus.store(1);
@@ -1351,6 +1356,7 @@ static napi_value Send2FA(napi_env env, napi_callback_info info) {
         }
     }
 
+    std::memset(code, 0, sizeof(code));
     napi_value ret;
     napi_create_int32(env, result, &ret);
     return ret;
@@ -1359,6 +1365,12 @@ static napi_value Send2FA(napi_env env, napi_callback_info info) {
 static napi_value GetEnableTrustedDevices(napi_env env, napi_callback_info info) {
     napi_value ret;
     napi_get_boolean(env, g_enableTrustedDevices.load(), &ret);
+    return ret;
+}
+
+static napi_value TakeTrustedDeviceNotice(napi_env env, napi_callback_info info) {
+    napi_value ret;
+    napi_create_int32(env, rust_take_trusted_device_notice(), &ret);
     return ret;
 }
 
@@ -2056,15 +2068,120 @@ static napi_value SetOption(napi_env env, napi_callback_info info) {
     napi_get_value_string_utf8(env, args[1], valueBuffer.data(), valueBuffer.size(), &valueLen);
     std::string key(keyBuffer.data(), keyLen);
     std::string value(valueBuffer.data(), valueLen);
-    if ((key == "custom-rendezvous-server" || key == "key" || key == "api-server") &&
-        Config::instance().get(key) != value) {
+    bool accountContextChanged = false;
+    const bool saved = Config::instance().setOptionsAndSave({{key, value}}, &accountContextChanged);
+    if (saved && accountContextChanged) {
         rust_set_api_account_context("");
     }
-    Config::instance().set(key, value);
-    Config::instance().save();
     napi_value ret;
-    napi_create_int32(env, 0, &ret);
+    napi_create_int32(env, saved ? 0 : -2, &ret);
     return ret;
+}
+
+static napi_value SetServerConfig(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value args[4] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::vector<std::string> values;
+    values.reserve(4);
+    bool valid = argc == 4;
+    for (size_t i = 0; valid && i < argc; ++i) {
+        napi_valuetype type = napi_undefined;
+        size_t length = 0;
+        if (napi_typeof(env, args[i], &type) != napi_ok || type != napi_string ||
+            napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok || length > 16384) {
+            valid = false;
+            break;
+        }
+        std::vector<char> buffer(length + 1, '\0');
+        if (napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length) != napi_ok) {
+            valid = false;
+            break;
+        }
+        std::string value(buffer.data(), length);
+        if (value.find('\0') != std::string::npos || value.find_first_of("\r\n") != std::string::npos) {
+            valid = false;
+            break;
+        }
+        values.push_back(std::move(value));
+    }
+    int result = -1;
+    if (valid) {
+        bool accountContextChanged = false;
+        const bool saved = Config::instance().setOptionsAndSave({
+            {"custom-rendezvous-server", values[0]}, {"relay-server", values[1]},
+            {"api-server", values[2]}, {"key", values[3]}
+        }, &accountContextChanged);
+        result = saved ? 0 : -2;
+        if (saved && accountContextChanged) rust_set_api_account_context("");
+    }
+    napi_value ret;
+    napi_create_int32(env, result, &ret);
+    return ret;
+}
+
+static bool ReadCloudRestoreStringArray(napi_env env, napi_value value, uint32_t count,
+                                        size_t maxLength, std::vector<std::string>& out) {
+    bool isArray = false;
+    uint32_t actual = 0;
+    if (napi_is_array(env, value, &isArray) != napi_ok || !isArray ||
+        napi_get_array_length(env, value, &actual) != napi_ok || actual != count) return false;
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        napi_value item = nullptr;
+        napi_valuetype type = napi_undefined;
+        size_t length = 0;
+        if (napi_get_element(env, value, i, &item) != napi_ok || napi_typeof(env, item, &type) != napi_ok ||
+            type != napi_string || napi_get_value_string_utf8(env, item, nullptr, 0, &length) != napi_ok ||
+            length > maxLength) return false;
+        std::vector<char> buffer(length + 1, '\0');
+        if (napi_get_value_string_utf8(env, item, buffer.data(), buffer.size(), &length) != napi_ok) return false;
+        std::string text(buffer.data(), length);
+        if (text.find('\0') != std::string::npos || text.find_first_of("\r\n") != std::string::npos) return false;
+        out.push_back(std::move(text));
+    }
+    return true;
+}
+
+static napi_value CommitCloudRestore(napi_env env, napi_callback_info info) {
+    // Allocate every possible JS result before touching disk. Once committed,
+    // no NAPI allocation may turn a successful commit into an apparent error.
+    napi_value ok = nullptr, invalid = nullptr, ioError = nullptr, stale = nullptr;
+    if (napi_create_int32(env, 0, &ok) != napi_ok || napi_create_int32(env, -1, &invalid) != napi_ok ||
+        napi_create_int32(env, -2, &ioError) != napi_ok || napi_create_int32(env, -3, &stale) != napi_ok) return nullptr;
+    size_t argc = 3;
+    napi_value args[3] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint32_t count = 0;
+    bool array = false;
+    int result = -1;
+    if (argc == 3 && napi_is_array(env, args[0], &array) == napi_ok && array &&
+        napi_get_array_length(env, args[0], &count) == napi_ok && count > 0 && count <= 16) {
+        std::vector<std::string> keys, expected, values;
+        if (ReadCloudRestoreStringArray(env, args[0], count, 80, keys) &&
+            ReadCloudRestoreStringArray(env, args[1], count, 8 * 1024 * 1024, expected) &&
+            ReadCloudRestoreStringArray(env, args[2], count, 8 * 1024 * 1024, values)) {
+            static const std::vector<std::string> allowed = {
+                "saved-connections", "saved-connection-groups", "credential-aliases-v1",
+                "custom-rendezvous-server", "relay-server", "api-server", "key",
+                "cloud-sync-enabled", "cloud-sync-include-secrets", "cloud-sync-last-applied-at",
+                "cloud-sync-local-changed-at", "cloud-sync-last-success-at", "cloud-sync-baseline-established"
+            };
+            std::map<std::string, std::string> before, after;
+            bool valid = true;
+            for (uint32_t i = 0; i < count; ++i) {
+                if (std::find(allowed.begin(), allowed.end(), keys[i]) == allowed.end() ||
+                    !before.emplace(keys[i], expected[i]).second) { valid = false; break; }
+                after.emplace(keys[i], values[i]);
+            }
+            if (valid) {
+                bool accountContextChanged = false;
+                result = Config::instance().compareAndSetOptionsAndSave(before, after, &accountContextChanged);
+                if (result == 0 && accountContextChanged) rust_set_api_account_context("");
+            }
+        }
+    }
+    return result == 0 ? ok : result == -2 ? ioError : result == -3 ? stale : invalid;
 }
 
 static napi_value GetOption(napi_env env, napi_callback_info info) {
@@ -2831,6 +2948,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"send2FA", nullptr, Send2FA, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getEnableTrustedDevices", nullptr, GetEnableTrustedDevices, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeTrustedDeviceNotice", nullptr, TakeTrustedDeviceNotice, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseEvent", nullptr, SendMouseEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMouseWheel", nullptr, SendMouseWheel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendMobileAction", nullptr, SendMobileAction, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -2879,6 +2997,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"takeRemoteClipboardText", nullptr, TakeRemoteClipboardText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setApiAccountContext", nullptr, SetApiAccountContext, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setOption", nullptr, SetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setServerConfig", nullptr, SetServerConfig, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"commitCloudRestore", nullptr, CommitCloudRestore, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getOption", nullptr, GetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getAllOptions", nullptr, GetAllOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"testIfValidServer", nullptr, TestIfValidServer, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -33,6 +33,240 @@ async fn stream_pair() -> (Stream, Stream) {
     (Stream::from(client, addr), Stream::from(server, peer))
 }
 
+#[derive(Default)]
+struct TestTrustedStore(Mutex<std::collections::HashMap<trusted_device::Scope, trusted_device::Token>>);
+impl trusted_device::CredentialStore for TestTrustedStore {
+    fn load(&self, scope: &trusted_device::Scope) -> trusted_device::LoadResult {
+        self.0.lock().unwrap().get(scope).copied().map(trusted_device::LoadResult::Present)
+            .unwrap_or(trusted_device::LoadResult::Missing)
+    }
+    fn save(&self, scope: &trusted_device::Scope, token: &trusted_device::Token) -> bool {
+        self.0.lock().unwrap().insert(*scope, *token); true
+    }
+}
+
+#[test]
+fn trusted_v2_wire_tags_match_official_153_and_legacy_defaults() {
+    use hbb_common::message_proto::LoginResponse;
+    let login = LoginRequest { trusted_device_v2_token: vec![0xab, 0xcd].into(),
+        trusted_device_v2_supported: true, ..Default::default() };
+    assert_eq!(login.write_to_bytes().unwrap(), vec![0x92, 0x01, 0x02, 0xab, 0xcd, 0x98, 0x01, 0x01]);
+    let auth = Auth2FA { trust_this_device: true, ..Default::default() };
+    assert_eq!(auth.write_to_bytes().unwrap(), vec![0x18, 0x01]);
+    let reply = LoginResponse { trusted_device_v2_supported: true,
+        trusted_device_v2_token: vec![0xab, 0xcd].into(), ..Default::default() };
+    assert_eq!(reply.write_to_bytes().unwrap(), vec![0x20, 0x01, 0x2a, 0x02, 0xab, 0xcd]);
+    let old = LoginResponse::parse_from_bytes(&[0x18, 0x01]).unwrap();
+    assert!(old.enable_trusted_devices && !old.trusted_device_v2_supported && old.trusted_device_v2_token.is_empty());
+}
+
+#[test]
+fn trusted_store_failure_is_visible_but_normal_authentication_remains_available() {
+    use hbb_common::message_proto::LoginResponse;
+    struct BrokenStore { read_fails: bool }
+    impl trusted_device::CredentialStore for BrokenStore {
+        fn load(&self, _: &trusted_device::Scope) -> trusted_device::LoadResult {
+            if self.read_fails { trusted_device::LoadResult::Unavailable } else { trusted_device::LoadResult::Missing }
+        }
+        fn save(&self, _: &trusted_device::Scope, _: &trusted_device::Token) -> bool { false }
+    }
+    let scope = [8; 32];
+    let mut unavailable = trusted_device::Session::new(1, Some(scope), &BrokenStore { read_fails: true });
+    let mut request = LoginRequest { password: vec![1].into(), ..Default::default() };
+    unavailable.apply_login(&mut request);
+    assert!(!request.password.is_empty() && !request.trusted_device_v2_supported);
+    let challenge = LoginResponse { trusted_device_v2_supported: true, ..Default::default() };
+    assert!(unavailable.challenge(&challenge) == trusted_device::TrustMode::Disabled);
+    assert_eq!(unavailable.notice, 3);
+    assert!(unavailable.awaiting_2fa, "ordinary 2FA remains available");
+
+    let mut unsaved = trusted_device::Session::new(2, Some(scope), &BrokenStore { read_fails: false });
+    unsaved.challenge(&challenge); unsaved.mark_submitted(true);
+    let issued = LoginResponse { trusted_device_v2_supported: true, trusted_device_v2_token: vec![4; 32].into(), ..Default::default() };
+    assert!(matches!(unsaved.finish(&issued, &BrokenStore { read_fails: false }), trusted_device::SaveResult::Failed));
+    assert_eq!(unsaved.notice, 2);
+}
+
+#[test]
+fn trusted_scope_requires_encrypted_stream_and_verified_matching_peer() {
+    let (server_pk, server_sk) = sign::gen_keypair();
+    let (peer_pk, _) = sign::gen_keypair();
+    let config = ConnectionConfig { public_server: false, peer: "scope-peer".into(), password: String::new(),
+        rendezvous_addr: "scope-server".into(), relay_override: String::new(),
+        key: base64::encode(&server_pk.0, Variant::Original), client_hwid: Vec::new(),
+        client_id: String::new(), os_password: String::new() };
+    let id = IdPk { id: "scope-peer".into(), pk: peer_pk.0.to_vec().into(), ..Default::default() };
+    let signed = sign::sign(&id.write_to_bytes().unwrap(), &server_sk);
+    let scope = verified_trust_scope(&config, &signed, true).unwrap();
+    assert!(verified_trust_scope(&config, &signed, false).is_none());
+    let mut other = config.clone(); other.peer = "other-peer".into();
+    assert!(verified_trust_scope(&other, &signed, true).is_none());
+    other = config.clone(); other.rendezvous_addr = "other-server".into();
+    assert_ne!(scope, verified_trust_scope(&other, &signed, true).unwrap());
+    let (other_server_pk, _) = sign::gen_keypair();
+    other.key = base64::encode(&other_server_pk.0, Variant::Original);
+    assert!(verified_trust_scope(&other, &signed, true).is_none());
+}
+
+#[test]
+fn trusted_v2_real_screen_wire_enrolls_then_reconnects_without_secret_logs() {
+    use hbb_common::message_proto::{LoginResponse, PeerInfo};
+    let store = Arc::new(TestTrustedStore::default());
+    *TEST_TRUSTED_STORE.lock().unwrap() = Some(store.clone());
+    let old_callback = EVENT_CALLBACK.lock().unwrap().replace(collect_login_event);
+    LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().clear();
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    *CURRENT_PEER_ID.lock().unwrap() = "synthetic-peer".into();
+    *PASSWORD_HASH.lock().unwrap() = b"synthetic-password-never-log".to_vec();
+    CURRENT_CLIENT_HWID.lock().unwrap().clear();
+    let scope = trusted_device::scope("synthetic-peer", "synthetic-server", "synthetic-key", &[7; 32]);
+    let token = [b'T'; 32];
+    runtime().block_on(async {
+        let session_id = advance_session();
+        CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+        let trust = prepare_trusted_session(session_id, Some(scope)).await;
+        assert!(install_trusted_session(session_id, &trust));
+        let (client, mut peer) = stream_pair().await;
+        spawn_receive_loop(session_id, client, None, trust);
+        let mut challenge = PeerMessage::new();
+        challenge.set_hash(Hash { salt: "test-salt".into(), challenge: "test-challenge".into(), ..Default::default() });
+        peer.send(&challenge).await.unwrap();
+        let request = PeerMessage::parse_from_bytes(&peer.next_timeout(1500).await.unwrap().unwrap()).unwrap();
+        let Some(message::Union::LoginRequest(request)) = request.union else { panic!("expected login request"); };
+        assert!(request.trusted_device_v2_supported && request.trusted_device_v2_token.is_empty());
+        let mut response = PeerMessage::new();
+        response.set_login_response(LoginResponse { trusted_device_v2_supported: true,
+            union: Some(login_response::Union::Error("2FA Required".into())), ..Default::default() });
+        peer.send(&response).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while rust_get_2fa_trust_mode() != 2 { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        let code = CString::new("623491").unwrap();
+        let blank = CString::new("").unwrap();
+        assert_eq!(rust_send_2fa(code.as_ptr(), blank.as_ptr(), 1), 0);
+        assert_ne!(rust_send_2fa(code.as_ptr(), blank.as_ptr(), 1), 0, "a submitted challenge cannot be replayed");
+        let auth = PeerMessage::parse_from_bytes(&peer.next_timeout(1500).await.unwrap().unwrap()).unwrap();
+        let Some(message::Union::Auth2fa(auth)) = auth.union else { panic!("expected 2FA message"); };
+        assert!(auth.trust_this_device && auth.hwid.is_empty());
+        response.set_login_response(LoginResponse { trusted_device_v2_supported: true,
+            trusted_device_v2_token: token.to_vec().into(),
+            union: Some(login_response::Union::PeerInfo(PeerInfo { platform: "Windows".into(), version: "1.5.3".into(), ..Default::default() })),
+            ..Default::default() });
+        peer.send(&response).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !store.0.lock().unwrap().contains_key(&scope) { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        assert_eq!(rust_take_trusted_device_notice(), 1);
+        let next_id = advance_session();
+        let next = prepare_trusted_session(next_id, Some(scope)).await;
+        assert!(install_trusted_session(next_id, &next));
+        let (client, mut peer2) = stream_pair().await;
+        spawn_receive_loop(next_id, client, None, next);
+        peer2.send(&challenge).await.unwrap();
+        let request = PeerMessage::parse_from_bytes(&peer2.next_timeout(1500).await.unwrap().unwrap()).unwrap();
+        let Some(message::Union::LoginRequest(request)) = request.union else { panic!("expected reconnect request"); };
+        assert_eq!(request.trusted_device_v2_token.as_ref(), token.as_slice());
+        advance_session();
+        drop(peer2); drop(peer);
+    });
+    let logs = LOGIN_DIAGNOSTIC_EVENTS.lock().unwrap().join("\n");
+    for secret in ["synthetic-password-never-log", "623491", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"] {
+        assert!(!logs.contains(secret), "authentication data leaked into logs");
+    }
+    assert!(logs.contains("trusted-device phase=enroll outcome=saved"));
+    *EVENT_CALLBACK.lock().unwrap() = old_callback;
+    *TEST_TRUSTED_STORE.lock().unwrap() = None;
+    PASSWORD_HASH.lock().unwrap().clear();
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn trusted_v2_file_login_and_2fa_use_the_same_scoped_store() {
+    use hbb_common::message_proto::LoginResponse;
+    let store = Arc::new(TestTrustedStore::default());
+    *TEST_TRUSTED_STORE.lock().unwrap() = Some(store.clone());
+    let scope = trusted_device::scope("file-peer", "file-server", "file-key", &[3; 32]);
+    let sid = advance_session();
+    FILE_ONLY_SESSION.store(true, Ordering::SeqCst);
+    CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+    let (sender, receiver) = mpsc::channel();
+    *FILE_MESSAGE_SENDER.lock().unwrap() = Some(sender);
+    runtime().block_on(async {
+        let trust = prepare_trusted_session(sid, Some(scope)).await;
+        assert!(install_trusted_session(sid, &trust));
+        let (mut client, mut peer) = stream_pair().await;
+        let config = ConnectionConfig { public_server: false, peer: "file-peer".into(), password: "test-password".into(),
+            rendezvous_addr: "file-server".into(), relay_override: String::new(), key: "file-key".into(),
+            client_hwid: Vec::new(), client_id: "test".into(), os_password: String::new() };
+        send_file_login(sid, &trust, Hash::new(), &config, &mut client).await.unwrap();
+        let msg = PeerMessage::parse_from_bytes(&peer.next_timeout(1500).await.unwrap().unwrap()).unwrap();
+        let Some(message::Union::LoginRequest(request)) = msg.union else { panic!("expected file login"); };
+        assert!(request.trusted_device_v2_supported && request.has_file_transfer());
+        let mut response = LoginResponse { trusted_device_v2_supported: true, ..Default::default() };
+        assert!(trusted_challenge(&trust, &response));
+        let code = CString::new("234567").unwrap(); let blank = CString::new("").unwrap();
+        assert_eq!(rust_send_2fa(code.as_ptr(), blank.as_ptr(), 1), 0);
+        let QueuedPeerCommand::Message { message, .. } = receiver.recv_timeout(Duration::from_secs(1)).unwrap() else { panic!("expected 2FA"); };
+        assert!(matches!(message.union, Some(message::Union::Auth2fa(auth)) if auth.trust_this_device));
+        response.trusted_device_v2_token = vec![8; 32].into();
+        finish_trusted_session(&trust, &response, true);
+        assert_eq!(store.0.lock().unwrap().get(&scope), Some(&[8; 32]));
+    });
+    advance_session();
+    *FILE_MESSAGE_SENDER.lock().unwrap() = None;
+    *TEST_TRUSTED_STORE.lock().unwrap() = None;
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn trusted_legacy_wire_is_preserved_and_stale_sessions_cannot_save_or_submit() {
+    use hbb_common::message_proto::LoginResponse;
+    let store = Arc::new(TestTrustedStore::default());
+    *TEST_TRUSTED_STORE.lock().unwrap() = Some(store.clone());
+    let scope = trusted_device::scope("old-peer", "old-server", "old-key", &[6; 32]);
+    let sid = advance_session();
+    FILE_ONLY_SESSION.store(true, Ordering::SeqCst);
+    CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
+    let (sender, receiver) = mpsc::channel(); *FILE_MESSAGE_SENDER.lock().unwrap() = Some(sender);
+    runtime().block_on(async {
+        let trust = prepare_trusted_session(sid, Some(scope)).await;
+        assert!(install_trusted_session(sid, &trust));
+        let legacy = LoginResponse { enable_trusted_devices: true, ..Default::default() };
+        assert!(trusted_challenge(&trust, &legacy));
+        assert_eq!(rust_get_2fa_trust_mode(), 1);
+        let code = CString::new("123456").unwrap(); let hwid = CString::new("synthetic-legacy-id").unwrap();
+        assert_eq!(rust_send_2fa(code.as_ptr(), hwid.as_ptr(), 1), 0);
+        let QueuedPeerCommand::Message { message, .. } = receiver.recv_timeout(Duration::from_secs(1)).unwrap() else { panic!("expected 2FA"); };
+        let Some(message::Union::Auth2fa(auth)) = message.union else { panic!("expected 2FA"); };
+        assert!(!auth.trust_this_device && auth.hwid.as_ref() == b"synthetic-legacy-id");
+        let mut v2 = LoginResponse { trusted_device_v2_supported: true, ..Default::default() };
+        assert!(trusted_challenge(&trust, &v2));
+        trust.lock().unwrap().mark_submitted(true);
+        advance_session();
+        v2.trusted_device_v2_token = vec![5; 32].into();
+        finish_trusted_session(&trust, &v2, true);
+        assert!(store.0.lock().unwrap().is_empty());
+        assert_ne!(rust_send_2fa(code.as_ptr(), hwid.as_ptr(), 1), 0);
+
+        // Unverified/direct sessions still support ordinary 2FA, but neither
+        // legacy identifiers nor V2 trust requests cross that channel.
+        let insecure_id = SESSION_ID.load(Ordering::SeqCst);
+        let insecure = prepare_trusted_session(insecure_id, None).await;
+        assert!(install_trusted_session(insecure_id, &insecure));
+        assert!(!trusted_challenge(&insecure, &v2));
+        assert_eq!(rust_send_2fa(code.as_ptr(), hwid.as_ptr(), 1), 0);
+        let QueuedPeerCommand::Message { message, .. } = receiver.recv_timeout(Duration::from_secs(1)).unwrap() else { panic!("expected 2FA"); };
+        let Some(message::Union::Auth2fa(auth)) = message.union else { panic!("expected 2FA"); };
+        assert!(!auth.trust_this_device && auth.hwid.is_empty());
+    });
+    *FILE_MESSAGE_SENDER.lock().unwrap() = None;
+    *TEST_TRUSTED_STORE.lock().unwrap() = None;
+    CURRENT_CLIENT_HWID.lock().unwrap().clear();
+    FILE_ONLY_SESSION.store(false, Ordering::SeqCst);
+    CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+}
+
 static LOGIN_DIAGNOSTIC_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 extern "C" fn collect_login_event(value: *const c_char) {
@@ -53,7 +287,9 @@ fn login_challenge_reaches_the_network_and_diagnostics_never_include_secrets() {
     *PASSWORD_HASH.lock().unwrap() = b"private-login-password".to_vec();
     runtime().block_on(async {
         let (client, mut peer) = stream_pair().await;
-        spawn_receive_loop(session_id, client, None);
+        let trust = Arc::new(Mutex::new(trusted_device::Session::unavailable(session_id, false)));
+        install_trusted_session(session_id, &trust);
+        spawn_receive_loop(session_id, client, None, trust);
         // A silent open socket must remain available until the peer supplies its challenge.
         assert!(peer.next_timeout(25).await.is_none());
         let mut challenge = PeerMessage::new();

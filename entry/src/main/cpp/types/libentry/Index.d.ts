@@ -130,6 +130,7 @@ export const sendPhysicalKeyEvent: (hidCode: number, action: number, modifierMas
 export const sendText: (text: string) => number;
 export const send2FA: (code: string, trustThisDevice: boolean) => number;
 export const getEnableTrustedDevices: () => boolean;
+export const takeTrustedDeviceNotice: () => number;
 export const sendClipboardText: (text: string) => number;
 export const takeRemoteClipboardText: () => string;
 export const requestRemoteDirectory: (path: string) => number;
@@ -169,6 +170,8 @@ export const getDeviceName: () => string;
 export const getClipboardText: () => string;
 export const setClipboardText: (text: string) => number;
 export const setOption: (key: string, value: string) => number;
+export const setServerConfig: (idServer: string, relayServer: string, apiServer: string, serverKey: string) => number;
+export const commitCloudRestore: (keys: string[], expected: string[], values: string[]) => number;
 export const setApiAccountContext: (json: string) => number;
 export const getOption: (key: string) => string;
 export const getAllOptions: () => string;

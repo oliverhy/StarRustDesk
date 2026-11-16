@@ -1,7 +1,12 @@
 #include "config.h"
+#include "config_transaction.h"
 #include "crypto/aead.h"
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdio>
 #include <cstring>
-#include <fstream>
+#include <fcntl.h>
 #include <sstream>
 #include <cstdlib>
 #include <unistd.h>
@@ -58,6 +63,7 @@ std::map<std::string, std::string> parse_options(const std::string& content) {
 
 bool decrypt_config(const std::vector<uint8_t>& bytes, std::string& plaintext) {
     if (bytes.size() < CONFIG_MAGIC_LEN + AEAD::NONCE_SIZE + AEAD::TAG_SIZE ||
+        bytes.size() - CONFIG_MAGIC_LEN - AEAD::NONCE_SIZE - AEAD::TAG_SIZE > static_cast<size_t>(INT_MAX) ||
         memcmp(bytes.data(), CONFIG_MAGIC, CONFIG_MAGIC_LEN) != 0) {
         return false;
     }
@@ -86,6 +92,7 @@ bool decrypt_config(const std::vector<uint8_t>& bytes, std::string& plaintext) {
 }
 
 std::vector<uint8_t> encrypt_config(const std::string& plaintext) {
+    if (plaintext.size() > static_cast<size_t>(INT_MAX)) return {};
     uint8_t key[AEAD::KEY_SIZE] = {0};
     uint8_t randomBytes[AEAD::KEY_SIZE] = {0};
     uint8_t nonce[AEAD::NONCE_SIZE] = {0};
@@ -98,12 +105,12 @@ std::vector<uint8_t> encrypt_config(const std::string& plaintext) {
     aead.setKey(key);
     aead.setNonce(nonce);
     std::vector<uint8_t> ciphertext(plaintext.size());
-    aead.encrypt(reinterpret_cast<const uint8_t*>(plaintext.data()),
+    if (aead.encrypt(reinterpret_cast<const uint8_t*>(plaintext.data()),
                  static_cast<int>(plaintext.size()),
                  reinterpret_cast<const uint8_t*>(CONFIG_MAGIC),
                  static_cast<int>(CONFIG_MAGIC_LEN),
                  ciphertext.data(),
-                 tag);
+                 tag) != 0) return {};
 
     std::vector<uint8_t> output;
     output.insert(output.end(), CONFIG_MAGIC, CONFIG_MAGIC + CONFIG_MAGIC_LEN);
@@ -112,6 +119,92 @@ std::vector<uint8_t> encrypt_config(const std::string& plaintext) {
     output.insert(output.end(), ciphertext.begin(), ciphertext.end());
     return output;
 }
+
+// Temporary files are created in the destination directory, so rename is an
+// atomic same-filesystem replacement. Existing data is never truncated first.
+class PosixAtomicFile {
+public:
+    ~PosixAtomicFile() { cancel(); }
+    bool open(const std::string& target) {
+        target_ = target;
+        std::string pattern = target + ".tmp.XXXXXX";
+        temp_.reserve(pattern.size());
+        std::vector<char> name(pattern.begin(), pattern.end());
+        name.push_back('\0');
+        fd_ = ::mkstemp(name.data());
+        if (fd_ < 0) return false;
+        temp_ = name.data();
+        if (::fcntl(fd_, F_SETFD, FD_CLOEXEC) != 0) { cancel(); return false; }
+        return true;
+    }
+    std::ptrdiff_t write(const uint8_t* data, size_t length) {
+        const size_t chunk = std::min(length, static_cast<size_t>(SSIZE_MAX));
+        ssize_t result;
+        do { result = ::write(fd_, data, chunk); } while (result < 0 && errno == EINTR);
+        return static_cast<std::ptrdiff_t>(result);
+    }
+    bool sync() {
+        int result;
+        do { result = ::fsync(fd_); } while (result < 0 && errno == EINTR);
+        return result == 0;
+    }
+    bool close() {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd >= 0 && ::close(fd) == 0;
+    }
+    bool commit() {
+        // Prepare everything that can allocate before the atomic rename.
+        const size_t slash = target_.find_last_of('/');
+        const std::string dir = slash == std::string::npos ? "." : (slash == 0 ? "/" : target_.substr(0, slash));
+        const int dirFd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (::rename(temp_.c_str(), target_.c_str()) != 0) {
+            if (dirFd >= 0) (void)::close(dirFd);
+            return false;
+        }
+        temp_.clear();
+        // Directory sync is best effort: after rename the new file is active
+        // and reporting failure could no longer promise the old file remains.
+        if (dirFd >= 0) { (void)::fsync(dirFd); (void)::close(dirFd); }
+        return true;
+    }
+    void cancel() {
+        if (fd_ >= 0) { (void)::close(fd_); fd_ = -1; }
+        if (!temp_.empty()) { (void)::unlink(temp_.c_str()); temp_.clear(); }
+    }
+private:
+    int fd_ = -1;
+    std::string temp_;
+    std::string target_;
+};
+
+bool save_snapshot(const std::string& path, const config_transaction::Options& options) {
+    auto encrypted = encrypt_config(serialize_options(options));
+    PosixAtomicFile file;
+    return config_transaction::writeFile(file, path, encrypted);
+}
+
+class PosixConfigReader {
+public:
+    ~PosixConfigReader() { if (fd_ >= 0) (void)::close(fd_); }
+    config_transaction::ReadResult open(const std::string& path) {
+        fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd_ >= 0) return config_transaction::ReadResult::Ok;
+        return errno == ENOENT ? config_transaction::ReadResult::Missing : config_transaction::ReadResult::Error;
+    }
+    std::ptrdiff_t read(uint8_t* buffer, size_t length) {
+        ssize_t result;
+        do { result = ::read(fd_, buffer, length); } while (result < 0 && errno == EINTR);
+        return static_cast<std::ptrdiff_t>(result);
+    }
+    bool close() {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd >= 0 && ::close(fd) == 0;
+    }
+private:
+    int fd_ = -1;
+};
 }
 
 Config& Config::instance() {
@@ -120,46 +213,45 @@ Config& Config::instance() {
 }
 
 void Config::load() {
+    std::lock_guard<std::mutex> lock(mutex_);
     options_.clear();
+    writable_ = false;
 
     // Use HarmonyOS app persistent data path
     configPath_ = "/data/storage/el2/base/haps/entry/files/rustdesk_config.txt";
 
-    std::ifstream file(configPath_, std::ios::binary);
-    if (!file.is_open()) {
-        return;
-    }
-
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    file.close();
+    PosixConfigReader file;
+    std::vector<uint8_t> bytes;
+    const auto read = config_transaction::readFile(file, configPath_, bytes);
+    if (read == config_transaction::ReadResult::Missing) { writable_ = true; return; }
+    if (read != config_transaction::ReadResult::Ok) return;
 
     std::string content;
     bool encrypted = decrypt_config(bytes, content);
     if (!encrypted) {
-        if (bytes.size() >= CONFIG_MAGIC_LEN && memcmp(bytes.data(), CONFIG_MAGIC, CONFIG_MAGIC_LEN) == 0) {
+        // Refuse to overwrite an unreadable encrypted file, including a
+        // truncated header. It may contain existing connections and settings.
+        if (!bytes.empty() && std::equal(bytes.begin(), bytes.begin() + std::min(bytes.size(), CONFIG_MAGIC_LEN),
+                                         reinterpret_cast<const uint8_t*>(CONFIG_MAGIC))) {
             return;
         }
-        content.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        if (!bytes.empty()) content.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
     options_ = parse_options(content);
+    writable_ = true;
     if (!encrypted && !options_.empty()) {
-        save();
+        try { (void)save_snapshot(configPath_, options_); } catch (...) {}
     }
 }
 
-void Config::save() {
-    std::ofstream file(configPath_, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) {
-        return;
-    }
-
-    std::string plaintext = serialize_options(options_);
-    std::vector<uint8_t> encrypted = encrypt_config(plaintext);
-    file.write(reinterpret_cast<const char*>(encrypted.data()), static_cast<std::streamsize>(encrypted.size()));
-    file.close();
+bool Config::save() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!writable_) return false;
+    try { return save_snapshot(configPath_, options_); } catch (...) { return false; }
 }
 
 std::string Config::get(const std::string& key, const std::string& defaultValue) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = options_.find(key);
     if (it != options_.end()) {
         return it->second;
@@ -168,9 +260,38 @@ std::string Config::get(const std::string& key, const std::string& defaultValue)
 }
 
 void Config::set(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(mutex_);
     options_[key] = value;
 }
 
+bool Config::setOptionsAndSave(const std::map<std::string, std::string>& changes,
+                               bool* accountContextChanged) {
+    return compareAndSetOptionsAndSave({}, changes, accountContextChanged) == 0;
+}
+
+int Config::compareAndSetOptionsAndSave(const std::map<std::string, std::string>& expected,
+                                        const std::map<std::string, std::string>& changes,
+                                        bool* accountContextChanged) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (accountContextChanged) *accountContextChanged = false;
+    if (!writable_) return -2;
+    if (!config_transaction::matches(options_, expected)) return -3;
+    bool contextChanged = false;
+    for (const char* key : {"custom-rendezvous-server", "api-server", "key"}) {
+        const auto change = changes.find(key);
+        const auto old = options_.find(key);
+        const std::string previous = old == options_.end() ? "" : old->second;
+        if (change != changes.end() && change->second != previous) contextChanged = true;
+    }
+    try {
+        if (!config_transaction::update(options_, changes,
+            [this](const auto& candidate) { return save_snapshot(configPath_, candidate); })) return -2;
+    } catch (...) { return -2; }
+    if (accountContextChanged) *accountContextChanged = contextChanged;
+    return 0;
+}
+
 std::map<std::string, std::string> Config::getAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
     return options_;
 }

@@ -1,4 +1,13 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+已信任此设备	This device is trusted
+登录成功，但未能保存信任，下次仍需验证码	Signed in, but trust could not be saved. A verification code will still be required next time.
+系统安全存储不可用，暂无法保存可信设备	Secure storage is unavailable; this device cannot be trusted right now.
+2.0.7（2000007）· 云恢复与可信设备优化	2.0.7 (2000007) · Cloud restore and trusted device improvements
+适配 RustDesk 1.5.3 可信设备 V2，保留旧版兼容；仅在远端身份和加密通道通过验证后使用可信设备凭证。	Added RustDesk 1.5.3 trusted-device V2 compatibility while retaining older peers. Trust credentials are used only after peer identity and the encrypted channel are verified.
+修复扫码或剪贴板导入服务器配置后，当前输入框没有立即刷新的问题；保存失败时明确提示。	Fixed server configuration fields not refreshing immediately after QR or clipboard import, and clearly report save failures.
+优化华为云恢复：备份中的空服务器字段保留本机值，服务器信息不完整且跨网络时暂停恢复，避免错误覆盖。	Improved Huawei Cloud restore: empty server fields retain local values, and an incomplete configuration for a different network pauses restore to avoid an incorrect overwrite.
+云恢复先暂存并校验密码，再整体提交连接、分组和服务器设置；失败或检测到并发修改时保留原数据。	Cloud restore stages and verifies passwords before atomically committing connections, groups, and server settings. Existing data is retained on failure or concurrent modification.
+完善恢复提示和脱敏诊断，不记录密码、验证码、可信设备凭证或服务器密钥。	Improved restore notices and redacted diagnostics without logging passwords, verification codes, trusted-device credentials, or server keys.
 2.0.6（2000006）· 输入与连接优化	2.0.6 (2000006) · Input and connection improvements
 优化多行文字输入：检测到换行时先保留原文并提示手动处理，避免直接转换为远端回车。	Improved multiline input: when a line break is detected, keep the original text and prompt for manual handling instead of converting it directly to remote Enter.
 优化长文字和中文输入处理，保留手动回车与组合键；输入未能加入发送队列时提示处理。	Improved long-text and Chinese input handling while retaining manual Enter and shortcuts. A prompt appears if input cannot be queued.
@@ -402,6 +411,34 @@ UDP 延迟持续过高，正在尝试 TCP 或中继	UDP latency stayed high; try
 状态未知 · 查询未确认，仍可尝试连接	Status unknown · Check inconclusive; you can still connect
 请输入新密码，或取消更换后选择清除	Enter a new password, or cancel the change and choose Clear
 保存失败，请重试	Save failed; retry
+服务器配置保存失败，原配置未更改，请重试	Server settings could not be saved. The previous settings remain unchanged; please retry.
+备份没有服务器地址，将保留本机服务器配置和 Key。	This backup has no server addresses. The current server settings and key will be retained.
+备份未记录服务器，请核对恢复后的连接是否属于当前服务器。	This backup does not identify a server. Check that restored connections belong to the current server.
+备份未包含 Key 且服务器不同，将保留本机服务器配置，避免密钥不匹配。	The backup has no key and specifies a different server. Current server settings will be retained to avoid a key mismatch.
+备份服务器信息不完整且服务器不同，将保留本机服务器配置。	The backup has incomplete information for a different server. Current server settings will be retained.
+为避免连接使用错误的服务器，请先手动配置备份对应的服务器后再恢复；本机数据不会改动。	To prevent connections from using the wrong server, configure the backup's server before restoring. Local data will not be changed.
+本次不会恢复连接、分组或服务器配置。	No connections, groups, or server settings will be restored this time.
+备份服务器与本机不同且配置不完整，请先手动配置对应服务器后再恢复；本机数据未改动	The backup uses a different server and has incomplete settings. Configure the matching server before restoring; local data was not changed.
+备份为空的服务器地址将保留本机值；需要清空时请手动设置。	Empty server-address fields will retain their local values. Clear them manually if necessary.
+将恢复备份中的服务器地址和 Key。	The server addresses and key in this backup will be restored.
+将恢复服务器地址；备份未包含 Key，保留本机现有 Key。	Server addresses will be restored. The backup has no key, so the current key will be retained.
+云端连接和分组将覆盖本机对应内容；服务器配置按上述说明处理。未加密备份不会覆盖本机已有密码。	Cloud connections and groups will replace their local counterparts; server settings will be handled as described above. An unencrypted backup will not overwrite existing passwords.
+备份无服务器配置，已保留本机设置	The backup had no server settings; the current settings were retained.
+备份为空的服务器地址已保留本机值，需要清空请手动设置	Empty server-address fields kept their local values; clear them manually if necessary.
+备份未包含服务器 Key，已保留本机 Key	The backup did not include a server key; the current key was retained.
+恢复已提交，但本机备份副本未更新	The restore was committed, but the local backup copy was not updated.
+恢复已提交，但云端历史备份清理尚未完成	The restore was committed, but cloud backup history cleanup is not yet complete.
+恢复已提交但读取校验未完成，请勿重复恢复并导出诊断日志	The restore was committed but readback verification did not finish. Do not repeat the restore; export diagnostic logs.
+本机密码正在修改，请稍后重新预览	Local passwords are being modified. Preview the backup again later.
+本机密码正在修改，请稍后再次同步	Local passwords are being modified. Try syncing again later.
+本机密码在备份期间已改变，请再次同步	Local passwords changed while the backup was being prepared. Sync again.
+本机密码已改变，请重新预览云备份	Local passwords changed. Preview the cloud backup again.
+备份中的连接标识无效或重复，本机数据未改动	The backup contains invalid or duplicate connection identifiers. Local data was not changed.
+备份连接与本机连接标识冲突，本机数据未改动	A backup connection identifier conflicts with a local connection. Local data was not changed.
+本机数据已改变，请重新预览云备份	Local data changed. Preview the cloud backup again.
+恢复未完成，本机原有数据已保留，请重试	Restore did not complete. Existing local data was retained; please retry.
+恢复准备失败，本机原有数据已保留，请重试	Restore preparation failed. Existing local data was retained; please retry.
+恢复结果无法确认，请勿重复恢复并导出诊断日志；原凭据已保留	The restore result could not be confirmed. Do not retry; export diagnostic logs. Original credentials were retained.
 排序：{0}	Sort: {0}
 {0}远端 ID	{0}Remote ID
 {0}设备名称	{0}Device name

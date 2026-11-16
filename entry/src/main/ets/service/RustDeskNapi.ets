@@ -286,6 +286,10 @@ export class RustDeskNapi {
     return (rustdeskNapi as ESObject).getEnableTrustedDevices()
   }
 
+  static takeTrustedDeviceNotice(): number {
+    return (rustdeskNapi as ESObject).takeTrustedDeviceNotice()
+  }
+
   static sendMouseEvent(x: number, y: number, action: number, modifierMask: number = 0): number {
     return rustdeskNapi.sendMouseEvent(x, y, action, modifierMask)
   }
@@ -555,6 +559,14 @@ export class RustDeskNapi {
 
   static setOption(key: string, value: string): number {
     return rustdeskNapi.setOption(key, value)
+  }
+
+  static setServerConfig(idServer: string, relayServer: string, apiServer: string, serverKey: string): number {
+    return rustdeskNapi.setServerConfig(idServer, relayServer, apiServer, serverKey)
+  }
+
+  static commitCloudRestore(keys: string[], expected: string[], values: string[]): number {
+    return rustdeskNapi.commitCloudRestore(keys, expected, values)
   }
 
   static getOption(key: string): string {

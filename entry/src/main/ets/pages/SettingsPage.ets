@@ -813,14 +813,18 @@ export struct SettingsPage {
         if (!quiet) promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
         return
       }
-      if (result.success) this.updateCloudSyncStatus()
+      const notices: string[] = (result.notices ?? []).map((notice: string): string => translate(notice, this.uiLanguage))
+      if (result.success && notices.length > 0) {
+        this.cloudSyncStatus = translate(result.message, this.uiLanguage) + '\n' + notices.join('\n')
+      } else if (result.success) this.updateCloudSyncStatus()
       else this.cloudSyncStatus = result.message
       this.cloudSyncIncludesSecrets = CloudSyncService.includesSecrets()
       if (this.cloudPasswordAction !== 'enable-secrets' && !this.cloudSecretsPending) {
         this.cloudSecretsSwitchOn = this.cloudSyncIncludesSecrets
       }
       if (!quiet || !result.success) {
-        promptAction.showToast({ message: translate(result.message, this.uiLanguage) })
+        promptAction.showToast({ message: translate(result.message, this.uiLanguage) +
+          (notices.length > 0 ? '\n' + notices.join('\n') : '') })
       }
       if (restoreOnly) this.cancelCloudRestore(false)
     } catch (_error) {
@@ -905,11 +909,31 @@ export struct SettingsPage {
   }
 
   showCloudRestorePreview(preview: CloudRestorePreview): void {
+    let serverDetail: string = ''
+    const serverConflict = preview.serverRestoreMode === 'preserve_key_conflict' ||
+      preview.serverRestoreMode === 'preserve_partial_conflict'
+    if (preview.serverRestoreMode === 'preserve_empty') {
+      serverDetail = '备份没有服务器地址，将保留本机服务器配置和 Key。'
+    } else if (preview.serverRestoreMode === 'preserve_key_conflict') {
+      serverDetail = '备份未包含 Key 且服务器不同，将保留本机服务器配置，避免密钥不匹配。'
+    } else if (preview.serverRestoreMode === 'preserve_partial_conflict') {
+      serverDetail = '备份服务器信息不完整且服务器不同，将保留本机服务器配置。'
+    } else if (preview.serverKeyIncluded) {
+      serverDetail = '将恢复备份中的服务器地址和 Key。'
+    } else {
+      serverDetail = '将恢复服务器地址；备份未包含 Key，保留本机现有 Key。'
+    }
     const details = `${new Date(preview.time).toLocaleString()}\n` +
       translate(`${preview.connectionCount} 个连接 · ${preview.groupCount} 个分组`, this.uiLanguage) + '\n' +
-      translate(preview.serverConfigured ? '包含服务器配置' : '不包含自建服务器地址', this.uiLanguage) + '\n\n' +
-      (preview.connectionCount === 0 ? translate('此备份没有连接，恢复后本机连接列表将为空。可取消并选择更早的备份。', this.uiLanguage) + '\n\n' : '') +
-      translate('云端的连接、分组和服务器配置将覆盖本机对应内容。未加密备份不会覆盖本机已有密码与服务器密钥。', this.uiLanguage)
+      translate(serverDetail, this.uiLanguage) + '\n\n' +
+      (serverConflict ? translate('为避免连接使用错误的服务器，请先手动配置备份对应的服务器后再恢复；本机数据不会改动。', this.uiLanguage) + '\n\n' : '') +
+      (preview.serverRestoreMode === 'preserve_empty' ?
+        translate('备份未记录服务器，请核对恢复后的连接是否属于当前服务器。', this.uiLanguage) + '\n\n' : '') +
+      (preview.serverRestoreMode === 'restore' && preview.serverEmptyFieldsKept ?
+        translate('备份为空的服务器地址将保留本机值；需要清空时请手动设置。', this.uiLanguage) + '\n\n' : '') +
+      (!serverConflict && preview.connectionCount === 0 ? translate('此备份没有连接，恢复后本机连接列表将为空。可取消并选择更早的备份。', this.uiLanguage) + '\n\n' : '') +
+      translate(serverConflict ? '本次不会恢复连接、分组或服务器配置。' :
+        '云端连接和分组将覆盖本机对应内容；服务器配置按上述说明处理。未加密备份不会覆盖本机已有密码。', this.uiLanguage)
     AlertDialog.show({
       title: translate('确认恢复此备份', this.uiLanguage),
       message: details,
@@ -921,9 +945,10 @@ export struct SettingsPage {
         action: () => { this.cancelCloudRestore() },
       },
       secondaryButton: {
-        value: translate('恢复', this.uiLanguage),
+        value: translate(serverConflict ? '知道了' : '恢复', this.uiLanguage),
         fontColor: RustDeskTheme.ACCENT,
         action: () => {
+          if (serverConflict) { this.cancelCloudRestore(false); return }
           CloudSyncService.recordUi('restore_confirmed', { cloudTime: preview.time, connections: preview.connectionCount,
             groups: preview.groupCount, encrypted: preview.encrypted, serverConfigured: preview.serverConfigured })
           this.syncCloudNow(true, false)

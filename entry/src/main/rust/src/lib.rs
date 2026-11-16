@@ -11,6 +11,7 @@ mod session_health;
 mod file_transfer_state;
 mod session_recovery;
 mod multi_display_routing;
+mod trusted_device;
 use file_transfer_state::{TransferWatchdog, UploadTransferState, TRANSFER_IDLE_TIMEOUT};
 use performance::PerformanceConfig;
 #[cfg(test)]
@@ -136,6 +137,84 @@ static PEER_TASK_CONTROL: Mutex<Option<PeerTaskControl>> = Mutex::new(None);
 static FILE_MESSAGE_SENDER: Mutex<Option<Sender<QueuedPeerCommand>>> = Mutex::new(None);
 static CURRENT_CONNECTION_CONFIG: Mutex<Option<ConnectionConfig>> = Mutex::new(None);
 static SESSION_ID: AtomicU64 = AtomicU64::new(0);
+type SharedTrustedSession = Arc<Mutex<trusted_device::Session>>;
+static TRUSTED_SESSION: Mutex<Option<SharedTrustedSession>> = Mutex::new(None);
+#[cfg(test)]
+static TEST_TRUSTED_STORE: Mutex<Option<Arc<dyn trusted_device::CredentialStore>>> = Mutex::new(None);
+
+fn trusted_store() -> Arc<dyn trusted_device::CredentialStore> {
+    #[cfg(test)]
+    if let Some(store) = TEST_TRUSTED_STORE.lock().unwrap().as_ref() { return Arc::clone(store); }
+    Arc::new(trusted_device::PlatformStore)
+}
+
+// Serialize session replacement with credential persistence and 2FA dispatch.
+fn advance_session() -> u64 {
+    let mut state = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    *state = None;
+    SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn verified_trust_scope(config: &ConnectionConfig, signed: &[u8], encrypted: bool) -> Option<trusted_device::Scope> {
+    if !encrypted { return None; }
+    let key = get_rs_pk(if config.key.is_empty() { RS_PUB_KEY } else { &config.key })?;
+    let (id, peer_key) = decode_id_pk(signed, &key).ok()?;
+    if id != config.peer { return None; }
+    Some(trusted_device::scope(&config.peer, &config.rendezvous_addr, &config.key, &peer_key))
+}
+
+async fn prepare_trusted_session(session_id: u64, scope: Option<trusted_device::Scope>) -> SharedTrustedSession {
+    // Native security services may block; a slow/unavailable store must not
+    // prevent normal password and 2FA authentication.
+    let is_verified = scope.is_some();
+    let store = trusted_store();
+    let task = tokio::task::spawn_blocking(move ||
+        trusted_device::Session::new(session_id, scope, store.as_ref()));
+    let session = match tokio::time::timeout(Duration::from_secs(3), task).await {
+        Ok(Ok(session)) => session,
+        _ => trusted_device::Session::unavailable(session_id, is_verified),
+    };
+    emit_event(if session.store_unavailable { "trusted-device phase=prepare outcome=store_unavailable" }
+        else if session.offered_v2 { "trusted-device phase=prepare outcome=ready" }
+        else { "trusted-device phase=prepare outcome=identity_unverified" });
+    Arc::new(Mutex::new(session))
+}
+
+fn install_trusted_session(session_id: u64, state: &SharedTrustedSession) -> bool {
+    let mut current = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if SESSION_ID.load(Ordering::SeqCst) != session_id { return false; }
+    *current = Some(Arc::clone(state));
+    true
+}
+
+fn trusted_challenge(state: &SharedTrustedSession, response: &hbb_common::message_proto::LoginResponse) -> bool {
+    let Ok(mut session) = state.lock() else { return false; };
+    if SESSION_ID.load(Ordering::SeqCst) != session.session_id { return false; }
+    let mode = session.challenge(response);
+    emit_event(match mode {
+        trusted_device::TrustMode::V2 => "trusted-device phase=challenge mode=v2",
+        trusted_device::TrustMode::Legacy => "trusted-device phase=challenge mode=legacy",
+        trusted_device::TrustMode::Disabled => "trusted-device phase=challenge mode=disabled",
+    });
+    mode != trusted_device::TrustMode::Disabled
+}
+
+fn finish_trusted_session(state: &SharedTrustedSession, response: &hbb_common::message_proto::LoginResponse, primary: bool) {
+    let current = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut session) = state.lock() else { return; };
+    if SESSION_ID.load(Ordering::SeqCst) != session.session_id { return; }
+    if primary && !current.as_ref().is_some_and(|active| Arc::ptr_eq(active, state)) { return; }
+    let result = session.finish(response, trusted_store().as_ref());
+    let label = match result {
+        trusted_device::SaveResult::NotRequested => "not_requested",
+        trusted_device::SaveResult::Saved => "saved",
+        trusted_device::SaveResult::Failed => "not_saved",
+        trusted_device::SaveResult::Unsolicited => "unsolicited_ignored",
+    };
+    drop(session);
+    drop(current);
+    emit_event(&format!("trusted-device phase=enroll outcome={label}"));
+}
 static PROTOCOL_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FPS_HINT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_RECEIVED_MS: AtomicU64 = AtomicU64::new(0);
@@ -566,7 +645,7 @@ pub extern "C" fn rust_connect(
         }
     };
     emit_event("rust_connect entered");
-    let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    let session_id = advance_session();
     PROTOCOL_SESSION_ID.store(new_protocol_session_id(), Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
@@ -699,7 +778,9 @@ pub extern "C" fn rust_connect(
             CONNECTION_ROUTE.store(1, Ordering::SeqCst);
             CONNECTION_TRANSPORT.store(stream_transport_code(&stream), Ordering::SeqCst);
             CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
-            spawn_receive_loop(session_id, stream, None);
+            let trust = prepare_trusted_session(session_id, None).await;
+            if !install_trusted_session(session_id, &trust) { return -19; }
+            spawn_receive_loop(session_id, stream, None, trust);
             emit_event("IP direct connected; rendezvous bypassed; awaiting peer login challenge");
             return 0;
         }
@@ -1139,6 +1220,10 @@ pub extern "C" fn rust_connect(
         }
         PEER_E2EE.store(peer_encrypted, Ordering::SeqCst);
         emit_event(&format!("remote security: e2ee={peer_encrypted}"));
+        let trust_scope = CURRENT_CONNECTION_CONFIG.lock().ok().and_then(|guard|
+            guard.as_ref().and_then(|config| verified_trust_scope(config, &signed_id_pk, peer_encrypted)));
+        let trust = prepare_trusted_session(session_id, trust_scope).await;
+        if !install_trusted_session(session_id, &trust) { return -19; }
         record_peer_route_success(&peer, selected.route, selected.transport, now_ms());
         selected.stream.set_send_timeout(5000);
         CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
@@ -1152,7 +1237,7 @@ pub extern "C" fn rust_connect(
             // session. Any losing or cancelled offer is closed by the guard.
             webrtc_guard.0 = None;
         }
-        spawn_receive_loop(session_id, selected.stream, selected.kcp);
+        spawn_receive_loop(session_id, selected.stream, selected.kcp, trust);
         emit_event(&format!("receive loop spawned transport={}", selected.label));
         0
         }).await {
@@ -1406,7 +1491,7 @@ pub extern "C" fn rust_disconnect() -> i32 {
     }
     let graceful_close_completed = request_graceful_peer_close(closing_session_id);
     finish_peer_task(closing_session_id, graceful_close_completed);
-    let session_id = SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    let session_id = advance_session();
     set_file_transfer_status("idle", 0, 0, "");
     if let Ok(mut sender) = FILE_MESSAGE_SENDER.lock() {
         *sender = None;
@@ -2015,31 +2100,59 @@ pub extern "C" fn rust_is_peer_android() -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rust_send_2fa(code: *const c_char, client_hwid: *const c_char) -> i32 {
+pub extern "C" fn rust_get_2fa_trust_mode() -> i32 {
+    let current = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = current.as_ref() else { return 0; };
+    let Ok(session) = state.lock() else { return 0; };
+    if session.session_id != SESSION_ID.load(Ordering::SeqCst) { return 0; }
+    match session.mode { trusted_device::TrustMode::Disabled => 0,
+        trusted_device::TrustMode::Legacy => 1, trusted_device::TrustMode::V2 => 2 }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_take_trusted_device_notice() -> i32 {
+    let current = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = current.as_ref() else { return 0; };
+    let Ok(mut session) = state.lock() else { return 0; };
+    if session.session_id != SESSION_ID.load(Ordering::SeqCst) { return 0; }
+    std::mem::replace(&mut session.notice, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_send_2fa(code: *const c_char, client_hwid: *const c_char, trust_requested: i32) -> i32 {
     let Some(code) = cstr_to_string(code) else {
         return -1;
     };
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return -2;
     }
-    let hwid = cstr_to_string(client_hwid).unwrap_or_default().into_bytes();
-    if let Ok(mut hwid_guard) = CURRENT_CLIENT_HWID.lock() {
-        *hwid_guard = hwid.clone();
-    }
-    if let Ok(mut config_guard) = CURRENT_CONNECTION_CONFIG.lock() {
-        if let Some(config) = config_guard.as_mut() {
-            config.client_hwid = hwid.clone();
-        }
-    }
-
+    let current = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = current.as_ref() else { return -3; };
+    let Ok(mut session) = state.lock() else { return -3; };
+    let session_id = session.session_id;
+    if session_id != SESSION_ID.load(Ordering::SeqCst) || !CONNECTION_ACTIVE.load(Ordering::SeqCst) || !session.awaiting_2fa { return -3; }
+    let legacy = session.mode == trusted_device::TrustMode::Legacy;
+    let trust = trust_requested != 0 && session.mode != trusted_device::TrustMode::Disabled;
+    let hwid = if legacy && trust { cstr_to_string(client_hwid).unwrap_or_default().into_bytes() } else { Vec::new() };
     let mut msg = PeerMessage::new();
     msg.set_auth_2fa(Auth2FA {
         code,
-        hwid: hwid.into(),
+        hwid: hwid.clone().into(),
+        trust_this_device: trust && session.mode == trusted_device::TrustMode::V2,
         ..Default::default()
     });
-    emit_event("2fa response queued");
-    queue_peer_message(msg)
+    if enqueue_peer_message_for_session(session_id, msg).is_err() { return -4; }
+    session.mark_submitted(trust);
+    if legacy {
+        if let Ok(mut guard) = CURRENT_CLIENT_HWID.lock() { *guard = hwid.clone(); }
+        if let Ok(mut guard) = CURRENT_CONNECTION_CONFIG.lock() {
+            if let Some(config) = guard.as_mut() { config.client_hwid = hwid; }
+        }
+    }
+    drop(session);
+    drop(current);
+    emit_event("trusted-device phase=2fa outcome=queued");
+    0
 }
 
 #[no_mangle]
@@ -2381,7 +2494,7 @@ async fn run_file_session(
         session_id,
         &SESSION_ID,
         CONNECTION_DEADLINE,
-        connect_file_stream(&config),
+        connect_file_stream_with_scope(&config),
     )
     .await;
     let result = match connection {
@@ -2394,8 +2507,8 @@ async fn run_file_session(
     if SESSION_ID.load(Ordering::SeqCst) != session_id {
         return;
     }
-    let mut stream = match result {
-        Ok(stream) => stream,
+    let (mut stream, trust_scope) = match result {
+        Ok(value) => value,
         Err(error) => {
             emit_event("file-session:connect-failed");
             let error = match error.as_str() {
@@ -2421,6 +2534,9 @@ async fn run_file_session(
             return;
         }
     };
+    let trust = prepare_trusted_session(session_id, trust_scope).await;
+    if SESSION_ID.load(Ordering::SeqCst) != session_id { return; }
+    if FILE_ONLY_SESSION.load(Ordering::SeqCst) && !install_trusted_session(session_id, &trust) { return; }
     stream.set_send_timeout(5000);
     let mut authenticated = false;
     let mut pending = Vec::new();
@@ -2471,7 +2587,7 @@ async fn run_file_session(
                 };
                 match message.union {
                     Some(message::Union::Hash(hash)) => {
-                        if let Err(error) = send_file_login(hash, &config, &mut stream).await {
+                        if let Err(error) = send_file_login(session_id, &trust, hash, &config, &mut stream).await {
                             emit_event("file-session:login-send-failed");
                             set_remote_directory_result(RemoteDirectoryResult {
                                 path: String::new(),
@@ -2481,12 +2597,18 @@ async fn run_file_session(
                             return;
                         }
                     }
-                    Some(message::Union::LoginResponse(response)) => match response.union {
+                    Some(message::Union::LoginResponse(response)) => {
+                        let trust_enabled = match response.union.as_ref() {
+                            Some(login_response::Union::Error(error)) if error == "2FA Required" || error == "Wrong 2FA Code" => trusted_challenge(&trust, &response),
+                            Some(login_response::Union::PeerInfo(_)) => { finish_trusted_session(&trust, &response, FILE_ONLY_SESSION.load(Ordering::SeqCst)); false },
+                            _ => false,
+                        };
+                        match response.union {
                         Some(login_response::Union::Error(error)) => {
                             if FILE_ONLY_SESSION.load(Ordering::SeqCst) {
                                 if error == "2FA Required" || error == "Wrong 2FA Code" {
-                                    emit_event(if error == "Wrong 2FA Code" { "login response: 2fa-wrong" }
-                                        else { "login response: 2fa-required enable_trusted_devices=0" });
+                                    emit_event(&format!("login response: 2fa-required enable_trusted_devices={}", if trust_enabled { 1 } else { 0 }));
+                                    if error == "Wrong 2FA Code" { emit_event("login response: 2fa-wrong"); }
                                     continue;
                                 }
                                 emit_event(&format!("login response: error={error}"));
@@ -2499,7 +2621,7 @@ async fn run_file_session(
                             emit_event("file-session:login-rejected");
                             return;
                         }
-                        _ => {
+                        Some(login_response::Union::PeerInfo(_)) => {
                             authenticated = true;
                             emit_event("file-session:authenticated");
                             if FILE_ONLY_SESSION.load(Ordering::SeqCst) { emit_event("file-only session ready"); }
@@ -2522,7 +2644,8 @@ async fn run_file_session(
                                 }
                             }
                         }
-                    },
+                        _ => { emit_event("file-session:login-response-invalid"); return; }
+                    } },
                     Some(message::Union::FileResponse(response)) => {
                         handle_file_session_response(
                             response,
@@ -2815,6 +2938,8 @@ async fn send_file_command(
 }
 
 async fn send_file_login(
+    session_id: u64,
+    trust: &SharedTrustedSession,
     hash: Hash,
     config: &ConnectionConfig,
     stream: &mut Stream,
@@ -2847,6 +2972,12 @@ async fn send_file_login(
         show_hidden: false,
         ..Default::default()
     });
+    if let Ok(mut session) = trust.lock() {
+        if SESSION_ID.load(Ordering::SeqCst) != session_id || session.session_id != session_id {
+            hbb_common::bail!("stale session");
+        }
+        session.apply_login(&mut login);
+    } else { hbb_common::bail!("trusted session unavailable"); }
     let mut message = PeerMessage::new();
     message.set_login_request(login);
     stream.send(&message).await
@@ -4896,7 +5027,12 @@ async fn connect_direct_peer(
     tokio::time::timeout_at(deadline, attempt).await?
 }
 
+#[cfg(test)]
 async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String> {
+    connect_file_stream_with_scope(config).await.map(|(stream, _)| stream)
+}
+
+async fn connect_file_stream_with_scope(config: &ConnectionConfig) -> Result<(Stream, Option<trusted_device::Scope>), String> {
     if let Some(address) = direct_peer_endpoint(&config.peer).map_err(str::to_string)? {
         if INSECURE_SESSION_REASON.load(Ordering::SeqCst) != INSECURE_DIRECT_ENDPOINT {
             emit_event("rv_diag phase=file_peer_security mode=direct_endpoint outcome=consent_required");
@@ -4904,6 +5040,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         }
         return connect_direct_endpoint(address)
             .await
+            .map(|stream| (stream, None))
             .map_err(|_| "direct endpoint connection failed".to_string());
     }
     let mut rendezvous = connect_transport_endpoint(
@@ -4970,7 +5107,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         )
         .await
         .map_err(|error| error.to_string())?;
-        secure_peer_connection(
+        let encrypted = secure_peer_connection(
             &config.peer,
             &signed_id_pk,
             &config.key,
@@ -4979,7 +5116,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
         )
         .await
         .map_err(|error| error.to_string())?;
-        return Ok(stream);
+        return Ok((stream, verified_trust_scope(config, &signed_id_pk, encrypted)));
     } else {
         match response.union {
             Some(rendezvous_message::Union::PunchHoleResponse(response)) => {
@@ -5048,7 +5185,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     } else {
         return Err("远端没有可用的文件传输路径".to_string());
     };
-    secure_peer_connection(
+    let encrypted = secure_peer_connection(
         &config.peer,
         &signed_id_pk,
         &config.key,
@@ -5057,7 +5194,7 @@ async fn connect_file_stream(config: &ConnectionConfig) -> Result<Stream, String
     )
     .await
     .map_err(|error| error.to_string())?;
-    Ok(stream)
+    Ok((stream, verified_trust_scope(config, &signed_id_pk, encrypted)))
 }
 
 async fn request_relay(
@@ -5950,7 +6087,7 @@ fn create_symmetric_key_msg(
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
 }
 
-fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<KcpStream>) {
+fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<KcpStream>, trust: SharedTrustedSession) {
     let (tx, mut rx) = tokio_mpsc::unbounded_channel::<QueuedPeerCommand>();
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.lock() {
         *guard = Some((session_id, tx));
@@ -6119,7 +6256,7 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                                         receive_started_at.elapsed().as_millis(), bytes.len()));
                                 }
                                 let message_kind =
-                                    handle_peer_bytes(&bytes, &mut read_jobs, &mut stream).await;
+                                    handle_peer_bytes(session_id, &trust, &bytes, &mut read_jobs, &mut stream).await;
                                 challenge_received |= message_kind == "hash";
                                 login_response_received |= message_kind == "login_response";
                                 received_messages += 1;
@@ -6217,10 +6354,13 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
 }
 
 async fn handle_peer_bytes(
+    session_id: u64,
+    trust: &SharedTrustedSession,
     bytes: &[u8],
     read_jobs: &mut Vec<TransferJob>,
     stream: &mut Stream,
 ) -> &'static str {
+    if SESSION_ID.load(Ordering::SeqCst) != session_id { return "stale"; }
     let msg = match PeerMessage::parse_from_bytes(bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -6234,19 +6374,25 @@ async fn handle_peer_bytes(
     match msg.union {
         Some(message::Union::Hash(hash)) => {
             emit_event("peer message: Hash");
-            send_login(hash).await;
+            send_login(session_id, trust, hash).await;
             "hash"
         }
         Some(message::Union::LoginResponse(resp)) => {
             emit_event("peer message: LoginResponse");
+            let trust_enabled = match resp.union.as_ref() {
+                Some(login_response::Union::Error(error)) if error == "2FA Required" || error == "Wrong 2FA Code" => trusted_challenge(trust, &resp),
+                Some(login_response::Union::PeerInfo(_)) => { finish_trusted_session(trust, &resp, true); false },
+                _ => false,
+            };
             match resp.union {
                 Some(login_response::Union::Error(err)) => {
                     if err == "2FA Required" {
                         emit_event(&format!(
                             "login response: 2fa-required enable_trusted_devices={}",
-                            if resp.enable_trusted_devices { 1 } else { 0 }
+                            if trust_enabled { 1 } else { 0 }
                         ));
                     } else if err == "Wrong 2FA Code" {
+                        emit_event(&format!("login response: 2fa-required enable_trusted_devices={}", if trust_enabled { 1 } else { 0 }));
                         emit_event("login response: 2fa-wrong");
                     } else {
                         emit_event(&format!("login response: error={err}"));
@@ -6932,7 +7078,8 @@ fn clear_clipboard_state() {
     }
 }
 
-async fn send_login(hash: Hash) {
+async fn send_login(session_id: u64, trust: &SharedTrustedSession, hash: Hash) {
+    if SESSION_ID.load(Ordering::SeqCst) != session_id { return; }
     let performance = performance_config();
     let password = match PASSWORD_HASH.lock() {
         Ok(guard) => guard.clone(),
@@ -6963,7 +7110,7 @@ async fn send_login(hash: Hash) {
         response_password = second.finalize().to_vec();
     }
 
-    let login = LoginRequest {
+    let mut login = LoginRequest {
         username: peer_id,
         password: response_password.into(),
         my_id: client_id,
@@ -7001,9 +7148,14 @@ async fn send_login(hash: Hash) {
         ..Default::default()
     };
 
+    if let Ok(mut session) = trust.lock() {
+        if SESSION_ID.load(Ordering::SeqCst) != session.session_id { return; }
+        session.apply_login(&mut login);
+    } else { return; }
+
     let mut out = PeerMessage::new();
     out.set_login_request(login);
-    match send_peer_message_async(out).await {
+    match enqueue_peer_message_for_session(session_id, out) {
         Ok(_) => {
             emit_event("peer-login: request_queued");
             emit_event(&format!("remote security: lock_option_sent enabled={}",
@@ -7536,14 +7688,17 @@ fn finish_peer_task(session_id: u64, graceful_close_completed: bool) {
 }
 
 fn mark_connection_lost(session_id: u64, reason: &str) {
+    let mut trust = TRUSTED_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if SESSION_ID.load(Ordering::SeqCst) != session_id {
         emit_event("skip stale connection lost");
         return;
     }
+    *trust = None;
+    SESSION_ID.fetch_add(1, Ordering::SeqCst);
+    drop(trust);
     let _ = reason; // Transport errors can contain endpoint or untrusted peer data.
     emit_event("peer transport interrupted");
     communication::reset();
-    SESSION_ID.fetch_add(1, Ordering::SeqCst);
     CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     set_file_transfer_status("failed", 0, 0, "connection lost");
     CONNECTION_ROUTE.store(0, Ordering::SeqCst);
@@ -7566,6 +7721,13 @@ async fn send_peer_message_async(msg: PeerMessage) -> Result<(), hbb_common::any
 
 fn enqueue_peer_message(msg: PeerMessage) -> Result<(), hbb_common::anyhow::Error> {
     let session_id = SESSION_ID.load(Ordering::SeqCst);
+    enqueue_peer_message_for_session(session_id, msg)
+}
+
+fn enqueue_peer_message_for_session(session_id: u64, msg: PeerMessage) -> Result<(), hbb_common::anyhow::Error> {
+    if SESSION_ID.load(Ordering::SeqCst) != session_id {
+        return Err(hbb_common::anyhow::anyhow!("stale session"));
+    }
     if FILE_ONLY_SESSION.load(Ordering::SeqCst) {
         // File-only sessions have no screen/control stream; only authentication
         // and explicit file-manager messages may use their sender.

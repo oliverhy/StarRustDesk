@@ -4,7 +4,7 @@ import { fileIo } from '@kit.CoreFileKit'
 import { CloudSyncFailure, CloudSyncTask, CloudSyncTrace, CloudSyncTraceDetails } from './CloudSyncTask'
 import { OperationDiagnostic } from './OperationDiagnostic'
 import { CloudSnapshotReference, CloudSyncSnapshotStore } from './CloudSyncSnapshotStore'
-import { CredentialStore } from './CredentialStore'
+import { CREDENTIAL_ALIASES_OPTION, CredentialAliasEntry, CredentialStore } from './CredentialStore'
 import {
   ConnectionBackupGroup,
   ConnectionBackupItem,
@@ -24,6 +24,12 @@ const CLOUD_SYNC_PASSWORD_ID: string = '__cloud_sync_master_password__'
 const CLOUD_FOLDER_NAME: string = 'StarRustDesk'
 const CLOUD_FILE_NAME: string = 'cloud-sync-v1.srdsync'
 const BACKUP_MIRROR_FOLDER: string = 'cloud_backup'
+// Every value in this set is compared and committed under the native config
+// lock. Credential assets are staged separately and referenced by the alias map.
+const CLOUD_RESTORE_KEYS: string[] = ['saved-connections', 'saved-connection-groups', CREDENTIAL_ALIASES_OPTION,
+  'custom-rendezvous-server', 'relay-server', 'api-server', 'key', CLOUD_SYNC_ENABLED_OPTION,
+  CLOUD_SYNC_SECRETS_OPTION, CLOUD_SYNC_LAST_APPLIED_OPTION, CLOUD_SYNC_LOCAL_CHANGED_OPTION,
+  CLOUD_SYNC_LAST_SUCCESS_OPTION, CLOUD_SYNC_BASELINE_OPTION]
 
 interface SavedConnectionRow {
   id: string
@@ -58,6 +64,7 @@ export interface CloudSyncResult {
   preview?: CloudRestorePreview
   connectionCount?: number
   groupCount?: number
+  notices?: string[]
 }
 
 export interface CloudBackupSummary {
@@ -77,6 +84,15 @@ export interface CloudRestorePreview {
   groupCount: number
   serverConfigured: boolean
   encrypted: boolean
+  serverRestoreMode: string
+  serverKeyIncluded: boolean
+  serverEmptyFieldsKept: boolean
+}
+
+interface ServerRestorePlan {
+  mode: string
+  keyIncluded: boolean
+  emptyFieldsKept: boolean
 }
 
 interface PreparedCloudRestore {
@@ -86,6 +102,8 @@ interface PreparedCloudRestore {
   payload: ConnectionBackupPayload
   epoch: number
   revision: number
+  baseline: string[]
+  credentialVersion: number
 }
 
 type CloudAction = 'sync' | 'upload' | 'restore' | 'history' | 'preview'
@@ -174,7 +192,7 @@ export class CloudSyncService {
   static getLastResult(): CloudSyncResult | undefined { return CloudSyncService.lastResult }
 
   static async hasCloudPassword(): Promise<boolean> {
-    return (await CredentialStore.load(CLOUD_SYNC_PASSWORD_ID)).length >= 8
+    return (await CredentialStore.loadStrict(CLOUD_SYNC_PASSWORD_ID)).length >= 8
   }
 
   static async saveCloudPassword(password: string): Promise<void> {
@@ -184,7 +202,7 @@ export class CloudSyncService {
     CloudSyncService.recordUi('password_save_requested')
     try {
       await CredentialStore.save(CLOUD_SYNC_PASSWORD_ID, password)
-      if (await CredentialStore.load(CLOUD_SYNC_PASSWORD_ID) !== password) {
+      if (await CredentialStore.loadStrict(CLOUD_SYNC_PASSWORD_ID) !== password) {
         throw new Error('备份密码保存失败')
       }
       CloudSyncService.recordUi('password_save_verified', { verified: true })
@@ -312,7 +330,8 @@ export class CloudSyncService {
           trace.detail('preview_changed', { cloudTime: CloudSyncService.payloadTime(prepared.payload) }, -1004)
           throw new CloudSyncFailure(-1004, 'stale_preview', '备份已更新或恢复已取消，请重新预览')
         }
-        const result = await CloudSyncService.applyPayload(context, raw, prepared.payload, trace, epoch, revision, true)
+        const result = await CloudSyncService.applyPayload(context, raw, prepared.payload, trace, epoch, revision, true,
+          prepared.baseline, prepared.credentialVersion)
         CloudSyncService.cancelRestorePreview()
         return result
       }
@@ -360,7 +379,7 @@ export class CloudSyncService {
       if (failure.code === -1010) return CloudSyncService.passwordRequired(failure.message, 'restore')
       const result = CloudSyncService.result(false, false, false, false,
         `${failure.message}（错误码 ${failure.code}）`, 0)
-      result.pending = [-1001, -1002, -1003, -1004].includes(failure.code)
+      result.pending = [-1001, -1002, -1003, -1004, -1012].includes(failure.code)
       result.code = failure.code
       result.stage = trace.stage
       return result
@@ -439,13 +458,25 @@ export class CloudSyncService {
       (content: string) => CloudSyncService.readContentTime(content))
     const payload = await CloudSyncService.decodeBackup(raw, trace)
     CloudSyncService.assertCurrent(epoch, revision)
+    const credentialVersion = CredentialStore.stableMutationVersion()
+    if (credentialVersion < 0) throw new CloudSyncFailure(-1004, 'local_changed', '本机密码正在修改，请稍后重新预览')
+    const baseline = CLOUD_RESTORE_KEYS.map((key: string): string => RustDeskNapi.getOption(key))
     const ticket = util.generateRandomUUID(true)
-    CloudSyncService.preparedRestore = { ticket: ticket, snapshotId: id, raw: raw, payload: payload, epoch: epoch, revision: revision }
+    CloudSyncService.preparedRestore = { ticket: ticket, snapshotId: id, raw: raw, payload: payload, epoch: epoch,
+      revision: revision, baseline: baseline, credentialVersion: credentialVersion }
     trace.counts('restore_preview', payload.connections.length, payload.groups.length)
     const result = CloudSyncService.result(true, false, false, false, '请核对备份内容后确认恢复', 0)
+    const serverPlan = CloudSyncService.serverRestorePlan(payload,
+      baseline[CLOUD_RESTORE_KEYS.indexOf('custom-rendezvous-server')], baseline[CLOUD_RESTORE_KEYS.indexOf('key')],
+      baseline[CLOUD_RESTORE_KEYS.indexOf('relay-server')], baseline[CLOUD_RESTORE_KEYS.indexOf('api-server')])
     result.preview = { ticket: ticket, time: CloudSyncService.payloadTime(payload),
       connectionCount: payload.connections.length, groupCount: payload.groups.length,
-      serverConfigured: CloudSyncService.hasServerConfig(payload), encrypted: ConnectionBackupService.isEncrypted(raw) }
+      serverConfigured: CloudSyncService.hasServerConfig(payload), encrypted: ConnectionBackupService.isEncrypted(raw),
+      serverRestoreMode: serverPlan.mode, serverKeyIncluded: serverPlan.keyIncluded,
+      serverEmptyFieldsKept: serverPlan.emptyFieldsKept }
+    trace.detail('restore_server_plan', { serverConfigured: CloudSyncService.hasServerConfig(payload),
+      serverWillRestore: serverPlan.mode === 'restore', serverKeyIncluded: serverPlan.keyIncluded,
+      serverKeyConflict: serverPlan.mode === 'preserve_key_conflict', serverEmptyFieldsKept: serverPlan.emptyFieldsKept })
     return result
   }
 
@@ -454,13 +485,43 @@ export class CloudSyncService {
     return config !== undefined && [config.idServer, config.relayServer, config.apiServer].some((value: string) => value.trim().length > 0)
   }
 
+  private static serverRestorePlan(payload: ConnectionBackupPayload, localId: string, localKey: string,
+    localRelay: string, localApi: string): ServerRestorePlan {
+    const config = payload.serverConfig
+    if (config === undefined || !CloudSyncService.hasServerConfig(payload)) {
+      return { mode: 'preserve_empty', keyIncluded: false, emptyFieldsKept: true }
+    }
+    const keyIncluded = payload.includesPasswords && config.serverKey.trim().length > 0
+    // A retained local key must never silently become attached to a different
+    // ID server when the selected backup did not include that server's key.
+    const unknownIdAndDifferentEndpoint = config.idServer.trim().length === 0 && localId.trim().length === 0 &&
+      (config.relayServer.trim() !== localRelay.trim() || config.apiServer.trim() !== localApi.trim())
+    if (!keyIncluded && localKey.trim().length > 0 &&
+      (config.idServer.trim() !== localId.trim() || unknownIdAndDifferentEndpoint)) {
+      return { mode: 'preserve_key_conflict', keyIncluded: false, emptyFieldsKept: true }
+    }
+    const keepsAddress = (config.idServer.trim().length === 0 && localId.trim().length > 0) ||
+      (config.relayServer.trim().length === 0 && localRelay.trim().length > 0) ||
+      (config.apiServer.trim().length === 0 && localApi.trim().length > 0)
+    // Do not splice settings from different/unknown server identities just to
+    // retain blank fields. Keep the whole local configuration instead.
+    if (keepsAddress && (config.idServer.trim() !== localId.trim() || unknownIdAndDifferentEndpoint)) {
+      return { mode: 'preserve_partial_conflict', keyIncluded: keyIncluded, emptyFieldsKept: true }
+    }
+    return { mode: 'restore', keyIncluded: keyIncluded, emptyFieldsKept: keepsAddress }
+  }
+
   private static async uploadSnapshot(context: common.UIAbilityContext, trace: CloudSyncTrace,
     epoch: number, revision: number, state: CloudOperationState): Promise<CloudSyncResult> {
     let includesSecrets: boolean = CloudSyncService.includesSecrets()
+    const credentialVersion = includesSecrets ? CredentialStore.stableMutationVersion() : 0
+    if (includesSecrets && credentialVersion < 0) {
+      throw new CloudSyncFailure(-1004, 'local_changed', '本机密码正在修改，请稍后再次同步')
+    }
     let password: string = ''
     if (includesSecrets) {
       trace.event('credential')
-      password = await CredentialStore.load(CLOUD_SYNC_PASSWORD_ID)
+      password = await CredentialStore.loadStrict(CLOUD_SYNC_PASSWORD_ID)
       if (password.length < 8) {
         trace.detail('password_missing', { hasPassword: false }, -1010)
         return CloudSyncService.passwordRequired('请先设置至少 8 位的云备份密码', 'sync')
@@ -468,6 +529,9 @@ export class CloudSyncService {
     }
     trace.event('snapshot')
     let payload: ConnectionBackupPayload = await CloudSyncService.buildPayload(includesSecrets)
+    if (includesSecrets && !CredentialStore.mutationVersionMatches(credentialVersion)) {
+      throw new CloudSyncFailure(-1004, 'local_changed', '本机密码在备份期间已改变，请再次同步')
+    }
     trace.detail('backup_summary', { cloudTime: CloudSyncService.payloadTime(payload), connections: payload.connections.length,
       groups: payload.groups.length, encrypted: includesSecrets, serverConfigured: CloudSyncService.hasServerConfig(payload) })
     trace.event('encrypt')
@@ -475,6 +539,9 @@ export class CloudSyncService {
       ConnectionBackupService.createPlainText(payload)
     trace.detail('encrypt_complete', { encrypted: includesSecrets })
     CloudSyncService.assertCurrent(epoch, revision)
+    if (includesSecrets && !CredentialStore.mutationVersionMatches(credentialVersion)) {
+      throw new CloudSyncFailure(-1004, 'local_changed', '本机密码在备份期间已改变，请再次同步')
+    }
     trace.event('mirror_write')
     CloudSyncService.writeText(CloudSyncService.mirrorPath(context), content)
     trace.event('cloud_write')
@@ -525,6 +592,17 @@ export class CloudSyncService {
     } catch (error) {
       const failure = CloudSyncFailure.from(error as Object)
       trace.detail('retention_failed', { verified: false, retentionLimit: CloudSyncSnapshotStore.MAX_BACKUPS }, failure.code)
+      if (result.restored) {
+        // Restore is already committed. A later cloud-history maintenance
+        // failure must not claim that restoring local data was rolled back.
+        result.pending = true
+        result.code = failure.code || -1011
+        result.stage = 'retention'
+        const notices = result.notices ?? []
+        notices.push('恢复已提交，但云端历史备份清理尚未完成')
+        result.notices = notices
+        return result
+      }
       result.success = false
       result.pending = true
       result.code = failure.code || -1011
@@ -544,7 +622,7 @@ export class CloudSyncService {
     let connections: ConnectionBackupItem[] = []
     let rows: SavedConnectionRow[] = CloudSyncService.readConnections()
     for (let row of rows) {
-      let password: string = includesSecrets ? await CredentialStore.load(row.id) : ''
+      let password: string = includesSecrets ? await CredentialStore.loadStrict(row.id) : ''
       connections.push({
         id: row.id,
         name: row.name,
@@ -575,7 +653,7 @@ export class CloudSyncService {
     if (ConnectionBackupService.isEncrypted(raw)) {
       trace.detail('encrypted_backup_detected', { encrypted: true })
       trace.event('credential')
-      let password: string = await CredentialStore.load(CLOUD_SYNC_PASSWORD_ID)
+      let password: string = await CredentialStore.loadStrict(CLOUD_SYNC_PASSWORD_ID)
       if (password.length < 8) {
         trace.detail('password_missing', { hasPassword: false }, -1010)
         throw new CloudSyncFailure(-1010, 'password_required', '该云备份已加密，请输入备份密码')
@@ -597,100 +675,228 @@ export class CloudSyncService {
   }
 
   private static async applyPayload(context: common.UIAbilityContext, raw: string, payload: ConnectionBackupPayload,
-    trace: CloudSyncTrace, epoch: number, revision: number, confirmed: boolean): Promise<CloudSyncResult> {
+    trace: CloudSyncTrace, epoch: number, revision: number, confirmed: boolean,
+    previewBaseline?: string[], previewCredentialVersion?: number): Promise<CloudSyncResult> {
     CloudSyncService.assertCurrent(epoch, revision)
     if (!confirmed && payload.connections.length === 0 && !CloudSyncService.hasBaseline()) {
       trace.event('empty_restore_blocked')
       return CloudSyncService.paused('最新云备份没有连接，未自动恢复；请查看历史备份')
     }
-    trace.event('mirror_restore_write')
-    CloudSyncService.writeText(CloudSyncService.mirrorPath(context), raw)
-    trace.event('credential')
-    let oldRows: SavedConnectionRow[] = CloudSyncService.readConnections()
+    const baseline = previewBaseline ?? CLOUD_RESTORE_KEYS.map((key: string): string => RustDeskNapi.getOption(key))
+    const credentialVersion = previewCredentialVersion ?? CredentialStore.stableMutationVersion()
+    if (!CredentialStore.mutationVersionMatches(credentialVersion)) {
+      throw new CloudSyncFailure(-1004, 'local_changed', '本机密码已改变，请重新预览云备份')
+    }
+    // Fail before touching any credential if local persisted data is malformed.
+    const oldRows = CloudSyncService.readConnections()
+    CloudSyncService.readGroups()
+    const originalAliases = CredentialStore.parseAliases(baseline[CLOUD_RESTORE_KEYS.indexOf(CREDENTIAL_ALIASES_OPTION)])
+    let aliases: CredentialAliasEntry[] = originalAliases.slice()
+    // A staged physical alias must not equal any old/new logical id,
+    // even when that logical id currently has an empty password.
+    const forbiddenAliases = originalAliases.map((entry: CredentialAliasEntry): string => entry.target)
+      .concat(oldRows.map((row: SavedConnectionRow): string => row.id))
+      .concat(payload.connections.map((row: ConnectionBackupItem): string => row.id))
+    forbiddenAliases.push(CLOUD_SYNC_PASSWORD_ID)
+    let aliasesChanged = false
+    const staged: string[] = []
+    const ids: Set<string> = new Set<string>()
+    let committed = false
+    let uncertainCommit = false
+    let readbackVerified = false
     let newRows: SavedConnectionRow[] = []
-    for (let item of payload.connections) {
-      CloudSyncService.assertCurrent(epoch, revision)
-      let row: SavedConnectionRow = {
-        id: item.id,
-        name: item.name,
-        remoteId: item.remoteId,
-        credentialAlias: item.id,
-        performancePreset: item.performancePreset,
-        groupId: item.groupId,
-        serverScope: item.serverScope
-      }
-      newRows.push(row)
-      if (payload.includesPasswords) {
-        await CredentialStore.save(item.id, item.password)
-        if (await CredentialStore.load(item.id) !== item.password) {
-          throw new CloudSyncFailure(-1008, 'restore_verify', '恢复数据写入校验失败，未确认恢复成功，请重试')
+    let groupRows: SavedConnectionGroupRow[] = []
+    const plan = CloudSyncService.serverRestorePlan(payload,
+      baseline[CLOUD_RESTORE_KEYS.indexOf('custom-rendezvous-server')], baseline[CLOUD_RESTORE_KEYS.indexOf('key')],
+      baseline[CLOUD_RESTORE_KEYS.indexOf('relay-server')], baseline[CLOUD_RESTORE_KEYS.indexOf('api-server')])
+    trace.detail('restore_server_plan', { serverConfigured: CloudSyncService.hasServerConfig(payload),
+      serverWillRestore: plan.mode === 'restore', serverKeyIncluded: plan.keyIncluded,
+      serverKeyConflict: plan.mode === 'preserve_key_conflict', serverEmptyFieldsKept: plan.emptyFieldsKept })
+    if (plan.mode === 'preserve_key_conflict' || plan.mode === 'preserve_partial_conflict') {
+      // Restoring connection passwords under a different, retained server may
+      // associate legacy unscoped peer IDs with the wrong network. Fail closed.
+      trace.detail('restore_aborted', { stagedCredentials: 0, verified: false }, -1008)
+      throw new CloudSyncFailure(-1008, 'server_conflict', '备份服务器与本机不同且配置不完整，请先手动配置对应服务器后再恢复；本机数据未改动')
+    }
+    try {
+      trace.event('restore_prepare')
+      payload.groups.forEach((group: ConnectionBackupGroup) => {
+        groupRows.push({ id: group.id, name: group.name, expanded: true })
+      })
+      for (let item of payload.connections) {
+        CloudSyncService.assertCurrent(epoch, revision)
+        if (!item.id || item.id === CLOUD_SYNC_PASSWORD_ID || !item.remoteId || ids.has(item.id)) {
+          throw new CloudSyncFailure(-1008, 'invalid_backup', '备份中的连接标识无效或重复，本机数据未改动')
         }
-      } else {
-        let old: SavedConnectionRow | undefined = oldRows.find((value: SavedConnectionRow) =>
-          value.remoteId === item.remoteId && (value.serverScope === undefined || item.serverScope === undefined ||
-            value.serverScope === item.serverScope))
-        if (old !== undefined && old.id !== item.id) {
-          let oldPassword: string = await CredentialStore.load(old.id)
-          CloudSyncService.assertCurrent(epoch, revision)
-          if (oldPassword.length > 0) {
-            await CredentialStore.save(item.id, oldPassword)
+        ids.add(item.id)
+        const sameId = oldRows.find((row: SavedConnectionRow) => row.id === item.id)
+        if (sameId !== undefined && (sameId.remoteId !== item.remoteId ||
+          (sameId.serverScope !== undefined && item.serverScope !== undefined && sameId.serverScope !== item.serverScope))) {
+          throw new CloudSyncFailure(-1008, 'identity_conflict', '备份连接与本机连接标识冲突，本机数据未改动')
+        }
+        newRows.push({ id: item.id, name: item.name, remoteId: item.remoteId, credentialAlias: item.id,
+          performancePreset: item.performancePreset, groupId: item.groupId, serverScope: item.serverScope })
+        let targetPassword: string | undefined = undefined
+        if (payload.includesPasswords) {
+          // Keep a matching existing asset, otherwise stage a new immutable alias.
+          const currentPassword = sameId === undefined ? undefined :
+            await CredentialStore.readPhysicalStrict(CredentialStore.physicalId(item.id, originalAliases))
+          if (currentPassword === undefined || currentPassword !== item.password) targetPassword = item.password
+        } else {
+          const old = oldRows.find((value: SavedConnectionRow) => value.remoteId === item.remoteId &&
+            (value.serverScope === undefined || item.serverScope === undefined || value.serverScope === item.serverScope))
+          if (old !== undefined && old.id !== item.id) {
+            targetPassword = await CredentialStore.readPhysicalStrict(CredentialStore.physicalId(old.id, originalAliases))
+          } else if (old === undefined) {
+            // An orphaned asset with a reused id must not leak into a new peer.
+            const existing = await CredentialStore.readPhysicalStrict(CredentialStore.physicalId(item.id, originalAliases))
+            if (existing.length > 0) targetPassword = ''
           }
         }
+        if (targetPassword !== undefined) {
+          trace.event('restore_stage_credentials')
+          const target = await CredentialStore.stageRestorePassword(targetPassword, forbiddenAliases)
+          staged.push(target)
+          forbiddenAliases.push(target)
+          aliases = aliases.filter((entry: CredentialAliasEntry) => entry.id !== item.id)
+          aliases.push({ id: item.id, target: target })
+          aliasesChanged = true
+        }
+      }
+      CloudSyncService.assertCurrent(epoch, revision)
+      if (!CredentialStore.mutationVersionMatches(credentialVersion)) {
+        throw new CloudSyncFailure(-1004, 'local_changed', '本机密码已改变，请重新预览云备份')
+      }
+      const desired = baseline.slice()
+      desired[CLOUD_RESTORE_KEYS.indexOf('saved-connections')] = JSON.stringify(newRows)
+      desired[CLOUD_RESTORE_KEYS.indexOf('saved-connection-groups')] = JSON.stringify(groupRows)
+      if (aliasesChanged) {
+        const aliasJson = JSON.stringify(aliases)
+        CredentialStore.parseAliases(aliasJson)
+        desired[CLOUD_RESTORE_KEYS.indexOf(CREDENTIAL_ALIASES_OPTION)] = aliasJson
+      }
+      desired[CLOUD_RESTORE_KEYS.indexOf(CLOUD_SYNC_SECRETS_OPTION)] = payload.includesPasswords ? '1' : '0'
+      if (plan.mode === 'restore' && payload.serverConfig !== undefined) {
+        if (payload.serverConfig.idServer.trim().length > 0) {
+          desired[CLOUD_RESTORE_KEYS.indexOf('custom-rendezvous-server')] = payload.serverConfig.idServer
+        }
+        if (payload.serverConfig.relayServer.trim().length > 0) {
+          desired[CLOUD_RESTORE_KEYS.indexOf('relay-server')] = payload.serverConfig.relayServer
+        }
+        if (payload.serverConfig.apiServer.trim().length > 0) {
+          desired[CLOUD_RESTORE_KEYS.indexOf('api-server')] = payload.serverConfig.apiServer
+        }
+        if (plan.keyIncluded) desired[CLOUD_RESTORE_KEYS.indexOf('key')] = payload.serverConfig.serverKey
+      }
+      let syncTime = CloudSyncService.payloadTime(payload)
+      if (syncTime <= 0) syncTime = Date.now()
+      desired[CLOUD_RESTORE_KEYS.indexOf(CLOUD_SYNC_LAST_APPLIED_OPTION)] = syncTime.toString()
+      desired[CLOUD_RESTORE_KEYS.indexOf(CLOUD_SYNC_LOCAL_CHANGED_OPTION)] =
+        (confirmed ? Math.max(Date.now(), syncTime + 1) : syncTime).toString()
+      desired[CLOUD_RESTORE_KEYS.indexOf(CLOUD_SYNC_LAST_SUCCESS_OPTION)] = Date.now().toString()
+      desired[CLOUD_RESTORE_KEYS.indexOf(CLOUD_SYNC_BASELINE_OPTION)] = '1'
+      trace.event('restore_commit')
+      let commit = -9
+      try {
+        const nativeResult = RustDeskNapi.commitCloudRestore(CLOUD_RESTORE_KEYS, baseline, desired)
+        commit = [0, -1, -2, -3].includes(nativeResult) ? nativeResult : -9
+      } catch (_error) {}
+      if (commit !== 0) {
+        trace.detail('restore_commit_failed', { stagedCredentials: staged.length, verified: false }, commit)
+        // A bridge exception can make the return value uncertain even if the
+        // native atomic rename completed. Never discard active staged assets.
+        if (commit === -9) {
+          uncertainCommit = true
+          let desiredVisible = false
+          let baselineVisible = false
+          try {
+            desiredVisible = CLOUD_RESTORE_KEYS.every((key: string, index: number): boolean => RustDeskNapi.getOption(key) === desired[index])
+            baselineVisible = CLOUD_RESTORE_KEYS.every((key: string, index: number): boolean => RustDeskNapi.getOption(key) === baseline[index])
+          } catch (_error) {}
+          if (desiredVisible && !baselineVisible) {
+            committed = true
+            trace.detail('restore_commit_recovered', { verified: true, stagedCredentials: staged.length })
+          } else if (!baselineVisible) {
+            throw new CloudSyncFailure(-1012, 'restore_uncertain', '恢复结果无法确认，请勿重复恢复并导出诊断日志；原凭据已保留')
+          }
+        }
+        if (!committed) {
+          if (commit === -3) throw new CloudSyncFailure(-1004, 'local_changed', '本机数据已改变，请重新预览云备份')
+          throw new CloudSyncFailure(-1008, 'restore_commit', '恢复未完成，本机原有数据已保留，请重试')
+        }
+      }
+      committed = true
+      trace.event('restore_verify')
+      let verified = false
+      let actualConnections = -1
+      let actualGroups = -1
+      try {
+        actualConnections = CloudSyncService.arrayCount(RustDeskNapi.getOption('saved-connections'))
+        actualGroups = CloudSyncService.arrayCount(RustDeskNapi.getOption('saved-connection-groups'))
+        verified = CLOUD_RESTORE_KEYS.every((key: string, index: number): boolean => RustDeskNapi.getOption(key) === desired[index])
+      } catch (_error) {}
+      readbackVerified = verified
+      trace.detail('restore_verify_info', { expectedConnections: newRows.length, actualConnections: actualConnections,
+        expectedGroups: groupRows.length, actualGroups: actualGroups, verified: verified,
+        stagedCredentials: staged.length, serverWillRestore: plan.mode === 'restore' })
+      if (!verified) trace.detail('restore_readback_deferred', { verified: false })
+    } catch (error) {
+      trace.detail('restore_aborted', { stagedCredentials: staged.length, verified: false }, OperationDiagnostic.errorCode(error as Object))
+      if (error instanceof CloudSyncFailure) throw error as CloudSyncFailure
+      throw new CloudSyncFailure(-1008, 'restore_stage', '恢复准备失败，本机原有数据已保留，请重试')
+    } finally {
+      if (!committed && uncertainCommit) {
+        trace.detail('restore_discard_deferred', { stagedCredentials: staged.length })
+      } else if (!committed) {
+        // Preserve staged assets if a bridge error makes the committed alias
+        // map unreadable. They are encrypted system assets, never log values.
+        try {
+          const active = CredentialStore.parseAliases(RustDeskNapi.getOption(CREDENTIAL_ALIASES_OPTION))
+          for (const target of staged) {
+            if (!active.some((entry: CredentialAliasEntry): boolean => entry.target === target)) {
+              await CredentialStore.discardStaged(target)
+            }
+          }
+        } catch (_error) { trace.detail('restore_discard_deferred', { stagedCredentials: staged.length }) }
       }
     }
-    CloudSyncService.assertCurrent(epoch, revision)
-    trace.event('apply')
-    let groupRows: SavedConnectionGroupRow[] = []
-    payload.groups.forEach((group: ConnectionBackupGroup) => {
-      groupRows.push({ id: group.id, name: group.name, expanded: true })
-    })
-    RustDeskNapi.setOption('saved-connection-groups', JSON.stringify(groupRows))
-    RustDeskNapi.setOption('saved-connections', JSON.stringify(newRows))
-    RustDeskNapi.setOption(CLOUD_SYNC_SECRETS_OPTION, payload.includesPasswords ? '1' : '0')
-    if (payload.serverConfig !== undefined) {
-      RustDeskNapi.setOption('custom-rendezvous-server', payload.serverConfig.idServer)
-      RustDeskNapi.setOption('relay-server', payload.serverConfig.relayServer)
-      RustDeskNapi.setOption('api-server', payload.serverConfig.apiServer)
-      if (payload.includesPasswords) {
-        RustDeskNapi.setOption('key', payload.serverConfig.serverKey)
-      }
-      let serverVersion: number = AppStorage.get<number>('serverConfigVersion') ?? 0
-      AppStorage.set<number>('serverConfigVersion', serverVersion + 1)
+    // The native commit is the point of success. Ancillary mirror/UI failures
+    // cannot be reported as a failed restore after data has already changed.
+    let mirrorReady = true
+    try { trace.event('mirror_restore_write'); CloudSyncService.writeText(CloudSyncService.mirrorPath(context), raw) }
+    catch (error) { mirrorReady = false; trace.detail('restore_mirror_deferred', { verified: false }, OperationDiagnostic.errorCode(error as Object)) }
+    let cloudRevision = 0
+    if (plan.mode === 'restore') {
+      try {
+        let serverVersion: number = AppStorage.get<number>('serverConfigVersion') ?? 0
+        AppStorage.set<number>('serverConfigVersion', serverVersion + 1)
+      } catch (_error) { trace.detail('restore_ui_deferred', { verified: false }) }
     }
-    trace.event('restore_verify')
-    const storedConnections = RustDeskNapi.getOption('saved-connections')
-    const storedGroups = RustDeskNapi.getOption('saved-connection-groups')
-    const verified = storedConnections === JSON.stringify(newRows) && storedGroups === JSON.stringify(groupRows) &&
-      !(payload.serverConfig !== undefined && (
-        RustDeskNapi.getOption('custom-rendezvous-server') !== payload.serverConfig.idServer ||
-        RustDeskNapi.getOption('relay-server') !== payload.serverConfig.relayServer ||
-        RustDeskNapi.getOption('api-server') !== payload.serverConfig.apiServer ||
-        (payload.includesPasswords && RustDeskNapi.getOption('key') !== payload.serverConfig.serverKey)))
-    trace.detail('restore_verify_info', { expectedConnections: newRows.length, actualConnections: CloudSyncService.arrayCount(storedConnections),
-      expectedGroups: groupRows.length, actualGroups: CloudSyncService.arrayCount(storedGroups), verified: verified })
-    if (!verified) {
-      throw new CloudSyncFailure(-1008, 'restore_verify', '恢复数据写入校验失败，未确认恢复成功，请重试')
-    }
-    let syncTime: number = CloudSyncService.payloadTime(payload)
-    if (syncTime <= 0) {
-      syncTime = Date.now()
-    }
-    RustDeskNapi.setOption(CLOUD_SYNC_LAST_APPLIED_OPTION, syncTime.toString())
-    // An explicitly chosen history version is a new local edit, so the next
-    // reconciliation publishes it instead of undoing it with the newer cloud file.
-    RustDeskNapi.setOption(CLOUD_SYNC_LOCAL_CHANGED_OPTION, (confirmed ? Math.max(Date.now(), syncTime + 1) : syncTime).toString())
-    RustDeskNapi.setOption(CLOUD_SYNC_LAST_SUCCESS_OPTION, Date.now().toString())
-    RustDeskNapi.setOption(CLOUD_SYNC_BASELINE_OPTION, '1')
-    let cloudRevision: number = AppStorage.get<number>('savedConnectionsCloudRevision') ?? 0
     CloudSyncService.lastRestoreOperationId = trace.id
-    trace.detail('restore_verified', { connections: newRows.length, groups: groupRows.length, cloudRevision: cloudRevision + 1 })
-    AppStorage.set<number>('savedConnectionsCloudRevision', cloudRevision + 1)
-    trace.counts('restore_verified', newRows.length, groupRows.length)
-    const result = CloudSyncService.result(true, true, false, false, newRows.length === 0 ?
-      `已恢复空连接备份（0 个连接、${groupRows.length} 个分组）` :
-      `已恢复 ${newRows.length} 个连接、${groupRows.length} 个分组`, Date.now())
+    try {
+      cloudRevision = AppStorage.get<number>('savedConnectionsCloudRevision') ?? 0
+      AppStorage.set<number>('savedConnectionsCloudRevision', cloudRevision + 1)
+    } catch (_error) { trace.detail('restore_ui_deferred', { verified: false }) }
+    trace.detail('restore_committed', { connections: newRows.length, groups: groupRows.length,
+      cloudRevision: cloudRevision + 1, verified: readbackVerified })
+    if (readbackVerified) {
+      trace.detail('restore_verified', { connections: newRows.length, groups: groupRows.length, cloudRevision: cloudRevision + 1 })
+      trace.counts('restore_verified', newRows.length, groupRows.length)
+    }
+    const message = newRows.length === 0 ? `已恢复空连接备份（0 个连接、${groupRows.length} 个分组）` :
+      `已恢复 ${newRows.length} 个连接、${groupRows.length} 个分组`
+    const result = CloudSyncService.result(true, true, false, false, message, Date.now())
     result.connectionCount = newRows.length
     result.groupCount = groupRows.length
+    const notices: string[] = []
+    if (plan.mode === 'preserve_empty') notices.push('备份无服务器配置，已保留本机设置')
+    else {
+      if (!plan.keyIncluded) notices.push('备份未包含服务器 Key，已保留本机 Key')
+      if (plan.emptyFieldsKept) notices.push('备份为空的服务器地址已保留本机值，需要清空请手动设置')
+    }
+    if (!mirrorReady) notices.push('恢复已提交，但本机备份副本未更新')
+    if (!readbackVerified) notices.push('恢复已提交但读取校验未完成，请勿重复恢复并导出诊断日志')
+    result.notices = notices
     return result
   }
 

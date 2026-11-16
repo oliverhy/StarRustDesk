@@ -130,6 +130,7 @@ async function main() {
     const method = dialog.slice(start, end);
     let nextRead = async () => ({ text: officialPadded, failed: false, code: 0 });
     const logs = [], toasts = [], applications = [];
+    let saveStatus = 0;
     class Trace {
       constructor(scope, action) { logs.push(scope + ':' + action); }
       event(step, fields = {}) { logs.push(step + ':' + JSON.stringify(fields)); }
@@ -146,19 +147,33 @@ async function main() {
     vm.runInNewContext(compile('class Harness {\n' + method + '\n}\nglobalThis.Harness = Harness;'), sandbox);
     const make = () => Object.assign(new sandbox.Harness(), {
       importing: false, scanning: false, importGeneration: 0, alive: true, uiLanguage: 'zh-Hans',
-      applyConfig: (...values) => applications.push(values)
+      idServer: 'previous.invalid', relayServer: 'previous-relay.invalid', apiServer: '', serverKey: 'previous-key',
+      applyConfig: (...values) => { applications.push(values); return saveStatus; }
     });
     let h = make();
     await h.importServerConfigFromClipboard();
     assert.equal(applications.length, 1);
     assert.deepEqual(applications[0], [expected.host, expected.relay, expected.api, expected.key]);
+    assert.equal(h.idServer, expected.host);
+    assert.equal(h.serverKey, expected.key);
+    assert.ok(toasts.includes('服务器配置已导入并生效'));
     assert.equal(h.importing, false);
+    saveStatus = -2;
+    h = make();
+    const successCount = toasts.filter(t => t === '服务器配置已导入并生效').length;
+    await h.importServerConfigFromClipboard();
+    assert.equal(h.idServer, 'previous.invalid');
+    assert.equal(h.serverKey, 'previous-key');
+    assert.equal(h.errorMsg, '服务器配置保存失败，原配置未更改，请重试');
+    assert.equal(toasts.filter(t => t === '服务器配置已导入并生效').length, successCount);
+    assert.equal(applications.length, 2);
+    saveStatus = 0;
     for (const result of [{ text: '', failed: false, code: 0 },
       { text: 'config=garbage', failed: false, code: 0 }, { text: '', failed: true, code: 201 }]) {
       nextRead = async () => result;
       h = make();
       await h.importServerConfigFromClipboard();
-      assert.equal(applications.length, 1, 'invalid or unreadable data must not change options');
+      assert.equal(applications.length, 2, 'invalid or unreadable data must not change options');
     }
     let resolveRead;
     nextRead = () => new Promise(resolve => { resolveRead = resolve; });
@@ -168,7 +183,7 @@ async function main() {
     h.importGeneration++;
     resolveRead({ text: officialPadded, failed: false, code: 0 });
     await pending;
-    assert.equal(applications.length, 1, 'closed dialog must not apply a delayed result');
+    assert.equal(applications.length, 2, 'closed dialog must not apply a delayed result');
     const output = logs.join('\n');
     assert.ok(!output.includes(expected.host) && !output.includes(expected.key) && !output.includes(officialPadded));
     assert.ok(toasts.includes('无法读取剪贴板，请检查系统权限后重试'));

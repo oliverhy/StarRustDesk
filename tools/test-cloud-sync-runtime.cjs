@@ -21,8 +21,8 @@ function environment(config = {}) {
   // below explicitly remove the baseline; do not model reinstall as deletion.
   const options = new Map(Object.entries({ 'cloud-sync-enabled': '1', 'diagnostic-log-enabled': '1',
     'cloud-sync-baseline-established': '1', ...config.options }))
-  const credentials = new Map()
-  let fd = 0, uuid = 0, lastSync = clock.now - 10000, cloudWrites = 0, starts = 0
+  const credentials = new Map(Object.entries(config.credentials ?? {}))
+  let fd = 0, uuid = 0, lastSync = clock.now - 10000, cloudWrites = 0, starts = 0, stagedAdds = 0
   const operations = []
   const states = { UPLOADING: 0, UPLOAD_FAILED: 1, DOWNLOADING: 2, DOWNLOAD_FAILED: 3, COMPLETED: 4, STOPPED: 5 }
   class FileSync {
@@ -100,12 +100,50 @@ function environment(config = {}) {
       TextEncoder: class { encodeInto(text) { return new TextEncoder().encode(text) } },
       TextDecoder: { create: () => ({ decodeToString: data => new TextDecoder().decode(data) }) } },
     OperationDiagnostic: { errorCode: e => Number.isFinite(Number(e?.code)) ? Number(e.code) : 0 },
-    RustDeskNapi: { getOption: key => options.get(key) ?? '', setOption: (key, value) => {
+    RustDeskNapi: { getOption: key => config.overrideRead?.(key, options) ?? options.get(key) ?? '', setOption: (key, value) => {
       if (config.ignoreWriteKey !== key) options.set(key, value)
     },
+      commitCloudRestore: (keys, expected, values) => {
+        config.beforeCommit?.(options, credentials)
+        if (keys.some((key, i) => (options.get(key) ?? '') !== expected[i])) return -3
+        if (config.commitFailure || keys.includes(config.ignoreWriteKey)) return -2
+        keys.forEach((key, i) => options.set(key, values[i])); config.afterCommit?.(options, credentials)
+        return config.undefinedCommitResult ? undefined : 0
+      },
       appendDiagnosticLog: (_, value) => { if (config.logError) throw new Error('logger'); logs.push(value) } },
-    CredentialStore: { load: async id => { if (config.credentialError) throw { code: 201 }; return credentials.has(id) ? credentials.get(id) : config.password ?? 'TEST_PASSWORD' },
-      save: async (id, value) => { if (!config.credentialSaveFailure) credentials.set(id, value) }, remove: async id => credentials.delete(id) },
+    asset: {
+      Tag: { ALIAS: 'alias', SECRET: 'secret', ACCESSIBILITY: 'accessibility', SYNC_TYPE: 'sync', RETURN_TYPE: 'return' },
+      Accessibility: { DEVICE_FIRST_UNLOCKED: 1 }, SyncType: { NEVER: 1 }, ReturnType: { ALL: 1 },
+      query: async query => {
+        if (config.credentialError) throw { code: 201 }
+        const alias = new TextDecoder().decode(query.get('alias')).replace(/^starrustdesk\.connection\./, '')
+        if (config.credentialReadErrorAt === alias) throw { code: 24000001 }
+        if (!credentials.has(alias)) {
+          if (alias === '__cloud_sync_master_password__' && config.password !== undefined && config.password !== '') {
+            return [new Map([['secret', new TextEncoder().encode(config.password)]])]
+          }
+          if (alias === '__cloud_sync_master_password__' && config.password === undefined) {
+            return [new Map([['secret', new TextEncoder().encode('TEST_PASSWORD')]])]
+          }
+          throw { code: 24000002 }
+        }
+        return [new Map([['secret', new TextEncoder().encode(credentials.get(alias))]])]
+      },
+      add: async attrs => {
+        const alias = new TextDecoder().decode(attrs.get('alias')).replace(/^starrustdesk\.connection\./, '')
+        config.onCredentialAdd?.(alias, options)
+        if (alias.startsWith('srd-cloud-')) stagedAdds++
+        if (config.credentialSaveFailure || (config.failStagedAdd && alias.startsWith('srd-cloud-')) ||
+          (config.failStagedAddAt && stagedAdds === config.failStagedAddAt)) throw { code: 24000001 }
+        if (credentials.has(alias)) throw { code: 24000003 }
+        credentials.set(alias, new TextDecoder().decode(attrs.get('secret')))
+      },
+      remove: async query => {
+        const alias = new TextDecoder().decode(query.get('alias')).replace(/^starrustdesk\.connection\./, '')
+        if (config.failStagedRemove && alias.startsWith('srd-cloud-')) throw { code: 24000001 }
+        credentials.delete(alias)
+      }
+    },
     ConnectionBackupService: {
       createPayload: (groups, connections, includesPasswords, serverConfig) => ({ groups, connections, includesPasswords, serverConfig, exportedAt: new Date(clock.now).toISOString() }),
       createPlainText: JSON.stringify, parsePlainText: JSON.parse, isEncrypted: () => config.encrypted === true,
@@ -115,13 +153,16 @@ function environment(config = {}) {
   })
   function load(code, label) {
     code = code.replace(/^import[\s\S]*?from\s+['"][^'"]+['"]\s*;?\r?\n/gm, '')
-    sandbox.exports = {}
-    vm.runInContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 } }).outputText, sandbox, { filename: label })
-    Object.assign(sandbox, sandbox.exports)
-    return sandbox.exports
+    const exported = {}
+    const compiled = ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 } }).outputText
+    const run = vm.runInContext(`(function(exports) {\n${compiled}\n})`, sandbox, { filename: label })
+    run(exported)
+    Object.assign(sandbox, exported)
+    return exported
   }
   load(source('service/CloudSyncTask.ets'), 'CloudSyncTask.ets')
   load(source('service/CloudSyncSnapshotStore.ets'), 'CloudSyncSnapshotStore.ets')
+  load(source('service/CredentialStore.ets'), 'CredentialStore.ets')
   load(source('service/CloudSyncService.ets'), 'CloudSyncService.ets')
   const context = { cloudFileDir: config.noCloudDir ? '' : '/cloud', filesDir: '/local' }
   const cloudPath = '/cloud/StarRustDesk/cloud-sync-v1.srdsync'
@@ -142,7 +183,7 @@ function environment(config = {}) {
   function wait() { return sandbox.CloudSyncTask.wait(new sandbox.CloudSyncTrace('sync'), () => config.cancelled === true) }
   const cloudSnapshots = () => [...files.keys()].filter(p => /\/cloud-sync-v2-.*\.srdsync$/.test(p)).sort()
   const latestContent = () => JSON.parse(JSON.parse(files.get(cloudSnapshots().at(-1))).content)
-  return { config, clock, logs, drivers, files, options, context, cloudPath, tick, wait, load, sandbox, handles, operations, cloudSnapshots, latestContent,
+  return { config, clock, logs, drivers, files, options, credentials, context, cloudPath, tick, wait, load, sandbox, handles, operations, cloudSnapshots, latestContent,
     service: sandbox.CloudSyncService, setLastSync: v => { lastSync = v }, stats: () => ({ cloudWrites, starts }) }
 }
 
@@ -511,6 +552,280 @@ async function confirmLatest(e) {
     for (let i = 0; i < 6; i++) await e.tick(100)
     return await p
   }
+  const localRow = (id = 'same', remoteId = '123456789') => ({ id, name: 'LOCAL_NAME', remoteId,
+    credentialAlias: id, performancePreset: 'smooth', groupId: '' })
+  const localEnvironment = extra => environment({ ...extra, credentials: { same: 'OLD_PASSWORD', ...extra?.credentials },
+    options: { 'saved-connections': JSON.stringify([localRow()]), 'saved-connection-groups': '[]',
+      'custom-rendezvous-server': 'old-server.invalid', 'relay-server': 'old-relay.invalid',
+      'api-server': 'old-api.invalid', key: 'OLD_SERVER_KEY', ...extra?.options } })
+  const restoreFixture = async (e, data) => {
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(data)))
+    const preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal(preview.success, true)
+    const result = await complete(e, e.service.restore(e.context, preview.preview.ticket))
+    return { preview: preview.preview, result }
+  }
+  await test('encrypted upload never publishes a password snapshot changed while it was read', async () => {
+    const e = localEnvironment({ options: { 'cloud-sync-include-secrets': '1' } }), store = e.sandbox.CredentialStore
+    const load = store.loadStrict.bind(store)
+    store.loadStrict = async id => {
+      const value = await load(id)
+      if (id === 'same') await store.save('same', 'USER_EDITED_PASSWORD')
+      return value
+    }
+    const result = await complete(e, e.service.upload(e.context))
+    assert.equal(result.success, false); assert.equal(result.code, -1004)
+    assert.equal(e.cloudSnapshots().length, 0)
+    store.loadStrict = load
+    assert.equal(await store.load('same'), 'USER_EDITED_PASSWORD')
+  })
+  await test('empty and absent server configs preserve all local fields and explain the decision', async () => {
+    for (const absent of [false, true]) {
+      const e = localEnvironment(), data = payload(e.clock.now - 1000, ['same'])
+      if (absent) delete data.serverConfig
+      else data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+      const { preview, result } = await restoreFixture(e, data)
+      assert.equal(preview.serverRestoreMode, 'preserve_empty')
+      assert.equal(result.success, true)
+      assert.ok(result.notices.includes('备份无服务器配置，已保留本机设置'))
+      for (const [key, value] of [['custom-rendezvous-server', 'old-server.invalid'], ['relay-server', 'old-relay.invalid'],
+        ['api-server', 'old-api.invalid'], ['key', 'OLD_SERVER_KEY']]) assert.equal(e.options.get(key), value)
+      assert.equal(await e.sandbox.CredentialStore.load('same'), 'OLD_PASSWORD')
+      assert.ok(e.logs.some(l => l.includes('stage=restore_server_plan ') && l.includes('server_will_restore=0')))
+    }
+  })
+  await test('unkeyed different server is skipped; same-server partial config and local key are restored safely', async () => {
+    const e = localEnvironment(), data = payload(e.clock.now - 1000, ['same'])
+    data.serverConfig = { idServer: 'new-server.invalid', relayServer: 'new-relay.invalid', apiServer: '', serverKey: '' }
+    let { preview, result } = await restoreFixture(e, data)
+    assert.equal(preview.serverRestoreMode, 'preserve_key_conflict'); assert.equal(result.success, false)
+    assert.equal(e.options.get('custom-rendezvous-server'), 'old-server.invalid')
+    assert.equal(e.options.get('relay-server'), 'old-relay.invalid'); assert.equal(e.options.get('key'), 'OLD_SERVER_KEY')
+    assert.match(result.message, /服务器与本机不同/)
+    const f = localEnvironment(), same = payload(f.clock.now - 1000, ['same'])
+    same.serverConfig = { idServer: 'old-server.invalid', relayServer: '', apiServer: 'new-api.invalid', serverKey: '' }
+    ;({ preview, result } = await restoreFixture(f, same))
+    assert.equal(preview.serverRestoreMode, 'restore'); assert.equal(preview.serverKeyIncluded, false)
+    assert.equal(f.options.get('relay-server'), 'old-relay.invalid'); assert.equal(f.options.get('api-server'), 'new-api.invalid')
+    assert.equal(f.options.get('key'), 'OLD_SERVER_KEY')
+    assert.equal(preview.serverEmptyFieldsKept, true)
+    assert.ok(result.notices.includes('备份为空的服务器地址已保留本机值，需要清空请手动设置'))
+    const g = localEnvironment({ options: { 'custom-rendezvous-server': '' } }), unknown = payload(g.clock.now - 1000, ['same'])
+    unknown.serverConfig = { idServer: '', relayServer: 'different-relay.invalid', apiServer: '', serverKey: '' }
+    ;({ preview, result } = await restoreFixture(g, unknown))
+    assert.equal(preview.serverRestoreMode, 'preserve_key_conflict'); assert.equal(result.success, false)
+    assert.equal(g.options.get('relay-server'), 'old-relay.invalid'); assert.equal(g.options.get('key'), 'OLD_SERVER_KEY')
+  })
+  await test('fresh devices can restore unkeyed server address without inventing a key', async () => {
+    const e = environment(), data = payload(e.clock.now - 1000, ['new'])
+    data.serverConfig = { idServer: 'new-server.invalid', relayServer: '', apiServer: '', serverKey: '' }
+    const { preview, result } = await restoreFixture(e, data)
+    assert.equal(preview.serverRestoreMode, 'restore'); assert.equal(result.success, true)
+    assert.equal(e.options.get('custom-rendezvous-server'), 'new-server.invalid')
+    assert.equal(e.options.get('key') ?? '', '')
+    assert.ok(result.notices.includes('备份未包含服务器 Key，已保留本机 Key'))
+  })
+  await test('encrypted restore commits new password aliases and server values together without changing old assets', async () => {
+    const e = localEnvironment({ encrypted: true }), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = 'NEW_PASSWORD'
+    data.serverConfig = { idServer: 'new-server.invalid', relayServer: 'new-relay.invalid', apiServer: 'new-api.invalid', serverKey: 'NEW_SERVER_KEY' }
+    const { preview, result } = await restoreFixture(e, data)
+    assert.equal(preview.serverKeyIncluded, true); assert.equal(result.success, true)
+    assert.equal(e.options.get('custom-rendezvous-server'), 'new-server.invalid')
+    assert.equal(e.options.get('relay-server'), 'new-relay.invalid'); assert.equal(e.options.get('key'), 'NEW_SERVER_KEY')
+    assert.equal(e.credentials.get('same'), 'OLD_PASSWORD', 'old asset is not modified')
+    assert.equal(await e.sandbox.CredentialStore.load('same'), 'NEW_PASSWORD')
+    const alias = JSON.parse(e.options.get('credential-aliases-v1'))[0]
+    assert.equal(alias.id, 'same'); assert.equal(e.credentials.get(alias.target), 'NEW_PASSWORD')
+    assert.equal((await e.service.buildPayload(true)).connections[0].password, 'NEW_PASSWORD')
+    assert.ok(e.logs.every(l => !/OLD_PASSWORD|NEW_PASSWORD|SERVER_KEY|server\.invalid/.test(l)))
+    const restarted = environment({ options: Object.fromEntries(e.options), credentials: Object.fromEntries(e.credentials) })
+    assert.equal(await restarted.sandbox.CredentialStore.load('same'), 'NEW_PASSWORD', 'alias survives process restart')
+    await restarted.sandbox.CredentialStore.save('same', 'EDITED_PASSWORD')
+    assert.equal(await restarted.sandbox.CredentialStore.load('same'), 'EDITED_PASSWORD')
+    assert.equal(restarted.credentials.get('same'), 'OLD_PASSWORD', 'edits use the committed alias')
+    await restarted.sandbox.CredentialStore.remove('same')
+    assert.equal(await restarted.sandbox.CredentialStore.load('same'), '')
+    assert.equal(restarted.credentials.get('same'), 'OLD_PASSWORD', 'clear does not revive the original asset')
+  })
+  await test('partial different-server backup never merges old fields with a new server or clears them', async () => {
+    const e = localEnvironment({ encrypted: true }), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = 'NEW_PASSWORD'
+    data.serverConfig = { idServer: 'new-server.invalid', relayServer: '', apiServer: 'new-api.invalid', serverKey: 'NEW_SERVER_KEY' }
+    const { preview, result } = await restoreFixture(e, data)
+    assert.equal(preview.serverRestoreMode, 'preserve_partial_conflict'); assert.equal(result.success, false)
+    assert.equal(e.options.get('custom-rendezvous-server'), 'old-server.invalid')
+    assert.equal(e.options.get('relay-server'), 'old-relay.invalid'); assert.equal(e.options.get('key'), 'OLD_SERVER_KEY')
+    assert.equal(await e.sandbox.CredentialStore.load('same'), 'OLD_PASSWORD')
+    assert.match(result.message, /服务器与本机不同/)
+  })
+  await test('encrypted empty password clears the active alias but does not delete the old asset', async () => {
+    const e = localEnvironment({ encrypted: true }), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = ''
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, true); assert.equal(await e.sandbox.CredentialStore.load('same'), '')
+    assert.equal(e.credentials.get('same'), 'OLD_PASSWORD')
+  })
+  await test('plain restore copies a matched peer password to a new alias without sharing assets', async () => {
+    const e = localEnvironment(), data = payload(e.clock.now - 1000, ['other-id'])
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, true)
+    assert.equal(await e.sandbox.CredentialStore.load('other-id'), 'OLD_PASSWORD')
+    assert.equal(e.credentials.get('same'), 'OLD_PASSWORD')
+    await e.sandbox.CredentialStore.save('other-id', 'EDITED_PASSWORD')
+    assert.equal(e.credentials.get('same'), 'OLD_PASSWORD')
+  })
+  await test('credential-stage failure and commit failure preserve original rows, server, passwords and mirror', async () => {
+    for (const failure of ['stage', 'commit']) {
+      const e = localEnvironment({ encrypted: true, ...(failure === 'stage' ? { failStagedAddAt: 2 } : { commitFailure: true }),
+        credentials: { second: 'OLD_SECOND' }, options: { 'saved-connections': JSON.stringify([localRow(), localRow('second')]) } })
+      const before = new Map(e.options), creds = new Map(e.credentials)
+      const mirror = '/local/cloud_backup/cloud-sync-v1.srdsync'
+      e.files.set(mirror, Buffer.from('OLD_MIRROR'))
+      const data = payload(e.clock.now - 1000, ['same', 'second'])
+      data.includesPasswords = true; data.connections[0].password = 'NEW_ONE'; data.connections[1].password = 'NEW_TWO'
+      data.serverConfig = { idServer: 'new-server.invalid', relayServer: 'new-relay.invalid', apiServer: 'new-api.invalid', serverKey: 'NEW_SERVER_KEY' }
+      const { result } = await restoreFixture(e, data)
+      assert.equal(result.success, false, failure); assert.equal(result.restored, false)
+      assert.deepEqual(e.options, before); assert.deepEqual(e.credentials, creds)
+      assert.equal(e.files.get(mirror).toString(), 'OLD_MIRROR')
+      assert.ok(e.logs.some(l => l.includes('stage=restore_aborted ')))
+      assert.ok(e.logs.some(l => l.includes(failure === 'stage' ? 'stage=restore_stage_credentials ' : 'stage=restore_commit_failed ')))
+      assert.ok(e.logs.every(l => !/OLD_PASSWORD|NEW_ONE|NEW_TWO|SERVER_KEY|server\.invalid/.test(l)))
+    }
+  })
+  await test('an edit before commit wins and staged passwords are discarded', async () => {
+    const e = localEnvironment({ encrypted: true, beforeCommit: options => options.set('key', 'USER_EDITED_KEY') })
+    const beforeRows = e.options.get('saved-connections'), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = 'NEW_PASSWORD'
+    data.serverConfig = { idServer: 'new-server.invalid', relayServer: 'new-relay.invalid', apiServer: 'new-api.invalid', serverKey: 'NEW_KEY' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, false); assert.equal(result.code, -1004)
+    assert.equal(e.options.get('key'), 'USER_EDITED_KEY'); assert.equal(e.options.get('saved-connections'), beforeRows)
+    assert.equal(await e.sandbox.CredentialStore.load('same'), 'OLD_PASSWORD')
+    assert.deepEqual([...e.credentials.keys()], ['same'])
+  })
+  await test('a concurrent password edit aborts the restore without undoing the user edit', async () => {
+    const e = localEnvironment({ encrypted: true }), store = e.sandbox.CredentialStore
+    const original = store.stageRestorePassword.bind(store)
+    store.stageRestorePassword = async (...args) => {
+      const staged = await original(...args); await store.save('same', 'USER_EDITED_PASSWORD'); return staged
+    }
+    const data = payload(e.clock.now - 1000, ['same']); data.includesPasswords = true; data.connections[0].password = 'CLOUD_PASSWORD'
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, false); assert.equal(result.code, -1004)
+    assert.equal(await store.load('same'), 'USER_EDITED_PASSWORD')
+    assert.equal(e.options.get('custom-rendezvous-server'), 'old-server.invalid')
+    assert.deepEqual([...e.credentials.keys()], ['same'])
+  })
+  await test('credential query failures and conflicting peer IDs abort before any local update', async () => {
+    for (const kind of ['query', 'identity', 'duplicate']) {
+      const e = localEnvironment({ encrypted: true, ...(kind === 'query' ? { credentialReadErrorAt: 'same' } : {}) })
+      const before = new Map(e.options), creds = new Map(e.credentials), data = payload(e.clock.now - 1000, ['same'])
+      data.includesPasswords = true; data.connections[0].password = 'NEW_PASSWORD'
+      data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+      if (kind === 'identity') data.connections[0].remoteId = '987654321'
+      if (kind === 'duplicate') data.connections.push({ ...data.connections[0] })
+      const { result } = await restoreFixture(e, data)
+      assert.equal(result.success, false, kind); assert.deepEqual(e.options, before); assert.deepEqual(e.credentials, creds)
+    }
+  })
+  await test('staged alias allocation never collides with a logical connection id', async () => {
+    const collision = '00000000-0000-4000-8000-000000000001', freshUuid = '00000000-0000-4000-8000-000000000002'
+    const e = environment({ uuids: [collision, freshUuid] })
+    const id = await e.sandbox.CredentialStore.stageRestorePassword('SYNTHETIC_PASSWORD', [`srd-cloud-${collision}`])
+    assert.equal(id, `srd-cloud-${freshUuid}`)
+    assert.equal(e.credentials.has(`srd-cloud-${collision}`), false)
+    await e.sandbox.CredentialStore.discardStaged(id)
+    assert.equal(e.credentials.size, 0)
+  })
+  await test('turning off sync during credential staging cancels without replacing existing data', async () => {
+    const e = localEnvironment({ encrypted: true }), store = e.sandbox.CredentialStore
+    const original = store.stageRestorePassword.bind(store)
+    store.stageRestorePassword = async (...args) => { const staged = await original(...args); e.service.setEnabled(false); return staged }
+    const data = payload(e.clock.now - 1000, ['same']); data.includesPasswords = true; data.connections[0].password = 'CLOUD_PASSWORD'
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const before = e.options.get('saved-connections'), { result } = await restoreFixture(e, data)
+    assert.equal(result.success, false); assert.equal(result.code, -1002)
+    assert.equal(e.options.get('cloud-sync-enabled'), '0'); assert.equal(e.options.get('saved-connections'), before)
+    assert.equal(await store.load('same'), 'OLD_PASSWORD'); assert.deepEqual([...e.credentials.keys()], ['same'])
+  })
+  await test('post-commit mirror failure reports committed restore and leaves the previous mirror intact', async () => {
+    const e = localEnvironment({ fileError: 'rename' }), data = payload(e.clock.now - 1000, ['same'])
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const mirror = '/local/cloud_backup/cloud-sync-v1.srdsync'
+    e.files.set(mirror, Buffer.from('OLD_MIRROR'))
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, true); assert.equal(result.restored, true)
+    assert.ok(result.notices.includes('恢复已提交，但本机备份副本未更新'))
+    assert.equal(e.files.get(mirror).toString(), 'OLD_MIRROR')
+    assert.ok(e.logs.some(l => l.includes('stage=restore_mirror_deferred ')))
+  })
+  await test('post-commit readback problem never claims the data was rolled back or verified', async () => {
+    const e = localEnvironment({ afterCommit: () => { e.config.overrideRead = key => key === 'saved-connections' ? 'unreadable' : undefined } })
+    const data = payload(e.clock.now - 1000, ['same'])
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, true); assert.equal(result.restored, true)
+    assert.ok(result.notices.includes('恢复已提交但读取校验未完成，请勿重复恢复并导出诊断日志'))
+    assert.ok(e.logs.some(l => l.includes('stage=restore_readback_deferred ')))
+    assert.ok(!e.logs.some(l => l.includes('stage=restore_verified ')))
+  })
+  await test('ambiguous bridge result recovers a visible commit or preserves staged assets when unreadable', async () => {
+    for (const unreadable of [false, true]) {
+      const e = localEnvironment({ encrypted: true }), data = payload(e.clock.now - 1000, ['same'])
+      data.includesPasswords = true; data.connections[0].password = 'CLOUD_PASSWORD'
+      data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+      e.config.afterCommit = () => {
+        if (unreadable) e.config.overrideRead = key => { if (key === 'credential-aliases-v1') throw new Error('read unavailable') }
+        throw new Error('bridge return unavailable')
+      }
+      const { result } = await restoreFixture(e, data)
+      const alias = JSON.parse(e.options.get('credential-aliases-v1'))[0].target
+      assert.equal(e.credentials.get(alias), 'CLOUD_PASSWORD', 'active staged credential must not be discarded')
+      assert.equal(e.credentials.get('same'), 'OLD_PASSWORD')
+      if (unreadable) {
+        assert.equal(result.success, false); assert.equal(result.code, -1012); assert.equal(result.pending, true)
+        assert.ok(e.logs.some(l => l.includes('stage=restore_discard_deferred ')))
+      } else {
+        assert.equal(result.success, true); assert.equal(result.restored, true)
+        assert.equal(await e.sandbox.CredentialStore.load('same'), 'CLOUD_PASSWORD')
+        assert.ok(e.logs.some(l => l.includes('stage=restore_commit_recovered ')))
+      }
+    }
+  })
+  await test('unknown pre-commit bridge failure keeps the old active data and defers uncertain cleanup', async () => {
+    const e = localEnvironment({ encrypted: true, beforeCommit: () => { throw new Error('bridge unavailable') } })
+    const before = new Map(e.options), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = 'CLOUD_PASSWORD'
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, false); assert.deepEqual(e.options, before)
+    assert.equal(await e.sandbox.CredentialStore.load('same'), 'OLD_PASSWORD')
+    assert.ok([...e.credentials.keys()].some(id => id.startsWith('srd-cloud-')))
+    assert.ok(e.logs.some(l => l.includes('stage=restore_discard_deferred ')))
+  })
+  await test('missing native return value is reconciled by readback without deleting committed credentials', async () => {
+    const e = localEnvironment({ encrypted: true, undefinedCommitResult: true }), data = payload(e.clock.now - 1000, ['same'])
+    data.includesPasswords = true; data.connections[0].password = 'CLOUD_PASSWORD'
+    data.serverConfig = { idServer: '', relayServer: '', apiServer: '', serverKey: '' }
+    const { result } = await restoreFixture(e, data)
+    assert.equal(result.success, true); assert.equal(result.restored, true)
+    assert.equal(await e.sandbox.CredentialStore.load('same'), 'CLOUD_PASSWORD')
+    assert.ok(e.logs.some(l => l.includes('stage=restore_commit_recovered ')))
+  })
+  await test('history cleanup failure after automatic restore reports a committed restore', async () => {
+    const e = fresh(), data = payload(e.clock.now - 1000, ['same'])
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(data)))
+    e.sandbox.CloudSyncSnapshotStore.retainLatest = async () => { throw { code: 13900020 } }
+    const result = await complete(e, e.service.syncNow(e.context))
+    assert.equal(result.success, true); assert.equal(result.restored, true); assert.equal(result.pending, true)
+    assert.ok(result.notices.includes('恢复已提交，但云端历史备份清理尚未完成'))
+    assert.equal(JSON.parse(e.options.get('saved-connections'))[0].id, 'same')
+  })
   await test('reinstall never publishes empty data, even after password/privacy preference edits', async () => {
     for (const changed of [false, true]) {
       const e = fresh()
@@ -696,6 +1011,33 @@ async function confirmLatest(e) {
     assert.ok(settings.includes('CloudSyncService.cancelRestorePreview()'))
     assert.ok(settings.includes('!lastResult.success || lastResult.restored'))
   })
+  await test('restore preview blocks conflicting servers and accurately describes empty fields', async () => {
+    const e = environment(), settings = source('pages/SettingsPage.ets')
+    const method = settings.slice(settings.indexOf('  showCloudRestorePreview('), settings.indexOf('  updateCloudSyncStatus()'))
+    const { Page } = e.load(`export class Page { ${method} }`, 'CloudPreviewUI')
+    let dialog, cancelled = 0, restores = 0
+    e.sandbox.AlertDialog = { show: value => { dialog = value } }
+    e.sandbox.DialogAlignment = { Center: 0 }; e.sandbox.RustDeskTheme = { ACCENT: '#000' }
+    e.sandbox.translate = value => value
+    const ui = new Page()
+    Object.assign(ui, { uiLanguage: 'zh-Hans', cancelCloudRestore() { cancelled++ }, syncCloudNow() { restores++ } })
+    const preview = { ticket: 'ticket', time: e.clock.now, connectionCount: 0, groupCount: 0,
+      serverConfigured: true, encrypted: true, serverKeyIncluded: true, serverEmptyFieldsKept: true,
+      serverRestoreMode: 'preserve_partial_conflict' }
+    ui.showCloudRestorePreview(preview)
+    assert.equal(dialog.secondaryButton.value, '知道了')
+    assert.ok(dialog.message.includes('本次不会恢复连接、分组或服务器配置'))
+    assert.ok(!dialog.message.includes('云端连接和分组将覆盖'))
+    assert.ok(!dialog.message.includes('恢复后本机连接列表将为空'))
+    dialog.secondaryButton.action(); assert.equal(cancelled, 1); assert.equal(restores, 0)
+    ui.showCloudRestorePreview({ ...preview, serverRestoreMode: 'restore', connectionCount: 1 })
+    assert.equal(dialog.secondaryButton.value, '恢复')
+    assert.ok(dialog.message.includes('备份为空的服务器地址将保留本机值'))
+    dialog.secondaryButton.action(); assert.equal(restores, 1)
+    ui.showCloudRestorePreview({ ...preview, serverRestoreMode: 'preserve_empty', connectionCount: 1 })
+    assert.equal(dialog.secondaryButton.value, '恢复')
+    assert.ok(dialog.message.includes('请核对恢复后的连接是否属于当前服务器'))
+  })
   await test('manual restore without confirmation ticket can only preview and never replaces local rows', async () => {
     const e = fresh()
     e.files.set(e.cloudPath, Buffer.from(JSON.stringify(payload(e.clock.now - 1000, ['old']))))
@@ -768,7 +1110,7 @@ async function confirmLatest(e) {
       assert.equal(result.restored, true); assert.equal(e.logs.length, 0)
     }
   })
-  await test('joined requests and refused readback writes have actionable operation and mismatch diagnostics', async () => {
+  await test('joined requests and refused atomic commits have actionable diagnostics', async () => {
     const e = environment()
     const a = e.service.syncNow(e.context), b = e.service.upload(e.context)
     assert.equal(a, b); await complete(e, a)
@@ -777,8 +1119,7 @@ async function confirmLatest(e) {
     f.files.set(f.cloudPath, Buffer.from(JSON.stringify(payload(f.clock.now - 1000, ['old']))))
     const result = await complete(f, f.service.syncNow(f.context))
     assert.equal(result.success, false); assert.equal(result.code, -1008)
-    assert.ok(f.logs.some(l => l.includes('stage=restore_verify_info ') && l.includes('expected_connections=1') &&
-      l.includes('actual_connections=-1') && l.includes('verified=0')))
+    assert.ok(f.logs.some(l => l.includes('stage=restore_commit_failed ') && l.includes('verified=0')))
   })
   await test('successful restore cleanup is not misreported as a user cancellation', async () => {
     const e = environment(), settings = source('pages/SettingsPage.ets')

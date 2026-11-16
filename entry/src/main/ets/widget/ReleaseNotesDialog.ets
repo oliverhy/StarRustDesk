@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.6'
-export const RELEASE_NOTES_BUILD: string = '2000006'
+export const RELEASE_NOTES_VERSION: string = '2.0.7'
+export const RELEASE_NOTES_BUILD: string = '2000007'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,13 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.7（2000007）· 云恢复与可信设备优化', [
+            '适配 RustDesk 1.5.3 可信设备 V2，保留旧版兼容；仅在远端身份和加密通道通过验证后使用可信设备凭证。',
+            '修复扫码或剪贴板导入服务器配置后，当前输入框没有立即刷新的问题；保存失败时明确提示。',
+            '优化华为云恢复：备份中的空服务器字段保留本机值，服务器信息不完整且跨网络时暂停恢复，避免错误覆盖。',
+            '云恢复先暂存并校验密码，再整体提交连接、分组和服务器设置；失败或检测到并发修改时保留原数据。',
+            '完善恢复提示和脱敏诊断，不记录密码、验证码、可信设备凭证或服务器密钥。'
+          ])
           this.buildSection('2.0.6（2000006）· 输入与连接优化', [
             '优化多行文字输入：检测到换行时先保留原文并提示手动处理，避免直接转换为远端回车。',
             '优化长文字和中文输入处理，保留手动回车与组合键；输入未能加入发送队列时提示处理。',

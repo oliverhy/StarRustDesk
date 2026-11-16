@@ -11,6 +11,12 @@ import { common } from '@kit.AbilityKit'
 import { BusinessError } from '@kit.BasicServicesKit'
 import { OperationDiagnostic } from '../service/OperationDiagnostic'
 
+interface ServerFieldBuilderParams {
+  label: string
+  value: string
+  onChange: (value: string) => void
+}
+
 @CustomDialog
 export struct ServerConfigDialog {
   @StorageLink('uiFontScale') uiFontScale: number = 1
@@ -45,7 +51,7 @@ export struct ServerConfigDialog {
       if (!this.alive || generation !== this.scanGeneration) { trace.end('stale'); return }
       trace.event('decode')
       const config = ServerConfigModel.decode(result.originalValue)
-      if (!config.isValidImport()) { trace.end('rejected'); this.errorMsg = '二维码不是有效的 RustDesk 服务器配置'; return }
+      if (!config.isValidImport()) { trace.end('rejected'); this.testResult = ''; this.errorMsg = '二维码不是有效的 RustDesk 服务器配置'; return }
       this.idServer = config.idServer
       this.relayServer = config.relayServer
       this.apiServer = config.apiServer
@@ -132,10 +138,10 @@ export struct ServerConfigDialog {
         .width('100%')
         .margin({ bottom: 4 })
 
-      this.buildField(translate('ID Server', this.uiLanguage), this.idServer, (v: string) => { this.idServer = v })
-      this.buildField(translate('Relay Server', this.uiLanguage), this.relayServer, (v: string) => { this.relayServer = v })
-      this.buildField(translate('API Server', this.uiLanguage), this.apiServer, (v: string) => { this.apiServer = v })
-      this.buildField(translate('Key', this.uiLanguage), this.serverKey, (v: string) => { this.serverKey = v })
+      this.buildField({ label: 'ID Server', value: this.idServer, onChange: (v: string) => { this.idServer = v } })
+      this.buildField({ label: 'Relay Server', value: this.relayServer, onChange: (v: string) => { this.relayServer = v } })
+      this.buildField({ label: 'API Server', value: this.apiServer, onChange: (v: string) => { this.apiServer = v } })
+      this.buildField({ label: 'Key', value: this.serverKey, onChange: (v: string) => { this.serverKey = v } })
 
       Text(translate('IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:db8::1]:21116', this.uiLanguage))
         .fontSize(11)
@@ -192,7 +198,7 @@ export struct ServerConfigDialog {
           .backgroundColor('#248A68')
           .borderRadius(6)
           .layoutWeight(1)
-          .enabled(!this.isTesting)
+          .enabled(!this.isTesting && !this.scanning && !this.importing)
           .onClick(() => {
             this.testConnection()
           })
@@ -203,7 +209,7 @@ export struct ServerConfigDialog {
           .backgroundColor(RustDeskTheme.ACCENT)
           .borderRadius(6)
           .layoutWeight(1)
-          .enabled(!this.isTesting)
+          .enabled(!this.isTesting && !this.scanning && !this.importing)
           .onClick(() => {
             this.saveConfig()
           })
@@ -239,28 +245,44 @@ export struct ServerConfigDialog {
   }
 
   saveConfig(): void {
+    if (this.scanning || this.importing || this.isTesting) return
     const idServer: string = this.idServer.trim()
     const relayServer: string = this.relayServer.trim()
     const apiServer: string = this.apiServer.trim()
     const serverKey: string = this.serverKey.trim()
-    this.applyConfig(idServer, relayServer, apiServer, serverKey)
+    if (this.applyConfig(idServer, relayServer, apiServer, serverKey) !== 0) {
+      this.testResult = ''
+      this.errorMsg = '服务器配置保存失败，原配置未更改，请重试'
+      return
+    }
     if (this.controller != undefined) {
       this.controller.close()
     }
   }
 
-  private applyConfig(idServer: string, relayServer: string, apiServer: string, serverKey: string): void {
-    RustDeskNapi.setOption('custom-rendezvous-server', idServer.trim())
-    RustDeskNapi.setOption('relay-server', relayServer.trim())
-    RustDeskNapi.setOption('api-server', apiServer.trim())
-    RustDeskNapi.setOption('key', serverKey.trim())
-    CloudSyncService.markLocalChanged()
-    let version: number = AppStorage.get<number>('serverConfigVersion') ?? 0
-    AppStorage.set<number>('serverConfigVersion', version + 1)
-    RustDeskNapi.appendDiagnosticLog('server-config',
-      `saved custom=${idServer.length > 0 || relayServer.length > 0 ? 1 : 0} ` +
-      `relay=${relayServer.length > 0 ? 1 : 0} api=${apiServer.length > 0 ? 1 : 0} ` +
-      `key=${serverKey.length > 0 ? 1 : 0}`)
+  private applyConfig(idServer: string, relayServer: string, apiServer: string, serverKey: string): number {
+    let result: number = -2
+    try {
+      result = RustDeskNapi.setServerConfig(idServer.trim(), relayServer.trim(), apiServer.trim(), serverKey.trim())
+    } catch (_error) {}
+    if (result !== 0) {
+      try { RustDeskNapi.appendDiagnosticLog('server-config', `save_failed result=${result}`) } catch (_error) {}
+      return result
+    }
+    // The native transaction is already committed. A nonessential UI/logging
+    // failure must not falsely report that the persisted settings were rolled back.
+    try { CloudSyncService.markLocalChanged() } catch (_error) {}
+    try {
+      let version: number = AppStorage.get<number>('serverConfigVersion') ?? 0
+      AppStorage.set<number>('serverConfigVersion', version + 1)
+    } catch (_error) {}
+    try {
+      RustDeskNapi.appendDiagnosticLog('server-config',
+        `saved custom=${idServer.length > 0 || relayServer.length > 0 ? 1 : 0} ` +
+        `relay=${relayServer.length > 0 ? 1 : 0} api=${apiServer.length > 0 ? 1 : 0} ` +
+        `key=${serverKey.length > 0 ? 1 : 0}`)
+    } catch (_error) {}
+    return 0
   }
 
   async exportServerConfigToClipboard(): Promise<void> {
@@ -307,15 +329,23 @@ export struct ServerConfigDialog {
       }
       // Preserve the existing one-tap import behaviour, but never apply an
       // unreadable or invalid configuration to the current network.
-      this.applyConfig(config.idServer, config.relayServer, config.apiServer, config.serverKey)
+      const saved: number = this.applyConfig(config.idServer, config.relayServer, config.apiServer, config.serverKey)
+      if (saved !== 0) {
+        trace.end('failed', { result: saved })
+        this.testResult = ''
+        this.errorMsg = '服务器配置保存失败，原配置未更改，请重试'
+        promptAction.showToast({ message: translate(this.errorMsg, this.uiLanguage) })
+        return
+      }
       this.idServer = config.idServer
       this.relayServer = config.relayServer
       this.apiServer = config.apiServer
       this.serverKey = config.serverKey
       this.errorMsg = ''
+      this.testResult = ''
       trace.end('completed')
-      RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_imported')
-      promptAction.showToast({ message: translate('服务器配置已导入并生效', this.uiLanguage) })
+      try { RustDeskNapi.appendDiagnosticLog('server-config', 'official_compatible_config_imported') } catch (_error) {}
+      try { promptAction.showToast({ message: translate('服务器配置已导入并生效', this.uiLanguage) }) } catch (_error) {}
     } catch (error) {
       trace.fail(error as Object)
       if (this.alive && generation === this.importGeneration) {
@@ -327,13 +357,13 @@ export struct ServerConfigDialog {
   }
 
   @Builder
-  buildField(label: string, value: string, onChange: (v: string) => void) {
+  buildField($$: ServerFieldBuilderParams) {
     Column() {
-      Text(translate(label, this.uiLanguage))
+      Text(translate($$.label, this.uiLanguage))
         .fontSize(12)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
         .width('100%')
-      TextInput({ placeholder: translate(label, this.uiLanguage), text: value })
+      TextInput({ placeholder: translate($$.label, this.uiLanguage), text: $$.value })
         .height(readableInputHeight(44, this.uiFontScale, 18))
         .fontSize(14)
         .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
@@ -341,7 +371,7 @@ export struct ServerConfigDialog {
         .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
         .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER, radius: 7 })
         .padding({ left: 12, right: 12 })
-        .onChange((v: string) => { onChange(v) })
+        .onChange((v: string) => { $$.onChange(v) })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
