@@ -19,7 +19,8 @@ const names = ['isPcDevice', 'isHandheldDevice', 'isHandheldLandscape', 'handleH
   'getRemoteToolbarHeight', 'getRemoteToolbarCollapsedSize', 'getRemoteToolbarCurrentWidth',
   'getRemoteToolbarCurrentHeight', 'getRemoteToolbarBaseX', 'getRemoteToolbarBaseY',
   'clampRemoteToolbarOffsetX', 'clampRemoteToolbarOffsetY', 'getRemoteToolbarX', 'getRemoteToolbarY',
-  'beginRemoteToolbarDrag', 'updateRemoteToolbarDrag', 'finishRemoteToolbarDrag',
+  'onRemoteToolbarHandleClick', 'undockRemoteToolbar', 'beginRemoteToolbarDrag',
+  'updateRemoteToolbarDrag', 'finishRemoteToolbarDrag', 'cancelRemoteToolbarDrag',
   'loadRemoteToolbarPosition', 'setFloatingPanelCollapsed', 'cancelPcToolbarAutoCollapse',
   'schedulePcToolbarAutoCollapse', 'togglePcToolbarPinned', 'isControlMenuBesideToolbar'];
 const pageJavaScript = ts.transpile('class Page {' + names.map(method).join('\n') + '} exports.Page = Page;');
@@ -46,7 +47,7 @@ function page(type = 'phone', extra = {}, options = new Map()) {
     peerPreferences,
     pageWidth: 360, pageHeight: 800, uiFontScale: 1, isFullScreen: false, immersiveWindow: false,
     remoteToolbarCollapsed: false, remoteToolbarOffsetX: 0, remoteToolbarOffsetY: 0,
-    remoteToolbarPositionX: -1, remoteToolbarPositionY: -1, remoteToolbarDragging: false,
+    remoteToolbarPositionX: -1, remoteToolbarPositionY: -1, remoteToolbarDockEdge: '', remoteToolbarDragging: false,
     remotePageVisible: true, isLeavingAfterDisconnect: false, desktopWindowActive: true,
     pointerOverRemoteViewport: true, pcToolbarPinned: false, pcToolbarCollapseTimer: -1,
     controlMenu: '', leftButtonHeld: false, rightButtonHeld: false, localPointerGestureActive: false,
@@ -127,6 +128,113 @@ for (const raw of ['', 'null', '[]', 'false', '{', '{"x":0.5}', '{"x":"0.5","y":
   assert.doesNotThrow(() => h.p.loadRemoteToolbarPosition());
   assert.equal(h.p.remoteToolbarPositionX, -1); bounded(h.p);
 }
+// Only an explicit collapsed-button drag to a side becomes an edge tab. Old
+// saved positions and center releases stay unchanged, and canceled drags do
+// not overwrite the user's prior state.
+for (const type of ['phone', 'tablet', 'pc']) {
+  for (const [w, height] of [[360, 800], [800, 360], [1024, 768], [1920, 1080]]) {
+    for (const edge of ['left', 'right']) {
+      const h = page(type, { pageWidth: w, pageHeight: height, remoteToolbarCollapsed: true,
+        remoteToolbarPositionX: 0.5, remoteToolbarPositionY: 0.4 });
+      h.p.beginRemoteToolbarDrag();
+      h.p.updateRemoteToolbarDrag(edge === 'left' ? -w : w, 0);
+      const centerBeforeDock = h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2;
+      h.p.finishRemoteToolbarDrag();
+      assert.equal(h.p.remoteToolbarDockEdge, edge);
+      assert.equal(h.p.getRemoteToolbarCurrentWidth(), 40);
+      assert.equal(h.p.getRemoteToolbarCurrentHeight(), 110);
+      near(h.p.getRemoteToolbarX(), edge === 'left' ? 0 : w - 40);
+      near(h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2, centerBeforeDock);
+      assert(h.p.getRemoteToolbarY() >= 8 && h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() <= height - 8);
+      const saved = JSON.parse(JSON.parse(h.options.get('test-captured-peer-settings'))['remote-toolbar-position-v1']);
+      assert.equal(saved.dock, undefined); assert.equal(saved.x, edge === 'left' ? 0 : 1);
+      // An explicitly docked tab expands, then returns to that same tab when
+      // folded again, until the user drags it somewhere else.
+      h.p.setFloatingPanelCollapsed(false, false);
+      assert.equal(h.p.remoteToolbarDockEdge, edge); bounded(h.p);
+      h.p.setFloatingPanelCollapsed(false, true);
+      assert.equal(h.p.remoteToolbarDockEdge, edge);
+      near(h.p.getRemoteToolbarX(), edge === 'left' ? 0 : w - 40);
+      const restored = page(type, { pageWidth: height, pageHeight: w, remoteToolbarCollapsed: true }, h.options).p;
+      restored.loadRemoteToolbarPosition();
+      assert.equal(restored.remoteToolbarDockEdge, '');
+      assert.equal(restored.getRemoteToolbarCurrentWidth(), 56);
+      near(restored.getRemoteToolbarX(), edge === 'left' ? 8 : height - 56 - 8);
+      const before = [h.p.remoteToolbarPositionX, h.p.remoteToolbarPositionY, h.p.remoteToolbarDockEdge];
+      const writes = h.writes.length;
+      const centerBeforeDrag = h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2;
+      h.p.beginRemoteToolbarDrag();
+      near(h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2, centerBeforeDrag);
+      h.p.updateRemoteToolbarDrag(edge === 'left' ? 120 : -120, 20);
+      h.p.cancelRemoteToolbarDrag();
+      assert.deepEqual([h.p.remoteToolbarPositionX, h.p.remoteToolbarPositionY, h.p.remoteToolbarDockEdge], before);
+      assert.equal(h.writes.length, writes);
+      h.p.beginRemoteToolbarDrag(); h.p.updateRemoteToolbarDrag(edge === 'left' ? w / 2 : -w / 2, 0);
+      h.p.finishRemoteToolbarDrag();
+      assert.equal(h.p.remoteToolbarDockEdge, ''); assert.equal(h.p.getRemoteToolbarCurrentWidth(), 56);
+      bounded(h.p);
+    }
+  }
+}
+for (const type of ['phone', 'tablet', 'pc']) {
+  for (const [w, height] of [[360, 800], [800, 360], [1024, 768]]) {
+    for (const edge of ['left', 'right']) {
+      const h = page(type, { pageWidth: w, pageHeight: height, remoteToolbarCollapsed: true,
+        remoteToolbarPositionX: 0.5, remoteToolbarPositionY: 0.5 });
+      h.p.beginRemoteToolbarDrag(); h.p.updateRemoteToolbarDrag(edge === 'left' ? -w : w, 0);
+      h.p.finishRemoteToolbarDrag();
+      assert.equal(h.p.remoteToolbarDockEdge, edge);
+      const centerBeforeTap = h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2;
+      const writesBeforeTap = h.writes.length;
+      h.p.onRemoteToolbarHandleClick();
+      assert.equal(h.p.remoteToolbarCollapsed, true, 'first tap must not expand the toolbar');
+      assert.equal(h.p.remoteToolbarDockEdge, '', 'first tap undocks the handle');
+      assert.equal(h.p.getRemoteToolbarCurrentWidth(), 56);
+      near(h.p.getRemoteToolbarX(), edge === 'left' ? 8 : w - 56 - 8);
+      near(h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2, centerBeforeTap);
+      assert.equal(h.writes.length, writesBeforeTap + 1, 'undock persists the chosen position once');
+      h.p.onRemoteToolbarHandleClick();
+      assert.equal(h.p.remoteToolbarCollapsed, false, 'second tap expands the toolbar');
+      h.p.setFloatingPanelCollapsed(false, true);
+      assert.equal(h.p.remoteToolbarDockEdge, '', 'folding does not redock after an explicit undock');
+      assert.equal(h.p.getRemoteToolbarCurrentWidth(), 56);
+      h.p.beginRemoteToolbarDrag(); h.p.updateRemoteToolbarDrag(edge === 'left' ? -w : w, 0);
+      h.p.finishRemoteToolbarDrag(); assert.equal(h.p.remoteToolbarDockEdge, edge);
+      checks++;
+    }
+  }
+}
+for (const raw of ['{"x":0,"y":0.4}', '{"x":0,"y":0.4,"dock":"left"}',
+  '{"x":1,"y":0.4,"dock":"right"}', '{"x":0.5,"y":0.4,"dock":"left"}',
+  '{"x":1,"y":0.4,"dock":"bad"}', '{"x":1,"y":0.4,"dock":{}}']) {
+  const decoded = model.exports.decodeRemoteToolbarPosition(raw);
+  assert(decoded && decoded.dock === undefined, 'legacy or invalid docking metadata must not move the control');
+}
+const centered = page('phone', { remoteToolbarCollapsed: true, remoteToolbarPositionX: 0.5, remoteToolbarPositionY: 0.5 });
+centered.p.beginRemoteToolbarDrag(); centered.p.updateRemoteToolbarDrag(20, 0); centered.p.finishRemoteToolbarDrag();
+assert.equal(centered.p.remoteToolbarDockEdge, '');
+const busyTap = page('phone', { remoteToolbarCollapsed: true, remoteToolbarDockEdge: 'left',
+  remoteToolbarDragging: true, remoteToolbarPositionX: 0, remoteToolbarPositionY: 0.5 });
+busyTap.p.onRemoteToolbarHandleClick();
+assert.equal(busyTap.p.remoteToolbarDockEdge, 'left'); assert.equal(busyTap.p.remoteToolbarCollapsed, true);
+const failedSave = page('phone', { remoteToolbarCollapsed: true, remoteToolbarDockEdge: 'right',
+  remoteToolbarPositionX: 1, remoteToolbarPositionY: 0.5 });
+failedSave.context.RustDeskNapi.setOption = () => { throw Error('storage unavailable'); };
+assert.doesNotThrow(() => failedSave.p.onRemoteToolbarHandleClick());
+assert.equal(failedSave.p.remoteToolbarDockEdge, ''); assert.equal(failedSave.p.remoteToolbarCollapsed, true);
+failedSave.p.onRemoteToolbarHandleClick(); assert.equal(failedSave.p.remoteToolbarCollapsed, false);
+const neverDragged = page('phone', { remoteToolbarCollapsed: false, remoteToolbarDockEdge: '',
+  remoteToolbarPositionX: 1, remoteToolbarPositionY: 0.5 });
+neverDragged.p.setFloatingPanelCollapsed(false, true);
+assert.equal(neverDragged.p.remoteToolbarDockEdge, '');
+assert.equal(neverDragged.p.getRemoteToolbarCurrentWidth(), 56, 'collapsing without a drag never docks');
+near(neverDragged.p.getRemoteToolbarX(), neverDragged.p.pageWidth - 56 - 8);
+const keyboardOnly = page('phone', { remoteToolbarCollapsed: true, remoteToolbarDockEdge: 'left',
+  remoteToolbarPositionX: 0, remoteToolbarPositionY: 0.5 });
+keyboardOnly.p.setFloatingPanelCollapsed(true, false);
+assert.equal(keyboardOnly.p.remoteToolbarDockEdge, 'left', 'keyboard controls do not change toolbar docking');
+assert.equal(model.exports.toolbarDockEdge(NaN, 360, 56), '');
+assert.equal(model.exports.toolbarDockEdge(150, 360, 56), '');
 const unavailable = page('pc');
 unavailable.context.RustDeskNapi.getOption = () => { throw Error('storage unavailable'); };
 assert.doesNotThrow(() => unavailable.p.loadRemoteToolbarPosition());
@@ -158,6 +266,10 @@ assert(builder.includes('buildUnifiedControlItems(false)') && builder.includes('
 assert(!builder.includes('buildUnifiedControlItems(true)'));
 assert(builder.includes(".id('remoteToolbarPinButton')"));
 assert(builder.includes('finishRemoteToolbarDrag()'));
+assert(builder.includes('cancelRemoteToolbarDrag()') && builder.includes(".width('100%')"));
+assert(builder.includes('this.onRemoteToolbarHandleClick()'));
+assert(builder.includes('.width(10)') && builder.includes(".backgroundColor('#B3A6A8AC')"));
+assert(builder.includes('.accessibilityText(') && builder.includes('HitTestMode.None'));
 assert(method('buildFloatingDragHandle').includes('finishRemoteToolbarDrag()'));
 assert(method('aboutToDisappear').includes('this.remoteToolbarDragging = false'));
 assert(source.includes('this.buildPcFullscreenExitButton()'));

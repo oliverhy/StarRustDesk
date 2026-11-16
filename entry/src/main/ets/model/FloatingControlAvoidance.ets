@@ -13,13 +13,13 @@ function overlaps(a: FloatingControlRect, b: FloatingControlRect, gap: number): 
 }
 
 function candidateCoordinates(desired: number, limit: number, size: number,
-  obstacles: FloatingControlRect[], horizontal: boolean): number[] {
+  obstacles: FloatingControlRect[], horizontal: boolean, minimum: number = 8): number[] {
   const values: number[] = [];
   const add = (value: number): void => {
-    const clamped: number = Math.max(8, Math.min(Math.max(8, limit), value));
+    const clamped: number = Math.max(minimum, Math.min(Math.max(minimum, limit), value));
     if (!values.some((item: number): boolean => Math.abs(item - clamped) < 0.01)) values.push(clamped);
   };
-  add(desired); add(8); add(limit);
+  add(desired); add(minimum); add(limit);
   for (const rect of obstacles) {
     const start: number = horizontal ? rect.x : rect.y;
     const length: number = horizontal ? rect.width : rect.height;
@@ -30,9 +30,10 @@ function candidateCoordinates(desired: number, limit: number, size: number,
 }
 
 function closestAvailable(original: FloatingControlRect, width: number, height: number,
-  obstacles: FloatingControlRect[]): FloatingControlRect | undefined {
-  if (original.width > width - 16 || original.height > height - 16) return undefined;
-  const xs: number[] = candidateCoordinates(original.x, width - original.width - 8, original.width, obstacles, true);
+  obstacles: FloatingControlRect[], horizontalMargin: number = 8): FloatingControlRect | undefined {
+  if (original.width > width - horizontalMargin * 2 || original.height > height - 16) return undefined;
+  const xs: number[] = candidateCoordinates(original.x, width - original.width - horizontalMargin,
+    original.width, obstacles, true, horizontalMargin);
   const ys: number[] = candidateCoordinates(original.y, height - original.height - 8, original.height, obstacles, false);
   let best: FloatingControlRect | undefined;
   let bestDistance: number = Number.POSITIVE_INFINITY;
@@ -54,8 +55,10 @@ function closestAvailable(original: FloatingControlRect, width: number, height: 
 // Try each ordering so one floating control does not needlessly block the
 // other. If neither fits, the caller hides the gamepad rather than covering it.
 export function avoidGamepadFloatingControls(width: number, height: number, toolbar: FloatingControlRect,
-  keyboard: FloatingControlRect, hasKeyboard: boolean, obstacles: FloatingControlRect[]): FloatingControlPlan {
-  const toolbarFirst: FloatingControlRect | undefined = closestAvailable(toolbar, width, height, obstacles);
+  keyboard: FloatingControlRect, hasKeyboard: boolean, obstacles: FloatingControlRect[],
+  toolbarAtScreenEdge: boolean = false): FloatingControlPlan {
+  const margin: number = toolbarAtScreenEdge ? 0 : 8;
+  const toolbarFirst: FloatingControlRect | undefined = closestAvailable(toolbar, width, height, obstacles, margin);
   if (toolbarFirst) {
     const keyboardSecond: FloatingControlRect | undefined = hasKeyboard ?
       closestAvailable(keyboard, width, height, obstacles.concat([toolbarFirst])) : keyboard;
@@ -65,7 +68,7 @@ export function avoidGamepadFloatingControls(width: number, height: number, tool
     const keyboardFirst: FloatingControlRect | undefined = closestAvailable(keyboard, width, height, obstacles);
     if (keyboardFirst) {
       const toolbarSecond: FloatingControlRect | undefined =
-        closestAvailable(toolbar, width, height, obstacles.concat([keyboardFirst]));
+        closestAvailable(toolbar, width, height, obstacles.concat([keyboardFirst]), margin);
       if (toolbarSecond) return { fits: true, toolbar: toolbarSecond, keyboard: keyboardFirst };
     }
   }

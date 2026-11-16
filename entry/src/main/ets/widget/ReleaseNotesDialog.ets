@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.7'
-export const RELEASE_NOTES_BUILD: string = '2000007'
+export const RELEASE_NOTES_VERSION: string = '2.0.8'
+export const RELEASE_NOTES_BUILD: string = '2000008'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.8（2000008）· 悬浮控制体验优化', [
+            '优化“控”悬浮按钮：折叠后可拖动到左右边缘，吸附时显示低调的贴边细条。',
+            '吸附细条点一次恢复“控”，再点一次展开控制栏；保留拖动位置并适配不同屏幕尺寸。',
+            '安卓被控端的“手机操作”显示状态按远端设备保存，重连后恢复；手动关闭后保持关闭。',
+            '完善手机操作状态保存失败提示和脱敏诊断，恢复悬浮条时不会自动发送远端按键。'
+          ])
           this.buildSection('2.0.7（2000007）· 云恢复与可信设备优化', [
             '适配 RustDesk 1.5.3 可信设备 V2，保留旧版兼容；仅在远端身份和加密通道通过验证后使用可信设备凭证。',
             '修复扫码或剪贴板导入服务器配置后，当前输入框没有立即刷新的问题；保存失败时明确提示。',

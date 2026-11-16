@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.yinhe.starrustdesk",
     "vendor": "example",
-    "versionCode": 2000007,
-    "versionName": "2.0.7",
+    "versionCode": 2000008,
+    "versionName": "2.0.8",
     "buildVersion": "1",
     "cloudFileSyncEnabled": true,
     "icon": "$media:starrustdesk_app_icon_1024",

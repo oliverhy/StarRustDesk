@@ -2,6 +2,11 @@
 已信任此设备	This device is trusted
 登录成功，但未能保存信任，下次仍需验证码	Signed in, but trust could not be saved. A verification code will still be required next time.
 系统安全存储不可用，暂无法保存可信设备	Secure storage is unavailable; this device cannot be trusted right now.
+2.0.8（2000008）· 悬浮控制体验优化	2.0.8 (2000008) · Floating controls improvements
+优化“控”悬浮按钮：折叠后可拖动到左右边缘，吸附时显示低调的贴边细条。	Improved the floating Controls button: drag it to either edge after collapsing it to show a subtle edge tab.
+吸附细条点一次恢复“控”，再点一次展开控制栏；保留拖动位置并适配不同屏幕尺寸。	Tap the docked tab once to restore Controls, then tap again to expand the toolbar. Position is remembered and adapts to different screen sizes.
+安卓被控端的“手机操作”显示状态按远端设备保存，重连后恢复；手动关闭后保持关闭。	The Phone controls visibility setting is saved per Android remote device and restored on reconnection; it stays closed after being manually closed.
+完善手机操作状态保存失败提示和脱敏诊断，恢复悬浮条时不会自动发送远端按键。	Improved save-failure notices and redacted diagnostics for Phone controls. Restoring the floating bar does not send remote key presses.
 2.0.7（2000007）· 云恢复与可信设备优化	2.0.7 (2000007) · Cloud restore and trusted device improvements
 适配 RustDesk 1.5.3 可信设备 V2，保留旧版兼容；仅在远端身份和加密通道通过验证后使用可信设备凭证。	Added RustDesk 1.5.3 trusted-device V2 compatibility while retaining older peers. Trust credentials are used only after peer identity and the encrypted channel are verified.
 修复扫码或剪贴板导入服务器配置后，当前输入框没有立即刷新的问题；保存失败时明确提示。	Fixed server configuration fields not refreshing immediately after QR or clipboard import, and clearly report save failures.
@@ -211,6 +216,7 @@ UDP 延迟持续过高，正在尝试 TCP 或中继	UDP latency stayed high; try
 存在重复按键映射，请确认是否符合游戏操作习惯。	Several controls share a mapping; confirm this suits the game.
 手柄设置保存失败，请重试	Could not save controller settings. Please try again.
 手柄模式已切换，但设置未保存	Controller mode changed, but the setting could not be saved.
+手机操作状态已切换，但设置未保存	Phone controls changed, but the setting could not be saved.
 当前系统无法使用实体手柄，虚拟手柄仍可使用	The physical controller is unavailable on this system. The virtual controller is still available.
 无法打开手柄设置，请重试	Could not open controller settings. Please try again.
 窗口过小，请放大窗口以使用虚拟手柄	Enlarge the window to use the virtual controller.

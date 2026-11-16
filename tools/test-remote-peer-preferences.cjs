@@ -197,7 +197,8 @@ const method = name => {
 function pageHarness(h, server, id, pc = false) {
   const names = ['inputModeOptionKey', 'compatibilityOptionKey', 'loadInputMode', 'loadLocalCursorPreference',
     'loadKeyboardSubmitPreference', 'setKeyboardSubmitPreference',
-    'loadEdgeAutoPanPreference', 'loadVirtualMousePreference', 'loadToolbarOrderPreferences', 'readToolbarOrder',
+    'loadEdgeAutoPanPreference', 'loadVirtualMousePreference', 'loadMobileActionsPreference',
+    'syncMobileActionsForPeer', 'setMobileActionsVisible', 'loadToolbarOrderPreferences', 'readToolbarOrder',
     'loadInputCompatibility', 'loadRemoteToolbarPosition', 'loadPeerToolbarState', 'resetRemoteViewportForSession',
     'resetViewportTransform', 'setInputMode', 'setLocalCursorPreference', 'saveToolbarOrder'];
   const constants = ['CONTROL_TOOLBAR_DEFAULT_ORDER', 'KEYBOARD_TOOLBAR_DEFAULT_ORDER', 'KEYBOARD_MORE_DEFAULT_ORDER']
@@ -206,7 +207,8 @@ function pageHarness(h, server, id, pc = false) {
   vm.runInNewContext(ts.transpile(constants + '\nclass Page {' + names.map(method).join('\n') + '} exports.Page = Page;'), h.context);
   return Object.assign(new h.context.exports.Page(), {
     peerPreferences: h.make(server, id), peerPreferenceServer: server, connectedPeerId: id,
-    remotePageVisible: true, connectionStatus: 2, keyboardHideOnSubmit: false, showFileToast() {},
+    remotePageVisible: true, connectionStatus: 2, fileOnly: false, isPeerAndroid: false,
+    showMobileActions: false, mobileActionsPreferred: false, keyboardHideOnSubmit: false, showFileToast() {},
     isPcDevice: () => pc, isHandheldLandscape: () => false, inputMode: 'mouse', relativeMouseEnabled: false,
     cancelActiveTouchGesture() {}, stopEdgeAutoPan() {}, ensurePointerInitialized() {}, updateSystemPointerVisibility() {},
     applyInputCompatibility() {}, startKeyboardLayout() {}, discardViewportPanFrame() {}, syncDesktopViewScale() {},
@@ -264,6 +266,68 @@ test('production page restores isolated input, toolbar order/state/positions and
     assert.equal(b.remoteToolbarPositionX, -1); assert.equal(b.remoteToolbarCollapsed, false); assert.equal(b.zoomScale, 1);
   }
   assert.equal(h.disk.get('show-local-cursor'), '1');
+});
+test('legacy edge docking does not auto-restore, while positions remain per remote', () => {
+  const h = harness();
+  const a = pageHarness(h, 'srv', 'A');
+  const b = pageHarness(h, 'srv', 'B');
+  assert(a.peerPreferences.set('remote-toolbar-position-v1', '{"x":0,"y":0.4,"dock":"left"}'));
+  assert(b.peerPreferences.set('remote-toolbar-position-v1', '{"x":1,"y":0.6}'));
+  a.peerPreferences.flush(); b.peerPreferences.flush();
+  const ar = pageHarness(h, 'srv', 'A'); ar.loadRemoteToolbarPosition();
+  const br = pageHarness(h, 'srv', 'B'); br.loadRemoteToolbarPosition();
+  assert.equal(ar.remoteToolbarDockEdge, ''); assert.equal(ar.remoteToolbarPositionX, 0);
+  assert.equal(br.remoteToolbarDockEdge, ''); assert.equal(br.remoteToolbarPositionX, 1);
+  const other = pageHarness(h, 'other', 'A'); other.loadRemoteToolbarPosition();
+  assert.equal(other.remoteToolbarDockEdge, ''); assert.equal(other.remoteToolbarPositionX, -1);
+});
+test('mobile controls visibility restores only for Android and remains scoped to the same peer', () => {
+  const h = harness(), a = pageHarness(h, 'srv', 'A');
+  a.loadMobileActionsPreference();
+  assert.equal(a.mobileActionsPreferred, false); assert.equal(a.showMobileActions, false);
+  a.setMobileActionsVisible(true);
+  assert.equal(a.showMobileActions, false, 'non-Android peers cannot enable the Android actions bar');
+  assert.equal(a.peerPreferences.get('show-mobile-actions'), '');
+  a.syncMobileActionsForPeer(true);
+  a.setMobileActionsVisible(true); assert.equal(a.showMobileActions, true);
+  assert.equal(a.peerPreferences.get('show-mobile-actions'), '1');
+  a.peerPreferences.dispose();
+  const restored = pageHarness(h, 'srv', 'A'); restored.loadMobileActionsPreference();
+  assert.equal(restored.mobileActionsPreferred, true);
+  assert.equal(restored.showMobileActions, false, 'never show before peer platform is known');
+  restored.syncMobileActionsForPeer(false); assert.equal(restored.showMobileActions, false);
+  restored.connectionStatus = 0; restored.syncMobileActionsForPeer(true);
+  assert.equal(restored.showMobileActions, false, 'disconnect hides without modifying preference');
+  assert.equal(restored.peerPreferences.get('show-mobile-actions'), '1');
+  restored.connectionStatus = 2; restored.syncMobileActionsForPeer(true);
+  assert.equal(restored.showMobileActions, true, 'reconnect restores visibility');
+  restored.fileOnly = true; restored.syncMobileActionsForPeer(true);
+  assert.equal(restored.showMobileActions, false, 'file-only sessions do not show controls');
+  restored.fileOnly = false; restored.syncMobileActionsForPeer(true);
+  restored.setMobileActionsVisible(false); assert.equal(restored.showMobileActions, false);
+  restored.peerPreferences.dispose();
+  const afterClose = pageHarness(h, 'srv', 'A'); afterClose.loadMobileActionsPreference();
+  afterClose.syncMobileActionsForPeer(true); assert.equal(afterClose.showMobileActions, false);
+  for (const [server, id] of [['srv', 'B'], ['other', 'A']]) {
+    const other = pageHarness(h, server, id); other.loadMobileActionsPreference();
+    other.syncMobileActionsForPeer(true); assert.equal(other.showMobileActions, false);
+  }
+  assert(!h.make('srv', 'A').set('show-mobile-actions', 'invalid'));
+  assert(method('aboutToAppear').includes('this.loadMobileActionsPreference()'));
+  assert(method('startPolling').includes('this.syncMobileActionsForPeer(RustDeskNapi.isPeerAndroid())'));
+  assert(method('onBackPress').includes('this.setMobileActionsVisible(false)'));
+  assert(method('buildMobileActionsOverlay').includes('this.setMobileActionsVisible(false)'));
+});
+test('mobile controls remain usable if persistence fails, with a warning and retry on disposal', () => {
+  const h = harness(), page = pageHarness(h, 'srv', 'A');
+  let toast = '';
+  page.showFileToast = value => { toast = value; };
+  page.loadMobileActionsPreference(); page.syncMobileActionsForPeer(true);
+  h.failWrite(true); page.setMobileActionsVisible(true);
+  assert.equal(page.showMobileActions, true); assert(toast.includes('未保存'));
+  assert.equal(h.make('srv', 'A').get('show-mobile-actions'), '');
+  h.failWrite(false); page.peerPreferences.dispose();
+  assert.equal(h.make('srv', 'A').get('show-mobile-actions'), '1');
 });
 test('page lifecycle captures identity before loading and flushes only the old owner on leave', () => {
   const appear = method('aboutToAppear');

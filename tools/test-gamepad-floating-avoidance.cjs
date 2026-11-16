@@ -53,6 +53,19 @@ const blocked = ctx.avoidGamepadFloatingControls(240, 160,
   [{x:0,y:0,width:240,height:160}]);
 assert.equal(blocked.fits, false, 'no unsafe overlay is returned when nothing fits');
 
+for (const side of ['left', 'right']) {
+  const w = 800, h = 360, toolbar = { x: side === 'left' ? 0 : w - 40, y: 80, width: 40, height: 110 };
+  const keyboard = { x: 300, y: 20, width: 52, height: 46 };
+  const clear = ctx.avoidGamepadFloatingControls(w, h, toolbar, keyboard, true, [], true);
+  assert(clear.fits); assert.equal(clear.toolbar.x, toolbar.x, 'unobstructed tab stays at the screen edge');
+  const obstacles = boxes(w, h);
+  const plan = ctx.avoidGamepadFloatingControls(w, h, toolbar, keyboard, true, obstacles, true);
+  assert(plan.fits); assert(plan.toolbar.x >= 0 && plan.toolbar.x + plan.toolbar.width <= w);
+  assert(plan.keyboard.x >= 8 && plan.keyboard.x + plan.keyboard.width <= w - 8);
+  for (const obstacle of obstacles) { assert(!intersects(plan.toolbar, obstacle)); assert(!intersects(plan.keyboard, obstacle)); }
+  assert(!intersects(plan.toolbar, plan.keyboard));
+}
+
 const preferences = new Map(), writes = [];
 const page = Object.assign(new ctx.exports.Page(), {
   pageWidth:1024, pageHeight:600, qualityViewportWidth:1024, qualityViewportHeight:600,

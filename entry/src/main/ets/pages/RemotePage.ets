@@ -56,7 +56,7 @@ import { RemoteFullscreenPolicy } from '../service/RemoteFullscreenPolicy';
 import { RemoteNavigationBarPolicy } from '../service/RemoteNavigationBarPolicy';
 import { DesktopViewMode, desktopFitScale, desktopZoomScale, desktopScalePercent, nextZoomPercent } from '../model/RemoteDesktopView';
 import { RemotePictureInPicture, RemotePiPPhase } from '../service/RemotePictureInPicture';
-import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition } from '../model/RemoteToolbarPlacement';
+import { decodeRemoteToolbarPosition, toolbarAxisFraction, toolbarAxisPosition, toolbarDockEdge } from '../model/RemoteToolbarPlacement';
 import { RemotePeerPreferences } from '../service/RemotePeerPreferences';
 import { KeyboardMappingDialog } from '../widget/KeyboardMappingDialog';
 import { KeyboardLayoutCalibrationDialog } from '../widget/KeyboardLayoutCalibrationDialog';
@@ -374,7 +374,13 @@ struct RemotePage {
   @State remoteToolbarOffsetY: number = 0;
   @State remoteToolbarPositionX: number = -1;
   @State remoteToolbarPositionY: number = -1;
+  @State remoteToolbarDockEdge: string = '';
   private remoteToolbarDragging: boolean = false;
+  private remoteToolbarDragOriginalX: number = -1;
+  private remoteToolbarDragOriginalY: number = -1;
+  private remoteToolbarDragOriginalOffsetX: number = 0;
+  private remoteToolbarDragOriginalOffsetY: number = 0;
+  private remoteToolbarDragOriginalDock: string = '';
   @State controlMenu: string = '';
   @State controlMenuProgress: number = 0;
   @State controlMenuClosing: boolean = false;
@@ -445,6 +451,7 @@ struct RemotePage {
   private keyboardCalibrationDialog: CustomDialogController | undefined = undefined;
   @State showMobileActions: boolean = false;
   @State isPeerAndroid: boolean = false;
+  private mobileActionsPreferred: boolean = false;
   @State privacyModeState: number = 0;
   @State showLocalCursor: boolean = true;
   @State showLeftButtonHoldIndicator: boolean = false;
@@ -840,6 +847,7 @@ struct RemotePage {
     this.loadEdgeAutoPanPreference();
     this.loadDisplaySwipePreference();
     this.loadVirtualMousePreference();
+    this.loadMobileActionsPreference();
     this.loadToolbarOrderPreferences();
     this.loadRemoteToolbarPosition();
     this.loadPeerToolbarState();
@@ -993,7 +1001,7 @@ struct RemotePage {
       return true;
     }
     if (this.showMobileActions) {
-      this.showMobileActions = false;
+      this.setMobileActionsVisible(false);
       return true;
     }
     if (this.isFullScreen) {
@@ -1123,7 +1131,7 @@ struct RemotePage {
         if (this.isPcDevice()) this.extendedRemoteDisplay = RustDeskNapi.getSecondaryDisplayState().display;
         this.initializeRemoteDisplay();
         this.updateConnectionRoute();
-        this.isPeerAndroid = RustDeskNapi.isPeerAndroid();
+        this.syncMobileActionsForPeer(RustDeskNapi.isPeerAndroid());
         this.canSendCtrlAltDel = ConnectionService.canSendCtrlAltDel();
         const nextPrivacyState: number = RustDeskNapi.getPrivacyModeState();
         if (nextPrivacyState === -2 && this.privacyModeState !== -2) {
@@ -3836,7 +3844,7 @@ struct RemotePage {
       case 'gestureHelp': this.showGestureHelp = true; break;
       case 'keyboardSettings': this.openKeyboardSettings(); break;
       case 'mouseSettings': this.openMouseSettings(); break;
-      case 'mobileActions': if (this.isPeerAndroid) this.showMobileActions = true; break;
+      case 'mobileActions': if (this.isPeerAndroid) this.setMobileActionsVisible(true); break;
       case 'fullscreen': if (!this.fullscreenTransitioning && !this.immersiveWindowTransitioning && !this.pipSurfaceOwned) {
         if (this.isFullScreen) this.exitFullScreen(); else this.enterFullScreen();
       } break;
@@ -4020,7 +4028,7 @@ struct RemotePage {
       }, item)
     } else if (item === 'mobileActions' && this.isPeerAndroid) {
       this.buildToolbarButton('手机操作', vertical ? 80 : 76, this.showMobileActions, false, true, () => {
-        this.showMobileActions = true;
+        this.setMobileActionsVisible(true);
       }, item)
     } else if (item === 'gestureHelp') {
       this.buildToolbarButton(vertical ? '手势说明' : '手势', vertical ? 80 : 54, false, false, true, () => {
@@ -4288,20 +4296,41 @@ struct RemotePage {
     Stack({ alignContent: Alignment.TopStart }) {
     if (this.remoteToolbarCollapsed) {
       Button() {
-        Text(translate('控', this.uiLanguage))
-          .fontSize(16)
-          .maxLines(1)
-          .minFontSize(11)
-          .maxFontSize(16)
-          .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.controlSelectedTextColor())
+        if (this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right') {
+          // Keep a usable transparent touch target while drawing only the
+          // understated narrow edge tab, without a label or prominent border.
+          Stack({ alignContent: this.remoteToolbarDockEdge === 'left' ? Alignment.Start : Alignment.End }) {
+            Row() {}
+              .width(10)
+              .height('100%')
+              .backgroundColor('#B3A6A8AC')
+              .borderRadius({
+                topLeft: this.remoteToolbarDockEdge === 'left' ? 0 : 10,
+                bottomLeft: this.remoteToolbarDockEdge === 'left' ? 0 : 10,
+                topRight: this.remoteToolbarDockEdge === 'right' ? 0 : 10,
+                bottomRight: this.remoteToolbarDockEdge === 'right' ? 0 : 10
+              })
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .width('100%')
+          .height('100%')
+        } else {
+          Text(translate('控', this.uiLanguage))
+            .fontSize(16)
+            .maxLines(1)
+            .minFontSize(11)
+            .maxFontSize(16)
+            .heightAdaptivePolicy(TextHeightAdaptivePolicy.MIN_FONT_SIZE_FIRST)
+            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+            .fontColor(this.controlSelectedTextColor())
+        }
       }
-      .width(56)
-      .height(this.getRemoteToolbarCollapsedSize())
+      .width('100%')
+      .height(this.getRemoteToolbarCurrentHeight())
       .padding(0)
       .backgroundColor(Color.Transparent)
       .borderRadius(16)
+      .accessibilityText(translate('控', this.uiLanguage))
       .transition(this.floatingPanelTransition())
       .focusable(false)
       .gesture(
@@ -4313,10 +4342,10 @@ struct RemotePage {
             this.updateRemoteToolbarDrag(event.offsetX, event.offsetY);
           })
           .onActionEnd(() => { this.finishRemoteToolbarDrag(); })
-          .onActionCancel(() => { this.finishRemoteToolbarDrag(); })
+          .onActionCancel(() => { this.cancelRemoteToolbarDrag(); })
       )
       .onClick(() => {
-        this.setFloatingPanelCollapsed(false, false);
+        this.onRemoteToolbarHandleClick();
       })
       .onHover((isHovering: boolean) => {
         this.handleNonRemoteHover(isHovering);
@@ -4362,11 +4391,19 @@ struct RemotePage {
     }
     .width(this.getRemoteToolbarCurrentWidth())
     .height(this.getRemoteToolbarCurrentHeight())
-    .backgroundColor(this.isDarkMode ? '#A61B2638' : '#A6FFFFFF')
-    .border({ width: 1, color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
-    .borderRadius(16)
+    .backgroundColor(this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ? Color.Transparent :
+      (this.isDarkMode ? '#A61B2638' : '#A6FFFFFF'))
+    .border({ width: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ? 0 : 1,
+      color: this.isDarkMode ? '#805C93E6' : '#80518BDD' })
+    .borderRadius({
+      topLeft: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'left' ? 0 : 16,
+      bottomLeft: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'left' ? 0 : 16,
+      topRight: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'right' ? 0 : 16,
+      bottomRight: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'right' ? 0 : 16
+    })
     .clip(true)
-    .shadow({ radius: 12, color: '#26000000', offsetX: 0, offsetY: 4 })
+    .shadow({ radius: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ? 0 : 12,
+      color: '#26000000', offsetX: 0, offsetY: 4 })
     .position({ x: this.getRemoteToolbarDisplayX(), y: this.getRemoteToolbarDisplayY() })
     .zIndex(60)
   }
@@ -5412,6 +5449,29 @@ struct RemotePage {
     .alignItems(HorizontalAlign.Start)
   }
 
+  loadMobileActionsPreference(): void {
+    // The peer platform is unknown until connected; restore visibility only
+    // after it is confirmed as Android, without sending any remote actions.
+    this.mobileActionsPreferred = this.peerPreferences?.get('show-mobile-actions') === '1';
+    this.showMobileActions = false;
+  }
+
+  syncMobileActionsForPeer(isAndroid: boolean): void {
+    this.isPeerAndroid = isAndroid;
+    this.showMobileActions = isAndroid && this.mobileActionsPreferred && !this.fileOnly &&
+      this.connectionStatus === ConnectionStatus.CONNECTED;
+  }
+
+  setMobileActionsVisible(visible: boolean): void {
+    if (visible && (!this.isPeerAndroid || this.fileOnly || this.connectionStatus !== ConnectionStatus.CONNECTED)) return;
+    this.mobileActionsPreferred = visible;
+    this.showMobileActions = visible;
+    let saved: boolean = this.peerPreferences?.set('show-mobile-actions', visible ? '1' : '0') ?? false;
+    if (saved) saved = this.peerPreferences?.flush() ?? false;
+    RustDeskNapi.appendDiagnosticLog('mobile-action', `panel_visible=${visible ? 1 : 0} saved=${saved ? 1 : 0}`);
+    if (!saved) this.showFileToast('手机操作状态已切换，但设置未保存');
+  }
+
   sendMobileAction(action: number, label: string): void {
     const result: number = RustDeskNapi.sendMobileAction(action);
     if (result !== 0) {
@@ -5510,7 +5570,7 @@ struct RemotePage {
         .backgroundColor(this.mutedSurfaceColor())
         .borderRadius(9)
         .onClick(() => {
-          this.showMobileActions = false;
+          this.setMobileActionsVisible(false);
         })
         .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 9, ButtonType.Capsule))
     }
@@ -10305,12 +10365,15 @@ struct RemotePage {
   }
 
   getRemoteToolbarCurrentWidth(): number {
-    return this.remoteToolbarCollapsed ? Math.min(56, Math.max(1,
+    const collapsedWidth: number = this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right' ? 40 : 56;
+    return this.remoteToolbarCollapsed ? Math.min(collapsedWidth, Math.max(1,
       (this.pageWidth > 0 ? this.pageWidth : 360) - 16)) : this.getRemoteToolbarWidth();
   }
 
   getRemoteToolbarCurrentHeight(): number {
-    return Math.min(this.remoteToolbarCollapsed ? this.getRemoteToolbarCollapsedSize() : this.getRemoteToolbarHeight(),
+    const docked: boolean = this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right';
+    const collapsedHeight: number = docked ? 110 : this.getRemoteToolbarCollapsedSize();
+    return Math.min(this.remoteToolbarCollapsed ? collapsedHeight : this.getRemoteToolbarHeight(),
       Math.max(1, (this.pageHeight > 0 ? this.pageHeight : 640) - 16));
   }
 
@@ -10350,11 +10413,75 @@ struct RemotePage {
     return Math.max(minOffset, Math.min(maxOffset, offset));
   }
 
+  onRemoteToolbarHandleClick(): void {
+    if (!this.remoteToolbarCollapsed || this.remoteToolbarDragging) return;
+    if (this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right') {
+      this.undockRemoteToolbar();
+    } else {
+      this.setFloatingPanelCollapsed(false, false);
+    }
+  }
+
+  undockRemoteToolbar(): void {
+    if (!this.remoteToolbarCollapsed || this.remoteToolbarDragging ||
+      (this.remoteToolbarDockEdge !== 'left' && this.remoteToolbarDockEdge !== 'right')) return;
+    const edge: string = this.remoteToolbarDockEdge;
+    const visibleX: number = this.getRemoteToolbarDisplayX();
+    const visibleY: number = this.getRemoteToolbarDisplayY();
+    const oldWidth: number = this.getRemoteToolbarCurrentWidth();
+    const oldHeight: number = this.getRemoteToolbarCurrentHeight();
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+      this.remoteToolbarDockEdge = '';
+      const newWidth: number = this.getRemoteToolbarCurrentWidth();
+      const newHeight: number = this.getRemoteToolbarCurrentHeight();
+      const anchoredX: number = edge === 'right' ? visibleX + oldWidth - newWidth : visibleX;
+      const anchoredY: number = visibleY + (oldHeight - newHeight) / 2;
+      this.remoteToolbarOffsetX = this.clampRemoteToolbarOffsetX(anchoredX - this.getRemoteToolbarBaseX());
+      this.remoteToolbarOffsetY = this.clampRemoteToolbarOffsetY(anchoredY - this.getRemoteToolbarBaseY());
+      this.remoteToolbarPositionX = toolbarAxisFraction(this.getRemoteToolbarBaseX() + this.remoteToolbarOffsetX,
+        this.pageWidth, newWidth, this.remoteToolbarPositionX);
+      this.remoteToolbarPositionY = toolbarAxisFraction(this.getRemoteToolbarBaseY() + this.remoteToolbarOffsetY,
+        this.pageHeight, newHeight, this.remoteToolbarPositionY);
+    });
+    if (this.remoteToolbarPositionX >= 0 && this.remoteToolbarPositionY >= 0) {
+      try {
+        this.peerPreferences?.set('remote-toolbar-position-v1',
+          JSON.stringify({ x: this.remoteToolbarPositionX, y: this.remoteToolbarPositionY }));
+        this.peerPreferences?.flush();
+      } catch (_error) {
+        // A visual preference cannot interrupt the active remote session.
+      }
+    }
+  }
+
   beginRemoteToolbarDrag(): void {
     this.cancelPcToolbarAutoCollapse();
+    this.remoteToolbarDragOriginalX = this.remoteToolbarPositionX;
+    this.remoteToolbarDragOriginalY = this.remoteToolbarPositionY;
+    this.remoteToolbarDragOriginalOffsetX = this.remoteToolbarOffsetX;
+    this.remoteToolbarDragOriginalOffsetY = this.remoteToolbarOffsetY;
+    this.remoteToolbarDragOriginalDock = this.remoteToolbarDockEdge;
+    const visibleX: number = this.getRemoteToolbarDisplayX();
+    const visibleY: number = this.getRemoteToolbarDisplayY();
+    const oldWidth: number = this.getRemoteToolbarCurrentWidth();
+    const oldHeight: number = this.getRemoteToolbarCurrentHeight();
+    const oldDock: string = this.remoteToolbarDockEdge || '';
+    // A drag can also pull the edge tab out directly; cancel restores it.
+    this.remoteToolbarDockEdge = '';
+    const newWidth: number = this.getRemoteToolbarCurrentWidth();
+    const anchoredX: number = this.remoteToolbarCollapsed && oldDock === 'right' ?
+      visibleX + oldWidth - newWidth : visibleX;
+    const anchoredY: number = this.remoteToolbarCollapsed && oldDock.length > 0 ?
+      visibleY + (oldHeight - this.getRemoteToolbarCurrentHeight()) / 2 : visibleY;
     this.remoteToolbarDragging = true;
-    this.remoteToolbarDragStartX = this.getRemoteToolbarDisplayX() - this.getRemoteToolbarBaseX();
-    this.remoteToolbarDragStartY = this.getRemoteToolbarDisplayY() - this.getRemoteToolbarBaseY();
+    this.remoteToolbarDragStartX = this.clampRemoteToolbarOffsetX(anchoredX - this.getRemoteToolbarBaseX());
+    this.remoteToolbarDragStartY = this.clampRemoteToolbarOffsetY(anchoredY - this.getRemoteToolbarBaseY());
+    this.remoteToolbarOffsetX = this.remoteToolbarDragStartX;
+    this.remoteToolbarOffsetY = this.remoteToolbarDragStartY;
+    this.remoteToolbarPositionX = toolbarAxisFraction(this.getRemoteToolbarBaseX() + this.remoteToolbarOffsetX,
+      this.pageWidth, newWidth, this.remoteToolbarPositionX);
+    this.remoteToolbarPositionY = toolbarAxisFraction(this.getRemoteToolbarBaseY() + this.remoteToolbarOffsetY,
+      this.pageHeight, this.getRemoteToolbarCurrentHeight(), this.remoteToolbarPositionY);
   }
 
   updateRemoteToolbarDrag(offsetX: number, offsetY: number): void {
@@ -10370,6 +10497,19 @@ struct RemotePage {
   finishRemoteToolbarDrag(): void {
     if (!this.remoteToolbarDragging) return;
     this.remoteToolbarDragging = false;
+    if (this.remoteToolbarCollapsed) {
+      const edge: string = toolbarDockEdge(this.getRemoteToolbarX(), this.pageWidth, this.getRemoteToolbarCurrentWidth());
+      if (edge.length > 0) {
+        const oldY: number = this.getRemoteToolbarDisplayY();
+        const oldHeight: number = this.getRemoteToolbarCurrentHeight();
+        this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+          this.remoteToolbarDockEdge = edge;
+          this.remoteToolbarPositionX = edge === 'left' ? 0 : 1;
+          this.remoteToolbarPositionY = toolbarAxisFraction(oldY + (oldHeight - this.getRemoteToolbarCurrentHeight()) / 2,
+            this.pageHeight, this.getRemoteToolbarCurrentHeight(), this.remoteToolbarPositionY);
+        });
+      }
+    }
     if (this.remoteToolbarPositionX >= 0 && this.remoteToolbarPositionY >= 0) {
       try {
         this.peerPreferences?.set('remote-toolbar-position-v1',
@@ -10382,9 +10522,21 @@ struct RemotePage {
     this.schedulePcToolbarAutoCollapse();
   }
 
+  cancelRemoteToolbarDrag(): void {
+    if (!this.remoteToolbarDragging) return;
+    this.remoteToolbarDragging = false;
+    this.remoteToolbarPositionX = this.remoteToolbarDragOriginalX;
+    this.remoteToolbarPositionY = this.remoteToolbarDragOriginalY;
+    this.remoteToolbarOffsetX = this.remoteToolbarDragOriginalOffsetX;
+    this.remoteToolbarOffsetY = this.remoteToolbarDragOriginalOffsetY;
+    this.remoteToolbarDockEdge = this.remoteToolbarDragOriginalDock;
+    this.schedulePcToolbarAutoCollapse();
+  }
+
   loadRemoteToolbarPosition(): void {
     this.remoteToolbarPositionX = -1;
     this.remoteToolbarPositionY = -1;
+    this.remoteToolbarDockEdge = '';
     this.remoteToolbarOffsetX = 0;
     this.remoteToolbarOffsetY = 0;
     try {
@@ -10414,6 +10566,10 @@ struct RemotePage {
   }
 
   getRemoteToolbarX(): number {
+    if (this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'left') return 0;
+    if (this.remoteToolbarCollapsed && this.remoteToolbarDockEdge === 'right') {
+      return Math.max(0, (this.pageWidth > 0 ? this.pageWidth : 360) - this.getRemoteToolbarCurrentWidth());
+    }
     if (this.remoteToolbarPositionX >= 0) return toolbarAxisPosition(this.remoteToolbarPositionX,
       this.pageWidth > 0 ? this.pageWidth : 360, this.getRemoteToolbarCurrentWidth());
     return this.getRemoteToolbarBaseX() + this.clampRemoteToolbarOffsetX(this.remoteToolbarOffsetX);
@@ -10449,12 +10605,14 @@ struct RemotePage {
       }
     }
     const hasKeyboard: boolean = this.isHandheldDevice();
-    const key: string = `${this.pageWidth}:${this.pageHeight}:${hasKeyboard ? 1 : 0}:` +
+    const docked: boolean = this.remoteToolbarCollapsed &&
+      (this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right');
+    const key: string = `${this.pageWidth}:${this.pageHeight}:${hasKeyboard ? 1 : 0}:${docked ? 1 : 0}:` +
       `${toolbar.x}:${toolbar.y}:${toolbar.width}:${toolbar.height}:${keyboard.x}:${keyboard.y}:` +
       obstacles.map((rect: FloatingControlRect): string => `${rect.x},${rect.y},${rect.width},${rect.height}`).join(';');
     if (this.gamepadFloatingPlanCache && this.gamepadFloatingPlanKey === key) return this.gamepadFloatingPlanCache;
     const plan: FloatingControlPlan = avoidGamepadFloatingControls(this.pageWidth, this.pageHeight,
-      toolbar, keyboard, hasKeyboard, obstacles);
+      toolbar, keyboard, hasKeyboard, obstacles, docked);
     this.gamepadFloatingPlanKey = key;
     this.gamepadFloatingPlanCache = plan;
     return plan;

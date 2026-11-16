@@ -4,7 +4,7 @@ import { validGamepadMappingValue } from './GamepadMapping';
 import { validScreenGameConfigValue } from './GameScreenControls';
 
 export const REMOTE_PEER_OPTION_NAMES: string[] = [
-  'input-mode', 'show-local-cursor', 'show-virtual-mouse', 'edge-auto-pan-enabled',
+  'input-mode', 'show-local-cursor', 'show-virtual-mouse', 'show-mobile-actions', 'edge-auto-pan-enabled',
   'keyboard-compat', 'relative-mouse', 'cursor-compat', 'remote-control-toolbar-order',
   'remote-keyboard-toolbar-order', 'remote-keyboard-more-order', 'remote-toolbar-position-v1',
   'keyboard-toolbar-position-v1', 'remote-toolbar-collapsed', 'keyboard-tools-collapsed',
