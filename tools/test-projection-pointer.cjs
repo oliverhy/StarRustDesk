@@ -223,12 +223,18 @@ test('display transition clears stale pairing and relative baseline', () => {
 test('diagnostics disabled by default; rate-limited movement and display reasons when enabled', () => {
   const p=page(); logs.length=0; now=5000; enabled=false;
   ark(p,100,100); p.flushPointerDiagnostics(); assert.equal(logs.length,0);
-  now+=2000; enabled=true; ark(p,110,110); p.flushPointerDiagnostics();
+  now+=2000; enabled=true; ark(p,110,110);
+  p.pointerTouchThrottledMoves=2; p.pointerTouchFinalMoveRequests=1;
+  p.pointerViewportCursorReflows=1; p.pointerShapeCursorReflows=1; p.flushPointerDiagnostics();
   assert.equal(logs.length,1); assert.match(logs[0][1],/ark_move=1/);
   assert.match(logs[0][1],/physical_move_dispatch=1/); assert.match(logs[0][1],/overlay=true/);
+  assert.match(logs[0][1],/touch_move_throttled=2 touch_final_move_requests=1/);
+  assert.match(logs[0][1],/cursor_viewport_reflows=1 cursor_shape_reflows=1/);
   p.flushPointerDiagnostics(); assert.equal(logs.length,1);
   now+=2000; p.flushPointerDiagnostics();
   assert.match(logs.at(-1)[1],/native_move=0 ark_move=0 touch_move=0/);
+  assert.match(logs.at(-1)[1],/touch_move_throttled=0 touch_final_move_requests=0/);
+  assert.match(logs.at(-1)[1],/cursor_viewport_reflows=0 cursor_shape_reflows=0/);
   assert.doesNotMatch(logs.map(v=>v[1]).join('\n'), /password|token|clipboard/);
 });
 test('cursor overlay does not intercept input and is explicitly above the surface', () => {

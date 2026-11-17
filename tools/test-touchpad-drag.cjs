@@ -27,6 +27,7 @@ function harness() {
   const p = Object.assign(new context.Page(), {
     lastAbsX: 100, lastAbsY: 100, zoomScale: 1, tapTimer: -1, longPressTimer: -1,
     lastMoveSentAt: 0, leftButtonHeld: false, touchpadDragCandidate: false,
+    pointerTouchThrottledMoves: 0, pointerTouchFinalMoveRequests: 0,
     pendingTapRemoteX: 0, pendingTapRemoteY: 0, pendingTapLocalX: 0, pendingTapLocalY: 0,
     touchpadDragOriginX: 0, touchpadDragOriginY: 0, touchpadLastTapAt: 0,
     showKeyboardPanel: false, remoteKeyboardVisible: false,
@@ -95,6 +96,29 @@ test('threshold crossing sends the first drag move despite an active move thrott
   h.advance(1); h.touch(h.TouchType.Move, 30, 10);
   assert.deepEqual(h.events.map(e => e.action), [1, 0]);
 });
+test('ordinary mouse mode flushes the last throttled position on release without a click', () => {
+  const h = harness(); h.touch(h.TouchType.Down, 10, 10); h.advance(20);
+  h.touch(h.TouchType.Move, 30, 10); h.advance(1);
+  h.touch(h.TouchType.Move, 80, 10);
+  assert.equal(h.p.lastAbsX, 170); assert.equal(h.events.at(-1).x, 120);
+  h.advance(1); h.touch(h.TouchType.Up, 80, 10);
+  assert.deepEqual(h.events.map(e => [e.x, e.y, e.action]), [[120, 100, 0], [170, 100, 0]]);
+  assert.equal(h.p.pointerTouchThrottledMoves, 1);
+  assert.equal(h.p.pointerTouchFinalMoveRequests, 1);
+});
+test('ordinary mode flushes the last throttled drag move before a single left-up', () => {
+  const h = harness(); h.touch(h.TouchType.Down); h.advance(20); h.touch(h.TouchType.Up);
+  h.advance(100); h.touch(h.TouchType.Down); h.advance(20); h.touch(h.TouchType.Move, 30, 10);
+  h.advance(1); h.touch(h.TouchType.Move, 60, 10); h.advance(1); h.touch(h.TouchType.Up, 60, 10);
+  assert.deepEqual(h.events.map(e => [e.x, e.action]), [[100, 1], [120, 0], [150, 0], [150, 2]]);
+  assert.equal(h.p.pointerTouchFinalMoveRequests, 1); assert(!h.p.leftButtonHeld);
+});
+test('ordinary mouse cancellation does not flush a throttled move or create a click', () => {
+  const h = harness(); h.touch(h.TouchType.Down); h.advance(20); h.touch(h.TouchType.Move, 30, 10);
+  h.advance(1); h.touch(h.TouchType.Move, 80, 10); h.touch(h.TouchType.Cancel, 80, 10);
+  assert.deepEqual(h.events.map(e => [e.x, e.action]), [[120, 0]]);
+  assert.equal(h.p.pointerTouchFinalMoveRequests, 0);
+});
 test('relative mouse drag holds left before sending the accumulated relative movement', () => {
   const h = harness(); Object.assign(h.p, { relativeMouseEnabled: true, remoteWidth: 1000, remoteHeight: 1000,
     getDisplayWidth: () => 1000, getDisplayHeight: () => 1000, updatePointerFromDelta: h.realUpdatePointerFromDelta });
@@ -104,6 +128,15 @@ test('relative mouse drag holds left before sending the accumulated relative mov
   assert.equal(h.events[0].action, 1); assert.equal(h.events[1].action, 'relative');
   assert.equal(h.events[1].x, 25); h.touch(h.TouchType.Up, 30, 10);
   assert.equal(h.events.at(-1).action, 2);
+});
+test('relative mode adds no absolute final move when the finger is lifted', () => {
+  const h = harness(); Object.assign(h.p, { relativeMouseEnabled: true, remoteWidth: 1000, remoteHeight: 1000,
+    getDisplayWidth: () => 1000, getDisplayHeight: () => 1000, updatePointerFromDelta: h.realUpdatePointerFromDelta });
+  h.touch(h.TouchType.Down); h.advance(20); h.touch(h.TouchType.Move, 30, 10);
+  h.advance(1); h.touch(h.TouchType.Move, 60, 10);
+  const before = h.events.length; h.touch(h.TouchType.Up, 60, 10);
+  assert.equal(h.events.length, before); assert.equal(h.p.pointerTouchFinalMoveRequests, 0);
+  assert.deepEqual(h.events.filter(e => e.action === 'relative').map(e => e.x), [25, 37.5]);
 });
 test('far second press is not mistaken for a double-tap and long press is right click', () => {
   const h = harness(); h.touch(h.TouchType.Down); h.advance(20); h.touch(h.TouchType.Up);

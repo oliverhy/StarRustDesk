@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.8'
-export const RELEASE_NOTES_BUILD: string = '2000008'
+export const RELEASE_NOTES_VERSION: string = '2.0.9'
+export const RELEASE_NOTES_BUILD: string = '2000009'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.9（2000009）· 鼠标指针同步优化', [
+            '优化触摸鼠标位置同步：手指结束移动时补发最终位置，减少本地指针与远端悬停位置不一致。',
+            '修复横竖屏切换或窗口尺寸变化后，鼠标箭头未按新画布比例及时更新的问题。',
+            '优化远端光标样式和热点变化后的定位，保留原有点击、拖拽和实体鼠标操作。',
+            '补充鼠标移动和光标重排次数诊断，不新增输入内容或坐标记录。'
+          ])
           this.buildSection('2.0.8（2000008）· 悬浮控制体验优化', [
             '优化“控”悬浮按钮：折叠后可拖动到左右边缘，吸附时显示低调的贴边细条。',
             '吸附细条点一次恢复“控”，再点一次展开控制栏；保留拖动位置并适配不同屏幕尺寸。',

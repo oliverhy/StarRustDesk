@@ -637,6 +637,10 @@ struct RemotePage {
   private pointerCaptureFocused: boolean = false;
   private compatibilityLeftSequence: boolean = false;
   private pointerTouchMoves: number = 0;
+  private pointerTouchThrottledMoves: number = 0;
+  private pointerTouchFinalMoveRequests: number = 0;
+  private pointerViewportCursorReflows: number = 0;
+  private pointerShapeCursorReflows: number = 0;
   private pointerForwardedMoves: number = 0;
   private pointerFilteredEvents: number = 0;
   private pointerDuplicateEvents: number = 0;
@@ -1577,6 +1581,10 @@ struct RemotePage {
     this.pointerViewportMoves = 0;
     this.pointerTargetDisplayId = -1;
     this.pointerTouchMoves = 0;
+    this.pointerTouchThrottledMoves = 0;
+    this.pointerTouchFinalMoveRequests = 0;
+    this.pointerViewportCursorReflows = 0;
+    this.pointerShapeCursorReflows = 0;
     this.pointerForwardedMoves = 0;
     this.pointerFilteredEvents = 0;
     this.pointerDuplicateEvents = 0;
@@ -1595,6 +1603,9 @@ struct RemotePage {
         RustDeskNapi.appendDiagnosticLog('projection-pointer',
           `display=${this.remoteProjectionDisplayId} external=${this.remoteExternalDisplay} mode=${this.inputMode} ` +
           `native_move=${this.pointerNativeMoves} ark_move=${this.pointerArkMoves} touch_move=${this.pointerTouchMoves} ` +
+          `touch_move_throttled=${this.pointerTouchThrottledMoves} ` +
+          `touch_final_move_requests=${this.pointerTouchFinalMoveRequests} ` +
+          `cursor_viewport_reflows=${this.pointerViewportCursorReflows} cursor_shape_reflows=${this.pointerShapeCursorReflows} ` +
           `viewport_move=${this.pointerViewportMoves} target_display=${this.pointerTargetDisplayId} ` +
           `capture_focused=${this.pointerCaptureFocused} native_hit=${this.remoteExternalDisplay} ` +
           `physical_move_dispatch=${this.pointerForwardedMoves} filtered=${this.pointerFilteredEvents} ` +
@@ -2009,9 +2020,7 @@ struct RemotePage {
     this.remoteCursorHotY = Math.max(0, Math.min(height - 1, hoty));
     this.remoteCursorImageWidth = width;
     this.remoteCursorImageHeight = height;
-    if (this.hasAuthoritativeRemoteCursor) {
-      this.updateCursorOverlayFromPosition(this.remoteCursorAbsX, this.remoteCursorAbsY);
-    }
+    this.refreshCursorOverlayGeometry('shape');
   }
 
   releaseRemoteCursorImages(): void {
@@ -3325,6 +3334,7 @@ struct RemotePage {
         this.stopEdgeAutoPan();
         this.syncDesktopViewScale();
         this.clampViewportOffset();
+        this.refreshCursorOverlayGeometry('viewport');
         this.syncVirtualMouseToCurrentPointer();
       }
       this.scheduleSurfaceRebindIfSizeChanged();
@@ -8504,6 +8514,8 @@ struct RemotePage {
       if (dragStarted || now - this.lastMoveSentAt > 16) {
         this.lastMoveSentAt = now;
         ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      } else if (!this.relativeMouseEnabled) {
+        this.pointerTouchThrottledMoves++;
       }
     } else if (event.type === TouchType.Up) {
       this.finishTouchpadTouch(touch.x, touch.y, false);
@@ -8566,10 +8578,12 @@ struct RemotePage {
     this.edgePanTouchActive = false;
     this.stopEdgeAutoPan();
     this.clearLongPressTimer();
-    if (!cancelled && this.touchMoved && this.shouldFollowTouchMouse()) {
-      // Flush the final sample that may have fallen inside the move throttle.
-      // The peer cursor must end at the same point as our followed viewport.
+    if (!cancelled && this.touchMoved && !this.relativeMouseEnabled) {
+      // The overlay is updated on every sample, while absolute moves are
+      // throttled. Flush the final position in both follow and ordinary mode,
+      // before releasing a drag. Relative mode already forwards every delta.
       ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 0);
+      this.pointerTouchFinalMoveRequests++;
     }
     if (this.leftButtonHeld) {
       this.sendLeftUp(this.lastAbsX, this.lastAbsY);
@@ -9106,6 +9120,22 @@ struct RemotePage {
 
   updateCursorOverlayFromRemote(): void {
     this.updateCursorOverlayFromPosition(this.lastAbsX, this.lastAbsY);
+  }
+
+  refreshCursorOverlayGeometry(reason: string): void {
+    // A layout or cursor-shape change must not resurrect a hidden cursor or
+    // move the remote pointer. Reuse the position currently being displayed:
+    // local prediction normally wins, except while a drag follows the peer.
+    if (!this.showCursor || !this.pointerInitialized || this.componentWidth <= 0 || this.componentHeight <= 0 ||
+      this.remoteWidth <= 0 || this.remoteHeight <= 0) return;
+    const useRemote: boolean = this.preferAuthoritativeCursor && this.hasAuthoritativeRemoteCursor;
+    const x: number = useRemote ? this.remoteCursorAbsX : this.lastAbsX;
+    const y: number = useRemote ? this.remoteCursorAbsY : this.lastAbsY;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 ||
+      x >= this.remoteWidth || y >= this.remoteHeight) return;
+    this.updateCursorOverlayFromPosition(x, y);
+    if (reason === 'viewport') this.pointerViewportCursorReflows++;
+    if (reason === 'shape') this.pointerShapeCursorReflows++;
   }
 
   updateCursorOverlayFromPosition(remoteX: number, remoteY: number): void {
