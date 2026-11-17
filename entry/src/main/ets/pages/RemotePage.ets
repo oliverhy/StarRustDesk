@@ -375,6 +375,7 @@ struct RemotePage {
   @State remoteToolbarPositionX: number = -1;
   @State remoteToolbarPositionY: number = -1;
   @State remoteToolbarDockEdge: string = '';
+  @State remoteToolbarHoverCursorSuppressed: boolean = false;
   private remoteToolbarDragging: boolean = false;
   private remoteToolbarDragOriginalX: number = -1;
   private remoteToolbarDragOriginalY: number = -1;
@@ -641,6 +642,10 @@ struct RemotePage {
   private pointerTouchFinalMoveRequests: number = 0;
   private pointerViewportCursorReflows: number = 0;
   private pointerShapeCursorReflows: number = 0;
+  private pointerCursorDeferred: number = 0;
+  private pointerCursorDeferredStale: number = 0;
+  private pointerVirtualMoves: number = 0;
+  private pointerVirtualButtonMoves: number = 0;
   private pointerForwardedMoves: number = 0;
   private pointerFilteredEvents: number = 0;
   private pointerDuplicateEvents: number = 0;
@@ -650,6 +655,7 @@ struct RemotePage {
   private lastTouchEventAt: number = 0;
   private lastMappedPhysicalLeftUpAt: number = 0;
   private lastLocalPointerInputAt: number = 0;
+  private localPointerInputRevision: number = 0;
   private localPointerGestureActive: boolean = false;
   private leftButtonHeldAt: number = 0;
   private preferAuthoritativeCursor: boolean = false;
@@ -789,6 +795,8 @@ struct RemotePage {
     this.showFullText(`${entry.name}\n${this.joinRemotePath(entry.name)}\n${translate(this.remoteEntryMetadata(entry), this.uiLanguage)}`);
   }
   private lastRemoteCursorSequence: number = -1;
+  private deferredRemoteCursorSequence: number = -1;
+  private deferredRemoteCursorInputRevision: number = 0;
   private lastRemoteCursorImageSequence: number = -1;
   private remoteCursorAbsX: number = 0;
   private remoteCursorAbsY: number = 0;
@@ -922,6 +930,7 @@ struct RemotePage {
     ConnectionService.configureKeyboardRemapping('');
     this.peerPreferences?.dispose();
     this.remoteToolbarDragging = false;
+    this.remoteToolbarHoverCursorSuppressed = false;
     this.resetControlMenuAnimation();
     this.stopDesktopWindowTracking();
     this.pictureInPicture?.dispose();
@@ -1093,6 +1102,7 @@ struct RemotePage {
         if (this.highPerformanceEnabled) RustDeskNapi.setHighPerformance(true);
       } else if (status !== ConnectionStatus.CONNECTED) {
         this.inputCompatibilityLoaded = false;
+        this.remoteToolbarHoverCursorSuppressed = false;
         this.waylandTextAllowed = false;
         this.waylandPermissionEpoch++;
         this.relativePointerSampleValid = false;
@@ -1260,6 +1270,7 @@ struct RemotePage {
   }
 
   onAppForegroundEpochChanged(): void {
+    this.remoteToolbarHoverCursorSuppressed = false;
     this.relativePointerSampleValid = false;
     ConnectionService.recordNetworkSnapshot();
     const status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus;
@@ -1308,6 +1319,7 @@ struct RemotePage {
 
   resetRemoteViewportForSession(): void {
     this.displayRestoreRetryPending = false;
+    this.remoteToolbarHoverCursorSuppressed = false;
     this.clearKeyboardInputAnchor('session_reset');
     this.pointerInitialized = false;
     this.lastAbsX = 0;
@@ -1340,6 +1352,8 @@ struct RemotePage {
     this.remoteCursorEmbedded = false;
     this.embeddedCursorOverlayFallback = false;
     this.lastRemoteCursorSequence = -1;
+    this.deferredRemoteCursorSequence = -1;
+    this.deferredRemoteCursorInputRevision = 0;
     this.lastRemoteCursorImageSequence = -1;
     this.hasAuthoritativeRemoteCursor = false;
     this.cursorPixelMap = undefined;
@@ -1349,6 +1363,7 @@ struct RemotePage {
     this.remoteCursorImageHeight = 0;
     this.localPointerGestureActive = false;
     this.lastLocalPointerInputAt = 0;
+    this.localPointerInputRevision = 0;
     this.leftButtonHeld = false;
     this.rightButtonHeld = false;
     this.leftButtonHeldAt = 0;
@@ -1548,6 +1563,7 @@ struct RemotePage {
 
   onProjectionDisplayChanged(): void {
     if (this.showOrientationDialog) this.closeOrientationMenu();
+    this.remoteToolbarHoverCursorSuppressed = false;
     this.physicalMouseDeduplicator.clear();
     this.compatibilityLeftSequence = false;
     this.relativePointerSampleValid = false;
@@ -1569,7 +1585,10 @@ struct RemotePage {
     // The phone's OS pointer is not part of an independently projected app.
     // Physical input needs our software cursor there even in direct-touch mode.
     // Respect embedded/KVM preferences and real feedback in relative mode.
-    return !this.suppressCompatibilityCursor() && (!this.relativeMouseEnabled || this.hasAuthoritativeRemoteCursor) &&
+    return (!this.remoteToolbarHoverCursorSuppressed || this.remoteExternalDisplay) &&
+      !(this.showVirtualMouse && !this.relativeMouseEnabled && this.isHandheldDevice() &&
+        !this.pipSurfaceOwned && !this.displaySwitchActive) &&
+      !this.suppressCompatibilityCursor() && (!this.relativeMouseEnabled || this.hasAuthoritativeRemoteCursor) &&
       this.showCursor && (!this.remoteCursorEmbedded || this.embeddedCursorOverlayFallback || this.isPanMode) &&
       (this.inputMode === INPUT_MODE_MOUSE || (this.remoteExternalDisplay && this.projectedPhysicalPointer));
   }
@@ -1585,6 +1604,10 @@ struct RemotePage {
     this.pointerTouchFinalMoveRequests = 0;
     this.pointerViewportCursorReflows = 0;
     this.pointerShapeCursorReflows = 0;
+    this.pointerCursorDeferred = 0;
+    this.pointerCursorDeferredStale = 0;
+    this.pointerVirtualMoves = 0;
+    this.pointerVirtualButtonMoves = 0;
     this.pointerForwardedMoves = 0;
     this.pointerFilteredEvents = 0;
     this.pointerDuplicateEvents = 0;
@@ -1600,17 +1623,28 @@ struct RemotePage {
     // so a report can distinguish no movement delivery from invisible rendering.
     try {
       if (RustDeskNapi.getOption('diagnostic-log-enabled') === '1') {
+        let virtualHotspotError: number = -1;
+        if (this.showVirtualMouse && !this.relativeMouseEnabled && this.pointerInitialized &&
+          this.componentWidth > 0 && this.componentHeight > 0 && this.remoteWidth > 0 && this.remoteHeight > 0) {
+          const visual: RemotePoint = this.remotePointToVisual(this.lastAbsX, this.lastAbsY);
+          virtualHotspotError = Math.sqrt(Math.pow(visual.x - (this.virtualMouseX + VIRTUAL_MOUSE_POINTER_HOT_X), 2) +
+            Math.pow(visual.y - (this.virtualMouseY + VIRTUAL_MOUSE_POINTER_HOT_Y), 2));
+        }
         RustDeskNapi.appendDiagnosticLog('projection-pointer',
           `display=${this.remoteProjectionDisplayId} external=${this.remoteExternalDisplay} mode=${this.inputMode} ` +
           `native_move=${this.pointerNativeMoves} ark_move=${this.pointerArkMoves} touch_move=${this.pointerTouchMoves} ` +
           `touch_move_throttled=${this.pointerTouchThrottledMoves} ` +
           `touch_final_move_requests=${this.pointerTouchFinalMoveRequests} ` +
           `cursor_viewport_reflows=${this.pointerViewportCursorReflows} cursor_shape_reflows=${this.pointerShapeCursorReflows} ` +
+          `cursor_deferred=${this.pointerCursorDeferred} cursor_deferred_stale=${this.pointerCursorDeferredStale} ` +
+          `virtual_mouse=${this.showVirtualMouse} virtual_moves=${this.pointerVirtualMoves} ` +
+          `virtual_button_moves=${this.pointerVirtualButtonMoves} virtual_prediction_error_vp=${virtualHotspotError.toFixed(1)} ` +
           `viewport_move=${this.pointerViewportMoves} target_display=${this.pointerTargetDisplayId} ` +
           `capture_focused=${this.pointerCaptureFocused} native_hit=${this.remoteExternalDisplay} ` +
           `physical_move_dispatch=${this.pointerForwardedMoves} filtered=${this.pointerFilteredEvents} ` +
           `duplicate=${this.pointerDuplicateEvents} fallback_click=${this.pointerFallbackClicks} ` +
           `source=${this.pointerLastSource} tool=${this.pointerLastTool} overlay=${this.shouldShowCursorOverlay()} ` +
+          `toolbar_cursor_suppressed=${this.remoteToolbarHoverCursorSuppressed && !this.remoteExternalDisplay} ` +
           `show=${this.showCursor} physical=${this.projectedPhysicalPointer} relative=${this.relativeMouseEnabled} ` +
           `authoritative=${this.hasAuthoritativeRemoteCursor} embedded=${this.remoteCursorEmbedded} ` +
           `embedded_fallback=${this.embeddedCursorOverlayFallback} suppressed=${this.suppressCompatibilityCursor()} ` +
@@ -1657,6 +1691,7 @@ struct RemotePage {
         this.remoteCursorEmbedded = false;
         this.embeddedCursorOverlayFallback = false;
         this.lastRemoteCursorSequence = -1;
+        this.deferredRemoteCursorSequence = -1;
         this.lastRemoteCursorImageSequence = -1;
         this.hasAuthoritativeRemoteCursor = false;
       }
@@ -1669,9 +1704,29 @@ struct RemotePage {
     if (!cursor.valid || cursor.sequence === this.lastRemoteCursorSequence) {
       return;
     }
+    // Display geometry often arrives after the first cursor sample. Do not
+    // classify that sample as off-screen or consume its sequence yet.
+    if (this.remoteWidth <= 0 || this.remoteHeight <= 0) {
+      if (this.deferredRemoteCursorSequence !== cursor.sequence) {
+        this.deferredRemoteCursorSequence = cursor.sequence;
+        this.deferredRemoteCursorInputRevision = this.localPointerInputRevision;
+        this.pointerCursorDeferred++;
+      }
+      return;
+    }
+    if (this.deferredRemoteCursorSequence === cursor.sequence &&
+      this.deferredRemoteCursorInputRevision !== this.localPointerInputRevision) {
+      // A deferred sample cannot override input that happened in the meantime.
+      this.lastRemoteCursorSequence = cursor.sequence;
+      this.deferredRemoteCursorSequence = -1;
+      this.pointerCursorDeferredStale++;
+      return;
+    }
+    this.deferredRemoteCursorSequence = -1;
     // Consume every sample once, including rejected coordinates. Replaying an
     // old off-screen sample would hide each newly predicted physical move.
     this.lastRemoteCursorSequence = cursor.sequence;
+    if (this.virtualMouseDragActive && !this.relativeMouseEnabled) return;
     const recentLocalInput: boolean = !this.relativeMouseEnabled && (this.localPointerGestureActive ||
       (this.lastLocalPointerInputAt > 0 && now - this.lastLocalPointerInputAt < LOCAL_CURSOR_ECHO_GUARD_MS));
     const inside: boolean = cursor.x >= 0 && cursor.y >= 0 &&
@@ -1869,6 +1924,10 @@ struct RemotePage {
     if (event.action === NATIVE_MOUSE_ACTION_CANCEL) {
       this.releaseHeldMouseButtons('native_cancel');
       return;
+    }
+    if (this.showVirtualMouse && !this.relativeMouseEnabled && pairedAction > 0) {
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
     }
 
     let forwardedAction: number = -1;
@@ -2550,6 +2609,7 @@ struct RemotePage {
     if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN) {
       if (this.desktopWindowActive) this.desktopReturnInputFocus = this.pointerOverRemoteViewport || this.pointerCaptureFocused;
       this.desktopWindowActive = false;
+      this.remoteToolbarHoverCursorSuppressed = false;
       this.clipboardChangeRevision++;
       if (this.displaySwitchActive) this.clearDisplaySwitchTransition();
       this.finishRemoteToolbarDrag();
@@ -4307,11 +4367,11 @@ struct RemotePage {
     if (this.remoteToolbarCollapsed) {
       Button() {
         if (this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right') {
-          // Keep a usable transparent touch target while drawing only the
-          // understated narrow edge tab, without a label or prominent border.
+          // The painted tab and its hit target share the same narrow bounds;
+          // no larger transparent button may intercept the remote desktop.
           Stack({ alignContent: this.remoteToolbarDockEdge === 'left' ? Alignment.Start : Alignment.End }) {
             Row() {}
-              .width(10)
+              .width('100%')
               .height('100%')
               .backgroundColor('#B3A6A8AC')
               .borderRadius({
@@ -4324,6 +4384,7 @@ struct RemotePage {
           }
           .width('100%')
           .height('100%')
+          .hitTestBehavior(HitTestMode.None)
         } else {
           Text(translate('控', this.uiLanguage))
             .fontSize(16)
@@ -4339,6 +4400,8 @@ struct RemotePage {
       .height(this.getRemoteToolbarCurrentHeight())
       .padding(0)
       .backgroundColor(Color.Transparent)
+      .stateEffect(this.remoteToolbarDockEdge.length === 0)
+      .hoverEffect(this.remoteToolbarDockEdge.length > 0 ? HoverEffect.None : HoverEffect.Auto)
       .borderRadius(16)
       .accessibilityText(translate('控', this.uiLanguage))
       .transition(this.floatingPanelTransition())
@@ -4358,9 +4421,11 @@ struct RemotePage {
         this.onRemoteToolbarHandleClick();
       })
       .onHover((isHovering: boolean) => {
-        this.handleNonRemoteHover(isHovering);
+        this.handleRemoteToolbarHover(isHovering);
       })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 16, ButtonType.Capsule))
+        .attributeModifier(new ButtonShapeModifier(this.remoteToolbarDockEdge.length > 0 ? false : this.roundedRectButtons,
+          this.remoteToolbarDockEdge.length > 0 ? 0 : 16,
+          this.remoteToolbarDockEdge.length > 0 ? ButtonType.Normal : ButtonType.Capsule))
     } else {
         Row({ space: 4 }) {
           this.buildFloatingDragHandle(false)
@@ -4395,7 +4460,7 @@ struct RemotePage {
         .padding(7)
         .transition(this.floatingPanelTransition())
         .onHover((isHovering: boolean) => {
-          this.handleNonRemoteHover(isHovering);
+          this.handleRemoteToolbarHover(isHovering);
         })
     }
     }
@@ -4414,6 +4479,9 @@ struct RemotePage {
     .clip(true)
     .shadow({ radius: this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ? 0 : 12,
       color: '#26000000', offsetX: 0, offsetY: 4 })
+    .hoverEffect(this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ? HoverEffect.None : HoverEffect.Auto)
+    .hitTestBehavior(this.remoteToolbarCollapsed && this.remoteToolbarDockEdge.length > 0 ?
+      HitTestMode.None : HitTestMode.Default)
     .position({ x: this.getRemoteToolbarDisplayX(), y: this.getRemoteToolbarDisplayY() })
     .zIndex(60)
   }
@@ -4649,41 +4717,29 @@ struct RemotePage {
 
   clampVirtualMouseX(value: number): number {
     const width: number = this.componentWidth > 0 ? this.componentWidth : 360;
-    const controlMaxX: number = Math.max(0, width - VIRTUAL_MOUSE_WIDTH);
     const centerX: number = width / 2;
     const displayLeft: number = centerX + (this.getDisplayLeft() - centerX) * this.zoomScale + this.offsetX;
-    const displayRight: number = centerX +
-      (this.getDisplayLeft() + this.getDisplayWidth() - centerX) * this.zoomScale + this.offsetX;
-    const minPointerX: number = Math.max(0, Math.min(width - 1, displayLeft));
-    const maxPointerX: number = Math.max(minPointerX, Math.min(width - 1, displayRight - 1));
-    return Math.max(0, Math.min(controlMaxX,
-      Math.max(minPointerX - VIRTUAL_MOUSE_POINTER_HOT_X,
-        Math.min(maxPointerX - VIRTUAL_MOUSE_POINTER_HOT_X, value))));
+    const displayRight: number = this.remotePointToVisual(Math.max(0, this.remoteWidth - 1), 0).x;
+    const minPointerX: number = Math.max(0, Math.min(width - 0.001, displayLeft));
+    const maxPointerX: number = Math.max(minPointerX, Math.min(width - 0.001, displayRight));
+    return Math.max(minPointerX - VIRTUAL_MOUSE_POINTER_HOT_X,
+      Math.min(maxPointerX - VIRTUAL_MOUSE_POINTER_HOT_X, value));
   }
 
   clampVirtualMouseY(value: number): number {
     const height: number = this.componentHeight > 0 ? this.componentHeight : 640;
-    const controlMaxY: number = Math.max(0, height - VIRTUAL_MOUSE_HEIGHT);
     const centerY: number = height / 2;
     const displayTop: number = centerY + (this.getDisplayTop() - centerY) * this.zoomScale + this.offsetY;
-    const displayBottom: number = centerY +
-      (this.getDisplayTop() + this.getDisplayHeight() - centerY) * this.zoomScale + this.offsetY;
-    const minPointerY: number = Math.max(0, Math.min(height - 1, displayTop));
-    const maxPointerY: number = Math.max(minPointerY, Math.min(height - 1, displayBottom - 1));
-    return Math.max(0, Math.min(controlMaxY,
-      Math.max(minPointerY - VIRTUAL_MOUSE_POINTER_HOT_Y,
-        Math.min(maxPointerY - VIRTUAL_MOUSE_POINTER_HOT_Y, value))));
+    const displayBottom: number = this.remotePointToVisual(0, Math.max(0, this.remoteHeight - 1)).y;
+    const minPointerY: number = Math.max(0, Math.min(height - 0.001, displayTop));
+    const maxPointerY: number = Math.max(minPointerY, Math.min(height - 0.001, displayBottom));
+    return Math.max(minPointerY - VIRTUAL_MOUSE_POINTER_HOT_Y,
+      Math.min(maxPointerY - VIRTUAL_MOUSE_POINTER_HOT_Y, value));
   }
 
   alignVirtualMouseToRemotePosition(remoteX: number, remoteY: number): void {
     if (!this.showVirtualMouse || !this.isHandheldDevice() || this.componentWidth <= 0 ||
       this.componentHeight <= 0 || this.remoteWidth <= 0 || this.remoteHeight <= 0) {
-      return;
-    }
-    if (this.offsetX < -this.getHorizontalPanLimit(this.zoomScale) ||
-      this.offsetY < -this.getVerticalPanLimit(this.zoomScale)) {
-      // In the black margin the control and its local arrow stay together;
-      // a delayed remote cursor echo must not pull either back onto the image.
       return;
     }
     const visualPoint: RemotePoint = this.remotePointToVisual(remoteX, remoteY);
@@ -4694,7 +4750,7 @@ struct RemotePage {
 
   syncVirtualMouseToCurrentPointer(): void {
     if (!this.showVirtualMouse || this.virtualMouseDragActive || !this.pointerInitialized) return;
-    if (this.hasAuthoritativeRemoteCursor) {
+    if (this.preferAuthoritativeCursor && this.hasAuthoritativeRemoteCursor) {
       this.alignVirtualMouseToRemotePosition(this.remoteCursorAbsX, this.remoteCursorAbsY);
     } else {
       this.alignVirtualMouseToRemotePosition(this.lastAbsX, this.lastAbsY);
@@ -4706,16 +4762,6 @@ struct RemotePage {
     const remotePoint: RemotePoint = this.visualPointToRemote(
       this.virtualMouseX + VIRTUAL_MOUSE_POINTER_HOT_X,
       this.virtualMouseY + VIRTUAL_MOUSE_POINTER_HOT_Y);
-    const remoteRight: number = this.remotePointToVisual(this.remoteWidth, 0).x;
-    if (this.remoteWidth > 0 && remoteRight <= this.componentWidth + 0.01 &&
-      this.virtualMouseX + VIRTUAL_MOUSE_POINTER_HOT_X >= remoteRight - 1) {
-      remotePoint.x = this.remoteWidth - 1;
-    }
-    const remoteBottom: number = this.remotePointToVisual(0, this.remoteHeight).y;
-    if (this.remoteHeight > 0 && remoteBottom <= this.componentHeight + 0.01 &&
-      this.virtualMouseY + VIRTUAL_MOUSE_POINTER_HOT_Y >= remoteBottom - 1) {
-      remotePoint.y = this.remoteHeight - 1;
-    }
     this.lastAbsX = remotePoint.x;
     this.lastAbsY = remotePoint.y;
     this.pointerInitialized = true;
@@ -4739,7 +4785,49 @@ struct RemotePage {
     this.beginLocalPointerGesture();
   }
 
+  // Return the pointer coordinate in x and the canvas offset in y. The control
+  // body may stop at the viewport edge, but the hotspot must stay on the image.
+  moveVirtualMouseAxis(pointer: number, delta: number, viewport: number, controlSize: number,
+    hot: number, imageStart: number, imageEnd: number, offset: number, panLimit: number,
+    extraMargin: number): RemotePoint {
+    let first: number = Math.max(0, Math.min(viewport - 0.001, imageStart));
+    let last: number = Math.max(first, Math.min(viewport - 0.001, imageEnd));
+    let nextPointer: number = Math.max(first - hot, Math.min(last - hot, pointer));
+    let remaining: number = delta;
+    // When returning from the exposed margin, move the image back first so
+    // the existing grouped-control behaviour remains stable.
+    if (remaining < 0 && offset < -panLimit) {
+      const retract: number = Math.min(-remaining, -panLimit - offset,
+        Math.max(0, nextPointer + hot - imageStart));
+      offset += retract;
+      imageStart += retract;
+      imageEnd += retract;
+      first = Math.max(0, Math.min(viewport - 0.001, imageStart));
+      last = Math.max(first, Math.min(viewport - 0.001, imageEnd));
+      remaining += retract;
+    }
+    if (remaining > 0) {
+      const bodyLimit: number = Math.max(0, viewport - controlSize);
+      const travel: number = Math.min(remaining, Math.max(0, Math.min(bodyLimit, last - hot) - nextPointer));
+      nextPointer += travel;
+      remaining -= travel;
+      const pan: number = Math.min(remaining, Math.max(0, imageEnd - (nextPointer + hot)),
+        Math.max(0, offset + panLimit + extraMargin));
+      offset -= pan;
+    } else if (remaining < 0) {
+      const travel: number = Math.min(-remaining, Math.max(0, nextPointer - (first - hot)));
+      nextPointer -= travel;
+      remaining += travel;
+      const pan: number = Math.min(-remaining, Math.max(0, nextPointer + hot - imageStart),
+        Math.max(0, panLimit - offset));
+      offset += pan;
+    }
+    return { x: nextPointer, y: offset };
+  }
+
   updateVirtualMouseMove(offsetX: number, offsetY: number): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      this.componentWidth <= 0 || this.componentHeight <= 0) return;
     const deltaX: number = offsetX - this.virtualMouseLastPanX;
     const deltaY: number = offsetY - this.virtualMouseLastPanY;
     this.virtualMouseLastPanX = offsetX;
@@ -4750,37 +4838,19 @@ struct RemotePage {
     const panLimitX: number = this.getHorizontalPanLimit(this.zoomScale);
     const panLimitY: number = this.getVerticalPanLimit(this.zoomScale);
     if (!this.relativeMouseEnabled) {
-      // The mouse control and arrow are one visual unit. Once the entire
-      // control reaches the viewport edge, consume further drag by panning
-      // the image immediately; do not keep moving the arrow on its own.
-      const controlMaxX: number = Math.max(0, this.componentWidth - VIRTUAL_MOUSE_WIDTH);
-      const controlMaxY: number = Math.max(0, this.componentHeight - VIRTUAL_MOUSE_HEIGHT);
-      this.virtualMouseX = Math.max(0, Math.min(this.virtualMouseX, controlMaxX));
-      this.virtualMouseY = Math.max(0, Math.min(this.virtualMouseY, controlMaxY));
-      if (deltaX > 0) {
-        const cursorTravel: number = Math.min(deltaX, controlMaxX - this.virtualMouseX);
-        this.virtualMouseX += cursorTravel;
-        this.offsetX = Math.max(-panLimitX - VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN,
-          this.offsetX - (deltaX - cursorTravel));
-      } else if (deltaX < 0) {
-        const blackMargin: number = Math.max(0, -panLimitX - this.offsetX);
-        const retract: number = Math.min(-deltaX, blackMargin);
-        this.offsetX += retract;
-        this.virtualMouseX = Math.max(0, this.virtualMouseX + deltaX + retract);
-      }
-      if (deltaY > 0) {
-        const cursorTravel: number = Math.min(deltaY, controlMaxY - this.virtualMouseY);
-        this.virtualMouseY += cursorTravel;
-        this.offsetY = Math.max(-panLimitY - VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN,
-          this.offsetY - (deltaY - cursorTravel));
-      } else if (deltaY < 0) {
-        const blackMargin: number = Math.max(0, -panLimitY - this.offsetY);
-        const retract: number = Math.min(-deltaY, blackMargin);
-        this.offsetY += retract;
-        this.virtualMouseY = Math.max(0, this.virtualMouseY + deltaY + retract);
-      }
+      const first: RemotePoint = this.remotePointToVisual(0, 0);
+      const last: RemotePoint = this.remotePointToVisual(this.remoteWidth - 1, this.remoteHeight - 1);
+      const x: RemotePoint = this.moveVirtualMouseAxis(this.virtualMouseX, deltaX, this.componentWidth,
+        VIRTUAL_MOUSE_WIDTH, VIRTUAL_MOUSE_POINTER_HOT_X, first.x, last.x, this.offsetX, panLimitX,
+        VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN);
+      const y: RemotePoint = this.moveVirtualMouseAxis(this.virtualMouseY, deltaY, this.componentHeight,
+        VIRTUAL_MOUSE_HEIGHT, VIRTUAL_MOUSE_POINTER_HOT_Y, first.y, last.y, this.offsetY, panLimitY,
+        VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN);
+      this.virtualMouseX = x.x; this.offsetX = x.y;
+      this.virtualMouseY = y.x; this.offsetY = y.y;
       const groupedPoint: RemotePoint = this.updatePointerFromVirtualMouse();
       ConnectionService.sendMouseEvent(groupedPoint.x, groupedPoint.y, 0);
+      this.pointerVirtualMoves++;
       if (!follow) this.updateEdgeAutoPan(groupedPoint.x, groupedPoint.y, true);
       return;
     }
@@ -4843,12 +4913,19 @@ struct RemotePage {
   }
 
   clickVirtualMouseButton(button: string): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      this.componentWidth <= 0 || this.componentHeight <= 0) return;
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.requestRemoteInputFocus();
     this.ensurePointerInitialized();
     this.initializeVirtualMousePosition();
     const remotePoint: RemotePoint = this.updatePointerFromVirtualMouse();
+    if (!this.relativeMouseEnabled) {
+      // RustDesk hosts apply position on MOVE; DOWN/UP do not reposition it.
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
+    }
     if (button === 'left') {
       this.sendLeftClick(remotePoint.x, remotePoint.y);
     } else if (button === 'right') {
@@ -4863,11 +4940,17 @@ struct RemotePage {
   }
 
   beginVirtualMouseButtonDrag(button: string): void {
+    if (this.connectionStatus !== ConnectionStatus.CONNECTED || this.remoteWidth <= 0 || this.remoteHeight <= 0 ||
+      this.componentWidth <= 0 || this.componentHeight <= 0) return;
     this.clearLongPressTimer();
     this.clearTapTimer();
     this.requestRemoteInputFocus();
     this.beginVirtualMouseMove();
     const remotePoint: RemotePoint = this.updatePointerFromVirtualMouse();
+    if (!this.relativeMouseEnabled) {
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
+    }
     if (button === 'left') {
       this.virtualMouseLeftDown = true;
       this.sendLeftDown(remotePoint.x, remotePoint.y);
@@ -4880,6 +4963,12 @@ struct RemotePage {
   }
 
   finishVirtualMouseButtonDrag(button: string, cancelled: boolean = false): void {
+    if (!cancelled && !this.relativeMouseEnabled &&
+      ((button === 'left' && this.virtualMouseLeftDown) || (button === 'right' && this.virtualMouseRightDown))) {
+      const remotePoint: RemotePoint = this.updatePointerFromVirtualMouse();
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
+    }
     if (button === 'left' && this.virtualMouseLeftDown) {
       this.virtualMouseLeftDown = false;
       this.sendLeftUp(this.lastAbsX, this.lastAbsY, true);
@@ -5015,11 +5104,11 @@ struct RemotePage {
   }
 
   virtualMousePointerX(): number {
-    return this.virtualMouseOverlayX();
+    return this.virtualMouseX;
   }
 
   virtualMousePointerY(): number {
-    return this.virtualMouseOverlayY();
+    return this.virtualMouseY;
   }
 
   @Builder
@@ -8137,6 +8226,7 @@ struct RemotePage {
     if (this.desktopWindowActive === false) return;
     if (!isHovering) this.relativePointerSampleValid = false;
     if (isHovering) {
+      this.remoteToolbarHoverCursorSuppressed = false;
       this.cancelPointerHoverExit();
       this.pointerOverRemoteViewport = true;
       this.updateSystemPointerVisibility();
@@ -8172,6 +8262,21 @@ struct RemotePage {
     this.stopEdgeAutoPan();
     this.releaseHeldMouseButtons('non_remote_hover');
     this.updateSystemPointerVisibility();
+  }
+
+  handleRemoteToolbarHover(isHovering: boolean): void {
+    this.handleNonRemoteHover(isHovering);
+    let localPointerVisible: boolean = false;
+    if (isHovering && !this.remoteExternalDisplay) {
+      try {
+        localPointerVisible = pointer.isPointerVisibleSync();
+      } catch (_error) {
+        // If the system cannot report the pointer, retain the remote cursor.
+      }
+    }
+    // Only suppress the separately rendered cursor while an actual local
+    // pointer is available. The projected display may have no system pointer.
+    this.remoteToolbarHoverCursorSuppressed = isHovering && localPointerVisible;
   }
 
   cancelPointerHoverExit(): void {
@@ -8251,7 +8356,10 @@ struct RemotePage {
     // them here would suppress the physical onClick fallback for 320ms.
     this.lastTouchEventAt = Date.now();
 
-    if (event.type === TouchType.Down) this.projectedPhysicalPointer = false;
+    if (event.type === TouchType.Down) {
+      this.remoteToolbarHoverCursorSuppressed = false;
+      this.projectedPhysicalPointer = false;
+    }
     if (event.type === TouchType.Move) this.pointerTouchMoves++;
 
     // An Up may still contain the released finger. Never start another gesture
@@ -8811,6 +8919,10 @@ struct RemotePage {
     if (event.source === SourceType.Mouse || event.sourceTool === SourceTool.MOUSE ||
       event.sourceTool === SourceTool.TOUCHPAD) this.noteProjectedPhysicalPointer();
     let remotePoint: RemotePoint = this.updatePointerFromLocal(localX, localY);
+    if (this.showVirtualMouse && !this.relativeMouseEnabled) {
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
+    }
     this.sendLeftClick(remotePoint.x, remotePoint.y);
     this.lastFallbackClickTimestamp = timestamp;
     this.pointerFallbackClicks++;
@@ -8872,6 +8984,7 @@ struct RemotePage {
     }
     this.noteProjectedPhysicalPointer();
     this.lastMouseEventAt = Date.now();
+    this.remoteToolbarHoverCursorSuppressed = false;
     this.pointerOverRemoteViewport = true;
     if (this.desktopWindow) this.schedulePcToolbarAutoCollapse();
     this.updateSystemPointerVisibility();
@@ -8885,6 +8998,10 @@ struct RemotePage {
       this.updateEdgeAutoPan(remotePoint.x, remotePoint.y, false);
     } else {
       this.stopEdgeAutoPan();
+    }
+    if (action > 0 && this.showVirtualMouse && !this.relativeMouseEnabled) {
+      ConnectionService.sendMouseEvent(remotePoint.x, remotePoint.y, 0);
+      this.pointerVirtualButtonMoves++;
     }
     this.reconcilePhysicalMouseButtons(event, remotePoint.x, remotePoint.y);
     if (action < 0) {
@@ -9037,6 +9154,9 @@ struct RemotePage {
     // Local prediction is therefore required even after an authoritative
     // remote position has already been received.
     this.updateCursorOverlayFromPosition(remoteX, remoteY);
+    if (this.showVirtualMouse && !this.virtualMouseDragActive && this.isHandheldDevice()) {
+      this.alignVirtualMouseToRemotePosition(remoteX, remoteY);
+    }
     return { x: remoteX, y: remoteY };
   }
 
@@ -9171,6 +9291,7 @@ struct RemotePage {
 
   markLocalPointerInput(): void {
     this.lastLocalPointerInputAt = Date.now();
+    this.localPointerInputRevision++;
     if (this.remoteCursorEmbedded && !this.embeddedCursorOverlayFallback) {
       this.embeddedCursorOverlayFallback = true;
       RustDeskNapi.appendDiagnosticLog('input',
@@ -10395,7 +10516,7 @@ struct RemotePage {
   }
 
   getRemoteToolbarCurrentWidth(): number {
-    const collapsedWidth: number = this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right' ? 40 : 56;
+    const collapsedWidth: number = this.remoteToolbarDockEdge === 'left' || this.remoteToolbarDockEdge === 'right' ? 16 : 56;
     return this.remoteToolbarCollapsed ? Math.min(collapsedWidth, Math.max(1,
       (this.pageWidth > 0 ? this.pageWidth : 360) - 16)) : this.getRemoteToolbarWidth();
   }
@@ -12635,6 +12756,8 @@ struct RemotePage {
     this.remoteCursorEmbedded = false;
     this.embeddedCursorOverlayFallback = false;
     this.lastRemoteCursorSequence = -1;
+    this.deferredRemoteCursorSequence = -1;
+    this.deferredRemoteCursorInputRevision = this.localPointerInputRevision;
     this.lastRemoteCursorImageSequence = -1;
     this.hasAuthoritativeRemoteCursor = false;
     this.remoteCursorAbsX = 0;

@@ -2,6 +2,11 @@
 已信任此设备	This device is trusted
 登录成功，但未能保存信任，下次仍需验证码	Signed in, but trust could not be saved. A verification code will still be required next time.
 系统安全存储不可用，暂无法保存可信设备	Secure storage is unavailable; this device cannot be trusted right now.
+2.0.10（2000010）· 虚拟鼠标与悬浮栏修复	2.0.10 (2000010) · Virtual mouse and floating toolbar fixes
+修复虚拟鼠标在画面边缘或缩放时指针与实际操作位置不一致的问题，点击及拖拽前同步目标位置。	Fixed virtual mouse pointer and target misalignment near screen edges or while zoomed. The target position is synchronized before clicking and dragging.
+优化虚拟鼠标和远端光标的显示，减少重复箭头；兼容实体鼠标操作。	Improved virtual mouse and remote cursor rendering to reduce duplicate arrows while preserving physical mouse controls.
+修复“控”按钮贴边后仍占用较大触控区域的问题，优化鼠标悬停时的显示。	Fixed the docked Controls tab occupying an oversized touch area and improved its appearance when a mouse hovers over it.
+优化连接初期光标位置处理，在画面未准备好时避免误发虚拟鼠标操作；完善不记录输入内容的诊断。	Improved initial cursor positioning and prevent virtual mouse input until the remote image is ready. Added diagnostics that do not record typed content.
 2.0.9（2000009）· 鼠标指针同步优化	2.0.9 (2000009) · Mouse pointer synchronization improvements
 优化触摸鼠标位置同步：手指结束移动时补发最终位置，减少本地指针与远端悬停位置不一致。	Improved touch mouse synchronization by sending the final position when a finger is lifted, reducing differences between the local pointer and remote hover position.
 修复横竖屏切换或窗口尺寸变化后，鼠标箭头未按新画布比例及时更新的问题。	Fixed the mouse arrow not updating promptly for the new canvas size after rotation or window resizing.

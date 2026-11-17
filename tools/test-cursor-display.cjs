@@ -10,6 +10,8 @@ vm.runInContext(ts.transpile('class Page {' + method + '} globalThis.Page = Page
 function page() {
   return Object.assign(new ctx.Page(), {
     lastRemoteCursorSequence: -1, remoteWidth: 1920, remoteHeight: 1080,
+    deferredRemoteCursorSequence: -1, deferredRemoteCursorInputRevision: 0,
+    localPointerInputRevision: 0, pointerCursorDeferred: 0, pointerCursorDeferredStale: 0,
     lastLocalPointerInputAt: 1000, localPointerGestureActive: false,
     preferAuthoritativeCursor: false, leftButtonHeld: false, showCursor: true,
     virtualMouseDragActive: false,
@@ -43,3 +45,35 @@ p.localPointerGestureActive=true;
 p.applyRemoteCursorPosition({...outside,x:350,sequence:20},1010);
 assert.deepEqual(p.position,[350,200], 'Relative mode must accept real cursor feedback during local movement');
 console.log('PASS relative mode does not suppress authoritative cursor feedback');
+p=page();
+p.remoteWidth=0; p.remoteHeight=0; p.lastLocalPointerInputAt=0;
+const early={valid:true,x:417,y:906,sequence:21};
+p.applyRemoteCursorPosition(early,1000);
+p.applyRemoteCursorPosition(early,1033);
+assert.equal(p.lastRemoteCursorSequence,-1,'unknown dimensions must not consume the sample');
+assert.equal(p.pointerCursorDeferred,1,'polling the same deferred sample must not spam diagnostics');
+p.remoteWidth=1920; p.remoteHeight=1080;
+p.applyRemoteCursorPosition(early,1100);
+assert.deepEqual(p.position,[417,906],'same sample must become usable when dimensions arrive');
+assert.equal(p.hasAuthoritativeRemoteCursor,true);
+console.log('PASS early remote position is applied when geometry becomes ready');
+p=page(); p.remoteWidth=0; p.remoteHeight=0; p.lastLocalPointerInputAt=0;
+p.applyRemoteCursorPosition(early,1000);
+p.localPointerInputRevision++;
+p.remoteWidth=1920; p.remoteHeight=1080;
+p.applyRemoteCursorPosition(early,2000);
+assert.equal(p.position,undefined,'a deferred sample must never override newer local input');
+assert.equal(p.pointerCursorDeferredStale,1);
+p.applyRemoteCursorPosition({...early,sequence:22,x:500},2100);
+assert.deepEqual(p.position,[500,906]);
+console.log('PASS local input invalidates a stale deferred sample');
+p=page(); p.lastLocalPointerInputAt=0; p.virtualMouseDragActive=true;
+p.applyRemoteCursorPosition({...early,sequence:23},2000);
+assert.equal(p.position,undefined,'late peer positions must not overwrite an active virtual drag');
+assert.equal(p.lastRemoteCursorSequence,23);
+p.virtualMouseDragActive=false;
+p.applyRemoteCursorPosition({...early,sequence:23},2100);
+assert.equal(p.position,undefined,'a sample consumed during dragging must not replay on release');
+p.applyRemoteCursorPosition({...early,sequence:24},2200);
+assert.deepEqual(p.position,[417,906]);
+console.log('PASS delayed peer samples cannot jump an active virtual drag');

@@ -112,6 +112,7 @@ function page(overrides = {}) {
     zoomScale: 1, offsetX: 0, offsetY: 0, showKeyboardPanel: false,
     remoteKeyboardVisible: false, remoteKeyboardEditing: false, remoteKeyboardVisibilityKnown: true,
     remoteExternalDisplay: true, remoteProjectionDisplayId: 8, projectedPhysicalPointer: false,
+    remoteToolbarHoverCursorSuppressed: false,
     showCursor: false, relativeMouseEnabled: false, hasAuthoritativeRemoteCursor: false,
     remoteCursorEmbedded: false, embeddedCursorOverlayFallback: false,
     remoteCursorImageWidth: 0, remoteCursorImageHeight: 0,
@@ -212,6 +213,31 @@ test('relative mode and explicit embedded preference keep their cursor constrain
   p.hasAuthoritativeRemoteCursor=true; assert.equal(p.shouldShowCursorOverlay(),true);
   p.cursorCompatibilityMode='embedded'; assert.equal(p.shouldShowCursorOverlay(),false);
 });
+test('virtual mouse uses one overlay and follows a physical pointer without duplicate clicks', () => {
+  const p=page({showVirtualMouse:true, remoteExternalDisplay:false,
+    isHandheldDevice:() => true, virtualMouseDragActive:false,
+    alignVirtualMouseToRemotePosition(x,y) { this.virtualPosition=[x,y]; }});
+  now=2000; ark(p,150,175);
+  assert.deepEqual(p.virtualPosition,[200,200]);
+  assert.equal(p.shouldShowCursorOverlay(),false,'the virtual arrow replaces the second app overlay');
+  assert.deepEqual(sent.map(v=>v[2]),[0]);
+  now+=10; ark(p,150,175,{action:MouseAction.Press,button:MouseButton.Left});
+  now+=10; ark(p,150,175,{action:MouseAction.Release,button:MouseButton.Left});
+  assert.deepEqual(sent.map(v=>v[2]),[0,0,1,0,2], 'each button is preceded by its target move');
+  assert.equal(p.pointerVirtualButtonMoves,2);
+  p.showVirtualMouse=false;
+  assert.equal(p.shouldShowCursorOverlay(),true,'ordinary physical pointer overlay is restored');
+});
+test('virtual mode native mouse sends position before physical buttons and balances releases', () => {
+  const p=page({showVirtualMouse:true,remoteExternalDisplay:false,
+    isHandheldDevice:()=>true,virtualMouseDragActive:false,
+    alignVirtualMouseToRemotePosition(x,y) { this.virtualPosition=[x,y]; }});
+  now=3000; native(p,100,100,1,1);
+  now+=10; native(p,120,110,2,1);
+  assert.deepEqual(sent.map(v=>v[2]),[0,1,0,2]);
+  assert.deepEqual(p.virtualPosition,[240,220]);
+  assert.equal(p.pointerVirtualButtonMoves,2);
+});
 test('display transition clears stale pairing and relative baseline', () => {
   const p=page({remotePageVisible:true,projectedPhysicalPointer:true,relativePointerSampleValid:true});
   p.physicalMouseDeduplicator.rememberNative(0,10,10,1000);
@@ -228,6 +254,7 @@ test('diagnostics disabled by default; rate-limited movement and display reasons
   p.pointerViewportCursorReflows=1; p.pointerShapeCursorReflows=1; p.flushPointerDiagnostics();
   assert.equal(logs.length,1); assert.match(logs[0][1],/ark_move=1/);
   assert.match(logs[0][1],/physical_move_dispatch=1/); assert.match(logs[0][1],/overlay=true/);
+  assert.match(logs[0][1],/toolbar_cursor_suppressed=false/);
   assert.match(logs[0][1],/touch_move_throttled=2 touch_final_move_requests=1/);
   assert.match(logs[0][1],/cursor_viewport_reflows=1 cursor_shape_reflows=1/);
   p.flushPointerDiagnostics(); assert.equal(logs.length,1);

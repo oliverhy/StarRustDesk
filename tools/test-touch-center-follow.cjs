@@ -32,8 +32,9 @@ const names = ['touchGesturePoint', 'isHandheldDevice', 'shouldFollowTouchMouse'
   'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
   'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport',
   'clampVirtualMouseX', 'clampVirtualMouseY', 'alignVirtualMouseToRemotePosition',
-  'updateVirtualMouseMove', 'beginVirtualMouseMove', 'finishVirtualMouseMove',
+  'moveVirtualMouseAxis', 'updateVirtualMouseMove', 'beginVirtualMouseMove', 'finishVirtualMouseMove',
   'updatePointerFromVirtualMouse', 'syncVirtualMouseToCurrentPointer',
+  'clickVirtualMouseButton', 'beginVirtualMouseButtonDrag', 'finishVirtualMouseButtonDrag',
   'virtualMouseOverlayX', 'virtualMouseOverlayY', 'virtualMousePointerX', 'virtualMousePointerY'];
 const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCHPAD_DRAG_START_THRESHOLD', 'TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS',
   'VIRTUAL_MOUSE_POINTER_HOT_X', 'VIRTUAL_MOUSE_POINTER_HOT_Y',
@@ -53,7 +54,8 @@ function make(overrides = {}) {
     isPanMode: false, showKeyboardPanel: false, remoteKeyboardVisible: false,
     remoteKeyboardEditing: false, remoteKeyboardVisibilityKnown: true, connectionStatus: 2, showVirtualMouse: false,
     leftButtonHeld: false, touchpadDragCandidate: false, tapTimer: -1, lastMoveSentAt: 0, touchpadLastTapAt: 0,
-    virtualMouseDragActive: false, hasAuthoritativeRemoteCursor: false,
+    virtualMouseDragActive: false, virtualMouseLeftDown: false, virtualMouseRightDown: false,
+    pointerVirtualMoves: 0, pointerVirtualButtonMoves: 0, hasAuthoritativeRemoteCursor: false,
     stopEdgeAutoPan() { this.stops = (this.stops || 0) + 1; },
     updateEdgeAutoPan() { this.edgeCalls = (this.edgeCalls || 0) + 1; },
     updatePointerFromDelta() { this.legacyCalls = (this.legacyCalls || 0) + 1;
@@ -190,6 +192,79 @@ test('hidden keyboard capture does not disable center follow after Windows login
   near(p.offsetX, -25);
   near(p.remotePointToVisual(p.lastAbsX, p.lastAbsY).x, 200);
 });
+test('enabling near the bottom keeps the existing remote hotspot while the panel stays visible', () => {
+  const p = make({ showVirtualMouse: true, componentWidth: 844, componentHeight: 363,
+    remoteWidth: 1920, remoteHeight: 1080, zoomScale: 1, lastAbsX: 516, lastAbsY: 718 });
+  p.syncVirtualMouseToCurrentPointer();
+  const visual = p.remotePointToVisual(516, 718);
+  near(p.virtualMousePointerX() + 1, visual.x);
+  near(p.virtualMousePointerY() + 1, visual.y);
+  assert(p.virtualMousePointerY() > p.virtualMouseOverlayY(), 'the panel, not the hotspot, must be clamped');
+  assert(p.virtualMouseOverlayY() + 138 <= p.componentHeight);
+  assert.deepEqual(calls, [], 'enabling or aligning must not move or click the remote');
+});
+test('virtual button moves the official-style host to the target before clicking', () => {
+  const p = make({ showVirtualMouse: true, componentWidth: 844, componentHeight: 363,
+    remoteWidth: 1920, remoteHeight: 1080, zoomScale: 1, lastAbsX: 516, lastAbsY: 718 });
+  p.syncVirtualMouseToCurrentPointer();
+  p.sendLeftClick = (x, y) => { calls.push([x, y, 1]); calls.push([x, y, 2]); };
+  p.clickVirtualMouseButton('left');
+  assert.deepEqual(calls.map(c => c[2]), [0, 1, 2]);
+  let hostPosition = [100, 100], clicked = null;
+  for (const [x, y, action] of calls) {
+    if (action === 0) hostPosition = [Math.trunc(x), Math.trunc(y)];
+    if (action === 1) clicked = [...hostPosition]; // host ignores x/y on DOWN
+  }
+  assert(Math.abs(clicked[0] - 516) <= 1 && Math.abs(clicked[1] - 718) <= 1);
+  assert.equal(p.pointerVirtualButtonMoves, 1);
+});
+test('right and middle virtual buttons each send one position before their balanced click', () => {
+  const p = make({showVirtualMouse:true}); p.syncVirtualMouseToCurrentPointer();
+  p.sendRightDown = (x,y) => calls.push([x,y,3]);
+  p.sendRightUp = (x,y) => calls.push([x,y,4]);
+  p.clickVirtualMouseButton('right');
+  assert.deepEqual(calls.map(c => c[2]), [0,3,4]);
+  calls=[]; p.clickVirtualMouseButton('middle');
+  assert.deepEqual(calls.map(c => c[2]), [0,5,6]);
+});
+test('virtual input is blocked while disconnected or geometry is not ready', () => {
+  for (const state of [{connectionStatus:0},{remoteWidth:0},{remoteHeight:0},
+    {componentWidth:0},{componentHeight:0}]) {
+    const p=make({showVirtualMouse:true,...state});
+    p.clickVirtualMouseButton('left'); p.beginVirtualMouseButtonDrag('left');
+    p.updateVirtualMouseMove(20,20);
+    assert.deepEqual(calls,[]); assert.equal(p.virtualMouseLeftDown,false);
+  }
+});
+test('virtual drag synchronizes before down and before release, cancel only releases', () => {
+  const p = make({ showVirtualMouse: true });
+  p.sendLeftDown = (x,y) => { p.leftButtonHeld = true; calls.push([x,y,1]); };
+  p.sendLeftUp = (x,y) => { p.leftButtonHeld = false; calls.push([x,y,2]); };
+  p.beginVirtualMouseButtonDrag('left');
+  assert.deepEqual(calls.map(c => c[2]), [0,1]);
+  p.updateVirtualMouseMove(20,15);
+  const target = [p.lastAbsX,p.lastAbsY];
+  p.lastAbsX = 0; p.lastAbsY = 0; // stale peer feedback must not change the release target
+  p.finishVirtualMouseButtonDrag('left');
+  assert.deepEqual(calls.slice(-2).map(c => c[2]), [0,2]);
+  near(calls.at(-2)[0], target[0]); near(calls.at(-2)[1], target[1]);
+  near(calls.at(-1)[0], target[0]); near(calls.at(-1)[1], target[1]);
+  p.beginVirtualMouseButtonDrag('left'); calls=[];
+  p.finishVirtualMouseButtonDrag('left', true);
+  assert.deepEqual(calls.map(c => c[2]), [2], 'cancel must release without moving or clicking');
+});
+test('virtual pointer remains aligned after landscape portrait and zoom changes', () => {
+  const p = make({ showVirtualMouse: true, componentWidth:844, componentHeight:363,
+    remoteWidth:1920, remoteHeight:1080, zoomScale:1, lastAbsX:516, lastAbsY:718 });
+  for (const [w,h,zoom] of [[844,363,1],[391,777,1],[391,777,1.3],[844,363,1]]) {
+    p.componentWidth=w; p.componentHeight=h; p.zoomScale=zoom;
+    p.offsetX=0; p.offsetY=0; p.syncVirtualMouseToCurrentPointer();
+    const visual = p.remotePointToVisual(p.lastAbsX,p.lastAbsY);
+    near(p.virtualMousePointerX()+1,visual.x); near(p.virtualMousePointerY()+1,visual.y);
+    assert(p.virtualMouseOverlayX()+112<=w && p.virtualMouseOverlayY()+138<=h);
+  }
+  assert.deepEqual(calls,[]);
+});
 test('virtual mouse release/restart and disabling follow do not jump', () => {
   const p = make({ showVirtualMouse: true }); p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(20, 0); near(p.offsetX, 0);
@@ -218,54 +293,44 @@ test('grouped virtual mouse also works when the computed horizontal pan limit is
   p.updateVirtualMouseMove(1000, 0);
   near(p.virtualMouseX, 288);
   near(p.virtualMousePointerX(), p.virtualMouseOverlayX());
-  near(p.offsetX, -256);
+  near(p.offsetX, -110.6);
   near(p.lastAbsX, 999);
 });
-test('right-edge drag carries the control and local arrow together into black space', () => {
+test('right-edge drag pans the canvas but never moves the hotspot into black space', () => {
   const p = make({ showVirtualMouse: true }); p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(1000, 0);
   near(p.lastAbsX, 999);
-  near(p.offsetX, -p.getHorizontalPanLimit(p.zoomScale) - 256);
-  const remoteRight = p.remotePointToVisual(p.remoteWidth, p.lastAbsY).x;
-  assert(remoteRight < p.componentWidth);
-  // Both local layers enter the black margin together. The remote input
-  // coordinate is still clamped to the desktop's last pixel.
-  assert(p.virtualMouseX > remoteRight);
+  const edge = p.remotePointToVisual(999, p.lastAbsY);
+  near(p.virtualMousePointerX() + 1, edge.x);
   near(p.virtualMouseX, p.virtualMouseOverlayX());
-  assert(p.virtualMouseOverlayX() >= remoteRight);
   assert(p.virtualMouseOverlayX() + 112 <= p.componentWidth);
-  assert.deepEqual(calls.at(-1), [999, 500, 0]);
+  near(calls.at(-1)[0], 999);
   p.finishVirtualMouseMove();
-  const outsideX = p.virtualMouseX;
-  p.beginVirtualMouseMove(); near(p.virtualMouseX, outsideX);
+  const edgeX = p.virtualMouseX;
+  p.beginVirtualMouseMove(); near(p.virtualMouseX, edgeX);
   p.updateVirtualMouseMove(-20, 0);
-  near(p.lastAbsX, 999);
-  assert(p.offsetX > -p.getHorizontalPanLimit(p.zoomScale) - 256);
+  assert(p.lastAbsX < 999);
+  near(p.virtualMousePointerX() + 1, p.remotePointToVisual(p.lastAbsX, p.lastAbsY).x);
   p.updateVirtualMouseMove(-300, 0);
   assert(p.lastAbsX < 999);
-  near(p.offsetX, -p.getHorizontalPanLimit(p.zoomScale));
 });
-test('bottom-edge drag carries the control and arrow together into black space', () => {
+test('bottom-edge drag keeps the hotspot at the last remote pixel', () => {
   const p = make({ showVirtualMouse: true }); p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(0, 1000);
   near(p.lastAbsY, 999);
-  near(p.offsetY, -p.getVerticalPanLimit(p.zoomScale) - 308);
-  const remoteBottom = p.remotePointToVisual(p.lastAbsX, p.remoteHeight).y;
-  assert(remoteBottom < p.componentHeight);
-  assert(p.virtualMouseY > remoteBottom);
+  near(p.virtualMousePointerY() + 1, p.remotePointToVisual(p.lastAbsX, 999).y);
   near(p.virtualMouseY, p.virtualMouseOverlayY());
   near(p.virtualMousePointerY(), p.virtualMouseOverlayY());
   assert(p.virtualMouseOverlayY() + 138 <= p.componentHeight);
-  assert.deepEqual(calls.at(-1), [500, 999, 0]);
+  near(calls.at(-1)[1], 999);
   p.finishVirtualMouseMove();
   const outsideY = p.virtualMouseY;
   p.beginVirtualMouseMove(); near(p.virtualMouseY, outsideY);
   p.updateVirtualMouseMove(0, -20);
-  near(p.lastAbsY, 999);
-  assert(p.offsetY > -p.getVerticalPanLimit(p.zoomScale) - 308);
+  assert(p.lastAbsY < 999);
+  near(p.virtualMousePointerY() + 1, p.remotePointToVisual(p.lastAbsX, p.lastAbsY).y);
   p.updateVirtualMouseMove(0, -400);
   assert(p.lastAbsY < 999);
-  near(p.offsetY, -p.getVerticalPanLimit(p.zoomScale));
 });
 test('bottom grouped movement also works without vertical image overflow', () => {
   const p = make({ showVirtualMouse: true, zoomScale: 1 }); p.beginVirtualMouseMove();
@@ -273,10 +338,49 @@ test('bottom grouped movement also works without vertical image overflow', () =>
   p.updateVirtualMouseMove(0, 1000);
   near(p.virtualMouseY, 262);
   near(p.virtualMousePointerY(), p.virtualMouseOverlayY());
-  near(p.offsetY, -308);
+  near(p.offsetY, -136.6);
   near(p.lastAbsY, 999);
 });
-test('virtual mouse reaches the same black area with edge-follow disabled', () => {
+test('all four virtual pointer edges stay on real remote pixels and reverse immediately', () => {
+  for (const [dx,dy] of [[-1000,0],[1000,0],[0,-1000],[0,1000]]) {
+    const p=make({showVirtualMouse:true}); p.beginVirtualMouseMove();
+    p.updateVirtualMouseMove(dx,dy);
+    const visual=p.remotePointToVisual(p.lastAbsX,p.lastAbsY);
+    near(p.virtualMousePointerX()+1,visual.x); near(p.virtualMousePointerY()+1,visual.y);
+    if(dx<0) near(p.lastAbsX,0); if(dx>0) near(p.lastAbsX,999);
+    if(dy<0) near(p.lastAbsY,0); if(dy>0) near(p.lastAbsY,999);
+    const previous=[p.lastAbsX,p.lastAbsY];
+    p.updateVirtualMouseMove(dx-Math.sign(dx)*20,dy-Math.sign(dy)*20);
+    if(dx) assert(Math.abs(p.lastAbsX-previous[0])>0);
+    if(dy) assert(Math.abs(p.lastAbsY-previous[1])>0);
+  }
+});
+test('virtual hotspot follows sent coordinates across aspect ratios, zooms and repeated direction changes', () => {
+  let seed=0x45ab23;
+  const random=()=>{ seed=(Math.imul(seed,1664525)+1013904223)>>>0; return seed/0x100000000; };
+  for (const [width,height] of [[844,363],[391,777],[1200,800],[240,320]]) {
+    for (const zoomScale of [0.75,1,1.5,2.5]) {
+      const p=make({showVirtualMouse:true,componentWidth:width,componentHeight:height,
+        remoteWidth:1920,remoteHeight:1080,lastAbsX:960,lastAbsY:540,zoomScale});
+      p.beginVirtualMouseMove(); let ox=0,oy=0;
+      for(let i=0;i<50;i++) {
+        ox+=(random()-0.5)*240; oy+=(random()-0.5)*240;
+        p.updateVirtualMouseMove(ox,oy);
+        const visual=p.remotePointToVisual(p.lastAbsX,p.lastAbsY);
+        if(Math.abs(p.virtualMousePointerX()+1-visual.x)>1e-7 || Math.abs(p.virtualMousePointerY()+1-visual.y)>1e-7)
+          console.log('virtual alignment failure',JSON.stringify({width,height,zoomScale,i,ox,oy,
+            offsetX:p.offsetX,offsetY:p.offsetY,pointerX:p.virtualMouseX,pointerY:p.virtualMouseY,
+            remoteX:p.lastAbsX,remoteY:p.lastAbsY,visual}));
+        near(p.virtualMousePointerX()+1,visual.x,`x ${width}x${height} zoom=${zoomScale}`);
+        near(p.virtualMousePointerY()+1,visual.y,`y ${width}x${height} zoom=${zoomScale}`);
+        assert(p.lastAbsX>=0 && p.lastAbsX<=1919 && p.lastAbsY>=0 && p.lastAbsY<=1079);
+        assert(p.virtualMouseOverlayX()>=0 && p.virtualMouseOverlayX()+112<=width);
+        assert(p.virtualMouseOverlayY()>=0 && p.virtualMouseOverlayY()+138<=height);
+      }
+    }
+  }
+});
+test('edge-follow disabled still keeps the virtual hotspot on the image', () => {
   const p = make({ showVirtualMouse: true, edgeAutoPanEnabled: false });
   p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(20, 0);
@@ -284,19 +388,15 @@ test('virtual mouse reaches the same black area with edge-follow disabled', () =
   near(p.lastAbsX, 525);
   p.updateVirtualMouseMove(1000, 0);
   near(p.lastAbsX, 999);
-  near(p.offsetX, -p.getHorizontalPanLimit(p.zoomScale) - 256);
-  const remoteRight = p.remotePointToVisual(p.remoteWidth, p.lastAbsY).x;
-  assert(p.virtualMouseX > remoteRight);
+  near(p.virtualMousePointerX() + 1, p.remotePointToVisual(999, p.lastAbsY).x);
   near(p.virtualMouseX, p.virtualMouseOverlayX());
-  assert(p.virtualMouseOverlayX() >= remoteRight);
   assert(p.virtualMouseOverlayX() + 112 <= p.componentWidth);
   p.finishVirtualMouseMove();
   p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(-20, 0);
-  near(p.lastAbsX, 999);
+  assert(p.lastAbsX < 999);
   p.updateVirtualMouseMove(-300, 0);
   assert(p.lastAbsX < 999);
-  near(p.offsetX, -p.getHorizontalPanLimit(p.zoomScale));
 });
 test('right-edge black margin is removed when virtual mouse is turned off', () => {
   const body = source.slice(source.indexOf('  setVirtualMouseEnabled(enabled:'),
@@ -304,25 +404,18 @@ test('right-edge black margin is removed when virtual mouse is turned off', () =
   assert(body.includes('this.clampViewportOffset();'));
   assert(source.includes(".backgroundColor('#090D14')"));
 });
-test('panning elsewhere after reaching the right edge never separates the arrow from its control', () => {
-  const p = make({ showVirtualMouse: true, lastAbsY: 999 });
+test('panning elsewhere retains the hotspot even when the body is clamped', () => {
+  const p = make({ showVirtualMouse: true });
   p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(1000, 0);
   p.finishVirtualMouseMove();
   assert(p.offsetX < -p.getHorizontalPanLimit(p.zoomScale));
-  // A finger on the canvas pans the image back within its ordinary bounds.
-  // Synchronizing the remote pointer used to put the arrow beyond the
-  // control's on-screen limit, even though both were aligned before this pan.
   p.offsetX = -p.getHorizontalPanLimit(p.zoomScale);
   p.syncVirtualMouseToCurrentPointer();
-  near(p.virtualMouseX, p.virtualMouseOverlayX());
-  near(p.virtualMousePointerX(), p.virtualMouseOverlayX());
-  near(p.virtualMouseY, p.virtualMouseOverlayY());
-  near(p.virtualMousePointerY(), p.virtualMouseOverlayY());
-  near(p.virtualMouseX, 288);
-  near(p.virtualMouseY, 262);
+  near(p.virtualMousePointerX() + 1, p.remotePointToVisual(p.lastAbsX, p.lastAbsY).x);
+  assert(p.virtualMouseOverlayX() + 112 <= p.componentWidth);
 });
-test('panning elsewhere after reaching the bottom keeps the arrow on the control', () => {
+test('panning elsewhere after reaching the bottom keeps the hotspot accurate', () => {
   const p = make({ showVirtualMouse: true });
   p.beginVirtualMouseMove();
   p.updateVirtualMouseMove(0, 1000);
@@ -332,9 +425,8 @@ test('panning elsewhere after reaching the bottom keeps the arrow on the control
   near(p.virtualMouseY, outsideY);
   p.offsetY = -p.getVerticalPanLimit(p.zoomScale);
   p.syncVirtualMouseToCurrentPointer();
-  near(p.virtualMouseY, p.virtualMouseOverlayY());
-  near(p.virtualMousePointerY(), p.virtualMouseOverlayY());
-  near(p.virtualMouseY, 262);
+  near(p.virtualMousePointerY() + 1, p.remotePointToVisual(p.lastAbsX, p.lastAbsY).y);
+  assert(p.virtualMouseOverlayY() + 138 <= p.componentHeight);
 });
 test('virtual mouse owns other-area touch even when the image has no ordinary pan overflow', () => {
   const body = source.slice(source.indexOf('  handleRemoteTouch(event: TouchEvent): void {'),
@@ -342,12 +434,12 @@ test('virtual mouse owns other-area touch even when the image has no ordinary pa
   assert(body.includes('if ((this.showVirtualMouse && this.isHandheldDevice()) || this.isPanMode)'));
   assert(!body.includes('this.showVirtualMouse && this.isHandheldDevice() && this.canPanViewport()'));
 });
-test('virtual mouse move handle remains on screen at the physical edge', () => {
-  const p = make({ virtualMouseX: 399, virtualMouseY: 399 });
+test('virtual mouse move handle remains on screen without shifting the hotspot', () => {
+  const p = make({ virtualMouseX: 398, virtualMouseY: 398 });
   near(p.virtualMouseOverlayX(), 288);
   near(p.virtualMouseOverlayY(), 262);
-  near(p.virtualMousePointerX(), 288);
-  near(p.virtualMousePointerY(), 262);
+  near(p.virtualMousePointerX(), 398);
+  near(p.virtualMousePointerY(), 398);
   assert(p.virtualMouseOverlayX() + 112 <= p.componentWidth);
   assert(p.virtualMouseOverlayY() + 138 <= p.componentHeight);
   assert(source.includes('.position({ x: this.virtualMouseOverlayX(), y: this.virtualMouseOverlayY() })'));
