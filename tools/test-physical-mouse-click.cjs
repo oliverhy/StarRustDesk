@@ -16,6 +16,7 @@ function method(name) {
 }
 let now = 1000;
 const sent = [], logs = [], roots = [];
+const withPositionSync = actions => actions.flatMap(action => action === 1 || action === 3 ? [0, action] : [action]);
 let parent;
 const MouseAction = { Press: 1, Release: 2, Move: 3, Hover: 4 };
 const MouseButton = { None: 0, Left: 1, Right: 2 };
@@ -41,11 +42,11 @@ const context = vm.createContext({
   Date: { now: () => now }, Math, Number, MouseAction, MouseButton, SourceType, SourceTool, TouchType,
   HitTestMode, ImageFit: { Fill: 0 }, ImageInterpolation: { None: 0 }, Color: { White: 'white' },
   Image: () => node('Image'), Path: () => node('Path'),
-  Stack: { begin(body) {
-    const stack = node('Stack'), previous = parent;
-    parent = stack;
+  Shape: { begin(body) {
+    const shape = node('Shape'), previous = parent;
+    parent = shape;
     try { body(); } finally { parent = previous; }
-    return stack;
+    return shape;
   }},
   INPUT_MODE_MOUSE: 'mouse', ConnectionStatus: { CONNECTED: 2 },
   NATIVE_MOUSE_ACTION_MOVE: 3, NATIVE_MOUSE_ACTION_PRESS: 1,
@@ -54,21 +55,22 @@ const context = vm.createContext({
   RustDeskNapi: { appendDiagnosticLog: (...args) => logs.push(args) },
   ConnectionService: { sendMouseEvent: (x, y, action) => sent.push(action), syncNativeModifierState() {} }
 });
-// Translate only ArkUI's declarative Stack block to the test container. The
+// Translate only ArkUI's declarative Shape block to the test container. The
 // Image/Path property chains and both production conditional branches are kept.
 const cursorBuilder = method('buildCursorOverlay')
-  .replace('Stack() {', 'Stack.begin(() => {')
-  .replace(/\n    }\r?\n    \.width/, '\n    })\n    .width');
+  .replace('Shape() {', 'Shape.begin(() => {')
+  .replace(/\n      }\r?\n      \.viewPort/, '\n      })\n      .viewPort');
+const cursorConsts = source.match(/^const FALLBACK_CURSOR_[^;]+;/gm).join('\n');
 const methods = [
   'handleNativeMouseInput', 'handleRemoteMouse', 'mapMouseAction',
   'handleRemoteTouch', 'handlePointerCompatibilityTouch', 'handleRemoteClickFallback',
-  'sendLeftClick', 'sendLeftDown', 'sendLeftUp', 'sendRightDown', 'sendRightUp',
+  'syncOrdinaryMouseButtonPosition', 'sendLeftClick', 'sendLeftDown', 'sendLeftUp', 'sendRightDown', 'sendRightUp',
   'rememberKeyboardInputAnchor', 'selectKeyboardInputAnchor',
   'releaseHeldMouseButtons', 'reconcilePhysicalMouseButtons',
   'updatePointerFromLocal', 'updateCursorOverlayFromPosition', 'markLocalPointerInput',
   'noteProjectedPhysicalPointer', 'resetPointerDiagnostics'
 ];
-vm.runInContext(ts.transpile(model.replace(/export /g, '') +
+vm.runInContext(ts.transpile(cursorConsts + '\n' + model.replace(/export /g, '') +
   '\nclass Page {' + methods.map(method).join('\n') + cursorBuilder + '}' +
   '\nglobalThis.Page = Page; globalThis.Dedup = PhysicalMouseDeduplicator;'), context);
 function page(overrides = {}) {
@@ -120,10 +122,13 @@ for (const image of [true, false]) test(`cursor ${image ? 'image' : 'fallback ar
   assert.equal(roots.length, 1);
   const cursor = roots[0];
   assert.deepEqual(cursor.attrs.zIndex, [11], 'keep projected cursor visible above the input layer');
-  assert.equal(cursor.children[0].kind, image ? 'Image' : 'Path');
+  assert.equal(cursor.kind, image ? 'Image' : 'Shape');
   assert.deepEqual(hitCandidates(cursor), []);
-  cursor.children[0].mode = HitTestMode.Default;
-  assert.equal(hitCandidates(cursor).length, 1, 'this test detects the old child interception, not just parent None');
+  if (!image) {
+    assert.equal(cursor.children[0].kind, 'Path');
+    cursor.children[0].mode = HitTestMode.Default;
+    assert.equal(hitCandidates(cursor).length, 1, 'this test detects the old child interception, not just parent None');
+  }
 });
 test('left-button-held status indicator cannot block a drag or its release', () => {
   const viewport = method('buildRemoteViewport');
@@ -138,7 +143,7 @@ for (const keyboard of [false, true]) {
   test(`ArkUI left press/release works once with keyboard=${keyboard}`, () => {
     const p = page({ showKeyboardPanel: keyboard });
     ark(p, MouseAction.Press); now += 20; ark(p, MouseAction.Release); fallback(p);
-    assert.deepEqual(sent, [1, 2]); assert.equal(p.leftButtonHeld, false);
+    assert.deepEqual(sent, withPositionSync([1, 2])); assert.equal(p.leftButtonHeld, false);
     assert.equal(p.pointerFallbackClicks, 0);
     assert.equal(p.keyboardInputAnchor.x, 100); assert.equal(p.keyboardInputAnchor.y, 100);
     if (keyboard) assert.equal(p.keyboardFocusSource, 'last_click');
@@ -146,49 +151,49 @@ for (const keyboard of [false, true]) {
   test(`ArkUI orphan release retains click fallback with keyboard=${keyboard}`, () => {
     const p = page({ showKeyboardPanel: keyboard });
     ark(p, MouseAction.Release); fallback(p);
-    assert.deepEqual(sent, [2, 1, 2]); assert.equal(p.pointerFallbackClicks, 1);
+    assert.deepEqual(sent, withPositionSync([2, 1, 2])); assert.equal(p.pointerFallbackClicks, 1);
   });
   test(`ArkUI right press/release works with keyboard=${keyboard}`, () => {
     const p = page({ showKeyboardPanel: keyboard });
     ark(p, MouseAction.Press, MouseButton.Right); ark(p, MouseAction.Release, MouseButton.Right);
-    assert.deepEqual(sent, [3, 4]); assert.equal(p.rightButtonHeld, false);
+    assert.deepEqual(sent, withPositionSync([3, 4])); assert.equal(p.rightButtonHeld, false);
   });
 }
 test('physical click-only fallback works with the soft keyboard and a recent finger gesture', () => {
   const p = page({ showKeyboardPanel: true, lastTouchEventAt: 999 });
-  fallback(p); assert.deepEqual(sent, [1, 2]);
+  fallback(p); assert.deepEqual(sent, withPositionSync([1, 2]));
 });
 test('fresh finger/pen clicks work during continuous input without bypassing touch duplicate guards', () => {
   for (const tool of [SourceTool.Finger, SourceTool.Pen]) {
     const p = page({ lastTouchEventAt: 999 });
     fallback(p, { source: SourceType.TouchScreen, sourceTool: tool });
-    assert.deepEqual(sent, []);
+    assert.deepEqual(sent, withPositionSync([]));
     p.lastTouchEventAt = 0; p.showKeyboardPanel = true;
     fallback(p, { source: SourceType.TouchScreen, sourceTool: tool });
-    assert.deepEqual(sent, [1, 2]);
+    assert.deepEqual(sent, withPositionSync([1, 2]));
     assert.equal(p.showKeyboardPanel, true, 'clicking a new remote input field keeps capture mounted');
   }
   const p = page({ lastTouchEventAt: 999 });
-  fallback(p, { sourceTool: SourceTool.Finger }); assert.deepEqual(sent, []);
+  fallback(p, { sourceTool: SourceTool.Finger }); assert.deepEqual(sent, withPositionSync([]));
 });
 test('touchpad click-only fallback works when the wrapper reports TouchScreen', () => {
   const p = page({ showKeyboardPanel: true });
   fallback(p, { source: SourceType.TouchScreen, sourceTool: SourceTool.TOUCHPAD });
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
 });
 test('physical compatibility touches do not set the finger-gesture suppression timer', () => {
   const p = page({ showKeyboardPanel: true });
   touch(p, TouchType.Down); now += 20; touch(p, TouchType.Up); fallback(p);
-  assert.equal(p.lastTouchEventAt, 0); assert.deepEqual(sent, [1, 2]);
+  assert.equal(p.lastTouchEventAt, 0); assert.deepEqual(sent, withPositionSync([1, 2]));
 });
 for (const empty of [false, true]) test(`compatibility orphan up, empty=${empty}, allows click repair`, () => {
   const p = page({ showKeyboardPanel: true });
   touch(p, TouchType.Up, empty); fallback(p);
-  assert.deepEqual(sent, [2, 1, 2]); assert.equal(p.lastMappedPhysicalLeftUpAt, 0);
+  assert.deepEqual(sent, withPositionSync([2, 1, 2])); assert.equal(p.lastMappedPhysicalLeftUpAt, 0);
 });
 test('compatibility up without coordinates after down suppresses the duplicate click', () => {
   const p = page(); touch(p, TouchType.Down); now += 20; touch(p, TouchType.Up, true); fallback(p);
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
 });
 
 for (const empty of [false,true]) test(`compatibility click is not replayed after blur/hover release, empty=${empty}`, () => {
@@ -196,13 +201,13 @@ for (const empty of [false,true]) test(`compatibility click is not replayed afte
   p.releaseHeldMouseButtons('input_blur');
   assert.equal(p.leftButtonHeld,false);
   now+=20; touch(p,TouchType.Up,empty); fallback(p);
-  assert.deepEqual(sent,[1,2,2],'cleanup keeps click repair suppressed; no second left-down');
+  assert.deepEqual(sent, withPositionSync([1,2,2]),'cleanup keeps click repair suppressed; no second left-down');
   assert.equal(p.compatibilityLeftSequence,false); assert.equal(p.pointerFallbackClicks,0);
 });
 
 test('empty compatibility down does not suppress a later click-only repair', () => {
   const p=page(); touch(p,TouchType.Down,true); now+=20; touch(p,TouchType.Up,true); fallback(p);
-  assert.deepEqual(sent,[2,1,2]); assert.equal(p.pointerFallbackClicks,1);
+  assert.deepEqual(sent, withPositionSync([2,1,2])); assert.equal(p.pointerFallbackClicks,1);
 });
 
 test('20261016 local PC log replay sends two balanced clicks, not two duplicate releases', () => {
@@ -217,7 +222,7 @@ test('20261016 local PC log replay sends two balanced clicks, not two duplicate 
     if (route === 'touch') touch(p, action); else ark(p, action);
   }
   fallback(p);
-  assert.deepEqual(sent, [1, 2, 1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 1, 2]));
   assert.equal(p.pointerDuplicateEvents, 4);
   assert.equal(p.pointerFallbackClicks, 0);
   assert.equal(logs.filter(v => v[1].startsWith('physical_mouse_duplicate')).length, 4);
@@ -228,7 +233,7 @@ test('physical compatibility clicks in direct-touch mode use the same letterbox 
   touch(p, TouchType.Down); now += 2; ark(p, MouseAction.Press);
   now += 20; touch(p, TouchType.Up); now += 2; ark(p, MouseAction.Release);
   fallback(p);
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
   assert.equal(p.pointerDuplicateEvents, 2);
 });
 
@@ -245,7 +250,7 @@ for (const projected of [false, true]) for (const reverse of [false, true]) {
         }
         fallback(p);
       }
-      assert.deepEqual(sent, [1, 2, 1, 2]);
+      assert.deepEqual(sent, withPositionSync([1, 2, 1, 2]));
       assert.equal(p.pointerFallbackClicks, 0);
       assert.equal(p.leftButtonHeld, false);
     });
@@ -259,7 +264,7 @@ test('local ArkUI before queued native delivery does not repeat either left or r
     now += 10; ark(p, MouseAction.Release, button); now += 10; native(p, 2, button);
     now += 100;
   }
-  assert.deepEqual(sent, [1, 2, 3, 4]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 3, 4]));
   assert.equal(p.pointerDuplicateEvents, 4);
 });
 
@@ -268,7 +273,7 @@ test('local native/compatibility/ArkUI paths forward physical buttons only once'
   native(p, 1); now += 10; touch(p, TouchType.Down); now += 10; ark(p, MouseAction.Press);
   now += 10; touch(p, TouchType.Up); now += 10; native(p, 2); now += 10; ark(p, MouseAction.Release);
   fallback(p);
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
   assert.equal(p.pointerDuplicateEvents, 4);
   assert.equal(p.pointerFallbackClicks, 0);
 });
@@ -282,7 +287,7 @@ test('local touchpad wrapped as TouchScreen stays on the physical button path', 
     now += 2; ark(p, down ? MouseAction.Press : MouseAction.Release, MouseButton.Left, pointer);
     now += 20;
   }
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
   assert.equal(p.pointerDuplicateEvents, 2);
   assert.equal(p.lastTouchEventAt, 0);
 });
@@ -290,7 +295,7 @@ test('local touchpad wrapped as TouchScreen stays on the physical button path', 
 test('duplicate orphan releases still allow one click-only repair', () => {
   const p = page();
   touch(p, TouchType.Up, true); now += 2; ark(p, MouseAction.Release); fallback(p);
-  assert.deepEqual(sent, [2, 1, 2]);
+  assert.deepEqual(sent, withPositionSync([2, 1, 2]));
   assert.equal(p.pointerFallbackClicks, 1);
 });
 
@@ -302,21 +307,21 @@ test('single-route fast clicks and dragging still forward all real presses and r
   ark(p, MouseAction.Press); now += 20;
   ark(p, MouseAction.Move, MouseButton.None, { x: 80, pressedButtons: [MouseButton.Left] });
   now += 20; ark(p, MouseAction.Release, MouseButton.Left, { x: 80 });
-  assert.deepEqual(sent, [1, 2, 1, 2, 1, 2, 1, 0, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 1, 2, 1, 2, 1, 0, 2]));
   assert.equal(p.leftButtonHeld, false);
 });
 
 test('second real click from another route survives the old 80ms duplicate window', () => {
   const p = page(); ark(p, MouseAction.Press); now += 5; ark(p, MouseAction.Release);
   now += 45; native(p, 1); now += 5; native(p, 2);
-  assert.deepEqual(sent, [1, 2, 1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 1, 2]));
 });
 
 test('click-only second click survives the old 160ms release guard', () => {
   const p = page(); ark(p, MouseAction.Press); now += 10;
   ark(p, MouseAction.Release, MouseButton.Left, { timestamp: 100 });
   now += 120; fallback(p, { timestamp: 200 });
-  assert.deepEqual(sent, [1, 2, 1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 1, 2]));
 });
 
 test('stamped delayed duplicate delivery after a complete click is still suppressed', () => {
@@ -326,7 +331,7 @@ test('stamped delayed duplicate delivery after a complete click is still suppres
   p.handleNativeMouseInput({x:50,y:50,action:1,button:1,hover:-1,timestamp:100,modifierValid:false});
   p.handleNativeMouseInput({x:50,y:50,action:2,button:1,hover:-1,timestamp:110,modifierValid:false});
   fallback(p, { timestamp: 110 });
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
 });
 
 test('onClick can carry either endpoint timestamp of the same completed pointer sequence', () => {
@@ -334,7 +339,7 @@ test('onClick can carry either endpoint timestamp of the same completed pointer 
     const p=page();ark(p,MouseAction.Press,MouseButton.Left,{timestamp:100});now+=10;
     ark(p,MouseAction.Release,MouseButton.Left,{timestamp:110});now+=1;
     fallback(p,{timestamp});fallback(p,{timestamp});
-    assert.deepEqual(sent,[1,2]);
+    assert.deepEqual(sent, withPositionSync([1,2]));
   }
 });
 
@@ -352,7 +357,7 @@ test('confirmed simulated touch/virtual-mouse drag keeps its held hint until rel
   assert.equal(p.showLeftButtonHoldIndicator, true);
   assert.equal(p.leftButtonHeld, true);
   p.sendLeftUp(100, 100);
-  assert.deepEqual(sent, [1, 2]);
+  assert.deepEqual(sent, withPositionSync([1, 2]));
   assert.equal(p.showLeftButtonHoldIndicator, false);
 });
 
@@ -362,36 +367,36 @@ test('projected ArkUI/native/touch button deliveries do not duplicate left or ri
   now+=10; touch(p,TouchType.Up); now+=10; native(p,2); now+=10; ark(p,MouseAction.Release); fallback(p);
   now+=200; native(p,1,MouseButton.Right); now+=10; ark(p,MouseAction.Press,MouseButton.Right);
   now+=10; ark(p,MouseAction.Release,MouseButton.Right); now+=10; native(p,2,MouseButton.Right);
-  assert.deepEqual(sent,[1,2,3,4]); assert.equal(p.pointerFallbackClicks,0);
+  assert.deepEqual(sent, withPositionSync([1,2,3,4])); assert.equal(p.pointerFallbackClicks,0);
 });
 test('native physical buttons work while the keyboard is visible', () => {
   const p = page({ showKeyboardPanel: true });
   native(p, 1); now += 20; native(p, 2); fallback(p);
   native(p, 1, MouseButton.Right); native(p, 2, MouseButton.Right);
-  assert.deepEqual(sent, [1, 2, 3, 4]);
+  assert.deepEqual(sent, withPositionSync([1, 2, 3, 4]));
 });
 test('native orphan release does not suppress click repair', () => {
   const p = page({ showKeyboardPanel: true }); native(p, 2); fallback(p);
-  assert.deepEqual(sent, [2, 1, 2]);
+  assert.deepEqual(sent, withPositionSync([2, 1, 2]));
 });
 test('paired native/ArkUI deliveries do not generate an extra click', () => {
   const p = page(); native(p, 1); now += 10; ark(p, MouseAction.Press);
   now += 10; native(p, 2); now += 10; ark(p, MouseAction.Release); fallback(p);
-  assert.deepEqual(sent, [1, 2]); assert.equal(p.pointerDuplicateEvents, 2);
+  assert.deepEqual(sent, withPositionSync([1, 2])); assert.equal(p.pointerDuplicateEvents, 2);
 });
 test('release recovered from button-state movement suppresses a duplicate onClick', () => {
   const p = page(); ark(p, MouseAction.Press); now += 20;
   ark(p, MouseAction.Move, MouseButton.None, { pressedButtons: [] }); fallback(p);
-  assert.deepEqual(sent, [1, 2, 0]); assert.equal(p.leftButtonHeld, false);
+  assert.deepEqual(sent, withPositionSync([1, 2, 0])); assert.equal(p.leftButtonHeld, false);
 });
 test('cancel balances an active button without completing a click', () => {
   const p = page(); touch(p, TouchType.Down); touch(p, TouchType.Cancel);
-  assert.deepEqual(sent, [1, 2]); assert.equal(p.lastMappedPhysicalLeftUpAt, 0);
+  assert.deepEqual(sent, withPositionSync([1, 2])); assert.equal(p.lastMappedPhysicalLeftUpAt, 0);
 });
 test('disconnected or missing-video-size input never sends a click', () => {
   for (const overrides of [{ connectionStatus: 0 }, { remoteWidth: 0 }]) {
     const p = page(overrides); ark(p, MouseAction.Press); native(p, 1); touch(p, TouchType.Down); fallback(p);
-    assert.deepEqual(sent, []);
+    assert.deepEqual(sent, withPositionSync([]));
   }
 });
 console.log(`${checks} physical mouse click regression checks passed`);

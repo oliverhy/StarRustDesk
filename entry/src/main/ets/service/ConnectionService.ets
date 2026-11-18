@@ -1048,14 +1048,14 @@ export class ConnectionService {
     return RustDeskNapi.send2FA(code, trustThisDevice)
   }
 
-  static sendMouseEvent(x: number, y: number, action: number): void {
+  static sendMouseEvent(x: number, y: number, action: number): number | undefined {
     // Relative movement is forwarded at its source, before viewport clamping/throttling.
     // Button packets must not reposition the remote cursor.
     if (ConnectionService.relativeMouse) {
-      if (action !== 0) RustDeskNapi.sendMouseEvent(0, 0, action, ConnectionService.heldModifierMask)
-      return
+      if (action === 0) return undefined
+      return RustDeskNapi.sendMouseEvent(0, 0, action, ConnectionService.heldModifierMask)
     }
-    RustDeskNapi.sendMouseEvent(x, y, action, ConnectionService.heldModifierMask)
+    return RustDeskNapi.sendMouseEvent(x, y, action, ConnectionService.heldModifierMask)
   }
 
   static sendMouseWheel(deltaX: number, deltaY: number): void {

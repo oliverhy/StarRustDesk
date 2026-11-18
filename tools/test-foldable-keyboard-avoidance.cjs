@@ -16,12 +16,12 @@ const deviceInfo = { deviceType: 'phone' };
 const logs = [];
 const context = vm.createContext({ deviceInfo, RustDeskNapi: {
   appendDiagnosticLog: (category, message) => logs.push([category, message]),
-}, ConnectionService: { sendMouseEvent() {} }, INPUT_MODE_MOUSE: 'mouse',
+}, ConnectionService: { sendMouseEvent() {} }, INPUT_MODE_MOUSE: 'mouse', ConnectionStatus: { CONNECTED: 2 },
   ViewportFrameCallback: class { constructor(apply) { this.apply = apply; } } });
 const names = ['isHandheldDevice', 'isHandheldLandscape', 'getRemoteCanvasHeight',
   'snapshotRemoteKeyboardViewport', 'hasKeyboardViewportSizeChanged', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
   'getKeyboardAvoidance', 'rememberKeyboardInputAnchor', 'selectKeyboardInputAnchor', 'clearKeyboardInputAnchor',
-  'traceRemoteKeyboardState', 'sendLeftClick', 'sendLeftDown', 'sendLeftUp',
+  'traceRemoteKeyboardState', 'syncOrdinaryMouseButtonPosition', 'sendLeftClick', 'sendLeftDown', 'sendLeftUp',
   'discardViewportPanFrame', 'flushViewportPanFrame', 'queueViewportPanFrame', 'finishViewportPan',
   'restoreKeyboardAvoidMode', 'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
   'remotePointToVisual', 'visualPointToRemote'];
@@ -35,7 +35,7 @@ function page(overrides = {}) {
     zoomScale: 1, offsetX: 0, offsetY: 0, lastAbsX: 900, lastAbsY: 1030,
     pointerInitialized: true, lastLocalPointerInputAt: 1000, showKeyboardPanel: false, keyboardAvoidModeChanged: false,
     keyboardViewportHeight: 0, keyboardLayoutWidth: 0, keyboardLayoutHeight: 0, controlMenuKeyboardInset: 0,
-    currentDisplay: 0, relativeMouseEnabled: false, keyboardManualPan: false, keyboardManualShiftY: 0,
+    currentDisplay: 0, connectionStatus: 2, relativeMouseEnabled: false, keyboardManualPan: false, keyboardManualShiftY: 0,
     viewportPanFramePending: false, viewportPanFrameGeneration: 0, callbacks: [],
     getUIContext() { return { postFrameCallback: c => this.callbacks.push(c.apply) }; },
     clampHorizontalOffset: x => x, clampVerticalOffset: y => y,

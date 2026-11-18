@@ -36,7 +36,8 @@ const names = ['touchGesturePoint', 'isHandheldDevice', 'shouldFollowTouchMouse'
   'updatePointerFromVirtualMouse', 'syncVirtualMouseToCurrentPointer',
   'clickVirtualMouseButton', 'beginVirtualMouseButtonDrag', 'finishVirtualMouseButtonDrag',
   'virtualMouseOverlayX', 'virtualMouseOverlayY', 'virtualMousePointerX', 'virtualMousePointerY'];
-const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCHPAD_DRAG_START_THRESHOLD', 'TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS',
+const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCH_MOVE_THRESHOLD', 'TOUCH_TAP_SLOP',
+  'TOUCHPAD_DRAG_START_THRESHOLD', 'TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS',
   'VIRTUAL_MOUSE_POINTER_HOT_X', 'VIRTUAL_MOUSE_POINTER_HOT_Y',
   'VIRTUAL_MOUSE_WIDTH', 'VIRTUAL_MOUSE_HEIGHT', 'VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN',
   'VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN'].map(name => {

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const source = fs.readFileSync('entry/src/main/ets/pages/RemotePage.ets', 'utf8');
 const model = fs.readFileSync('entry/src/main/ets/model/PhysicalMousePolicy.ets', 'utf8');
+const tracker = fs.readFileSync('entry/src/main/ets/model/OrdinaryPointerDiagnostics.ets', 'utf8');
 const method = name => {
   const start = source.indexOf('\n  ' + name + '(');
   assert(start >= 0, name);
@@ -23,11 +24,13 @@ const context = vm.createContext({
   NATIVE_MOUSE_ACTION_RELEASE: 2, NATIVE_MOUSE_ACTION_CANCEL: 13,
   NATIVE_MOUSE_BUTTON_LEFT: 1, NATIVE_MOUSE_BUTTON_RIGHT: 2,
   RustDeskNapi: { getOption: () => enabled ? '1' : '0', appendDiagnosticLog: (...v) => logs.push(v) },
-  ConnectionService: { sendMouseEvent: (...v) => sent.push(v), syncNativeModifierState() {} }
+  ConnectionService: { sendMouseEvent: (...v) => { sent.push(v); return 0; }, syncNativeModifierState() {} }
 });
-vm.runInContext(ts.transpile(model.replace(/export /g, '') + `
+const cursorConsts = source.match(/^const FALLBACK_CURSOR_[^;]+;/gm).join('\n');
+vm.runInContext(ts.transpile(cursorConsts + '\n' + model.replace(/export /g, '') + tracker.replace('export class', 'class') + `
 globalThis.Dedup = PhysicalMouseDeduplicator;
 globalThis.isTouchOnly = isTouchOnlyMouseEvent;
+globalThis.Tracker = OrdinaryPointerDiagnostics;
 class Page {${[
   'handleNativeMouseInput', 'handleRemoteMouse', 'mapMouseAction',
   'updatePointerFromLocal', 'updateCursorOverlayFromPosition', 'markLocalPointerInput',
@@ -148,7 +151,7 @@ test('native button followed by ArkUI movement forwards and positions overlay', 
   const p = page(); now = 1000; native(p, 100, 100, 1, 1);
   now += 16; ark(p, 160, 175);
   assert.deepEqual(sent.at(-1), [220, 200, 0]);
-  assert.equal(p.cursorX, 160); assert.equal(p.cursorY, 175);
+  assert.equal(p.cursorX + 1, 160); assert.equal(p.cursorY + 1, 175);
   assert.equal(p.shouldShowCursorOverlay(), true);
 });
 test('same native/ArkUI move forwards once; different next move still works', () => {
@@ -248,21 +251,30 @@ test('display transition clears stale pairing and relative baseline', () => {
 });
 test('diagnostics disabled by default; rate-limited movement and display reasons when enabled', () => {
   const p=page(); logs.length=0; now=5000; enabled=false;
+  p.pointerDelivery = new context.Tracker();
+  p.pointerDelivery.noteMove(1200, 950, -2, 'final', 3);
   ark(p,100,100); p.flushPointerDiagnostics(); assert.equal(logs.length,0);
   now+=2000; enabled=true; ark(p,110,110);
   p.pointerTouchThrottledMoves=2; p.pointerTouchFinalMoveRequests=1;
+  p.pointerTouchShortFinalMoveRequests=1; p.pointerOrdinaryButtonMoveRequests=2;
   p.pointerViewportCursorReflows=1; p.pointerShapeCursorReflows=1; p.flushPointerDiagnostics();
   assert.equal(logs.length,1); assert.match(logs[0][1],/ark_move=1/);
   assert.match(logs[0][1],/physical_move_dispatch=1/); assert.match(logs[0][1],/overlay=true/);
   assert.match(logs[0][1],/toolbar_cursor_suppressed=false/);
   assert.match(logs[0][1],/touch_move_throttled=2 touch_final_move_requests=1/);
+  assert.match(logs[0][1],/touch_short_final_move_requests=1 ordinary_button_move_requests=2/);
   assert.match(logs[0][1],/cursor_viewport_reflows=1 cursor_shape_reflows=1/);
+  assert.match(logs[0][1],/final_move_queue=0\/0\/0/);
+  assert.match(logs[0][1],/remote_cursor_feedback=none/);
+  assert.match(logs[0][1],/local_to_last_queued_move_vp=0\.0 ordinary_move_queue_failed=0/);
   p.flushPointerDiagnostics(); assert.equal(logs.length,1);
   now+=2000; p.flushPointerDiagnostics();
   assert.match(logs.at(-1)[1],/native_move=0 ark_move=0 touch_move=0/);
   assert.match(logs.at(-1)[1],/touch_move_throttled=0 touch_final_move_requests=0/);
+  assert.match(logs.at(-1)[1],/touch_short_final_move_requests=0 ordinary_button_move_requests=0/);
   assert.match(logs.at(-1)[1],/cursor_viewport_reflows=0 cursor_shape_reflows=0/);
   assert.doesNotMatch(logs.map(v=>v[1]).join('\n'), /password|token|clipboard/);
+  assert.doesNotMatch(logs.map(v=>v[1]).join('\n'), /(?:remote|overlay|pan)_[xy]=/);
 });
 test('cursor overlay does not intercept input and is explicitly above the surface', () => {
   const start=source.indexOf('\n  buildCursorOverlay()');
@@ -270,7 +282,7 @@ test('cursor overlay does not intercept input and is explicitly above the surfac
   assert.match(overlay,/\.zIndex\(11\)/);
   // None on the parent does not disable child hit testing. Check both branches.
   const image=overlay.slice(overlay.indexOf('Image('),overlay.indexOf('} else {'));
-  const arrow=overlay.slice(overlay.indexOf('Path()'),overlay.indexOf('\n    }'));
+  const arrow=overlay.slice(overlay.indexOf('Shape()'));
   assert.match(image,/\.hitTestBehavior\(HitTestMode.None\)/);
   assert.match(arrow,/\.hitTestBehavior\(HitTestMode.None\)/);
   assert.equal((overlay.match(/\.hitTestBehavior\(HitTestMode.None\)/g)||[]).length,3);

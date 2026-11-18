@@ -2,8 +2,8 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.10'
-export const RELEASE_NOTES_BUILD: string = '2000010'
+export const RELEASE_NOTES_VERSION: string = '2.0.11'
+export const RELEASE_NOTES_BUILD: string = '2000011'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -48,6 +48,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.11（2000011）· 远控鼠标与触摸优化', [
+            '修复普通鼠标箭头尖端与实际点击位置不一致的问题，优化缩放后的定位。',
+            '优化手指滑动判定，减少短滑或慢起步时误触发左键、右键。',
+            '优化“控”按钮贴边样式，吸附后高度与展开栏一致。',
+            '完善鼠标诊断，便于排查位置同步与远端光标反馈。'
+          ])
           this.buildSection('2.0.10（2000010）· 虚拟鼠标与悬浮栏修复', [
             '修复虚拟鼠标在画面边缘或缩放时指针与实际操作位置不一致的问题，点击及拖拽前同步目标位置。',
             '优化虚拟鼠标和远端光标的显示，减少重复箭头；兼容实体鼠标操作。',

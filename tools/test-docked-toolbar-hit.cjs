@@ -61,7 +61,13 @@ const context = vm.createContext({
   ButtonType: { Normal: 0, Capsule: 1 }, Color: { Transparent: 'transparent' },
   Alignment: { Start: 0, End: 1 }, translate: value => value
 });
-vm.runInContext(ts.transpile(`class Page { buildDockedButton() {${dockButton}\n} } globalThis.Page = Page;`), context);
+const methods = ['getRemoteToolbarButtonHeight', 'getRemoteToolbarHeight', 'getRemoteToolbarCollapsedSize',
+  'getRemoteToolbarCurrentWidth', 'getRemoteToolbarCurrentHeight'].map(name => {
+  const start = source.indexOf('\n  ' + name + '(');
+  assert(start >= 0, name);
+  return source.slice(start, source.indexOf('\n  }', start) + 4);
+}).join('\n');
+vm.runInContext(ts.transpile(`class Page {${methods}\n buildDockedButton() {${dockButton}\n} } globalThis.Page = Page;`), context);
 let count = 0;
 function test(name, fn) { fn(); count++; console.log('PASS ' + name); }
 for (const edge of ['left', 'right']) for (const rectangular of [false, true]) {
@@ -69,7 +75,7 @@ for (const edge of ['left', 'right']) for (const rectangular of [false, true]) {
     roots.length = 0; gestures.length = 0; parent = undefined;
     const calls = [], page = Object.assign(new context.Page(), {
       remoteToolbarDockEdge: edge, roundedRectButtons: rectangular,
-      uiLanguage: 'zh-Hans', getRemoteToolbarCurrentHeight: () => 110,
+      uiLanguage: 'zh-Hans', remoteToolbarCollapsed: true, pageWidth: 360, pageHeight: 800, uiFontScale: 1,
       floatingPanelTransition: () => ({}), onRemoteToolbarHandleClick: () => calls.push('click'),
       handleRemoteToolbarHover: value => calls.push(`hover:${value}`),
       beginRemoteToolbarDrag: () => calls.push('drag-start'),
@@ -80,8 +86,9 @@ for (const edge of ['left', 'right']) for (const rectangular of [false, true]) {
     page.buildDockedButton();
     assert.equal(roots.length, 1);
     const button = roots[0], stack = button.children[0], strip = stack.children[0];
+    const height = page.getRemoteToolbarHeight(), width = page.getRemoteToolbarCurrentWidth();
     assert.equal(button.kind, 'Button'); assert.equal(button.attrs.width[0], '100%');
-    assert.equal(button.attrs.height[0], 110); assert.equal(button.attrs.backgroundColor[0], 'transparent');
+    assert.equal(button.attrs.height[0], height); assert.equal(button.attrs.backgroundColor[0], 'transparent');
     assert.equal(button.attrs.stateEffect[0], false); assert.equal(button.attrs.hoverEffect[0], context.HoverEffect.None);
     assert.equal(stack.mode, modes.None); assert.equal(strip.mode, modes.None);
     assert.equal(stack.attrs.width[0], '100%'); assert.equal(strip.attrs.width[0], '100%');
@@ -89,9 +96,10 @@ for (const edge of ['left', 'right']) for (const rectangular of [false, true]) {
     assert.equal(shape.rectangular, false); assert.equal(shape.radius, 0); assert.equal(shape.type, context.ButtonType.Normal);
     // The production wrapper is 16 vp wide: there is no remaining 40 vp
     // sibling-blocking rectangle in this simplified hit model.
-    const hit = (x, y) => x >= 0 && x < 16 && y >= 0 && y < 110 ? 'control' : 'remote';
-    assert.equal(hit(8, 55), 'control'); assert.equal(hit(16, 55), 'remote');
-    assert.equal(hit(30, 55), 'remote'); assert.equal(hit(8, 111), 'remote');
+    assert.equal(width, 16);
+    const hit = (x, y) => x >= 0 && x < width && y >= 0 && y < button.attrs.height[0] ? 'control' : 'remote';
+    assert.equal(hit(8, height / 2), 'control'); assert.equal(hit(16, height / 2), 'remote');
+    assert.equal(hit(30, height / 2), 'remote'); assert.equal(hit(8, height), 'remote');
     button.attrs.onHover[0](true); button.attrs.onHover[0](false); button.attrs.onClick[0]();
     gestures[0].events.onActionStart(); gestures[0].events.onActionUpdate({ offsetX: 3, offsetY: 2 });
     gestures[0].events.onActionEnd(); gestures[0].events.onActionCancel();

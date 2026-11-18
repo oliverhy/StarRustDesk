@@ -142,7 +142,7 @@ for (const type of ['phone', 'tablet', 'pc']) {
       h.p.finishRemoteToolbarDrag();
       assert.equal(h.p.remoteToolbarDockEdge, edge);
       assert.equal(h.p.getRemoteToolbarCurrentWidth(), 16);
-      assert.equal(h.p.getRemoteToolbarCurrentHeight(), 110);
+      assert.equal(h.p.getRemoteToolbarCurrentHeight(), h.p.getRemoteToolbarHeight());
       near(h.p.getRemoteToolbarX(), edge === 'left' ? 0 : w - 16);
       near(h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() / 2, centerBeforeDock);
       assert(h.p.getRemoteToolbarY() >= 8 && h.p.getRemoteToolbarY() + h.p.getRemoteToolbarCurrentHeight() <= height - 8);
@@ -174,6 +174,18 @@ for (const type of ['phone', 'tablet', 'pc']) {
       assert.equal(h.p.remoteToolbarDockEdge, ''); assert.equal(h.p.getRemoteToolbarCurrentWidth(), 56);
       bounded(h.p);
     }
+  }
+}
+for (const edge of ['left', 'right']) for (const fontScale of [1, 1.75, 2.4]) {
+  for (const pageHeight of [78, 360, 800]) {
+    const { p } = page('phone', { pageHeight, uiFontScale: fontScale, remoteToolbarDockEdge: edge });
+    const expanded = p.getRemoteToolbarCurrentHeight();
+    p.remoteToolbarCollapsed = true;
+    assert.equal(p.getRemoteToolbarCurrentHeight(), expanded);
+    assert.equal(p.getRemoteToolbarCurrentWidth(), 16);
+    p.remoteToolbarDockEdge = '';
+    assert.equal(p.getRemoteToolbarCurrentHeight(), 54);
+    checks++;
   }
 }
 for (const type of ['phone', 'tablet', 'pc']) {

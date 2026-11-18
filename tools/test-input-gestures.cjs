@@ -67,15 +67,15 @@ const gc=vm.createContext({Date:{now:()=>now},Math,TouchType,SourceType:{Mouse:9
  exports:{},ConnectionStatus:{CONNECTED:1},
  PINCH_DISTANCE_THRESHOLD:10,MULTI_TOUCH_MOVE_THRESHOLD:8,THREE_FINGER_SWIPE_THRESHOLD:40,
  THREE_FINGER_HORIZONTAL_LIMIT:80,THREE_FINGER_MAX_DURATION:1200,RustDeskNapi:napi,
- ConnectionService:{sendMouseEvent:(x,y,a)=>output.push(a===3?'right_down':'right_up')}});
+ ConnectionService:{sendMouseEvent:(x,y,a)=>output.push(a===0?'move':a===3?'right_down':'right_up')}});
 vm.runInContext(ts.transpile(read('entry/src/main/ets/model/RemoteDisplaySwipe.ets')),gc);
 Object.assign(gc,gc.exports);
-vm.runInContext(ts.transpile('class Gesture {'+['touchGesturePoint','handleRemoteTouch','handleMultiTouch','finishMultiTouchGesture',
+vm.runInContext(ts.transpile('class Gesture {'+['touchGesturePoint','handleRemoteTouch','handleMultiTouch','finishMultiTouchGesture','syncOrdinaryMouseButtonPosition',
  'canSwipeRemoteDisplays','displaySwipePoints','handleThreeFingerGesture','finishThreeFingerGesture'].map(method).join('\n')+'};globalThis.Gesture=Gesture;'),gc);
 function make(full=false){
   now=1000;output=[];
   const p=Object.assign(new gc.Gesture(),{isFullScreen:full,inputMode:0,multiTouchActive:false,
-    threeFingerGestureActive:false,zoomScale:1,lastAbsX:100,lastAbsY:100,lastPinchEndedAt:0,
+    threeFingerGestureActive:false,zoomScale:1,lastAbsX:100,lastAbsY:100,lastPinchEndedAt:0,remoteWidth:1000,remoteHeight:500,
     touchSequenceDraining:false,touchSequenceMaxFingers:0,displaySwipe:new gc.RemoteDisplaySwipe(),
     displayCount:1,currentDisplay:0,displaySwipeEnabled:true,remotePageVisible:true,connectionStatus:1,lastDisplaySwipeAt:-1});
   for(const n of ['stopEdgeAutoPan','endLocalPointerGesture','clearLongPressTimer','flushPendingTap','sendLeftUp',
@@ -96,7 +96,7 @@ for(const count of [2,3])test(`${count}-finger scroll never adds a right-click o
   assert.deepEqual(output,['scroll']);
 });
 test('two-finger tap emits exactly one right-click',()=>{
-  const p=make();send(p,0,1);send(p,0,2);lift(p,2);assert.deepEqual(output,['right_down','right_up']);
+  const p=make();send(p,0,1);send(p,0,2);lift(p,2);assert.deepEqual(output,['move','right_down','right_up']);
 });
 test('three-finger tap cannot become two-finger tap',()=>{
   const p=make();send(p,0,1);send(p,0,3);lift(p,3);assert.deepEqual(output,[]);
@@ -110,7 +110,7 @@ test('full-screen keyboard swipe does not restart with remaining fingers',()=>{
 });
 test('new two-finger tap works after completed scroll',()=>{
   const p=make();send(p,0,1);send(p,0,3);send(p,1,3,60);lift(p,3,60);
-  send(p,0,1);send(p,0,2);lift(p,2);assert.deepEqual(output,['scroll','right_down','right_up']);
+  send(p,0,1);send(p,0,2);lift(p,2);assert.deepEqual(output,['scroll','move','right_down','right_up']);
 });
 test('release event cannot initialize a multi-touch tap',()=>{
   const p=make();send(p,2,2);send(p,2,1);assert.deepEqual(output,[]);
