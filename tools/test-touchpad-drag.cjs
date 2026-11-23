@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const source = fs.readFileSync(path.resolve(__dirname, '../entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
 const tracker = fs.readFileSync(path.resolve(__dirname, '../entry/src/main/ets/model/OrdinaryPointerDiagnostics.ets'), 'utf8');
 const method = name => {
@@ -30,7 +30,7 @@ function harness(queueResults = []) {
     'handleDirectTouch', 'finishDirectTouch',
     'clearLongPressTimer', 'queueTouchpadTap', 'flushPendingTap', 'clearTapTimer', 'updatePointerFromDelta',
     'syncOrdinaryMouseButtonPosition', 'sendLeftClick', 'sendLeftDown', 'sendLeftUp',
-    'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
+    'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight', 'isSplitKeyboardActive',
     'updateCursorOverlayFromPosition', 'updateCursorOverlayFromRemote'];
   vm.runInNewContext(ts.transpile(tracker.replace('export class', 'class') + constants + '\nclass Page {' +
     names.map(method).join('\n') + '}\nglobalThis.Page=Page;globalThis.Tracker=OrdinaryPointerDiagnostics;'), context);

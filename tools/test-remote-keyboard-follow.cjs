@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
 function method(name) {
@@ -63,10 +63,11 @@ const names = ['isHandheldDevice', 'shouldFollowTouchMouse', 'touchMouseFollowBl
   'toggleRemoteKeyboard', 'openRemoteKeyboard', 'closeRemoteKeyboard',
   'isCurrentKeyboardCapture', 'handleRemoteKeyboardSubmit', 'finishRemoteKeyboardSubmit',
   'snapshotRemoteKeyboardViewport', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
-  'getKeyboardAvoidance', 'selectKeyboardInputAnchor',
+  'getKeyboardAvoidance', 'selectKeyboardInputAnchor', 'isSplitKeyboardActive', 'getEffectiveKeyboardViewportHeight',
   'applyKeyboardResizeMode', 'restoreKeyboardAvoidMode', 'buildKeyboardCapture',
   'updateCenterFollowPointer', 'remotePointToVisual', 'getDisplayWidth', 'getDisplayHeight',
-  'getDisplayLeft', 'getDisplayTop', 'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport'];
+  'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight', 'getHorizontalPanLimit', 'getVerticalPanLimit',
+  'getVerticalPanBias', 'getPanLimit', 'canPanViewport'];
 vm.runInContext(ts.transpile('class Page {' + names.map(method).join('\n') + '} globalThis.Page = Page;'), context);
 function page({ queryFails = false } = {}) {
   now = 1000; nextTimer = 1; timers = new Map(); logs = []; callbacks = {}; focused = []; sent = [];
@@ -81,6 +82,7 @@ function page({ queryFails = false } = {}) {
     remoteKeyboardFocusGeneration: 0, remoteKeyboardCloseTimer: -1,
     remoteKeyboardRefocusTimer: -1, remoteKeyboardPointerHandoffUntil: 0,
     keyboardAvoidModeChanged: false, keyboardLayoutWidth: 0, keyboardLayoutHeight: 0, keyboardViewportHeight: 0,
+    splitKeyboardEnabled: false, remoteExternalDisplay: false,
     keyboardFocusAvailable: false, pointerInitialized: false, qualityViewportHeight: 400,
     pageWidth: 800, pageHeight: 450, componentWidth: 400, componentHeight: 400,
     remoteWidth: 1000, remoteHeight: 1000, zoomScale: 2, offsetX: 0, offsetY: 0,

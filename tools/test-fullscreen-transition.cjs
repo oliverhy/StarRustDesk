@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 const source = read('entry/src/main/ets/pages/RemotePage.ets');
@@ -43,7 +43,8 @@ function pageHarness(overrides = {}) {
   });
   const names = ['requestFullscreen', 'enterFullScreen', 'exitFullScreen', 'restoreFullscreenOnLeave',
     'bindSurfaceIfReady', 'scheduleSurfaceRebindIfSizeChanged', 'rebindSurfaceAfterLayoutChange',
-    'readCurrentSurfaceId', 'getDisplayWidth', 'getDisplayHeight', 'requestVideoRefreshAfterSurfaceRebind',
+    'readCurrentSurfaceId', 'getDisplayWidth', 'getDisplayHeight', 'getDisplayFitHeight', 'isSplitKeyboardActive',
+    'requestVideoRefreshAfterSurfaceRebind',
     'releaseRemoteNavigationKeys', 'resetKeyboardCaptureBuffer'];
   const navigationModel = read('entry/src/main/ets/model/RemoteNavigationKeys.ets').replace(/^export /gm, '');
   vm.runInContext(ts.transpile(navigationModel + '\nclass Page {' + names.map(method).join('\n') +

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 const source = read('entry/src/main/ets/pages/RemotePage.ets');
@@ -29,7 +29,7 @@ function pageHarness(extra = {}, names = []) {
   const timers = new Map(), calls = [], logs = []; let nextTimer = 0;
   const basic = ['getDesktopFitScale', 'refreshDesktopDensity', 'syncDesktopViewScale', 'selectDesktopViewMode',
     'getDesktopDisplayedPercent', 'setDesktopCustomPercent', 'getDisplayWidth', 'getDisplayHeight',
-    'getDisplayLeft', 'getDisplayTop', 'applyZoomAt', 'clampViewportOffset', 'getHorizontalPanLimit',
+    'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight', 'isSplitKeyboardActive', 'getVerticalPanBias', 'applyZoomAt', 'clampViewportOffset', 'getHorizontalPanLimit',
     'getVerticalPanLimit', 'getPanLimit', 'clampHorizontalOffset', 'clampVerticalOffset', 'clampOffsetToLimit',
     'adjustZoom', 'handleDesktopWindowEvent', 'cancelPcToolbarAutoCollapse', 'schedulePcToolbarAutoCollapse',
     'togglePcToolbarPinned', 'startDesktopWindowTracking', 'stopDesktopWindowTracking', 'finishRemoteToolbarDrag'];

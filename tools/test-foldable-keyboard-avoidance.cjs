@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
 function method(name) {
   const start = source.indexOf('\n  ' + name + '(');
@@ -19,11 +19,12 @@ const context = vm.createContext({ deviceInfo, RustDeskNapi: {
 }, ConnectionService: { sendMouseEvent() {} }, INPUT_MODE_MOUSE: 'mouse', ConnectionStatus: { CONNECTED: 2 },
   ViewportFrameCallback: class { constructor(apply) { this.apply = apply; } } });
 const names = ['isHandheldDevice', 'isHandheldLandscape', 'getRemoteCanvasHeight',
+  'isSplitKeyboardActive', 'getEffectiveKeyboardViewportHeight',
   'snapshotRemoteKeyboardViewport', 'hasKeyboardViewportSizeChanged', 'getKeyboardCanvasShiftY', 'getKeyboardViewportMaxHeight',
   'getKeyboardAvoidance', 'rememberKeyboardInputAnchor', 'selectKeyboardInputAnchor', 'clearKeyboardInputAnchor',
   'traceRemoteKeyboardState', 'syncOrdinaryMouseButtonPosition', 'sendLeftClick', 'sendLeftDown', 'sendLeftUp',
   'discardViewportPanFrame', 'flushViewportPanFrame', 'queueViewportPanFrame', 'finishViewportPan',
-  'restoreKeyboardAvoidMode', 'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
+  'restoreKeyboardAvoidMode', 'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight',
   'remotePointToVisual', 'visualPointToRemote'];
 vm.runInContext(ts.transpile('class Page {' + names.map(method).join('\n') +
   '} globalThis.Page=Page;'), context);
@@ -35,6 +36,7 @@ function page(overrides = {}) {
     zoomScale: 1, offsetX: 0, offsetY: 0, lastAbsX: 900, lastAbsY: 1030,
     pointerInitialized: true, lastLocalPointerInputAt: 1000, showKeyboardPanel: false, keyboardAvoidModeChanged: false,
     keyboardViewportHeight: 0, keyboardLayoutWidth: 0, keyboardLayoutHeight: 0, controlMenuKeyboardInset: 0,
+    splitKeyboardEnabled: false, splitKeyboardLineVp: 0, remoteExternalDisplay: false,
     currentDisplay: 0, connectionStatus: 2, relativeMouseEnabled: false, keyboardManualPan: false, keyboardManualShiftY: 0,
     viewportPanFramePending: false, viewportPanFrameGeneration: 0, callbacks: [],
     getUIContext() { return { postFrameCallback: c => this.callbacks.push(c.apply) }; },

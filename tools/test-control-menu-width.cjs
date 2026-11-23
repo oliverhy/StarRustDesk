@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
 const context = { exports: {} };
@@ -15,7 +15,7 @@ vm.runInNewContext(ts.transpile(read('entry/src/main/ets/utils/I18nCatalog.ets')
 const translate = (label, language) => language === 'en' ? catalog.exports.ENGLISH[label] ?? label :
   language === 'zh-Hant' ? catalog.exports.TRADITIONAL[label] ?? label : label;
 const items = {
-  view: ['edgePan','pan','zoomIn','zoomOut','fullscreen','pip','orientation'],
+  view: ['edgePan','pan','splitKeyboard','zoomIn','zoomOut','fullscreen','pip','orientation'],
   more: ['chat','upload','uploadFolder','download','recording','recordings','privacy'],
 };
 let cases = 0;
@@ -66,6 +66,8 @@ for(const invalid of [NaN,Infinity,-1,0]) {
 assert.deepEqual(Array.from(labels('input',items.more,false)),[]);
 assert(!labels('view',['fullscreen'],false).includes('边缘跟随开'),'hidden items do not reserve width');
 for(const label of ['全屏','退出全屏','切换中…']) assert(labels('view',['fullscreen'],false).includes(label));
+// covers: TC-001 (switch label reserves menu width)
+assert(labels('view',items.view,false).includes('上画面下键盘'));
 for(const label of ['发送文件夹','隐私屏处理中','连接信息','工具栏排序']) assert(labels('more',items.more,false).includes(label));
 
 const source=read('entry/src/main/ets/pages/RemotePage.ets');
