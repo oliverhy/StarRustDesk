@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 const context = { exports: {} };
@@ -62,12 +62,12 @@ const pageContext = { exports: {}, compactControlMenuMetrics:metrics, placeCompa
 vm.runInNewContext(ts.transpile('class Page {'+methods.map(method).join('\n')+'} exports.Page=Page;'),pageContext);
 const p = Object.assign(new pageContext.exports.Page(), {
   pageWidth:396,pageHeight:780,controlMenu:'screens',displayCount:3,uiFontScale:1,
-  controlToolbarOrder:['displays','input','virtualMouse','mobileActions','gestureHelp','clipboard','edgePan','pan','zoomIn','zoomOut','fullscreen','pip','privacy','orientation'],
+  controlToolbarOrder:['displays','input','virtualMouse','mobileActions','gestureHelp','clipboard','edgePan','pan','splitKeyboard','zoomIn','zoomOut','fullscreen','pip','privacy','orientation'],
   isPcDevice:()=>false,isHandheldDevice:()=>true,isHandheldLandscape:()=>false,isLargeLayout:()=>false,
   canPanViewport:()=>false,isPeerAndroid:false,desktopViewMode:'adaptive',isFullScreen:false,immersiveWindow:false,
   controlMenuAnchors:[],controlMenuPageOriginX:0,controlMenuPageOriginY:24,
   getRemoteToolbarX:()=>8,getRemoteToolbarY:()=>694,getSideToolbarHeight:()=>338,
-  showKeyboardPanel:false,controlMenuKeyboardInset:0,keyboardLayoutHeight:0,
+  showKeyboardPanel:false,controlMenuKeyboardInset:0,keyboardLayoutHeight:0,remoteExternalDisplay:false,
   adaptiveToolbarButtonWidth:n=>n,getRemoteToolbarButtonHeight:()=>40,
   getControlMenuLabelWidth:()=>0,
 });
@@ -82,12 +82,16 @@ p.controlMenu='input';
 assert.equal(p.getControlActionPadding(),12,'input retains its existing padding');
 assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['input','virtualMouse','gestureHelp','clipboard']);
 p.controlMenu='view';
-assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['zoomIn','zoomOut','fullscreen','pip','orientation']);
-assert.equal(p.getControlMenuMetrics().contentHeight,5*44+4*2,
-  'unzoomed menu height includes exactly five rendered actions');
+// covers: TC-001 (handheld view menu lists the split-keyboard switch before zoomIn)
+assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['splitKeyboard','zoomIn','zoomOut','fullscreen','pip','orientation']);
+assert.equal(p.getControlMenuMetrics().contentHeight,6*44+5*2,
+  'unzoomed menu height includes exactly six rendered actions');
 p.canPanViewport=()=>true;
-assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['edgePan','pan','zoomIn','zoomOut','fullscreen','pip','orientation']);
-assert.equal(p.getControlMenuMetrics().contentHeight,7*44+6*2);
+assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['edgePan','pan','splitKeyboard','zoomIn','zoomOut','fullscreen','pip','orientation']);
+assert.equal(p.getControlMenuMetrics().contentHeight,8*44+7*2);
+p.remoteExternalDisplay=true;
+assert(!p.getVisibleControlMenuItems().includes('splitKeyboard'),'projected page hides the split-keyboard switch');
+p.remoteExternalDisplay=false;
 p.canPanViewport=()=>false;p.controlMenu='input';
 p.isHandheldDevice=()=>false;p.isPeerAndroid=true;
 assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['input','mobileActions','gestureHelp','clipboard']);

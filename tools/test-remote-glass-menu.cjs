@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
-const ts=require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts=require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const read=p=>fs.readFileSync(path.join(__dirname,'..',p),'utf8').replace(/\r\n/g,'\n');
 const context={exports:{}};
 vm.runInNewContext(ts.transpile(read('entry/src/main/ets/model/RemoteGlassMenu.ets')),context);
@@ -10,7 +10,7 @@ const baseline={screens:252,input:224,keyboard:224,view:224,more:204,orientation
 for(const category of Object.keys(baseline)){
  const s=new State();s.category=category;s.displayCount=3;s.followSystem=false;
  s.items=category==='input'?['input','virtualMouse','clipboard','gestureHelp']:category==='view'?
- ['zoomIn','zoomOut','pan','edgePan','fullscreen','pip','orientation']:
+ ['zoomIn','zoomOut','pan','edgePan','splitKeyboard','fullscreen','pip','orientation']:
  ['upload','uploadFolder','download','chat','recording','recordings','privacy'];
  const base=metrics(s,396,780,1);assert.equal(base.width,baseline[category]);
  for(const [w,h] of [[120,80],[240,160],[280,640],[360,780],[600,820],[840,400],[1024,768],[1440,900]]){

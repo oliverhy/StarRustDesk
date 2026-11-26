@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const source = fs.readFileSync(path.resolve(__dirname, '../entry/src/main/ets/pages/RemotePage.ets'), 'utf8');
 const method = name => {
   const start = source.indexOf('\n  ' + name + '(');
@@ -24,8 +24,9 @@ const context = vm.createContext({
   ConnectionService: { sendMouseEvent: (...args) => sent.push(args) },
   image: { PixelMapFormat: { RGBA_8888: 1 }, createPixelMapSync: () => ({}) }
 });
-const names = ['getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
-  'refreshCursorOverlayGeometry', 'updateCursorOverlayFromPosition', 'pollRemoteCursorImage', 'remotePointToVisual'];
+const names = ['getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight',
+  'refreshCursorOverlayGeometry', 'updateCursorOverlayFromPosition', 'pollRemoteCursorImage', 'remotePointToVisual',
+  'isSplitKeyboardActive', 'getEffectiveKeyboardViewportHeight'];
 const cursorConsts = source.match(/^const FALLBACK_CURSOR_[^;]+;/gm).join('\n');
 vm.runInContext(ts.transpile(`${cursorConsts}\nclass Page {${names.map(method).join('\n')}\n${areaMethod}} globalThis.Page=Page;`), context);
 const near = (actual, expected) => assert(Math.abs(actual - expected) < 1e-7, `${actual} != ${expected}`);
@@ -39,6 +40,7 @@ function page(overrides = {}) {
     remoteCursorHotX: 4, remoteCursorHotY: 8, pointerViewportCursorReflows: 0, pointerShapeCursorReflows: 0,
     lastRemoteCursorImageSequence: -1, cursorPixelMapCache: new Map(),
     showKeyboardPanel: false, keyboardViewportHeight: 0, displaySwitchActive: false,
+    splitKeyboardEnabled: false, remoteExternalDisplay: false,
     zoomScale: 1, offsetX: 0, offsetY: 0,
     isHandheldDevice: () => true, stopEdgeAutoPan() {}, syncDesktopViewScale() {},
     clampViewportOffset() {}, syncVirtualMouseToCurrentPointer() {}, scheduleSurfaceRebindIfSizeChanged() {},

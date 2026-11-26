@@ -1,6 +1,6 @@
 const fs = require('fs')
 const path = require('path')
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript')
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript')
 
 const root = path.resolve(__dirname, '..')
 const remotePage = fs.readFileSync(
@@ -88,7 +88,7 @@ expect(remotePage, /buildVirtualMouseWheelIcon\(1\)[\s\S]*?\.position\(\{ x: 29,
   'virtual wheel controls must stay above the overlapping mouse drag body')
 expect(remotePage, /setKeyboardAvoidMode\(KeyboardAvoidMode\.RESIZE\)/,
   'the keyboard must resize the available area for floating controls')
-expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.keyboardViewportHeight[\s\S]*?\.align\(Alignment.TopStart\)/,
+expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.getEffectiveKeyboardViewportHeight\(\)[\s\S]*?\.align\(Alignment.TopStart\)/,
   'the landscape canvas keeps its full height and moves upward inside the clipped available area')
 expect(remotePage, /keyboardViewportHeight = this\.isHandheldDevice\(\) \?[\s\S]*?this\.componentHeight/,
   'opening the keyboard must preserve the unscaled canvas on all handheld aspect ratios')

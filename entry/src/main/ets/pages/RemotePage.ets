@@ -26,7 +26,7 @@ import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavi
 import { RustDeskTheme } from '../theme/RustDeskTheme';
 import { CommunicationService } from '../service/CommunicationService';
 import { CommunicationPanel } from '../widget/CommunicationPanel';
-import { FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { FrameCallback, KeyboardAvoidMode, display, window } from '@kit.ArkUI';
 import { BusinessError, deviceInfo, zlib } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
@@ -68,6 +68,8 @@ import { followTouchMouseAxis } from '../utils/TouchMouseFollow';
 import { REMOTE_CONTROL_CATEGORIES, remoteControlCategoryItems, remoteControlCategoryLabel,
   compactControlMenuMetrics, placeCompactControlMenu, remoteControlMenuWidthLabels, estimateControlMenuTextWidth,
   RemoteMenuMetrics, RemoteMenuAnchor } from '../model/RemoteControlMenu';
+import { SPLIT_KEYBOARD_OPTION, SplitKeyboardRect, findHorizontalCreaseTopPx, splitKeyboardLineVp,
+  splitKeyboardViewportHeight } from '../model/SplitKeyboardLayout';
 
 class ViewportFrameCallback extends FrameCallback {
   private apply: () => void;
@@ -222,7 +224,7 @@ const KEYBOARD_CAPTURE_SENTINEL: string =
   '1111111111111111111111111111111111111111111111111111111111111111';
 const CONTROL_TOOLBAR_DEFAULT_ORDER: string[] = [
   'displays', 'input', 'virtualMouse', 'physicalGamepad', 'virtualGamepad', 'gameMode', 'highPerformance', 'edgePan', 'keyboard', 'mobileActions', 'gestureHelp',
-  'pan', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
+  'pan', 'splitKeyboard', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
 ];
 const KEYBOARD_TOOLBAR_DEFAULT_ORDER: string[] = [
   'ctrl', 'alt', 'shift', 'meta', 'function', 'more', 'release'
@@ -317,6 +319,12 @@ struct RemotePage {
   private keyboardLauncherDragStartX: number = 0;
   private keyboardLauncherDragStartY: number = 0;
   @State keyboardViewportHeight: number = 0;
+  // Local-device "picture above keyboard" switch; layout applies only while the IME capture is open.
+  @State splitKeyboardEnabled: boolean = false;
+  @State splitKeyboardLineVp: number = 0;
+  // Page size the cached split line was computed for (keyboard hidden only).
+  private splitKeyboardLinePageWidth: number = 0;
+  private splitKeyboardLinePageHeight: number = 0;
   private keyboardLayoutWidth: number = 0;
   private keyboardLayoutHeight: number = 0;
   private keyboardWindowWidth: number = 0;
@@ -871,6 +879,7 @@ struct RemotePage {
     this.loadInputMode();
     this.loadLocalCursorPreference();
     this.loadEdgeAutoPanPreference();
+    this.loadSplitKeyboardPreference();
     this.loadDisplaySwipePreference();
     this.loadVirtualMousePreference();
     this.loadMobileActionsPreference();
@@ -1207,8 +1216,8 @@ struct RemotePage {
   onAreaChangeCallback(oldValue: Area, newValue: Area): void {
     this.relativePointerSampleValid = false;
     this.componentWidth = newValue.width as number;
-    this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
-      this.keyboardViewportHeight : newValue.height as number;
+    this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.getEffectiveKeyboardViewportHeight() > 0 ?
+      this.getEffectiveKeyboardViewportHeight() : newValue.height as number;
     if (this.lastSurfaceWidth <= 0 || this.lastSurfaceHeight <= 0) {
       this.bindSurfaceIfReady();
       return;
@@ -2281,6 +2290,7 @@ struct RemotePage {
         this.closeRemoteKeyboard();
       }
       this.handleHandheldLayoutChange();
+      this.refreshSplitKeyboardLineIfPageChanged();
       this.mobileActionsOffsetX = this.clampMobileActionsOffsetX(this.mobileActionsOffsetX);
       this.mobileActionsOffsetY = this.clampMobileActionsOffsetY(this.mobileActionsOffsetY);
       this.keyboardToolsOffsetX = this.clampKeyboardToolsOffsetX(this.keyboardToolsOffsetX);
@@ -3174,7 +3184,7 @@ struct RemotePage {
       }
       .width('100%')
       .height(this.getRemoteCanvasHeight())
-      .constraintSize({ minHeight: this.keyboardViewportHeight })
+      .constraintSize({ minHeight: this.getEffectiveKeyboardViewportHeight() })
       .align(Alignment.TopStart)
       .translate({ y: this.getKeyboardCanvasShiftY() })
       .backgroundColor('#090D14')
@@ -3245,7 +3255,8 @@ struct RemotePage {
   @Builder
   buildDisplaySwitchImage(snapshot: DisplaySwitchImage, outgoing: boolean) {
     Stack({ alignContent: Alignment.Center }) {
-      Stack({ alignContent: Alignment.Center }) {
+      // Same placement as the live surface (top-aligned in split keyboard).
+      Stack({ alignContent: this.getRemoteViewportAlignment() }) {
         Image(snapshot.pixelMap)
           .width(snapshot.width).height(snapshot.height)
           .objectFit(ImageFit.Fill)
@@ -3291,7 +3302,7 @@ struct RemotePage {
 
   @Builder
   buildRemoteViewport() {
-    Stack({ alignContent: Alignment.Center }) {
+    Stack({ alignContent: this.getRemoteViewportAlignment() }) {
       Button('', { stateEffect: false })
         .id('remoteInputCapture')
         .width(this.inputMode === INPUT_MODE_MOUSE ? '100%' : this.getDisplayWidth())
@@ -3423,8 +3434,8 @@ struct RemotePage {
       let previousWidth: number = this.componentWidth;
       let previousHeight: number = this.componentHeight;
       this.componentWidth = newValue.width as number;
-      this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
-        this.keyboardViewportHeight : newValue.height as number;
+      this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.getEffectiveKeyboardViewportHeight() > 0 ?
+        this.getEffectiveKeyboardViewportHeight() : newValue.height as number;
       if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
         Math.abs(this.componentHeight - previousHeight) > 0.5) {
         if (this.displaySwitchActive) this.clearDisplaySwitchTransition();
@@ -3691,6 +3702,7 @@ struct RemotePage {
       if (item === 'virtualMouse' || item === 'orientation') return this.isHandheldDevice();
       if (item === 'mobileActions') return this.isPeerAndroid;
       if (item === 'pan' || item === 'edgePan') return this.canPanViewport();
+      if (item === 'splitKeyboard') return this.isHandheldDevice() && !this.remoteExternalDisplay;
       if (item === 'privacy') return !this.isPeerAndroid;
       return true;
     });
@@ -3808,6 +3820,7 @@ struct RemotePage {
     state.displaySwipe = this.displaySwipeEnabled;
     state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
     state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
+    state.splitKeyboard = this.splitKeyboardEnabled;
     state.zoom = this.isPcDevice() ? this.getDesktopDisplayedPercent() : Math.round(this.zoomScale * 100);
     state.fullscreen = this.isFullScreen;
     state.pip = this.pipPhase === 'active'; state.recording = this.recordingActive;
@@ -3928,6 +3941,7 @@ struct RemotePage {
       case 'clipboard-paste-denied': this.showFileToast('无法读取剪贴板，请检查系统权限后重试'); return;
       case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
       case 'edgePan': if (this.canPanViewport()) this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled); return;
+      case 'splitKeyboard': this.setSplitKeyboardEnabled(!this.splitKeyboardEnabled); return;
       case 'monitor': this.showQualityMonitor = !this.showQualityMonitor; return;
       case 'gameMode': this.setGameMode(!this.gameModeEnabled); return;
       case 'highPerformance': this.setHighPerformance(!this.highPerformanceEnabled); return;
@@ -4249,6 +4263,7 @@ struct RemotePage {
       case 'mobileActions': return '手机操作';
       case 'gestureHelp': return '手势说明';
       case 'pan': return '移动画面';
+      case 'splitKeyboard': return '上画面下键盘';
       case 'chat': return '聊天与语音';
       case 'upload': return '发送文件';
       case 'download': return '取回文件';
@@ -4880,11 +4895,12 @@ struct RemotePage {
       const x: RemotePoint = this.moveVirtualMouseAxis(this.virtualMouseX, deltaX, this.componentWidth,
         VIRTUAL_MOUSE_WIDTH, VIRTUAL_MOUSE_POINTER_HOT_X, first.x, last.x, this.offsetX, panLimitX,
         VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN);
+      const biasY: number = this.getVerticalPanBias(this.zoomScale);
       const y: RemotePoint = this.moveVirtualMouseAxis(this.virtualMouseY, deltaY, this.componentHeight,
-        VIRTUAL_MOUSE_HEIGHT, VIRTUAL_MOUSE_POINTER_HOT_Y, first.y, last.y, this.offsetY, panLimitY,
+        VIRTUAL_MOUSE_HEIGHT, VIRTUAL_MOUSE_POINTER_HOT_Y, first.y, last.y, this.offsetY - biasY, panLimitY,
         VIRTUAL_MOUSE_BOTTOM_OUTSIDE_MARGIN);
       this.virtualMouseX = x.x; this.offsetX = x.y;
-      this.virtualMouseY = y.x; this.offsetY = y.y;
+      this.virtualMouseY = y.x; this.offsetY = biasY + y.y;
       const groupedPoint: RemotePoint = this.updatePointerFromVirtualMouse();
       ConnectionService.sendMouseEvent(groupedPoint.x, groupedPoint.y, 0);
       this.pointerVirtualMoves++;
@@ -6754,7 +6770,70 @@ struct RemotePage {
   }
 
   getRemoteCanvasHeight(): number | string {
-    return this.keyboardViewportHeight > 0 ? this.keyboardViewportHeight : '100%';
+    const height: number = this.getEffectiveKeyboardViewportHeight();
+    return height > 0 ? height : '100%';
+  }
+
+  // The picture stays above the line while the switch is on, whether or not
+  // the IME is currently shown; only the switch returns to full screen.
+  isSplitKeyboardActive(): boolean {
+    return this.splitKeyboardEnabled && this.isHandheldDevice() && !this.remoteExternalDisplay;
+  }
+
+  // With the IME hidden the page has its full height. Recompute the line when
+  // that size changes (first layout, rotation, fold/unfold), not per IME frame.
+  refreshSplitKeyboardLineIfPageChanged(): void {
+    if (!this.isSplitKeyboardActive() || this.showKeyboardPanel || this.pageWidth <= 0 || this.pageHeight <= 0) return;
+    if (Math.abs(this.pageWidth - this.splitKeyboardLinePageWidth) <= 0.5 &&
+      Math.abs(this.pageHeight - this.splitKeyboardLinePageHeight) <= 0.5) return;
+    this.splitKeyboardLinePageWidth = this.pageWidth;
+    this.splitKeyboardLinePageHeight = this.pageHeight;
+    this.refreshSplitKeyboardLine();
+  }
+
+  // The split layout fits the picture into the area above the line instead of
+  // keeping the pre-IME canvas and lifting it, so it has no fixed canvas.
+  getEffectiveKeyboardViewportHeight(): number {
+    return this.isSplitKeyboardActive() ? 0 : this.keyboardViewportHeight;
+  }
+
+  getSplitKeyboardFullPageHeight(): number {
+    // RESIZE mode shrinks pageHeight with the IME; use the pre-IME snapshot.
+    return this.keyboardLayoutHeight > 0 ? this.keyboardLayoutHeight : (this.pageHeight > 0 ? this.pageHeight : 640);
+  }
+
+  // Query the crease once per keyboard open/switch change, never per frame.
+  refreshSplitKeyboardLine(): void {
+    const fullPageHeight: number = this.getSplitKeyboardFullPageHeight();
+    let creaseTopPx: number = -1;
+    let windowTopPx: number = 0;
+    let density: number = 1;
+    try {
+      const rect = this.remoteKeyboardWindow?.getWindowProperties().windowRect;
+      if (rect) {
+        windowTopPx = rect.top;
+        const windowRect: SplitKeyboardRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        const creaseRects: SplitKeyboardRect[] = display.getCurrentFoldCreaseRegion().creaseRects
+          .map((crease: display.Rect): SplitKeyboardRect => {
+            const item: SplitKeyboardRect = { left: crease.left, top: crease.top, width: crease.width, height: crease.height };
+            return item;
+          });
+        creaseTopPx = findHorizontalCreaseTopPx(windowRect, creaseRects);
+      }
+    } catch (_e) {
+      creaseTopPx = -1; // Non-foldable devices report no crease or throw.
+    }
+    try { density = this.getUIContext().vp2px(1); } catch (_e) { density = 1; }
+    this.splitKeyboardLineVp = splitKeyboardLineVp(creaseTopPx, windowTopPx, density, this.controlMenuPageOriginY,
+      fullPageHeight);
+    RustDeskNapi.appendDiagnosticLog('input-keyboard', `split-keyboard line=${Math.round(this.splitKeyboardLineVp)} ` +
+      `crease=${creaseTopPx >= 0 ? 1 : 0} page_h=${Math.round(fullPageHeight)}`);
+  }
+
+  getSplitKeyboardViewportHeight(): number {
+    const fullPageHeight: number = this.getSplitKeyboardFullPageHeight();
+    const line: number = this.splitKeyboardLineVp > 0 ? this.splitKeyboardLineVp : fullPageHeight / 2;
+    return splitKeyboardViewportHeight(line, fullPageHeight, this.controlMenuKeyboardInset);
   }
 
   snapshotRemoteKeyboardViewport(): void {
@@ -6839,6 +6918,10 @@ struct RemotePage {
   getKeyboardAvoidance(): KeyboardAvoidanceInfo {
     const result: KeyboardAvoidanceInfo = { shiftY: 0, visibleHeight: 0, hiddenHeight: 0, maxManualLift: 0, focusY: 0,
       source: 'none', reason: 'inactive' };
+    if (this.isSplitKeyboardActive()) {
+      result.reason = 'split_keyboard';
+      return result;
+    }
     if (!this.showKeyboardPanel || !this.isHandheldDevice() || this.keyboardViewportHeight <= 0 ||
       !Number.isFinite(this.qualityViewportHeight) || this.qualityViewportHeight <= 0) return result;
     const visibleHeight: number = Math.min(this.qualityViewportHeight, this.getKeyboardViewportMaxHeight());
@@ -6887,6 +6970,10 @@ struct RemotePage {
   }
 
   getKeyboardViewportMaxHeight(): number {
+    // Split: the black viewport reaches the IME top; only the picture stops at the line.
+    if (this.isSplitKeyboardActive()) {
+      return Math.max(1, this.getSplitKeyboardFullPageHeight() - this.controlMenuKeyboardInset);
+    }
     if (this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 &&
       this.controlMenuKeyboardInset > 0) {
       // Use the original canvas, not an already resized height: no double inset.
@@ -6921,11 +7008,18 @@ struct RemotePage {
     }, 5000);
   }
 
+  // Height the picture is fitted into. Split: the area above the line, while
+  // the viewport itself (black, trackpad in mouse mode) extends to the IME.
+  getDisplayFitHeight(): number {
+    return this.isSplitKeyboardActive() ?
+      Math.min(this.componentHeight, this.getSplitKeyboardViewportHeight()) : this.componentHeight;
+  }
+
   getDisplayWidth(): number {
     if (this.componentWidth <= 0 || this.componentHeight <= 0 || this.remoteWidth <= 0 || this.remoteHeight <= 0) {
       return this.componentWidth > 0 ? this.componentWidth : 1;
     }
-    let scale: number = Math.min(this.componentWidth / this.remoteWidth, this.componentHeight / this.remoteHeight);
+    let scale: number = Math.min(this.componentWidth / this.remoteWidth, this.getDisplayFitHeight() / this.remoteHeight);
     return Math.max(1, this.remoteWidth * scale);
   }
 
@@ -6933,7 +7027,7 @@ struct RemotePage {
     if (this.componentWidth <= 0 || this.componentHeight <= 0 || this.remoteWidth <= 0 || this.remoteHeight <= 0) {
       return this.componentHeight > 0 ? this.componentHeight : 1;
     }
-    let scale: number = Math.min(this.componentWidth / this.remoteWidth, this.componentHeight / this.remoteHeight);
+    let scale: number = Math.min(this.componentWidth / this.remoteWidth, this.getDisplayFitHeight() / this.remoteHeight);
     return Math.max(1, this.remoteHeight * scale);
   }
 
@@ -7456,6 +7550,36 @@ struct RemotePage {
   loadLocalCursorPreference(): void {
     this.showLocalCursor = (this.peerPreferences?.get('show-local-cursor', 'show-local-cursor') ??
       RustDeskNapi.getOption('show-local-cursor')) !== '0';
+  }
+
+  loadSplitKeyboardPreference(): void {
+    // Local device option, deliberately not per remote peer.
+    this.splitKeyboardEnabled = RustDeskNapi.getOption(SPLIT_KEYBOARD_OPTION) === '1';
+  }
+
+  setSplitKeyboardEnabled(enabled: boolean): void {
+    this.splitKeyboardEnabled = enabled;
+    RustDeskNapi.setOption(SPLIT_KEYBOARD_OPTION, enabled ? '1' : '0');
+    this.setControlMenu('');
+    RustDeskNapi.appendDiagnosticLog('input-keyboard',
+      `split-keyboard enabled=${enabled ? 1 : 0} keyboard_open=${this.showKeyboardPanel ? 1 : 0}`);
+    if (enabled) {
+      // The layout applies even if a gate below keeps the IME closed.
+      this.refreshSplitKeyboardLine();
+      this.splitKeyboardLinePageWidth = this.showKeyboardPanel ? 0 : this.pageWidth;
+      this.splitKeyboardLinePageHeight = this.showKeyboardPanel ? 0 : this.pageHeight;
+      if (!this.showKeyboardPanel) {
+        // User action: keep openRemoteKeyboard's pending text/Wayland/connection gates.
+        this.openRemoteKeyboard();
+      } else {
+        this.traceRemoteKeyboardState('split_keyboard_on');
+      }
+    } else {
+      this.splitKeyboardLinePageWidth = 0;
+      this.splitKeyboardLinePageHeight = 0;
+      if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+      this.clampViewportOffset();
+    }
   }
 
   loadEdgeAutoPanPreference(): void {
@@ -9346,12 +9470,13 @@ struct RemotePage {
     const scaleY: number = this.getDisplayHeight() * this.zoomScale / this.remoteHeight;
     const x = followTouchMouseAxis(this.lastAbsX, deltaX * gain, scaleX, this.remoteWidth,
       this.componentWidth, origin.x, this.offsetX, this.getHorizontalPanLimit(this.zoomScale));
+    const biasY: number = this.getVerticalPanBias(this.zoomScale);
     const y = followTouchMouseAxis(this.lastAbsY, deltaY * gain, scaleY, this.remoteHeight,
-      this.componentHeight, origin.y, this.offsetY, this.getVerticalPanLimit(this.zoomScale));
+      this.componentHeight, origin.y, this.offsetY - biasY, this.getVerticalPanLimit(this.zoomScale));
     // Pointer and viewport are updated in the same input callback; do not
     // request a video refresh or feed viewport motion back as extra input.
     this.offsetX = x.offset;
-    this.offsetY = y.offset;
+    this.offsetY = biasY + y.offset;
     this.lastAbsX = x.pointer;
     this.lastAbsY = y.pointer;
     this.remoteCursorAbsX = x.pointer;
@@ -9874,8 +9999,9 @@ struct RemotePage {
       (vectorX > 0 && this.offsetX <= -panLimitX + 0.5)) {
       vectorX = 0;
     }
-    if ((vectorY < 0 && this.offsetY >= panLimitY - 0.5) ||
-      (vectorY > 0 && this.offsetY <= -panLimitY + 0.5)) {
+    let panOffsetY: number = this.offsetY - this.getVerticalPanBias(this.zoomScale);
+    if ((vectorY < 0 && panOffsetY >= panLimitY - 0.5) ||
+      (vectorY > 0 && panOffsetY <= -panLimitY + 0.5)) {
       vectorY = 0;
     }
     if (vectorX === 0 && vectorY === 0) {
@@ -10231,7 +10357,23 @@ struct RemotePage {
   }
 
   clampVerticalOffset(value: number, scale: number): number {
-    return this.clampOffsetToLimit(value, this.getVerticalPanLimit(scale));
+    const bias: number = this.getVerticalPanBias(scale);
+    return bias + this.clampOffsetToLimit(value - bias, this.getVerticalPanLimit(scale));
+  }
+
+  // Pan limits are symmetric around a centred picture. The split keyboard
+  // picture is top-aligned, so its allowed vertical offsets are shifted: when
+  // zoomed beyond the viewport the range is centred here; otherwise the top
+  // edge stays at the viewport top. Always 0 outside the split layout.
+  getVerticalPanBias(scale: number): number {
+    if (!this.isSplitKeyboardActive() || this.componentHeight <= 0 || scale <= 0) return 0;
+    const centerY: number = this.componentHeight / 2;
+    const displayTop: number = this.getDisplayTop();
+    const displayHeight: number = this.getDisplayHeight();
+    if (displayHeight * scale >= this.componentHeight) {
+      return (centerY - displayTop - displayHeight / 2) * scale;
+    }
+    return (centerY - displayTop) * scale - centerY;
   }
 
   clampOffsetToLimit(value: number, limit: number): number {
@@ -10503,7 +10645,8 @@ struct RemotePage {
       `anchor_source=${avoidance.source} avoid_reason=${avoidance.reason} anchor_age_ms=${anchorAge} ` +
       `anchor_visual_y=${Math.round(avoidance.focusY)} hidden_h=${Math.round(avoidance.hiddenHeight)} ` +
       `avoid_visible_h=${Math.round(avoidance.visibleHeight)} display=${this.currentDisplay} ` +
-      `remote_size=${this.remoteWidth}x${this.remoteHeight} manual_pan=${this.keyboardManualPan}`);
+      `remote_size=${this.remoteWidth}x${this.remoteHeight} manual_pan=${this.keyboardManualPan} ` +
+      `split_keyboard=${this.isSplitKeyboardActive() ? 1 : 0} split_line=${Math.round(this.splitKeyboardLineVp)}`);
   }
 
   openRemoteKeyboard(): void {
@@ -10530,6 +10673,9 @@ struct RemotePage {
       // A touchpad tap can still be waiting for its double-click timeout.
       this.flushPendingTap();
       this.snapshotRemoteKeyboardViewport();
+      if (this.splitKeyboardEnabled && this.isHandheldDevice() && !this.remoteExternalDisplay) {
+        this.refreshSplitKeyboardLine();
+      }
     }
     this.resetKeyboardCaptureBuffer();
     this.applyKeyboardResizeMode();
@@ -12921,7 +13067,13 @@ struct RemotePage {
   }
 
   getDisplayTop(): number {
+    // Split keeps the picture on the top edge (matches getRemoteViewportAlignment).
+    if (this.isSplitKeyboardActive()) return 0;
     return Math.max(0, (this.componentHeight - this.getDisplayHeight()) / 2);
+  }
+
+  getRemoteViewportAlignment(): Alignment {
+    return this.isSplitKeyboardActive() ? Alignment.Top : Alignment.Center;
   }
 
   bindSurfaceIfReady(): void {

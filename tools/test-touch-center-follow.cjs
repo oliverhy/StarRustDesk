@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(process.env.TYPESCRIPT_PATH || 'C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
 const source = read('entry/src/main/ets/pages/RemotePage.ets');
@@ -29,8 +29,8 @@ context.followTouchMouseAxis = follow;
 const names = ['touchGesturePoint', 'isHandheldDevice', 'shouldFollowTouchMouse',
   'touchMouseFollowBlockReason', 'isRemoteKeyboardBlockingPointer', 'updateCenterFollowPointer',
   'handleTouchpadTouch', 'finishTouchpadTouch', 'remotePointToVisual', 'visualPointToRemote',
-  'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
-  'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport',
+  'getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop', 'getDisplayFitHeight', 'isSplitKeyboardActive',
+  'getVerticalPanBias', 'getHorizontalPanLimit', 'getVerticalPanLimit', 'getPanLimit', 'canPanViewport',
   'clampVirtualMouseX', 'clampVirtualMouseY', 'alignVirtualMouseToRemotePosition',
   'moveVirtualMouseAxis', 'updateVirtualMouseMove', 'beginVirtualMouseMove', 'finishVirtualMouseMove',
   'updatePointerFromVirtualMouse', 'syncVirtualMouseToCurrentPointer',
