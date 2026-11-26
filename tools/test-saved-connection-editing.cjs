@@ -49,6 +49,32 @@ const draft=(f,r)=>({...f.context.Editing.empty(),remoteId:r.remoteId,name:r.nam
 let count=0;
 async function test(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
+ await test('control and file-only dispatch only the linked ID with mandatory verification; malformed links do not dial',async()=>{
+   const f=fixture([{...row('a','192.0.2.1'),linkedDeviceId:'VerifiedID'}]), calls=[];
+   Object.assign(f.context,{AppStorage:{setOrCreate(){}},router:{pushUrl(){}},ConnectionStatus:{CONNECTED:2,WAITING_2FA:4,CONNECTING:1},
+     RustDeskTheme:{ERROR:0,WARNING:1},ConnectionService:{connect:async(...args)=>{calls.push(args);return 1;}}});
+   compile('class RealPage {'+method(source,'onConnect')+'} globalThis.dial=RealPage.prototype.onConnect;',f.context);
+   f.p.syncConnectionState=()=>0;
+   for(const files of [false,true]){
+     f.p.isConnecting=false;await f.context.dial.call(f.p,files,f.p.requestForSavedConnection(f.p.savedConnections[0]));
+     assert.equal(calls.at(-1)[0],'VerifiedID');assert.equal(calls.at(-1)[3],files);assert.equal(calls.at(-1)[8],true);
+   }
+   f.p.isConnecting=false;const r=f.p.requestForSavedConnection(f.p.savedConnections[0]);r.draft.linkedDeviceId='192.0.2.2';
+   await f.context.dial.call(f.p,false,r);assert.equal(calls.length,2);
+ });
+ await test('linked IP retains original endpoint and strict identity after save, reload and quick connect',async()=>{
+   const a=row('a','192.0.2.1'), f=fixture([a]), d=draft(f,a);
+   d.linkedDeviceId='Verified-ID';d.passwordMode='replace';d.password='confirmed';
+   await f.p.saveConnectionDraft(d,a.id,'update',a);
+   f.p.savedConnections=[];await f.p.loadSavedConnections();const item=f.p.savedConnections[0];
+   assert.equal(item.remoteId,a.remoteId);assert.equal(item.linkedDeviceId,'Verified-ID');
+   f.p.connectSavedConnection(item);assert.equal(f.p.connectionRequest.draft.linkedDeviceId,'Verified-ID');
+   f.p.remoteId=a.remoteId;assert.equal(f.p.requestForCurrentForm().draft.linkedDeviceId,'Verified-ID');
+   for(const id of ['192.0.2.2','[::1]','id/r','id@server','']){
+     await assert.rejects(f.p.saveConnectionDraft({...d,linkedDeviceId:id},a.id,'update',item));
+   }
+   await assert.rejects(f.p.saveConnectionDraft({...d,linkedDeviceId:undefined,passwordMode:'keep'},a.id,'update',item));
+ });
  await test('saved connection editor keeps game mode isolated by server and peer',async()=>{
    const f=fixture();f.p.openNewSavedConnection();const d=draft(f,row('a','game-peer','Game',''));
    assert.equal((await f.p.saveEditedConnection(d,'new',true,true)).success,true);

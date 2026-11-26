@@ -627,6 +627,61 @@ pub extern "C" fn rust_connect(
     os_password: *const c_char,
     transport_policy: i32,
 ) -> i32 {
+    connect_impl(peer_id, password, rendezvous_server, relay_server, server_key, client_hwid,
+        client_id, force_relay, allow_insecure_fallback, file_only, lock_after_disconnect,
+        privacy_mode, os_password, transport_policy, None)
+}
+
+struct BookCredential {
+    first_hash: bool,
+    bytes: Vec<u8>,
+}
+
+impl BookCredential {
+    fn parse(kind: i32, value: &[u8]) -> Option<Self> {
+        match kind {
+            1 => {
+                let mut bytes = base64::decode(value, Variant::Original).ok()?;
+                if bytes.len() != 32 {
+                    bytes.fill(0);
+                    return None;
+                }
+                Some(Self { first_hash: true, bytes })
+            }
+            2 if !value.is_empty() && value.len() < 512 && std::str::from_utf8(value).is_ok() =>
+                Some(Self { first_hash: false, bytes: value.to_vec() }),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for BookCredential {
+    fn drop(&mut self) { self.bytes.fill(0); }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_connect_with_address_book(
+    peer_id: *const c_char, rendezvous_server: *const c_char, relay_server: *const c_char,
+    server_key: *const c_char, client_hwid: *const c_char, client_id: *const c_char,
+    force_relay: i32, transport_policy: i32, credential_kind: i32, credential_value: *const c_char,
+) -> i32 {
+    if credential_value.is_null() { return -37; }
+    let bytes = unsafe { CStr::from_ptr(credential_value) }.to_bytes();
+    let Some(credential) = BookCredential::parse(credential_kind, bytes) else {
+        emit_event("address-book-auth phase=credential outcome=invalid");
+        return -37;
+    };
+    connect_impl(peer_id, std::ptr::null(), rendezvous_server, relay_server, server_key, client_hwid,
+        client_id, force_relay, INSECURE_NONE, 0, 0, 0, std::ptr::null(), transport_policy, Some(credential))
+}
+
+fn connect_impl(
+    peer_id: *const c_char, password: *const c_char, rendezvous_server: *const c_char,
+    relay_server: *const c_char, server_key: *const c_char, client_hwid: *const c_char,
+    client_id: *const c_char, force_relay: i32, allow_insecure_fallback: i32, file_only: i32,
+    lock_after_disconnect: i32, privacy_mode: i32, os_password: *const c_char, transport_policy: i32,
+    book_credential: Option<BookCredential>,
+) -> i32 {
     if peer_id.is_null() {
         return -1;
     }
@@ -644,6 +699,10 @@ pub extern "C" fn rust_connect(
             return -23;
         }
     };
+    if book_credential.is_some() && direct_addr.is_some() {
+        emit_event("address-book-auth phase=identity outcome=direct_endpoint_blocked");
+        return -37;
+    }
     emit_event("rust_connect entered");
     let session_id = advance_session();
     PROTOCOL_SESSION_ID.store(new_protocol_session_id(), Ordering::SeqCst);
@@ -780,7 +839,7 @@ pub extern "C" fn rust_connect(
             CONNECTION_ACTIVE.store(true, Ordering::SeqCst);
             let trust = prepare_trusted_session(session_id, None).await;
             if !install_trusted_session(session_id, &trust) { return -19; }
-            spawn_receive_loop(session_id, stream, None, trust);
+            spawn_receive_loop(session_id, stream, None, trust, None);
             emit_event("IP direct connected; rendezvous bypassed; awaiting peer login challenge");
             return 0;
         }
@@ -1222,6 +1281,10 @@ pub extern "C" fn rust_connect(
         emit_event(&format!("remote security: e2ee={peer_encrypted}"));
         let trust_scope = CURRENT_CONNECTION_CONFIG.lock().ok().and_then(|guard|
             guard.as_ref().and_then(|config| verified_trust_scope(config, &signed_id_pk, peer_encrypted)));
+        if book_credential.is_some() && trust_scope.is_none() {
+            emit_event("address-book-auth phase=identity outcome=unverified");
+            return -37;
+        }
         let trust = prepare_trusted_session(session_id, trust_scope).await;
         if !install_trusted_session(session_id, &trust) { return -19; }
         record_peer_route_success(&peer, selected.route, selected.transport, now_ms());
@@ -1237,7 +1300,7 @@ pub extern "C" fn rust_connect(
             // session. Any losing or cancelled offer is closed by the guard.
             webrtc_guard.0 = None;
         }
-        spawn_receive_loop(session_id, selected.stream, selected.kcp, trust);
+        spawn_receive_loop(session_id, selected.stream, selected.kcp, trust, book_credential);
         emit_event(&format!("receive loop spawned transport={}", selected.label));
         0
         }).await {
@@ -6087,7 +6150,9 @@ fn create_symmetric_key_msg(
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
 }
 
-fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<KcpStream>, trust: SharedTrustedSession) {
+fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<KcpStream>,
+    trust: SharedTrustedSession, mut book_credential: Option<BookCredential>) {
+    let from_address_book = book_credential.is_some();
     let (tx, mut rx) = tokio_mpsc::unbounded_channel::<QueuedPeerCommand>();
     if let Ok(mut guard) = PEER_MESSAGE_SENDER.lock() {
         *guard = Some((session_id, tx));
@@ -6256,7 +6321,8 @@ fn spawn_receive_loop(session_id: u64, mut stream: Stream, kcp_guard: Option<Kcp
                                         receive_started_at.elapsed().as_millis(), bytes.len()));
                                 }
                                 let message_kind =
-                                    handle_peer_bytes(session_id, &trust, &bytes, &mut read_jobs, &mut stream).await;
+                                    handle_peer_bytes(session_id, &trust, &bytes, &mut read_jobs, &mut stream,
+                                        &mut book_credential, from_address_book && challenge_received).await;
                                 challenge_received |= message_kind == "hash";
                                 login_response_received |= message_kind == "login_response";
                                 received_messages += 1;
@@ -6359,6 +6425,8 @@ async fn handle_peer_bytes(
     bytes: &[u8],
     read_jobs: &mut Vec<TransferJob>,
     stream: &mut Stream,
+    book_credential: &mut Option<BookCredential>,
+    book_challenge_already_handled: bool,
 ) -> &'static str {
     if SESSION_ID.load(Ordering::SeqCst) != session_id { return "stale"; }
     let msg = match PeerMessage::parse_from_bytes(bytes) {
@@ -6373,8 +6441,9 @@ async fn handle_peer_bytes(
     };
     match msg.union {
         Some(message::Union::Hash(hash)) => {
+            if book_challenge_already_handled { return "hash"; }
             emit_event("peer message: Hash");
-            send_login(session_id, trust, hash).await;
+            send_login(session_id, trust, hash, book_credential.take()).await;
             "hash"
         }
         Some(message::Union::LoginResponse(resp)) => {
@@ -7078,12 +7147,30 @@ fn clear_clipboard_state() {
     }
 }
 
-async fn send_login(session_id: u64, trust: &SharedTrustedSession, hash: Hash) {
+fn login_challenge_response(password: &[u8], first_hash: bool, hash: &Hash) -> Vec<u8> {
+    if password.is_empty() { return Vec::new(); }
+    let mut second = Sha256::new();
+    if first_hash {
+        second.update(password);
+    } else {
+        let mut first = Sha256::new();
+        first.update(password);
+        first.update(hash.salt.as_bytes());
+        second.update(first.finalize());
+    }
+    second.update(hash.challenge.as_bytes());
+    second.finalize().to_vec()
+}
+
+async fn send_login(session_id: u64, trust: &SharedTrustedSession, hash: Hash, book_credential: Option<BookCredential>) {
     if SESSION_ID.load(Ordering::SeqCst) != session_id { return; }
     let performance = performance_config();
-    let password = match PASSWORD_HASH.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => Vec::new(),
+    let response_password = if let Some(credential) = book_credential {
+        emit_event(if credential.first_hash { "address-book-auth phase=challenge source=personal" }
+            else { "address-book-auth phase=challenge source=shared" });
+        login_challenge_response(&credential.bytes, credential.first_hash, &hash)
+    } else {
+        PASSWORD_HASH.lock().map(|password| login_challenge_response(&password, false, &hash)).unwrap_or_default()
     };
     let peer_id = match CURRENT_PEER_ID.lock() {
         Ok(guard) => guard.clone(),
@@ -7097,19 +7184,6 @@ async fn send_login(session_id: u64, trust: &SharedTrustedSession, hash: Hash) {
         Ok(guard) => guard.clone(),
         Err(_) => "harmony-client".to_string(),
     };
-    let mut response_password = Vec::new();
-    if !password.is_empty() {
-        let mut first = Sha256::new();
-        first.update(&password);
-        first.update(hash.salt.as_bytes());
-        let first_hash = first.finalize();
-
-        let mut second = Sha256::new();
-        second.update(first_hash);
-        second.update(hash.challenge.as_bytes());
-        response_password = second.finalize().to_vec();
-    }
-
     let mut login = LoginRequest {
         username: peer_id,
         password: response_password.into(),

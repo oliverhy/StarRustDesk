@@ -15,15 +15,20 @@ let now, nextTimer, timers, logs, callbacks, focused, sent;
 const windows = new Map();
 function fakeWindow(name, queryFails = false) {
   const listeners = new Map();
+  const focusListeners = new Set();
   const win = { name, height: 0, queryFails, detached: [],
-    on(event, callback) { assert.equal(event, 'keyboardHeightChange'); listeners.set(callback, callback); },
+    on(event, callback) {
+      if (event === 'windowEvent') { focusListeners.add(callback); return; }
+      assert.equal(event, 'keyboardHeightChange'); listeners.set(callback, callback);
+    },
     off(event, callback) {
+      if (event === 'windowEvent') { focusListeners.delete(callback); return; }
       assert.equal(event, 'keyboardHeightChange'); assert.equal(typeof callback, 'function');
       this.detached.push(callback); listeners.delete(callback);
     },
     getWindowAvoidArea() { if (this.queryFails) throw Error('query unavailable'); return { bottomRect: { height: this.height } }; },
     emit(height) { this.height = height; for (const callback of [...listeners.values()]) callback(height); },
-    listeners,
+    listeners, focusListeners,
   };
   windows.set(name, win); return win;
 }
@@ -46,7 +51,7 @@ const attributes = new Proxy({}, { get(_target, property) {
 const context = vm.createContext({ exports: {},
   ConnectionStatus: { CONNECTED: 2 }, INPUT_MODE_MOUSE: 'mouse',
   deviceInfo: { deviceType: 'phone' }, KeyboardAvoidMode: { RESIZE: 1 }, Color: { Transparent: 0 },
-  window: { AvoidAreaType: { TYPE_KEYBOARD: 4 }, findWindow(name) { if (!windows.has(name)) throw Error('missing'); return windows.get(name); } },
+  window: { AvoidAreaType: { TYPE_KEYBOARD: 4 }, WindowEventType: { WINDOW_ACTIVE: 1, WINDOW_INACTIVE: 2, WINDOW_HIDDEN: 3, WINDOW_DESTROYED: 4 }, findWindow(name) { if (!windows.has(name)) throw Error('missing'); return windows.get(name); } },
   RemoteDisplayPolicy: { getMainWindow: () => windows.get('main') },
   RustDeskNapi: { appendDiagnosticLog: (category, message) => logs.push([category, message]) },
   TextInput: () => attributes, Date: { now: () => now },
@@ -103,6 +108,16 @@ function page({ queryFails = false } = {}) {
 }
 let passed = 0;
 function test(name, run) { run(); passed++; console.log('PASS ' + name); }
+
+test('only the current handheld window can release virtual buttons on focus loss', () => {
+  const { p, owner } = page(); let releases = 0;
+  p.releaseVirtualMouseButtons = () => releases++;
+  const listener = [...owner.focusListeners][0];
+  listener(2); assert.equal(p.virtualMouseWindowInactive, true); assert.equal(releases, 1);
+  listener(1); assert.equal(p.virtualMouseWindowInactive, false);
+  p.stopRemoteKeyboardTracking(); assert.equal(owner.focusListeners.size, 0);
+  listener(3); assert.equal(releases, 1);
+});
 
 test('zero-height seed and initial non-editing event do not cancel opening', () => {
   const { p } = page(); p.openRemoteKeyboard(); callbacks.onEditChange(false); advance(80);

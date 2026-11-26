@@ -1,18 +1,22 @@
 import { translate } from '../utils/I18n'
 import { ApiBook, ApiPeer, ApiFailure, ApiLoginOption, RustDeskApiService, AccountSession } from '../service/RustDeskApiService';
 import { common } from '@kit.AbilityKit';
+import { router } from '@kit.ArkUI';
 import { ApiAddressBookImport } from '../service/ApiAddressBookImport';
 import { RustDeskNapi } from '../service/RustDeskNapi';
 import { ApiAccountAction } from './ApiAccountAction';
 import { ApiOAuthProviderButton } from './ApiOAuthProviderButton';
+import { SettingsAction, SettingsChoice } from './SettingsControls';
+import { settingsPalette } from '../theme/SettingsSkin';
 import { ApiBookSync, BookSyncPlan, BookSyncChange } from '../service/ApiBookSync';
+import { ConnectionService } from '../service/ConnectionService';
+import { ConnectionStatus } from '../model/ConnectionModel';
 
 @CustomDialog
 export struct ApiAccountDialog {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   controller: CustomDialogController;
   @StorageLink('isDarkMode') isDarkMode: boolean = false;
-  @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true;
   @State server: string = '';
   @State provider: string = 'official';
   @State loginMode: string = 'public';
@@ -43,6 +47,7 @@ export struct ApiAccountDialog {
   private webRetryCount: number = 0;
   private api: RustDeskApiService = AccountSession.getApi();
   private alive: boolean = true;
+  private openingAddressBookSession: boolean = false;
   private proServerDraft: string = '';
   private thirdPartyServerDraft: string = '';
   private proHttpDraft: boolean = false;
@@ -50,6 +55,7 @@ export struct ApiAccountDialog {
 
   aboutToAppear(): void {
     this.alive = true;
+    this.openingAddressBookSession = false;
     this.server = RustDeskApiService.defaultServer();
     this.provider = RustDeskNapi.getOption('api-account-provider') === 'thirdParty' ? 'thirdParty' : 'official';
     this.proServerDraft = RustDeskApiService.defaultCustomServer('official');
@@ -62,7 +68,37 @@ export struct ApiAccountDialog {
     this.alive = false;
     this.stopWebLogin();
     this.password = ''; this.code = '';
-    this.api.cancel();
+    // Closing after a successful handoff must not invalidate the account
+    // revision that protects reconnects for the active session.
+    if (!this.openingAddressBookSession) this.api.cancel();
+  }
+
+  async connectAddressBookPeer(peer: ApiPeer): Promise<void> {
+    const book = this.books[this.bookIndex];
+    if (!book || this.busy) return;
+    this.busy = true;
+    this.message = '';
+    try {
+      const status = await ConnectionService.connect(peer.id, '', 'smooth', false,
+        { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false }, '', false, book);
+      if (!this.alive) return;
+      if (status !== ConnectionStatus.CONNECTING) {
+        this.message = ConnectionService.getLastConnectionError();
+        return;
+      }
+      AppStorage.setOrCreate<string>('connectedPeerId', peer.id);
+      this.openingAddressBookSession = true;
+      await router.pushUrl({ url: 'pages/RemotePage' });
+      this.controller.close();
+    } catch (error) {
+      if (this.openingAddressBookSession) {
+        this.openingAddressBookSession = false;
+        ConnectionService.disconnect();
+      }
+      if (this.alive) this.message = error instanceof ApiFailure ? error.message : '无法打开地址簿连接，请重试。';
+    } finally {
+      if (this.alive) this.busy = false;
+    }
   }
 
   stopWebLogin(): void {
@@ -231,8 +267,8 @@ export struct ApiAccountDialog {
     this.syncPlan = undefined; this.editingId = '';
     this.busy = true; this.message = ''; this.peers = []; this.selected = []; this.bookIndex = index;
     try {
-      const peers = await this.api.peers(this.books[index]);
-      if (this.alive) { this.peers = peers; this.message = `已获取 ${peers.length} 台设备，请勾选后导入`; }
+      const peers = await this.api.browsePeers(this.books[index]);
+      if (this.alive) { this.peers = peers; this.message = `已获取 ${peers.length} 台设备，可直接连接或勾选导入`; }
     } catch (error) { this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
   }
@@ -262,7 +298,7 @@ export struct ApiAccountDialog {
     try {
       await ApiBookSync.apply(this.api, this.books[this.bookIndex], this.syncPlan, this.preferLocal);
       if (!this.alive) return;
-      const peers = await this.api.peers(this.books[this.bookIndex]);
+      const peers = await this.api.browsePeers(this.books[this.bookIndex]);
       if (this.alive) { this.syncPlan = undefined; this.peers = peers; this.message = '双向同步完成，未同步密码'; }
     } catch (error) { this.syncPlan = undefined; this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
@@ -282,7 +318,7 @@ export struct ApiAccountDialog {
       await this.api.writePeer(this.books[this.bookIndex], { id: old.id, name: this.editingName.trim() || old.id,
         platform: old.platform, tags: this.editingTags.split(/[,，]/).map((s: string) => s.trim()).filter((s: string) => !!s) }, false);
       if (!this.alive) return;
-      const peers = await this.api.peers(this.books[this.bookIndex]);
+      const peers = await this.api.browsePeers(this.books[this.bookIndex]);
       if (this.alive) { this.editingId = ''; this.peers = peers; this.message = '服务器设备信息已保存'; }
     } catch (error) { this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
@@ -298,17 +334,26 @@ export struct ApiAccountDialog {
     try {
       await this.api.deletePeer(this.books[this.bookIndex], peer.id);
       if (!this.alive) return;
-      const peers = await this.api.peers(this.books[this.bookIndex]);
+      const peers = await this.api.browsePeers(this.books[this.bookIndex]);
       if (this.alive) { this.peers = peers; this.message = '已从服务器地址簿删除'; }
     } catch (error) { this.showError(error as Error); }
     finally { if (this.alive) this.busy = false; }
   }
-  textColor(): ResourceColor { return this.isDarkMode ? '#EFF4FB' : '#17253D'; }
-  secondaryColor(): ResourceColor { return this.isDarkMode ? '#B6C4D7' : '#60728B'; }
-  bookOptions(): SelectOption[] {
-    const options: SelectOption[] = [];
-    this.books.forEach((book: ApiBook) => { options.push({ value: book.name }); });
-    return options;
+  textColor(): ResourceColor { return settingsPalette(this.isDarkMode).ink; }
+  secondaryColor(): ResourceColor { return settingsPalette(this.isDarkMode).muted; }
+  bookOptions(): SettingsChoice[] {
+    return this.books.map((book: ApiBook): SettingsChoice => ({ key: this.bookKey(book), label: book.name, literal: true }));
+  }
+
+  private bookKey(book: ApiBook): string { return (book.legacy ? 'personal:' : 'shared:') + book.guid; }
+
+  private selectBook(key: string): void {
+    if (this.busy) return;
+    const index = this.books.findIndex((book: ApiBook) => this.bookKey(book) === key);
+    if (index < 0) return;
+    this.syncPlan = undefined;
+    this.editingId = '';
+    this.loadBook(index);
   }
 
   @Builder
@@ -339,7 +384,8 @@ export struct ApiAccountDialog {
           isEnabled: !this.busy, onAction: () => { this.loadLoginOptions(); } });
       }
     }.width('100%').padding(14).alignItems(HorizontalAlign.Start)
-      .backgroundColor(this.isDarkMode ? '#202F41' : '#F5F8FC').borderRadius(16);
+      .backgroundColor(settingsPalette(this.isDarkMode).app)
+      .border({ width: 1, color: settingsPalette(this.isDarkMode).hair }).borderRadius(12);
   }
 
   build() {
@@ -427,11 +473,14 @@ export struct ApiAccountDialog {
             Row({ space: 8 }) {
               Text(translate(`已登录：${this.username}`, this.uiLanguage)).fontSize(14).fontColor(this.textColor()).layoutWeight(1);
               ApiAccountAction({ label: '刷新', isEnabled: !this.busy, onAction: () => { this.refreshBooks(); } });
-              ApiAccountAction({ label: '退出', isEnabled: !this.busy, onAction: () => { this.logout(); } });
+              ApiAccountAction({ label: '退出', tone: 'warn', isEnabled: !this.busy, onAction: () => { this.logout(); } });
             }.width('100%');
-            Select(this.bookOptions())
-              .value(this.bookIndex >= 0 ? this.books[this.bookIndex]?.name : '选择个人或共享地址簿')
-              .enabled(!this.busy).width('100%').onSelect((index: number) => { this.syncPlan = undefined; this.editingId = ''; this.loadBook(index); });
+            SettingsAction({
+              label: this.books[this.bookIndex]?.name ?? translate('选择个人或共享地址簿', this.uiLanguage),
+              items: this.bookOptions(), selected: this.books[this.bookIndex] ? this.bookKey(this.books[this.bookIndex]) : '',
+              isEnabled: !this.busy && this.books.length > 0, trailing: 'down', maxWidth: 224,
+              onSelect: (key: string) => { this.selectBook(key); }
+            }).alignSelf(ItemAlign.Start);
             if (this.bookIndex >= 0) {
               ApiAccountAction({ label: '预览双向同步', isEnabled: !this.busy, onAction: () => { this.previewSync(); } });
               Text(translate('手动同步本地全部 ID 连接与当前地址簿，请确认它们属于同一服务器。IP 直连、密码及服务器密钥不参与同步。删除及冲突会先列出，不会自动执行。', this.uiLanguage))
@@ -445,7 +494,8 @@ export struct ApiAccountDialog {
                 Checkbox().select(this.preferLocal).enabled(!this.busy).onChange((v: boolean) => { this.preferLocal = v; });
                 Text(translate('冲突时使用本地版本（不选则使用服务器版本）', this.uiLanguage)).fontSize(12).fontColor(this.textColor()).layoutWeight(1);
               }
-              ApiAccountAction({ label: '确认执行上述变更（含删除）', isEnabled: !this.busy && this.syncPlan.changes.length > 0,
+              ApiAccountAction({ label: '确认执行上述变更（含删除）', tone: 'danger',
+                isEnabled: !this.busy && this.syncPlan.changes.length > 0,
                 onAction: () => { this.applySync(); } });
               ApiAccountAction({ label: '取消同步', isEnabled: !this.busy, onAction: () => { this.syncPlan = undefined; } });
             }
@@ -475,17 +525,35 @@ export struct ApiAccountDialog {
                     if (value !== this.selected.includes(peer.id)) this.toggle(peer.id);
                   });
                   Column({ space: 3 }) {
-                    Text(peer.name).fontSize(15).fontColor(this.textColor()).width('100%');
+                    Text(peer.name).fontSize(15).fontColor(this.textColor()).width('100%').wordBreak(WordBreak.BREAK_WORD);
                     Text(translate(`${peer.id} · ${peer.platform || '设备'}${peer.tags.length > 0 ? ' · ' + peer.tags.join(' / ') : ''}`, this.uiLanguage))
                       .fontSize(12).fontColor(this.secondaryColor()).width('100%');
+                    if (peer.note) {
+                      Text(peer.note).fontSize(12).fontColor(this.secondaryColor()).width('100%');
+                    }
                   }.layoutWeight(1);
+                  ApiAccountAction({ label: '连接', isEnabled: !this.busy,
+                    onAction: () => { this.connectAddressBookPeer(peer); } });
                   if (this.books[this.bookIndex]?.writable) {
-                    Button('⋯').height(36).width(40).enabled(!this.busy).bindMenu([
-                      { value: translate('修改名称 / 标签', this.uiLanguage), action: () => { this.editingId = peer.id; this.editingName = peer.name; this.editingTags = peer.tags.join(', '); } },
-                      { value: translate('删除服务器记录', this.uiLanguage), action: () => { this.confirmDeletePeer(peer); } }
-                    ]);
+                    SettingsAction({
+                      icon: 'dots', tone: 'quiet', accessibleLabel: translate('更多操作', this.uiLanguage),
+                      isEnabled: !this.busy,
+                      items: [
+                        { key: 'edit', label: '修改名称 / 标签', icon: 'edit' },
+                        { key: 'delete', label: '删除服务器记录', icon: 'trash', tone: 'warn' }
+                      ],
+                      onSelect: (key: string) => {
+                        if (this.busy || !this.books[this.bookIndex]?.writable) return;
+                        if (key === 'edit') {
+                          this.editingId = peer.id; this.editingName = peer.name; this.editingTags = peer.tags.join(', ');
+                        } else if (key === 'delete') {
+                          this.confirmDeletePeer(peer);
+                        }
+                      }
+                    });
                   }
-                }.width('100%').padding({ top: 8, bottom: 8 });
+                }.width('100%').padding(9).backgroundColor(settingsPalette(this.isDarkMode).app)
+                  .border({ width: 1, color: settingsPalette(this.isDarkMode).hair }).borderRadius(11);
               }, (peer: ApiPeer) => peer.id);
             }
           }
@@ -493,11 +561,12 @@ export struct ApiAccountDialog {
             Text(translate('正在请求服务器…', this.uiLanguage)).fontSize(13).fontColor(this.secondaryColor());
           }
           if (this.message) { Text(translate(this.message, this.uiLanguage)).fontSize(13).fontColor(this.textColor()).width('100%'); }
-          Text(translate('API 用于账号和地址簿，不替代 ID/中继服务器。导入后沿用当前中继配置，请确保属于同一网络。不会自动上传本地连接；不导入远端密码或密码哈希。', this.uiLanguage))
+          Text(translate('从地址簿点「连接」可使用该记录的凭证。导入到本地只保存设备信息，不导入密码或密码哈希；也不会自动上传本地密码。', this.uiLanguage))
             .fontSize(12).fontColor(this.secondaryColor()).width('100%');
         }.width('100%');
       }.width('100%').layoutWeight(1).scrollBar(BarState.Auto);
-    }.padding(20).width('94%').constraintSize({ maxWidth: 600 }).height('86%')
-      .borderRadius(20).backgroundColor(this.isDarkMode ? '#1E2A3A' : '#FFFFFF');
+    }.padding(16).width('94%').constraintSize({ maxWidth: 585, maxHeight: '86%' })
+      .backgroundColor(settingsPalette(this.isDarkMode).surface)
+      .border({ width: 1, color: settingsPalette(this.isDarkMode).line, radius: 16 });
   }
 }

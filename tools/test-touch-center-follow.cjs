@@ -35,8 +35,9 @@ const names = ['touchGesturePoint', 'isHandheldDevice', 'shouldFollowTouchMouse'
   'moveVirtualMouseAxis', 'updateVirtualMouseMove', 'beginVirtualMouseMove', 'finishVirtualMouseMove',
   'updatePointerFromVirtualMouse', 'syncVirtualMouseToCurrentPointer',
   'clickVirtualMouseButton', 'beginVirtualMouseButtonDrag', 'finishVirtualMouseButtonDrag',
+  'handleVirtualMouseButtonTouch', 'resetVirtualMouseButtonTouch', 'releaseVirtualMouseButtons',
   'virtualMouseOverlayX', 'virtualMouseOverlayY', 'virtualMousePointerX', 'virtualMousePointerY'];
-const constants = ['TOUCHPAD_POINTER_SPEED', 'TOUCH_MOVE_THRESHOLD', 'TOUCH_TAP_SLOP',
+const constants = ['VIRTUAL_MOUSE_BUTTON_DRAG_THRESHOLD','TOUCHPAD_POINTER_SPEED', 'TOUCH_MOVE_THRESHOLD', 'TOUCH_TAP_SLOP',
   'TOUCHPAD_DRAG_START_THRESHOLD', 'TOUCHPAD_DOUBLE_TAP_TIMEOUT_MS',
   'VIRTUAL_MOUSE_POINTER_HOT_X', 'VIRTUAL_MOUSE_POINTER_HOT_Y',
   'VIRTUAL_MOUSE_WIDTH', 'VIRTUAL_MOUSE_HEIGHT', 'VIRTUAL_MOUSE_RIGHT_OUTSIDE_MARGIN',
@@ -253,6 +254,30 @@ test('virtual drag synchronizes before down and before release, cancel only rele
   p.beginVirtualMouseButtonDrag('left'); calls=[];
   p.finishVirtualMouseButtonDrag('left', true);
   assert.deepEqual(calls.map(c => c[2]), [2], 'cancel must release without moving or clicking');
+});
+for (const button of ['left', 'right']) test('virtual '+button+' preserves real edges, drag, rapid taps and interruption', () => {
+  const p=make({showVirtualMouse:true,desktopWindowActive:true});
+  const down=button==='left'?1:3, up=down+1, held=button+'ButtonHeld';
+  p[button==='left'?'sendLeftDown':'sendRightDown']=(x,y)=>{p[held]=true;calls.push([x,y,down]);};
+  p[button==='left'?'sendLeftUp':'sendRightUp']=(x,y)=>{if(p[held]) calls.push([x,y,up]);p[held]=false;};
+  const evt=(type,x=50,id=1)=>{const point={id,windowX:x,windowY:40,x:0,y:0};
+    p.handleVirtualMouseButtonTouch(button,{type,touches:type===TouchType.Up?[]:[point],
+      changedTouches:[point],stopPropagation(){}});};
+  const edges=()=>calls.map(c=>c[2]).filter(Boolean);
+  evt(TouchType.Down);assert.deepEqual(calls.map(c=>c[2]),[0,down]);
+  now+=900;evt(TouchType.Move,52);evt(TouchType.Down,53,2);evt(TouchType.Up,53,2);
+  assert.deepEqual(calls.map(c=>c[2]),[0,down]);assert(p[held]);
+  evt(TouchType.Move,75);assert.deepEqual(edges(),[down]);assert.equal(calls.at(-1)[2],0);
+  evt(TouchType.Up,75);assert.deepEqual(edges(),[down,up]);assert(!p[held]);
+  for(let i=0;i<3;i++){now+=4;evt(TouchType.Down);now+=8;evt(TouchType.Up);}
+  assert.deepEqual(edges(),[down,up,down,up,down,up,down,up]);
+  for(const via of ['cancel','lost_focus_or_hidden']){
+    calls=[];evt(TouchType.Down);calls=[];
+    if(via==='cancel') evt(TouchType.Cancel); else p.releaseVirtualMouseButtons();
+    p.releaseVirtualMouseButtons();evt(TouchType.Up);assert.deepEqual(calls.map(c=>c[2]),[up]);
+    assert(!p[held]&&!p.virtualMouseDragActive&&!p.virtualMouseButtonTouchActive);
+  }
+  p.virtualMouseWindowInactive=true;calls=[];evt(TouchType.Down);evt(TouchType.Up);assert.deepEqual(calls,[]);
 });
 test('virtual pointer remains aligned after landscape portrait and zoom changes', () => {
   const p = make({ showVirtualMouse: true, componentWidth:844, componentHeight:363,

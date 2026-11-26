@@ -9,6 +9,7 @@ import { deviceInfo } from '@kit.BasicServicesKit'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { ConnectionService } from '../service/ConnectionService'
+import { SunshineExperiment } from '../service/SunshineExperiment'
 import { RemoteSessionBackgroundTask } from '../service/RemoteSessionBackgroundTask'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { PerformanceSettings } from '../model/PerformanceSettings'
@@ -31,6 +32,7 @@ import {
 } from '../service/ConnectionBackupService'
 
 interface SavedConnectionInfo {
+  linkedDeviceId?: string
   id: string
   name: string
   remoteId: string
@@ -41,6 +43,7 @@ interface SavedConnectionInfo {
 }
 
 interface SavedConnectionRow {
+  linkedDeviceId?: string
   id: string
   name: string
   remoteId: string
@@ -86,6 +89,8 @@ class ConnectionSaveConflict extends Error {}
 
 @Component
 export struct ConnectionPage {
+  @StorageLink('sunshineTestAvailable') private sunshineAvailable: boolean = false
+  @StorageLink('sunshineTestEnabled') private sunshineEnabled: boolean = false
   @Prop @Watch('onLanTabChanged') homeTabActive: boolean = true
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
@@ -372,6 +377,39 @@ export struct ConnectionPage {
     return status
   }
 
+  @Builder
+  buildSunshineEntry() {
+    if (this.sunshineAvailable && this.sunshineEnabled) {
+      Button() {
+        Row({ space: 12 }) {
+          Column({ space: 5 }) {
+            Text(this.uiLanguage === 'en' ? 'Game streaming · Experiment' : '游戏串流 · 实验')
+              .fontSize(17).fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
+              .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+              .width('100%').textAlign(TextAlign.Start)
+            Text(this.uiLanguage === 'en' ? 'Sunshine · Direct UDP preferred' : 'Sunshine · UDP 直连优先')
+              .fontSize(14).fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+              .width('100%').textAlign(TextAlign.Start)
+          }
+          .layoutWeight(1)
+          Text('›').fontSize(25).fontColor(this.isDarkMode ? '#91BDFF' : '#2062CE').accessibilityText('')
+        }
+        .width('100%').padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      }
+      .id('sunshine-experiment-entry')
+      .width('100%').constraintSize({ minHeight: 64 }).padding(0)
+      .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
+      .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
+      .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, RustDeskTheme.HOME_CARD_RADIUS, ButtonType.Capsule))
+      .onClick(() => {
+        const info = (getContext(this) as common.UIAbilityContext).applicationInfo
+        if (SunshineExperiment.mayOpen(info.name, info.debug)) {
+          router.pushUrl({ url: 'pages/SunshineStreamPage' }).catch(() => {})
+        }
+      })
+    }
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       Column() {
@@ -384,6 +422,7 @@ export struct ConnectionPage {
             this.buildWideQuickConnect()
             Scroll() {
               Column() {
+                this.buildSunshineEntry()
                 this.buildSavedConnections()
                 this.buildLanDiscovery()
               }
@@ -403,6 +442,7 @@ export struct ConnectionPage {
             Scroll() {
               Column() {
                 this.buildConnectionForm()
+                this.buildSunshineEntry()
               }
               .width('100%')
               .padding({ bottom: 94 })
@@ -434,6 +474,7 @@ export struct ConnectionPage {
           Scroll() {
             Column({ space: 14 }) {
               this.buildConnectionForm()
+              this.buildSunshineEntry()
               this.buildSavedConnections()
               this.buildLanDiscovery()
             }
@@ -2524,6 +2565,12 @@ export struct ConnectionPage {
       return
     }
     let peerId: string = this.normalizeRemoteId(request.draft.remoteId)
+    const linked = request.draft.linkedDeviceId
+    if (linked !== undefined && (!SavedConnectionEditing.addressEntry(peerId) || !SavedConnectionEditing.validDeviceId(linked))) {
+      this.connectionStatusText = '关联设备 ID 无效，请修改连接'
+      this.connectionStatusColor = RustDeskTheme.ERROR
+      return
+    }
     if (requested === undefined) {
       this.remoteId = peerId
       this.isIdEmpty = peerId.length === 0
@@ -2556,7 +2603,7 @@ export struct ConnectionPage {
       this.isConnecting = true
       this.connectionStatusText = translate('Connecting...', this.uiLanguage)
       this.connectionStatusColor = RustDeskTheme.WARNING
-      AppStorage.setOrCreate<string>('connectedPeerId', peerId)
+      AppStorage.setOrCreate<string>('connectedPeerId', linked ?? peerId)
       this.preparingAccount = true
       let status: ConnectionStatus
       try {
@@ -2576,8 +2623,12 @@ export struct ConnectionPage {
           (request.draft.osPassword.length > 0 ? request.draft.osPassword :
             (request.draft.clearOsPassword ? '' : await RemoteSecurityStore.loadOsPassword(request.savedId))) : ''
         if (request.serverScope !== this.currentConnectionScope()) throw new Error('Connection network changed')
-        status = await ConnectionService.connect(peerId, password, request.draft.performancePreset, fileOnly,
-          security, osPassword, request.lanDiscovery === true)
+        if (request.savedId && !this.savedConnections.some((item: SavedConnectionInfo) =>
+          item.id === request.savedId && item.linkedDeviceId === linked && SavedConnectionEditing.sameEndpoint(item.remoteId, peerId))) {
+          throw new Error('Saved connection changed')
+        }
+        status = await ConnectionService.connect(linked ?? peerId, password, request.draft.performancePreset, fileOnly,
+          security, osPassword, request.lanDiscovery === true, undefined, linked !== undefined)
       } catch (_error) {
         this.preparingAccount = false
         this.connectionStatusText = '账号恢复失败或服务器配置已改变，请重试；必要时到设置中的 API 账号重新登录'
@@ -3102,7 +3153,8 @@ export struct ConnectionPage {
         remoteId: item.remoteId,
         password: item.password,
         performancePreset: item.performancePreset,
-        groupId: item.id === connectionId ? validId : item.groupId
+        groupId: item.id === connectionId ? validId : item.groupId,
+        linkedDeviceId: item.linkedDeviceId, serverScope: item.serverScope
       })
     })
     this.savedConnections = list
@@ -3205,8 +3257,10 @@ export struct ConnectionPage {
       try {
         const original = this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === request.savedId)
         if (request.savedId.length > 0 && original === undefined) throw new ConnectionSaveConflict('此连接已不存在，请关闭后重试')
-        if (original !== undefined && !SavedConnectionEditing.sameEndpoint(original.remoteId,
-          request.draft.remoteId)) throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+        if (original !== undefined && (!SavedConnectionEditing.sameEndpoint(original.remoteId,
+          request.draft.remoteId) || original.linkedDeviceId !== request.draft.linkedDeviceId)) {
+          throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
+        }
         const savedDraft = original === undefined ? request.draft : this.requestForSavedConnection(original).draft
         savedDraft.password = password
         savedDraft.passwordMode = 'replace'
@@ -3407,6 +3461,16 @@ export struct ConnectionPage {
   async replaceConnectionsFromBackup(payload: ConnectionBackupPayload): Promise<number> {
     let oldConnections: SavedConnectionInfo[] = this.cloneSavedConnections(this.savedConnections)
     let imported: NormalizedImportData = this.normalizeImportedData(payload, [], [])
+    // Restoring an older backup must not turn an existing secure entry into a plaintext entry.
+    for (const item of imported.connections) {
+      const old = oldConnections.find((r: SavedConnectionInfo) => SavedConnectionEditing.sameEndpoint(r.remoteId, item.remoteId) &&
+        (r.serverScope === undefined || item.serverScope === undefined || r.serverScope === item.serverScope))
+      if (old && item.linkedDeviceId !== undefined && old.linkedDeviceId !== item.linkedDeviceId) throw new Error('关联设备 ID 与本机记录不同，请先核对连接')
+      if (old?.linkedDeviceId !== undefined) {
+        item.linkedDeviceId = old.linkedDeviceId
+        item.serverScope = item.serverScope ?? old.serverScope
+      }
+    }
     for (let item of oldConnections) {
       await CredentialStore.remove(item.id)
       await RemoteSecurityStore.remove(item.id)
@@ -3475,6 +3539,7 @@ export struct ConnectionPage {
       let name: string = source.name.trim().length > 0 ? source.name.trim().substring(0, 200) : remoteId
       if (existingIndex >= 0) {
         let existing: SavedConnectionInfo = connections[existingIndex]
+        if (source.linkedDeviceId !== undefined && existing.linkedDeviceId !== source.linkedDeviceId) throw new Error('关联设备 ID 与本机记录不同，请先核对连接')
         connections[existingIndex] = {
           id: existing.id,
           name: name,
@@ -3483,7 +3548,7 @@ export struct ConnectionPage {
             (payload.includesPasswords ? source.password : ''),
           performancePreset: preset,
           groupId: groupId,
-          serverScope: importedScope ?? existing.serverScope
+          serverScope: importedScope ?? existing.serverScope, linkedDeviceId: existing.linkedDeviceId ?? source.linkedDeviceId
         }
       } else {
         let id: string = source.id.trim()
@@ -3497,7 +3562,7 @@ export struct ConnectionPage {
           password: payload.includesPasswords ? source.password : '',
           performancePreset: preset,
           groupId: groupId,
-          serverScope: importedScope
+          serverScope: importedScope, linkedDeviceId: source.linkedDeviceId
         })
       }
       importedCount++
@@ -3528,7 +3593,7 @@ export struct ConnectionPage {
         password: includesPasswords ? item.password : '',
         performancePreset: item.performancePreset,
         groupId: item.groupId,
-        serverScope: item.serverScope
+        serverScope: item.serverScope, linkedDeviceId: item.linkedDeviceId
       })
     })
     return ConnectionBackupService.createPayload(groups, connections, includesPasswords)
@@ -3593,13 +3658,13 @@ export struct ConnectionPage {
     this.editingConnectionOriginal = this.cloneSavedConnections([item])[0]
     this.editingConnectionScope = scope
     this.connectionEditorGameServer = RustDeskNapi.getOption('custom-rendezvous-server').trim()
-    this.connectionEditorGameMode = this.readEditorGameMode(this.connectionEditorGameServer, item.remoteId)
+    this.connectionEditorGameMode = this.readEditorGameMode(this.connectionEditorGameServer, item.linkedDeviceId ?? item.remoteId)
     const options = RemoteSecurityStore.options(item.id)
     const hasOsPassword = (await RemoteSecurityStore.loadOsPassword(item.id)).length > 0
     if (!this.savePageActive || generation !== this.editingConnectionGeneration || scope !== this.currentConnectionScope() ||
       !this.savedConnections.some((entry: SavedConnectionInfo) => entry.id === item.id)) return
     this.connectionEditorDraft = {
-      remoteId: item.remoteId, name: item.name, groupId: this.validGroupId(item.groupId), performancePreset: item.performancePreset,
+      linkedDeviceId: item.linkedDeviceId, remoteId: item.remoteId, name: item.name, groupId: this.validGroupId(item.groupId), performancePreset: item.performancePreset,
       password: '', passwordMode: 'keep', lockAfterDisconnect: options.lockAfterDisconnect, privacyMode: options.privacyMode,
       autoUnlock: options.autoUnlock, osPassword: '', clearOsPassword: false, hasPassword: item.password.length > 0, hasOsPassword: hasOsPassword
     }
@@ -3643,7 +3708,7 @@ export struct ConnectionPage {
         this.editingConnectionOriginal, this.editingConnectionScope, generation)
       let gameSaved = true
       if (changed) {
-        const preferences = new RemotePeerPreferences(gameServer, this.normalizeRemoteId(draft.remoteId))
+        const preferences = new RemotePeerPreferences(gameServer, this.normalizeRemoteId(draft.linkedDeviceId ?? draft.remoteId))
         gameSaved = preferences.set('game-mode', gameMode ? '1' : '0')
         if (gameSaved) gameSaved = preferences.flush()
         preferences.dispose()
@@ -3692,7 +3757,7 @@ export struct ConnectionPage {
             id: id,
             name: row['name'] ?? '',
             remoteId: remoteId,
-            password: savedPassword,
+            password: savedPassword, linkedDeviceId: row['linkedDeviceId'],
             performancePreset: PerformanceSettings.normalize(row['performancePreset'] ?? 'smooth'),
             groupId: this.validGroupId(row['groupId'] ?? ''),
             serverScope: row['serverScope'] !== undefined && /^network-v1-[0-9a-f]{16}$/.test(row['serverScope']) ? row['serverScope'] : undefined
@@ -3733,7 +3798,7 @@ export struct ConnectionPage {
         credentialAlias: item.id,
         performancePreset: item.performancePreset,
         groupId: item.groupId,
-        serverScope: item.serverScope
+        serverScope: item.serverScope, linkedDeviceId: item.linkedDeviceId
       })
     })
     RustDeskNapi.setOption('saved-connections', JSON.stringify(rows))
@@ -4063,7 +4128,7 @@ export struct ConnectionPage {
   requestForCurrentForm(): SavedConnectionRequest {
     const saved = this.savedConnectionForPassword()
     const draft: SavedConnectionDraft = {
-      remoteId: this.normalizeRemoteId(this.remoteId), name: this.connectionName, groupId: this.selectedGroupId,
+      linkedDeviceId: saved?.linkedDeviceId, remoteId: this.normalizeRemoteId(this.remoteId), name: this.connectionName, groupId: this.selectedGroupId,
       performancePreset: this.performancePreset, password: this.connectionPasswordForUse(), passwordMode: this.passwordEditMode,
       lockAfterDisconnect: this.lockAfterDisconnect, privacyMode: this.privacyMode, autoUnlock: this.autoUnlock,
       osPassword: this.osPasswordDraft, clearOsPassword: this.clearOsPassword,
@@ -4075,7 +4140,7 @@ export struct ConnectionPage {
   requestForSavedConnection(item: SavedConnectionInfo): SavedConnectionRequest {
     const options = RemoteSecurityStore.options(item.id)
     return { savedId: item.id, serverScope: item.serverScope ?? this.currentConnectionScope(), draft: {
-      remoteId: item.remoteId, name: item.name, groupId: item.groupId, performancePreset: item.performancePreset,
+      linkedDeviceId: item.linkedDeviceId, remoteId: item.remoteId, name: item.name, groupId: item.groupId, performancePreset: item.performancePreset,
       password: item.password, passwordMode: 'keep', lockAfterDisconnect: options.lockAfterDisconnect,
       privacyMode: options.privacyMode, autoUnlock: options.autoUnlock, osPassword: '', clearOsPassword: false,
       hasPassword: item.password.length > 0, hasOsPassword: false
@@ -4086,6 +4151,8 @@ export struct ConnectionPage {
     expected: SavedConnectionInfo | undefined = undefined, scope: string = this.currentConnectionScope(),
     expectedEditorGeneration: number = -1): Promise<void> {
     const peerId = SavedConnectionEditing.endpoint(draft.remoteId)
+    if (draft.linkedDeviceId !== undefined && (!SavedConnectionEditing.addressEntry(peerId) ||
+      !SavedConnectionEditing.validDeviceId(draft.linkedDeviceId))) throw new ConnectionSaveConflict('关联设备 ID 无效，请修改连接')
     if (peerId.length === 0) throw new ConnectionSaveConflict('请输入远程 ID')
     if (!['new', 'update', 'copy', 'replace'].includes(action)) throw new ConnectionSaveConflict('编辑已过期，请重新打开连接')
     const original = originalId.length > 0 ? this.savedConnections.find((entry: SavedConnectionInfo) => entry.id === originalId) : undefined
@@ -4109,7 +4176,7 @@ export struct ConnectionPage {
     const password = draft.passwordMode === 'clear' ? '' :
       (draft.password.trim().length > 0 ? draft.password.trim() :
         (!identityChanged && keepOriginal && draft.passwordMode === 'keep' ? original!.password : ''))
-    const next: SavedConnectionInfo = { id: targetId, name: draft.name.trim() || peerId, remoteId: peerId, password: password,
+    const next: SavedConnectionInfo = { id: targetId, name: draft.name.trim() || peerId, remoteId: peerId, password: password, linkedDeviceId: draft.linkedDeviceId,
       performancePreset: PerformanceSettings.normalize(draft.performancePreset), groupId: this.validGroupId(draft.groupId), serverScope: scope }
     const baseline = RustDeskNapi.getOption('saved-connections')
     const editorGeneration = expectedEditorGeneration >= 0 ? expectedEditorGeneration : this.editingConnectionGeneration
@@ -4124,6 +4191,11 @@ export struct ConnectionPage {
     const oldOsPassword = await RemoteSecurityStore.loadOsPassword(targetId)
     const oldOptions = RemoteSecurityStore.options(targetId)
     const oldBinding = RemoteSecurityStore.serverBinding(targetId)
+    if (keepOriginal && original!.linkedDeviceId !== draft.linkedDeviceId &&
+      ((oldPassword.length > 0 && draft.passwordMode === 'keep') ||
+       (oldOsPassword.length > 0 && !draft.clearOsPassword && !draft.osPassword))) {
+      throw new ConnectionSaveConflict('关联目标已改变，请在连接选项中重新输入或清除原有密码')
+    }
     check()
     if (keepOriginal && oldPassword !== original!.password) {
       throw new ConnectionSaveConflict('连接已改变，请重新打开后修改')
@@ -4162,7 +4234,7 @@ export struct ConnectionPage {
       // Read back the same serialized rows before declaring success or scheduling cloud sync.
       const rows: SavedConnectionRow[] = list.map((entry: SavedConnectionInfo): SavedConnectionRow => {
         return { id: entry.id, name: entry.name, remoteId: entry.remoteId, credentialAlias: entry.id,
-          performancePreset: entry.performancePreset, groupId: entry.groupId, serverScope: entry.serverScope }
+          performancePreset: entry.performancePreset, groupId: entry.groupId, serverScope: entry.serverScope, linkedDeviceId: entry.linkedDeviceId }
       })
       expectedRows = JSON.stringify(rows)
       wroteRows = true
@@ -4249,7 +4321,7 @@ export struct ConnectionPage {
         password: item.password,
         performancePreset: item.performancePreset,
         groupId: item.groupId,
-        serverScope: item.serverScope
+        serverScope: item.serverScope, linkedDeviceId: item.linkedDeviceId
       })
     })
     return cloned

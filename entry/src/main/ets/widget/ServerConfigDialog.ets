@@ -1,5 +1,6 @@
 import { readableInputHeight } from '../theme/ReadableLayout'
-import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
+import { settingsPalette } from '../theme/SettingsSkin'
+import { SettingsAction } from './SettingsControls'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { translate } from '../utils/I18n'
 import { ClipboardImportReadResult, RustDeskNapi } from '../service/RustDeskNapi'
@@ -77,154 +78,129 @@ export struct ServerConfigDialog {
   }
 
   build() {
-    Scroll() {
-    Column({ space: 12 }) {
-      Button(translate(this.scanning ? '扫描中' : '扫码导入服务器配置', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
-        .enabled(!this.scanning && !this.importing).onClick(() => { this.scanConfig() })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-      Button(translate(this.showQr ? '收起配置二维码' : '显示配置二维码', this.uiLanguage)).constraintSize({ minHeight: 32 }).fontSize(13)
-        .enabled(this.idServer.trim().length > 0).onClick(() => { this.showQr = !this.showQr })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-      if (this.showQr) {
-        QRCode(new ServerConfigModel(this.idServer, this.relayServer, this.apiServer, this.serverKey).toQrPayload())
-          .width(180).height(180).color(Color.Black).backgroundColor(Color.White)
-        Text(translate('包含当前填写的服务器地址与公钥，不含连接密码。请仅向可信设备展示。', this.uiLanguage))
-          .fontSize(11).fontColor(this.isDarkMode ? '#D6DCE7' : '#52627A')
-      }
-      if (this.errorMsg) { Text(translate(this.errorMsg, this.uiLanguage)).fontSize(12).fontColor(RustDeskTheme.ERROR).width('100%') }
+    Column() {
       Row({ space: 8 }) {
-        Text(translate('ID/Relay Server', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Start)
+        Text(translate('ID / 中继服务器', this.uiLanguage)).fontSize(20).fontWeight(700)
+          .fontColor(settingsPalette(this.isDarkMode).ink).layoutWeight(1).wordBreak(WordBreak.BREAK_WORD)
+        SettingsAction({ icon: 'close', accessibleLabel: translate('关闭', this.uiLanguage), tone: 'quiet',
+          onAction: () => { this.controller?.close() } })
+      }
+      .width('100%').padding({ left: 16, right: 10, top: 10, bottom: 8 })
+      Divider().strokeWidth(1).color(settingsPalette(this.isDarkMode).hair)
+      Scroll() {
+        Column({ space: 10 }) {
+          Text(translate('为连接指定自建的 ID、Relay 与 API 服务', this.uiLanguage))
+            .fontSize(13).fontColor(settingsPalette(this.isDarkMode).muted).width('100%')
+          Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+            SettingsAction({ label: translate(this.scanning ? '扫描中' : '扫码导入服务器配置', this.uiLanguage),
+              icon: 'scan', isEnabled: !this.scanning && !this.importing, onAction: () => { this.scanConfig() } })
+              .margin({ right: 6, bottom: 6 })
+            SettingsAction({ label: translate(this.showQr ? '收起配置二维码' : '显示配置二维码', this.uiLanguage),
+              icon: 'qr', isEnabled: this.idServer.trim().length > 0, onAction: () => { this.showQr = !this.showQr } })
+              .margin({ right: 6, bottom: 6 })
 
-        // The system security component grants temporary clipboard access only
-        // after the user taps it; a normal Button cannot grant that access.
-        PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
-          .fontSize(14)
-          .fontColor(this.isDarkMode ? '#E0ECFF' : '#175AB3')
-          .backgroundColor(this.isDarkMode ? '#293F60' : '#E3EFFF')
-          .borderRadius(8)
-          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-          .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
-            if (result === PasteButtonOnClickResult.SUCCESS) {
-              this.importServerConfigFromClipboard()
-            } else {
-              const trace = new OperationDiagnostic('server-config', 'clipboard_import')
-              trace.end('rejected', { kind: 3 })
-              promptAction.showToast({ message: translate('无法读取剪贴板，请检查系统权限后重试', this.uiLanguage) })
+            // A normal button cannot grant the native component's one-time clipboard access.
+            Row() {
+              PasteButton({ text: PasteDescription.PASTE, buttonType: this.roundedRectButtons ?
+                ButtonType.Normal : ButtonType.Capsule })
+                .fontSize(13)
+                .fontColor(settingsPalette(this.isDarkMode).ink)
+                .backgroundColor(settingsPalette(this.isDarkMode).pill)
+                .borderRadius(this.roundedRectButtons ? 12 : 22)
+                .constraintSize({ minHeight: 44 })
+                .padding({ left: 10, right: 10, top: 7, bottom: 7 })
+                .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+                  if (result === PasteButtonOnClickResult.SUCCESS) {
+                    this.importServerConfigFromClipboard()
+                  } else {
+                    const trace = new OperationDiagnostic('server-config', 'clipboard_import')
+                    trace.end('rejected', { kind: 3 })
+                    promptAction.showToast({ message: translate('无法读取剪贴板，请检查系统权限后重试', this.uiLanguage) })
+                  }
+                })
             }
-          })
+            .margin({ right: 6, bottom: 6 })
 
-        Button(translate('导出', this.uiLanguage))
-          .constraintSize({ minHeight: 30 })
-          .fontSize(12)
-          .fontColor(this.isDarkMode ? '#AFCBFF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(8)
-          .padding({ left: 10, right: 10 })
-          .onClick(() => {
-            this.exportServerConfigToClipboard()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
-      }
-      .width('100%')
+            SettingsAction({ label: translate('导出', this.uiLanguage), icon: 'download',
+              onAction: () => { this.exportServerConfigToClipboard() } }).margin({ bottom: 6 })
+          }
+          .width('100%')
+          if (this.showQr) {
+            Column({ space: 8 }) {
+              QRCode(new ServerConfigModel(this.idServer, this.relayServer, this.apiServer, this.serverKey).toQrPayload())
+                .width(180).height(180).color(Color.Black).backgroundColor(Color.White)
+              Text(translate('包含当前填写的服务器地址与公钥，不含连接密码。请仅向可信设备展示。', this.uiLanguage))
+                .fontSize(12).fontColor(settingsPalette(this.isDarkMode).muted).width('100%')
+            }
+            .width('100%').padding(9).backgroundColor(settingsPalette(this.isDarkMode).app).borderRadius(10)
+          }
+          if (this.errorMsg) {
+            Text(translate(this.errorMsg, this.uiLanguage)).fontSize(12).fontColor(settingsPalette(this.isDarkMode).red)
+              .width('100%')
+          }
+          this.buildField({ label: 'ID Server', value: this.idServer, onChange: (v: string) => { this.idServer = v } })
+          this.buildField({ label: 'Relay Server', value: this.relayServer, onChange: (v: string) => { this.relayServer = v } })
+          this.buildField({ label: 'API Server', value: this.apiServer, onChange: (v: string) => { this.apiServer = v } })
+          this.buildField({ label: 'Key', value: this.serverKey, onChange: (v: string) => { this.serverKey = v } })
 
-      Text(translate('为连接指定自建的 ID、Relay 与 API 服务', this.uiLanguage))
-        .fontSize(13)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
-        .margin({ bottom: 4 })
-
-      this.buildField({ label: 'ID Server', value: this.idServer, onChange: (v: string) => { this.idServer = v } })
-      this.buildField({ label: 'Relay Server', value: this.relayServer, onChange: (v: string) => { this.relayServer = v } })
-      this.buildField({ label: 'API Server', value: this.apiServer, onChange: (v: string) => { this.apiServer = v } })
-      this.buildField({ label: 'Key', value: this.serverKey, onChange: (v: string) => { this.serverKey = v } })
-
-      Text(translate('IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:db8::1]:21116', this.uiLanguage))
-        .fontSize(11)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
-
-      if (this.testResult.length > 0) {
-        Row() {
-          Circle()
-            .width(8)
-            .height(8)
-            .fill(this.testResult.startsWith('✓') || this.testResult === translate('Server connected successfully', this.uiLanguage) ? RustDeskTheme.SUCCESS : RustDeskTheme.ERROR)
-          Text(translate(this.testResult, this.uiLanguage))
-            .fontSize(12)
-            .fontColor(this.testResult.startsWith('✓') || this.testResult === translate('Server connected successfully', this.uiLanguage) ? RustDeskTheme.SUCCESS : RustDeskTheme.ERROR)
-            .margin({ left: 4 })
-        }
-        .width('100%')
-      }
-
-      if (this.isTesting) {
-        Row() {
-          LoadingProgress()
-            .width(16)
-            .height(16)
-          Text(translate('Testing connection...', this.uiLanguage))
-            .fontSize(12)
+          Text(translate('IPv6 可输入裸地址，指定端口时请使用 [IPv6]:端口，例如 [2001:db8::1]:21116', this.uiLanguage))
+            .fontSize(11)
             .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .margin({ left: 6 })
-        }
-        .width('100%')
-      }
+            .width('100%')
 
-      Text(translate('导出配置与 RustDesk 官方格式兼容，并包含服务器 Key，请勿发送给不可信的人。', this.uiLanguage))
-        .fontSize(11)
-        .fontColor('#B7791F')
-        .width('100%')
-
-      Row({ space: 12 }) {
-        Button(translate('Cancel', this.uiLanguage))
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-          .borderRadius(6)
-          .layoutWeight(1)
-          .onClick(() => {
-            if (this.controller != undefined) {
-              this.controller.close()
+          if (this.testResult.length > 0) {
+            Row() {
+              Circle()
+                .width(8)
+                .height(8)
+                .fill(this.testResult.startsWith('✓') || this.testResult === translate('Server connected successfully', this.uiLanguage) ? RustDeskTheme.SUCCESS : RustDeskTheme.ERROR)
+              Text(translate(this.testResult, this.uiLanguage))
+                .fontSize(12)
+                .fontColor(this.testResult.startsWith('✓') || this.testResult === translate('Server connected successfully', this.uiLanguage) ? RustDeskTheme.SUCCESS : RustDeskTheme.ERROR)
+                .margin({ left: 4 })
             }
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+            .width('100%')
+          }
 
-        Button(translate('Test Connection', this.uiLanguage))
-          .fontColor(Color.White)
-          .backgroundColor('#248A68')
-          .borderRadius(6)
-          .layoutWeight(1)
-          .enabled(!this.isTesting && !this.scanning && !this.importing)
-          .onClick(() => {
-            this.testConnection()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+          if (this.isTesting) {
+            Row() {
+              LoadingProgress()
+                .width(16)
+                .height(16)
+              Text(translate('Testing connection...', this.uiLanguage))
+                .fontSize(12)
+                .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+                .margin({ left: 6 })
+            }
+            .width('100%')
+          }
 
-        Button(translate('OK', this.uiLanguage))
-          .fontColor(Color.White)
-          .backgroundColor(RustDeskTheme.ACCENT)
-          .borderRadius(6)
-          .layoutWeight(1)
-          .enabled(!this.isTesting && !this.scanning && !this.importing)
-          .onClick(() => {
-            this.saveConfig()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 6, ButtonType.Capsule))
+          Text(translate('导出配置与 RustDesk 官方格式兼容，并包含服务器 Key，请勿发送给不可信的人。', this.uiLanguage))
+            .fontSize(11)
+            .fontColor('#B7791F')
+            .width('100%')
+        }
+        .width('100%').padding({ left: 16, right: 16, top: 12, bottom: 10 })
       }
-      .width('100%')
-      .padding({ top: 8 })
+      .width('100%').layoutWeight(1).scrollBar(BarState.Auto).edgeEffect(EdgeEffect.None)
+
+      Divider().strokeWidth(1).color(settingsPalette(this.isDarkMode).hair)
+      Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, justifyContent: FlexAlign.End }) {
+        SettingsAction({ label: translate('Cancel', this.uiLanguage), onAction: () => { this.controller?.close() } })
+          .margin({ left: 6, top: 6 })
+        SettingsAction({ label: translate('Test Connection', this.uiLanguage),
+          isEnabled: !this.isTesting && !this.scanning && !this.importing,
+          onAction: () => { this.testConnection() } }).margin({ left: 6, top: 6 })
+        SettingsAction({ label: translate('OK', this.uiLanguage), icon: 'check', tone: 'primary',
+          isEnabled: !this.isTesting && !this.scanning && !this.importing,
+          onAction: () => { this.saveConfig() } }).margin({ left: 6, top: 6 })
+      }
+      .width('100%').padding({ left: 12, right: 12, top: 4, bottom: 12 })
     }
-    .padding(24)
-    .width('100%')
-    }
-    .width('90%').constraintSize({ maxWidth: 650, maxHeight: '90%' })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
-    .borderRadius(8)
+    .width('92%').height('85%').constraintSize({ maxWidth: 460, maxHeight: 650 })
+    .backgroundColor(settingsPalette(this.isDarkMode).surface)
+    .border({ width: 1, color: settingsPalette(this.isDarkMode).line })
+    .borderRadius(16)
     .shadow({ radius: 24, color: '#26345A84', offsetX: 0, offsetY: 8 })
   }
 

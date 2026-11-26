@@ -21,6 +21,7 @@ export struct SavedConnectionEditorDialog {
   @State gameMode: boolean = false
   @State gameModeChanged: boolean = false
   @State remoteId: string = ''
+  @State linkedDeviceId: string = ''
   @State name: string = ''
   @State groupId: string = ''
   @State performancePreset: string = 'smooth'
@@ -44,6 +45,7 @@ export struct SavedConnectionEditorDialog {
     this.active = true
     this.generation++
     this.remoteId = this.initial.remoteId
+    this.linkedDeviceId = this.initial.linkedDeviceId ?? ''
     this.name = this.initial.name
     this.groupId = this.initial.groupId
     this.performancePreset = this.initial.performancePreset
@@ -79,6 +81,7 @@ export struct SavedConnectionEditorDialog {
     this.remoteId = normalized
     this.error = ''
     if (changed) {
+      this.linkedDeviceId = ''
       const preferences = new RemotePeerPreferences(this.gameModeServer, normalized)
       this.gameMode = preferences.get('game-mode') === '1'
       preferences.dispose()
@@ -113,6 +116,7 @@ export struct SavedConnectionEditorDialog {
     this.busy = true
     const generation = this.generation
     const draft: SavedConnectionDraft = {
+      linkedDeviceId: this.linkedDeviceId || undefined,
       remoteId: this.remoteId, name: this.name, groupId: this.groupId, performancePreset: this.performancePreset,
       password: this.password, passwordMode: this.passwordMode, lockAfterDisconnect: this.lockAfterDisconnect,
       privacyMode: this.privacyMode, autoUnlock: this.autoUnlock && this.lockAfterDisconnect,
@@ -146,6 +150,14 @@ export struct SavedConnectionEditorDialog {
                 .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
             }.width('100%').padding(12).borderRadius(12)
               .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE)
+          }
+          if (SavedConnectionEditing.addressEntry(this.remoteId)) {
+            Text(translate('关联设备 ID（可选）', this.uiLanguage)).fontColor(this.primary()).width('100%')
+            TextInput({ placeholder: translate('填写被控端显示的设备 ID', this.uiLanguage), text: this.linkedDeviceId })
+              .height(readableInputHeight(48, this.uiFontScale, 18)).fontSize(16).enabled(!this.busy)
+              .onChange((value: string) => { this.linkedDeviceId = SavedConnectionEditing.endpoint(value) })
+            Text(translate('请先在被控端核对 ID。关联后保留原地址，仅通过 ID 加密连接；验证失败不会改用 IP。', this.uiLanguage))
+              .fontSize(13).fontColor(this.secondary()).width('100%')
           }
           TextInput({ placeholder: translate('连接名称（可选）', this.uiLanguage), text: this.name })
             .height(readableInputHeight(48, this.uiFontScale, 18)).fontSize(16).enabled(!this.busy).onChange((value: string) => { this.name = value })

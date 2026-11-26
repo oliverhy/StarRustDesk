@@ -2,12 +2,15 @@ import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { FileTransferHistoryRecord, FileTransferHistoryService } from '../service/FileTransferHistoryService'
+import { SettingsAction } from './SettingsControls'
+import { settingsPalette } from '../theme/SettingsSkin'
 
 @CustomDialog
 export struct FileTransferHistoryDialog {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('isDarkMode') isDarkMode: boolean = false
+  @Prop settingsStyle: boolean = false
   @State records: FileTransferHistoryRecord[] = []
   @State filter: string = 'all'
   controller?: CustomDialogController
@@ -40,7 +43,11 @@ export struct FileTransferHistoryDialog {
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
 
-        Button(translate('清空', this.uiLanguage))
+        if (this.settingsStyle) {
+          SettingsAction({ label: translate('清空', this.uiLanguage), icon: 'trash', tone: 'warn',
+            isEnabled: this.records.length > 0, onAction: () => { this.confirmClear() } })
+        } else {
+          Button(translate('清空', this.uiLanguage))
           .constraintSize({ minHeight: 34 })
           .fontSize(13)
           .fontColor(this.records.length > 0 ? RustDeskTheme.ERROR : this.secondaryTextColor())
@@ -50,17 +57,28 @@ export struct FileTransferHistoryDialog {
           .onClick(() => {
             this.confirmClear()
           })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+        }
       }
       .width('100%')
 
-      Row({ space: 7 }) {
-        this.buildFilterButton('全部', 'all')
-        this.buildFilterButton('发送', 'upload')
-        this.buildFilterButton('取回', 'download')
-        this.buildFilterButton('失败', 'failed')
+      if (this.settingsStyle) {
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+          this.buildSettingsFilter('全部', 'all')
+          this.buildSettingsFilter('发送', 'upload')
+          this.buildSettingsFilter('取回', 'download')
+          this.buildSettingsFilter('失败', 'failed')
+        }
+        .width('100%')
+      } else {
+        Row({ space: 7 }) {
+          this.buildFilterButton('全部', 'all')
+          this.buildFilterButton('发送', 'upload')
+          this.buildFilterButton('取回', 'download')
+          this.buildFilterButton('失败', 'failed')
+        }
+        .width('100%')
       }
-      .width('100%')
 
       Divider()
         .height(1)
@@ -93,7 +111,11 @@ export struct FileTransferHistoryDialog {
         .edgeEffect(EdgeEffect.Spring)
       }
 
-      Button(translate('关闭', this.uiLanguage))
+      if (this.settingsStyle) {
+        SettingsAction({ label: translate('关闭', this.uiLanguage), onAction: () => { this.controller?.close() } })
+          .alignSelf(ItemAlign.End)
+      } else {
+        Button(translate('关闭', this.uiLanguage))
         .constraintSize({ minHeight: 42 })
         .width('100%')
         .fontSize(15)
@@ -104,16 +126,25 @@ export struct FileTransferHistoryDialog {
         .onClick(() => {
           if (this.controller !== undefined) this.controller.close()
         })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+      }
     }
     .width('92%')
     .height('78%')
     .constraintSize({ maxWidth: 680 })
     .padding({ left: 18, right: 18, top: 20, bottom: 16 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
-    .borderRadius(10)
+    .backgroundColor(this.settingsStyle ? settingsPalette(this.isDarkMode).surface :
+      (this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White))
+    .border({ width: 1, color: this.settingsStyle ? settingsPalette(this.isDarkMode).line :
+      (this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3') })
+    .borderRadius(this.settingsStyle ? 16 : 10)
     .shadow({ radius: 24, color: '#26345A84', offsetX: 0, offsetY: 8 })
+  }
+
+  @Builder
+  buildSettingsFilter(label: string, value: string) {
+    SettingsAction({ label: translate(label, this.uiLanguage), tone: this.filter === value ? 'primary' : 'neutral',
+      onAction: () => { this.filter = value } }).margin({ right: 6, bottom: 4 })
   }
 
   @Builder
@@ -148,8 +179,9 @@ export struct FileTransferHistoryDialog {
           .fontSize(15)
           .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
           .fontColor(this.primaryTextColor())
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .maxLines(this.settingsStyle ? undefined : 2)
+          .textOverflow({ overflow: this.settingsStyle ? TextOverflow.None : TextOverflow.Ellipsis })
+          .wordBreak(WordBreak.BREAK_WORD)
           .accessibilityDescription(translate('长按查看完整内容', this.uiLanguage))
           .gesture(LongPressGesture().onAction(() => { this.showRecordDetails(record) }))
         Text(translate(this.statusText(record.status), this.uiLanguage))
@@ -175,21 +207,25 @@ export struct FileTransferHistoryDialog {
           .layoutWeight(1)
           .fontSize(12)
           .fontColor(this.secondaryTextColor())
-        Button(translate('详情', this.uiLanguage))
+        if (this.settingsStyle) {
+          SettingsAction({ label: translate('详情', this.uiLanguage), tone: 'quiet',
+            onAction: () => { this.showRecordDetails(record) } })
+          SettingsAction({ label: translate('删除', this.uiLanguage), icon: 'trash', tone: 'warn',
+            onAction: () => { this.deleteRecord(record.id) } })
+        } else {
+          Button(translate('详情', this.uiLanguage))
           .constraintSize({ minHeight: 36 }).fontSize(12)
           .fontColor(this.primaryTextColor()).backgroundColor(Color.Transparent)
           .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
           .onClick(() => { this.showRecordDetails(record) })
-        Button(translate('删除', this.uiLanguage))
+          Button(translate('删除', this.uiLanguage))
           .constraintSize({ minHeight: 30 })
           .fontSize(12)
           .fontColor(RustDeskTheme.ERROR)
           .backgroundColor(Color.Transparent)
-          .onClick(() => {
-            FileTransferHistoryService.delete(record.id)
-            this.reload()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+            .onClick(() => { this.deleteRecord(record.id) })
+            .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+        }
       }
       .width('100%')
 
@@ -204,9 +240,16 @@ export struct FileTransferHistoryDialog {
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     .padding(12)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER })
-    .borderRadius(8)
+    .backgroundColor(this.settingsStyle ? settingsPalette(this.isDarkMode).app :
+      (this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.SURFACE_MUTED))
+    .border({ width: 1, color: this.settingsStyle ? settingsPalette(this.isDarkMode).hair :
+      (this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER) })
+    .borderRadius(this.settingsStyle ? 11 : 8)
+  }
+
+  private deleteRecord(id: string): void {
+    FileTransferHistoryService.delete(id)
+    this.reload()
   }
 
   filteredRecords(): FileTransferHistoryRecord[] {

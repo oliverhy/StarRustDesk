@@ -1,0 +1,703 @@
+<div id="sesame-sunshine-preview" lang="zh-CN">
+  <div class="ss-lab">
+    <span class="ss-lab-label"><span class="ss-live-dot"></span>交互原型</span>
+    <label class="ss-scenario">演示情景
+      <select aria-label="演示情景" data-scenario>
+        <option value="relay">直连超时 → UDP 中继</option>
+        <option value="direct">UDP 直连成功</option>
+        <option value="weak">中继不稳 → 降档重连</option>
+        <option value="identity">主机身份校验失败</option>
+        <option value="encryption">未能建立加密会话</option>
+        <option value="offline">直连和中继均不可达</option>
+        <option value="noRelay">直连超时，未配置中继</option>
+      </select>
+    </label>
+  </div>
+  <div class="ss-stage viz-dotted-background">
+    <div class="ss-app" data-app aria-label="芝麻远控游戏串流">
+      <div data-surface></div>
+      <div data-overlay hidden></div>
+      <span class="ss-sr" data-announcement aria-live="polite"></span>
+    </div>
+  </div>
+</div>
+<style>
+#sesame-sunshine-preview {
+  color-scheme: light dark;
+  --ink:light-dark(#142439,#edf3ff);
+  --muted:light-dark(#52647b,#adc0db);
+  --faint:light-dark(#e5ebf4,#303d52);
+  --surface:light-dark(#fff,#172336);
+  --page:light-dark(#f3f6fd,#101a29);
+  --chip:light-dark(#e9f1ff,#263956);
+  --blue:light-dark(#2062ce,#91bdff);
+  --action:light-dark(#2062ce,#83b4ff);
+  --on-action:light-dark(#fff,#0f203a);
+  --green:light-dark(#13674e,#8cdbba);
+  --green-bg:light-dark(#e8f5ee,#1a3a34);
+  --amber:light-dark(#80500b,#f1c57d);
+  --amber-bg:light-dark(#fff3df,#3a2e20);
+  --danger:light-dark(#a93434,#ffadac);
+  --danger-bg:light-dark(#fff0ed,#42272b);
+  --spring:cubic-bezier(.22,1.26,.36,1);
+  color:var(--ink);
+  font:400 .9375rem/1.55 system-ui,"Microsoft YaHei","PingFang SC",sans-serif;
+  max-width:100%;
+}
+#sesame-sunshine-preview * { box-sizing:border-box; }
+#sesame-sunshine-preview [hidden] { display:none !important; }
+#sesame-sunshine-preview .ss-lab { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:0 min(12vw,90px) 12px 0; }
+#sesame-sunshine-preview .ss-lab-label, #sesame-sunshine-preview .ss-scenario { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:.8125rem; }
+#sesame-sunshine-preview .ss-scenario { flex-wrap:wrap; min-width:0; }
+#sesame-sunshine-preview .ss-live-dot { width:7px; height:7px; border-radius:50%; background:var(--blue); }
+#sesame-sunshine-preview select, #sesame-sunshine-preview input:not([type="radio"]) {
+  max-width:100%; min-width:0; color:var(--ink); background:var(--surface); font:inherit;
+  border:1px solid var(--faint); border-radius:11px; min-height:44px; padding:6px 10px;
+}
+#sesame-sunshine-preview .ss-stage { display:grid; place-items:center; padding:clamp(6px,2.3vw,20px); border-radius:24px; }
+#sesame-sunshine-preview .ss-app {
+  width:100%; max-width:550px; min-width:0; position:relative; isolation:isolate;
+  border:1px solid var(--faint); border-radius:25px; overflow:hidden;
+  background:var(--page); box-shadow:0 18px 44px light-dark(#273d651f,#0005);
+}
+#sesame-sunshine-preview .ss-app[data-screen="player"] { max-width:610px; }
+#sesame-sunshine-preview h1, #sesame-sunshine-preview h2, #sesame-sunshine-preview p { margin:0; overflow-wrap:anywhere; }
+#sesame-sunshine-preview h1 { font-size:1.5625rem; line-height:1.24; letter-spacing:-.03em; }
+#sesame-sunshine-preview h2 { font-size:1.0625rem; line-height:1.35; }
+#sesame-sunshine-preview button { font:inherit; color:inherit; overflow-wrap:anywhere; }
+#sesame-sunshine-preview .ss-top {
+  padding:10px clamp(11px,3vw,20px); display:flex; align-items:center; justify-content:space-between;
+  gap:6px 10px; flex-wrap:wrap; border-bottom:1px solid var(--faint); background:var(--surface);
+}
+#sesame-sunshine-preview .ss-top-start, #sesame-sunshine-preview .ss-brand { display:flex; align-items:center; min-width:0; gap:8px; }
+#sesame-sunshine-preview .ss-brand { font-size:.875rem; font-weight:700; }
+#sesame-sunshine-preview .ss-tag {
+  display:inline-flex; width:fit-content; align-items:center; gap:5px; max-width:100%; border-radius:999px;
+  padding:4px 9px; background:var(--chip); color:var(--blue); font-size:.75rem; font-weight:650;
+}
+#sesame-sunshine-preview .ss-tag.is-good { color:var(--green); background:var(--green-bg); }
+#sesame-sunshine-preview .ss-tag.is-warn { color:var(--amber); background:var(--amber-bg); }
+#sesame-sunshine-preview .ss-tag.is-neutral { color:var(--muted); background:var(--page); }
+#sesame-sunshine-preview .ss-ico, #sesame-sunshine-preview i[data-lucide] {
+  width:1.125rem; height:1.125rem; flex-shrink:0; display:inline-flex; vertical-align:middle;
+}
+#sesame-sunshine-preview .ss-main { padding:clamp(12px,3vw,21px); display:grid; gap:16px; }
+#sesame-sunshine-preview .ss-in { animation:ss-in .29s cubic-bezier(.19,1,.35,1) both; }
+#sesame-sunshine-preview .ss-heading, #sesame-sunshine-preview .ss-host-head, #sesame-sunshine-preview .ss-info-heading {
+  display:flex; align-items:center; gap:12px; min-width:0;
+}
+#sesame-sunshine-preview .ss-heading > div:last-child, #sesame-sunshine-preview .ss-info-heading > div:last-child { min-width:0; }
+#sesame-sunshine-preview .ss-heading p { margin-top:5px; }
+#sesame-sunshine-preview .ss-emblem {
+  display:grid; place-items:center; width:50px; height:50px; border-radius:15px; color:var(--blue);
+  background:linear-gradient(155deg,var(--chip),var(--page)); border:1px solid var(--faint); flex-shrink:0;
+}
+#sesame-sunshine-preview .ss-emblem svg { width:25px; height:25px; }
+#sesame-sunshine-preview .ss-emblem.is-error { background:var(--danger-bg); color:var(--danger); border-color:transparent; }
+#sesame-sunshine-preview .ss-emblem.is-soft { width:41px; height:41px; border-radius:13px; }
+#sesame-sunshine-preview .ss-emblem.is-soft svg { width:22px; height:22px; }
+#sesame-sunshine-preview .ss-dim { color:var(--muted); }
+#sesame-sunshine-preview .ss-small { font-size:.8125rem; }
+#sesame-sunshine-preview .ss-kicker { color:var(--blue); font-size:.75rem; font-weight:650; letter-spacing:.04em; margin-bottom:3px; }
+#sesame-sunshine-preview .ss-card { background:var(--surface); border:1px solid var(--faint); border-radius:17px; padding:clamp(11px,2.8vw,16px); }
+#sesame-sunshine-preview .ss-section { display:grid; gap:8px; min-width:0; }
+#sesame-sunshine-preview .ss-section-head {
+  display:flex; align-items:center; justify-content:space-between; gap:4px 8px; flex-wrap:wrap;
+}
+#sesame-sunshine-preview .ss-host {
+  display:grid; gap:13px; position:relative;
+  background:radial-gradient(ellipse 150px 90px at top right,var(--chip),transparent),var(--surface);
+}
+#sesame-sunshine-preview .ss-host-head {
+  display:grid; grid-template-columns:auto minmax(0,1fr) auto;
+  grid-template-areas:"tile name status" "tile address address"; gap:3px 10px;
+}
+#sesame-sunshine-preview .ss-host-head > .ss-emblem { grid-area:tile; }
+#sesame-sunshine-preview .ss-host-head > .ss-tag { grid-area:status; }
+#sesame-sunshine-preview .ss-host-name { grid-area:name; min-width:0; }
+#sesame-sunshine-preview .ss-address { grid-area:address; min-width:0; }
+#sesame-sunshine-preview .ss-btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:7px 12px;
+  min-height:44px; text-align:center; border-radius:12px; border:1px solid transparent;
+  font-weight:640; background:var(--chip); color:var(--blue); cursor:pointer;
+  transition:transform .20s var(--spring), background .18s ease,color .18s ease;
+}
+#sesame-sunshine-preview .ss-btn:hover { filter:brightness(light-dark(.97,1.08)); }
+#sesame-sunshine-preview .ss-btn:active { transform:scale(.965); }
+#sesame-sunshine-preview .ss-btn.primary { background:var(--action); color:var(--on-action); }
+#sesame-sunshine-preview .ss-btn.outline { border-color:var(--faint); color:var(--ink); background:var(--surface); }
+#sesame-sunshine-preview .ss-btn.ghost { color:var(--blue); background:transparent; padding-inline:7px; }
+#sesame-sunshine-preview .ss-btn.danger { background:var(--danger-bg); color:var(--danger); }
+#sesame-sunshine-preview .ss-btn.is-icon { width:44px; padding:0; }
+#sesame-sunshine-preview .ss-btn.fill { width:100%; }
+#sesame-sunshine-preview .ss-btn:focus-visible, #sesame-sunshine-preview :is(input,select):focus-visible {
+  outline:2px solid var(--blue); outline-offset:2px;
+}
+#sesame-sunshine-preview .ss-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+#sesame-sunshine-preview .ss-row > .ss-btn { flex:1 1 auto; }
+#sesame-sunshine-preview .ss-list-btn {
+  text-align:start; justify-content:flex-start; width:100%; min-height:58px;
+  background:var(--surface); border-color:var(--faint); color:var(--ink); gap:10px; border-radius:15px;
+}
+#sesame-sunshine-preview .ss-list-btn .ss-fill-text { flex:1; min-width:0; }
+#sesame-sunshine-preview .ss-fill-text small { display:block; font-size:.8125rem; font-weight:400; }
+#sesame-sunshine-preview .ss-safe-line { display:flex; gap:6px; align-items:flex-start; color:var(--muted); font-size:.8125rem; }
+#sesame-sunshine-preview .ss-safe-line svg { color:var(--green); width:1rem; height:1rem; margin-top:2px; }
+#sesame-sunshine-preview .ss-lane {
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(30px,1.1fr) minmax(0,1fr); gap:7px;
+  align-items:center; text-align:center; margin:0 0 10px; font-size:.8125rem;
+}
+#sesame-sunshine-preview .ss-lane-item { display:grid; justify-items:center; min-width:0; gap:5px; }
+#sesame-sunshine-preview .ss-lane-item span { overflow-wrap:anywhere; }
+#sesame-sunshine-preview .ss-lane-track { min-width:0; position:relative; height:2px; background:var(--faint); align-self:start; margin-top:21px; }
+#sesame-sunshine-preview .ss-lane-track::after {
+  content:""; display:block; position:absolute; top:0; left:0; height:2px; width:36%; background:var(--blue); border-radius:2px;
+  animation:ss-signal 1.05s ease-in-out infinite alternate;
+}
+#sesame-sunshine-preview .ss-lane-track strong {
+  display:block; position:absolute; inset-inline:0; top:7px; color:var(--blue); font-size:.75rem; overflow-wrap:anywhere;
+}
+#sesame-sunshine-preview .ss-phase { animation:ss-phase .26s ease-out both; }
+#sesame-sunshine-preview .ss-steps { display:grid; padding:0; margin:0; list-style:none; }
+#sesame-sunshine-preview .ss-step {
+  display:grid; grid-template-columns:23px minmax(0,1fr) auto; align-items:center; gap:6px 9px; min-height:38px;
+  border-top:1px solid var(--faint); color:var(--muted); font-size:.875rem;
+}
+#sesame-sunshine-preview .ss-step b { font-weight:640; }
+#sesame-sunshine-preview .ss-step span:last-child { font-size:.75rem; }
+#sesame-sunshine-preview .ss-step.is-active { color:var(--blue); }
+#sesame-sunshine-preview .ss-step.is-done svg { color:var(--green); }
+#sesame-sunshine-preview .ss-step.is-skipped svg { color:var(--amber); }
+#sesame-sunshine-preview .ss-notice { display:flex; align-items:flex-start; gap:8px; padding:9px 11px; border-radius:12px; }
+#sesame-sunshine-preview .ss-notice svg { margin-top:2px; }
+#sesame-sunshine-preview .ss-notice.warn { background:var(--amber-bg); color:var(--amber); }
+#sesame-sunshine-preview .ss-notice.note { background:var(--chip); color:var(--blue); }
+#sesame-sunshine-preview .ss-notice.error { background:var(--danger-bg); color:var(--danger); }
+#sesame-sunshine-preview .ss-player { display:grid; gap:10px; }
+#sesame-sunshine-preview .ss-frame {
+  background:#0d1829; color:#f4f9ff; position:relative; isolation:isolate; overflow:hidden;
+  border-radius:15px; aspect-ratio:16/9; min-width:0;
+}
+#sesame-sunshine-preview .ss-frame canvas { display:block; width:100%; height:100%; }
+#sesame-sunshine-preview .ss-frame-tag {
+  position:absolute; top:9px; left:9px; align-items:center; display:flex; gap:5px;
+  padding:4px 8px; border-radius:10px; background:#152439ed; color:#e6f0ff; font-size:.75rem;
+}
+#sesame-sunshine-preview .ss-player-toolbar {
+  display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding:7px;
+  background:var(--surface); border:1px solid var(--faint); border-radius:15px;
+}
+#sesame-sunshine-preview .ss-statline { flex:1 1 auto; padding-inline:4px; min-width:0; font-size:.8125rem; }
+#sesame-sunshine-preview .ss-statline span { display:flex; gap:5px; align-items:center; flex-wrap:wrap; }
+#sesame-sunshine-preview .ss-statline b { font-weight:680; }
+#sesame-sunshine-preview .ss-statline .ss-ico { color:var(--green); }
+#sesame-sunshine-preview .ss-metrics { margin:0; }
+#sesame-sunshine-preview .ss-metrics div { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:7px 0; border-bottom:1px solid var(--faint); }
+#sesame-sunshine-preview .ss-metrics dt { color:var(--muted); }
+#sesame-sunshine-preview .ss-metrics dd { margin:0; text-align:right; overflow-wrap:anywhere; font-weight:650; font-variant-numeric:tabular-nums; }
+#sesame-sunshine-preview .ss-shade {
+  position:absolute; inset:0; z-index:3; background:light-dark(#142b4a58,#0009);
+  display:grid; grid-template-rows:minmax(0,1fr); align-items:end; padding:9px;
+}
+#sesame-sunshine-preview .ss-sheet {
+  background:var(--surface); border:1px solid var(--faint); border-radius:21px; padding:clamp(12px,3vw,18px);
+  display:grid; grid-template-rows:auto minmax(0,1fr); gap:9px; max-height:100%; overflow:hidden;
+  box-shadow:0 -8px 34px light-dark(#22385b26,#0004);
+  animation:ss-sheet .34s var(--spring) both;
+}
+#sesame-sunshine-preview .ss-sheet-head { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+#sesame-sunshine-preview .ss-sheet-scroll {
+  min-height:0; overflow:auto; display:grid; gap:11px; padding:3px;
+  scrollbar-width:thin; scrollbar-color:var(--faint) transparent;
+}
+#sesame-sunshine-preview .ss-sheet [data-form] { display:grid; gap:11px; }
+#sesame-sunshine-preview .ss-field { display:grid; gap:4px; }
+#sesame-sunshine-preview fieldset { padding:0; border:0; margin:0; min-width:0; }
+#sesame-sunshine-preview legend { padding:0; margin-bottom:5px; }
+#sesame-sunshine-preview .ss-radio-row { display:flex; flex-wrap:wrap; gap:7px; }
+#sesame-sunshine-preview .ss-radio {
+  display:flex; align-items:center; justify-content:center; gap:5px; flex:1 1 auto; min-height:44px;
+  padding:5px 7px; background:var(--page); border:1px solid var(--faint); border-radius:11px; cursor:pointer;
+}
+#sesame-sunshine-preview .ss-radio:has(:checked) { color:var(--blue); background:var(--chip); border-color:var(--blue); }
+#sesame-sunshine-preview input[type="radio"] { accent-color:var(--blue); margin:0; }
+#sesame-sunshine-preview .ss-pin { display:flex; justify-content:center; gap:6px; flex-wrap:wrap; }
+#sesame-sunshine-preview .ss-pin b { display:grid; place-items:center; width:42px; min-height:50px; border-radius:13px; background:var(--chip); color:var(--blue); font-size:1.375rem; }
+#sesame-sunshine-preview .ss-sr {
+  position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip-path:inset(50%);
+}
+@keyframes ss-in { from { transform:translateX(12px); opacity:.52; } to { transform:none; opacity:1; } }
+@keyframes ss-phase { from { transform:translateY(5px); opacity:.65; } to { transform:none; opacity:1; } }
+@keyframes ss-sheet { from { transform:translateY(32px) scale(.985); opacity:.65; } to { transform:none; opacity:1; } }
+@keyframes ss-signal { from { transform:translateX(0); } to { transform:translateX(176%); } }
+@media (max-width:420px) {
+  #sesame-sunshine-preview .ss-lab { padding-right:0; }
+  #sesame-sunshine-preview .ss-stage { padding:3px; }
+  #sesame-sunshine-preview .ss-app { border-radius:20px; }
+  #sesame-sunshine-preview .ss-main { gap:13px; }
+}
+@media (prefers-reduced-motion:reduce) {
+  #sesame-sunshine-preview *, #sesame-sunshine-preview *::after { animation:none !important; transition:none !important; }
+  #sesame-sunshine-preview .ss-btn:active { transform:none; }
+}
+</style>
+<script>
+(() => {
+  "use strict";
+  const root = document.getElementById("sesame-sunshine-preview");
+  const app = root.querySelector("[data-app]");
+  const surface = root.querySelector("[data-surface]");
+  const overlay = root.querySelector("[data-overlay]");
+  const announcement = root.querySelector("[data-announcement]");
+  const picker = root.querySelector("[data-scenario]");
+  const lab = root.querySelector(".ss-lab");
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const scenarios = new Set(Array.from(picker.options, ({value}) => value));
+  const hosts = [{name:"游戏主机", address:"gamepc.example"}];
+  const ui = {
+    screen: "hub", scenario: "relay", stage: "", route: "", limit: 4, low: false,
+    directMissed: false, relayReady: false, verified: false, error: "", sheet: "",
+    notice: "", selected: 0
+  };
+  const active = () => hosts[ui.selected];
+  let attempt = 0;
+  let timer = 0;
+  let painting = 0;
+  let lastScreen = "";
+  let sheetTrigger = null;
+  let draft = null;
+  const text = (value) => String(value).replace(/[&<>"']/g, (x) =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[x]);
+  const icon = (name) => `<i class="ss-ico" data-lucide="${name}" aria-hidden="true"></i>`;
+  function icons() {
+    globalThis.lucide?.createIcons({ attrs: { width: 18, height: 18 } });
+  }
+  const tag = (label, type = "", mark = "") =>
+    `<span class="ss-tag ${type}">${mark ? icon(mark) : ""}${label}</span>`;
+  const emblem = (mark, kind = "") => `<span class="ss-emblem ${kind}">${icon(mark)}</span>`;
+  const btn = (action, label, mark = "", kind = "") =>
+    `<button class="ss-btn ${kind}" type="button" data-action="${action}">${mark ? icon(mark) : ""}${label}</button>`;
+  const closeX = (action, label) => `<button class="ss-btn ghost is-icon" type="button" data-action="${action}" aria-label="${label}">${icon("x")}</button>`;
+  const notice = (label, kind = "note", mark = "info") =>
+    `<div class="ss-notice ss-small ${kind}">${icon(mark)}<span>${label}</span></div>`;
+  const row = (action, label, sub, mark) =>
+    `<button class="ss-btn ss-list-btn" type="button" data-action="${action}">
+      ${emblem(mark, "is-soft")}<span class="ss-fill-text">${label}<small class="ss-dim">${sub}</small></span>${icon("chevron-right")}
+    </button>`;
+  const title = (mark, kicker, heading, desc) =>
+    `<div class="ss-heading">${emblem(mark)}
+      <div>${kicker ? `<div class="ss-kicker">${kicker}</div>` : ""}
+      <h1>${heading}</h1><p class="ss-dim ss-small">${desc}</p></div>
+    </div>`;
+
+  function header() {
+    const home = ui.screen === "home";
+    const hub = ui.screen === "hub";
+    const back = ui.screen === "player" ? "disconnect" : hub ? "home" : "cancel";
+    const backText = hub ? "返回连接页" : ui.screen === "player" ? "退出串流" : "返回游戏串流";
+    return `<header class="ss-top"><div class="ss-top-start">
+      ${home ? "" : `<button class="ss-btn ghost is-icon" type="button" data-action="${back}" aria-label="${backText}">${icon("arrow-left")}</button>`}
+      <span class="ss-brand">${home || hub ? "芝麻远控" : "游戏串流"}</span>
+    </div>${tag("测试版", "is-neutral", "flask-conical")}</header>`;
+  }
+  function homePanel() {
+    return `${title("layout-grid", "", "连接", "选择远程连接方式")}
+      <section class="ss-card ss-section" aria-label="原有连接">
+        <h2>连接远端</h2><p class="ss-dim ss-small">RustDesk · 设备 ID 或 IP</p>
+      </section>
+      ${row("hub", "游戏串流", "Sunshine · UDP 直连优先", "gamepad-2")}`;
+  }
+  function hubPanel() {
+    return `${title("gamepad-2", "SUNSHINE", "游戏串流", "从运行 Sunshine 的电脑串流。优先直连，网络不通时再使用中继。")}
+      ${ui.notice ? notice(text(ui.notice), "note", "info") : ""}
+      <section class="ss-section" aria-label="串流主机">
+        <div class="ss-section-head"><h2>串流主机</h2>${btn("add", "添加主机", "plus", "ghost")}</div>
+        <div class="ss-card ss-host"><div class="ss-host-head">
+          ${emblem("monitor", "is-soft")}
+          <h2 class="ss-host-name">${text(active().name)}</h2>
+          ${tag("已配对", "is-good", "link-2")}
+          <p class="ss-address ss-dim ss-small">${text(active().address)}</p>
+        </div>${btn("start", "开始串流", "play", "primary fill")}</div>
+        ${hosts.map((host, index) => index === ui.selected ? "" :
+          row(`host:${index}`, text(host.name), text(host.address), "monitor")).join("")}
+      </section>
+      ${row("prefs", "串流偏好", `540p · 30 FPS · 请求上限 ${ui.limit} Mbps`, "sliders-horizontal")}
+      <div class="ss-safe-line">${icon("shield-check")}<span>强制加密，不会在验证失败后改走不安全连接。</span></div>`;
+  }
+  const stageCopy = {
+    direct: ["正在尝试 UDP 直连", "先寻找本机到主机的可用线路。", "radio"],
+    fallback: ["直连超时，转用中继", "不需要重新配对，也不会降低加密要求。", "route"],
+    relay: ["正在连接 UDP 中继", "使用独立的串流中继，不经过 RustDesk 服务。", "route"],
+    secure: ["正在验证主机与加密", "只接受已经配对的主机和加密串流。", "shield-check"],
+    frame: ["等待第一帧", "验证已通过，正在等待主机送出画面。", "monitor-play"],
+    low: ["带宽不足，正在降档重连", "只降码率，不降安全性。最多自动重试一次。", "gauge"]
+  };
+  const word = { active:"进行中", done:"通过", skipped:"超时", next:"待开始" };
+  const mark = { active:"radio", done:"circle-check", skipped:"clock-3", next:"circle-dashed" };
+  function step(label, state) {
+    return `<li class="ss-step is-${state}" ${state === "active" ? 'aria-current="step"' : ""}>
+      ${icon(mark[state])}<b>${label}</b><span>${word[state]}</span></li>`;
+  }
+  function connectingPanel() {
+    const [heading, desc, glyph] = stageCopy[ui.stage];
+    const inRelay = ui.route === "relay";
+    const lines = [
+      step("UDP 直连", ui.directMissed ? "skipped" : ui.stage === "direct" ? "active" : "done"),
+      ...(ui.directMissed ? [step("UDP 中继", ui.relayReady ? "done" : "active")] : []),
+      step("主机身份与加密", ui.verified ? "done" : ui.stage === "secure" ? "active" : "next"),
+      step("接收首帧", ui.stage === "frame" || ui.stage === "low" ? "active" : "next")
+    ];
+    return `<div class="ss-phase">${title(glyph, "", heading, desc)}</div>
+      <section class="ss-card" aria-label="连接进度">
+        <div class="ss-lane">
+          <div class="ss-lane-item">${emblem("smartphone", "is-soft")}<span>本机</span></div>
+          <div class="ss-lane-track"><strong>${inRelay ? "UDP 中继" : "UDP 直连"}</strong></div>
+          <div class="ss-lane-item">${emblem("monitor", "is-soft")}<span>${text(active().name)}</span></div>
+        </div>
+        <ol class="ss-steps">${lines.join("")}</ol>
+      </section>
+      ${ui.stage === "low" ? notice("会话请求：1.4 → 1.1 Mbps。", "warn", "gauge")
+        : inRelay ? notice("低带宽模式 · 中继转发上限 " + metrics().wire + " Mbps", "note", "gauge")
+        : notice("只在网络不可达时自动尝试中继。", "note", "shield-check")}
+      ${btn("cancel", "取消连接", "x", "outline fill")}`;
+  }
+  const errors = {
+    identity: ["主机身份校验失败", "这次连接已停止。中继也不会绕过主机身份检查。", "请在主机端核对是否更换了证书或重新安装了 Sunshine，再尝试连接。", "shield-alert"],
+    encryption: ["无法建立加密会话", "这次连接已停止，不会转中继或改走未加密连接。", "请确认主机支持并启用了强制加密后再试。", "shield-alert"],
+    offline: ["暂时无法连接", "UDP 直连和中继都没有响应，未开启任何串流。", "请检查主机是否在线，以及移动网络能否访问已配置的中继。", "wifi-off"],
+    noRelay: ["直连超时", "当前未配置 UDP 中继，本次连接已停止。", "请确认主机可直连，或在测试版中配置经过授权的串流中继后再试。", "route"]
+  };
+  function errorPanel() {
+    const [heading, description, suggestion, glyph] = errors[ui.error];
+    return `<section class="ss-card ss-section" role="alert">
+        <div class="ss-heading">${emblem(glyph, "is-error")}<div><h1>${heading}</h1><p class="ss-dim ss-small">${description}</p></div></div>
+      </section>
+      ${notice(suggestion, ["identity","encryption"].includes(ui.error) ? "error" : "note", "info")}
+      <div class="ss-row">${btn("cancel", "返回", "", "outline")}${btn("start", "重试", "rotate-cw", "primary")}</div>`;
+  }
+  function metrics() {
+    if (ui.route !== "relay") return { path:"UDP 直连", ask:`${ui.limit}`, wire:"—", received:Math.min(2.48, ui.limit * .64).toFixed(2), rtt:"23", fps:"30.0", seq:"0" };
+    return { path:"UDP 中继", ask:ui.low ? "1.1" : "1.4", wire:ui.low ? "1.35" : "1.8",
+             received:ui.low ? "0.56" : "0.73", rtt:ui.low ? "46" : "44", fps:"30.0", seq:"0" };
+  }
+  function playerPanel() {
+    const m = metrics();
+    return `<section class="ss-player" aria-label="串流播放">
+      <div class="ss-section-head"><h2>${text(active().name)}</h2>${tag("强制加密 · 已验证", "is-good", "shield-check")}</div>
+      <div class="ss-frame">
+        <canvas width="960" height="540" aria-label="由代码绘制的模拟游戏画面" role="img"></canvas>
+        <span class="ss-frame-tag">${icon("flask-conical")}演示画面</span>
+      </div>
+      <div class="ss-player-toolbar">
+        <div class="ss-statline"><span><b>${m.path}</b>${icon("shield-check")}</span><span class="ss-dim">${m.rtt} ms · ${m.fps} FPS</span></div>
+        ${btn("info", "连接信息", "activity", "outline")}
+        ${btn("disconnect", "断开", "power", "danger")}
+      </div>
+      ${ui.route === "relay" ? notice(ui.low ? "已降档重连 · 仍使用强制加密" : "低带宽中继 · 已自动限制转发速率", "note", "gauge") : ""}
+    </section>`;
+  }
+  const panels = { home:homePanel, hub:hubPanel, connecting:connectingPanel, error:errorPanel, player:playerPanel };
+  function render() {
+    cancelAnimationFrame(painting);
+    const previousFocus = surface.contains(document.activeElement) ? document.activeElement : null;
+    const key = previousFocus?.dataset.action;
+    const previousLabel = previousFocus?.getAttribute("aria-label");
+    app.dataset.screen = ui.screen;
+    surface.innerHTML = `${header()}<main class="ss-main ${lastScreen !== ui.screen ? "ss-in" : ""}">${panels[ui.screen]()}</main>`;
+    lastScreen = ui.screen;
+    icons();
+    if (key && !ui.sheet) {
+      const copy = [...surface.querySelectorAll("button[data-action]")].find((b) =>
+        b.dataset.action === key && b.getAttribute("aria-label") === previousLabel);
+      (copy || surface.querySelector(".ss-main button"))?.focus({preventScroll:true});
+    }
+    if (ui.screen === "player") drawPreview(surface.querySelector("canvas"));
+  }
+  function stop() {
+    attempt++;
+    clearTimeout(timer);
+    cancelAnimationFrame(painting);
+  }
+  function later(ms, action) {
+    const epoch = attempt;
+    timer = setTimeout(() => { if (attempt === epoch) action(); }, ms);
+  }
+  function announce(label) { announcement.textContent = label; }
+  function stage(phase, ms, next) {
+    ui.screen = "connecting";
+    ui.stage = phase;
+    render();
+    announce(stageCopy[phase][0]);
+    later(ms, next);
+  }
+  function fail(type) {
+    clearTimeout(timer);
+    ui.error = type;
+    ui.screen = "error";
+    render();
+    announce(errors[type][0]);
+  }
+  function verify() {
+    stage("secure", 820, () => {
+      if (["identity","encryption"].includes(ui.scenario)) return fail(ui.scenario);
+      ui.verified = true;
+      stage("frame", 760, () => {
+        if (ui.scenario === "weak" && !ui.low && ui.route === "relay") {
+          return stage("low", 1280, () => {
+            ui.low = true;
+            ui.relayReady = false;
+            ui.verified = false;
+            stage("relay", 640, confirmRelay);
+          });
+        }
+        ui.screen = "player";
+        render();
+        announce(`${metrics().path}，强制加密画面已就绪`);
+      });
+    });
+  }
+  function confirmRelay() {
+    if (ui.scenario === "offline") return fail("offline");
+    ui.relayReady = true;
+    verify();
+  }
+  function launch() {
+    stop();
+    ui.notice = "";
+    ui.low = ui.directMissed = ui.relayReady = ui.verified = false;
+    ui.route = "direct";
+    stage("direct", 1050, () => {
+      if (["direct","identity","encryption"].includes(ui.scenario)) return verify();
+      ui.directMissed = true;
+      if (ui.scenario === "noRelay") return fail("noRelay");
+      ui.route = "relay";
+      stage("fallback", 960, () => stage("relay", 740, confirmRelay));
+    });
+  }
+  function toHub(message = "") {
+    stop();
+    dismiss(false);
+    ui.notice = message;
+    ui.screen = "hub";
+    render();
+    if (message) announce(message);
+  }
+
+  function infoContents() {
+    const m = metrics();
+    const values = [["线路", m.path], ["安全状态", "强制加密 · 身份已校验"], ["画面规格", "960 × 540 · 30 FPS"],
+      ["请求上限", ui.limit + " Mbps"], ["会话请求", m.ask + " Mbps"],
+      ...(ui.route === "relay" ? [["转发限速（含封装）", m.wire + " Mbps"]] : []),
+      ["收到的视频码率", m.received + " Mbps"], ["网络 RTT", m.rtt + " ms"], ["帧序号缺口", m.seq]];
+    return `<dl class="ss-metrics">${values.map(([name,value]) => `<div><dt>${name}</dt><dd>${value}</dd></div>`).join("")}</dl>
+      <p class="ss-dim ss-small">此处为演示数值。RTT 是网络往返，不是操作到画面的延迟。</p>`;
+  }
+  function prefsContents() {
+    return `<section data-form="prefs" aria-label="偏好选项">
+      <fieldset><legend>码率请求上限</legend><div class="ss-radio-row">
+        ${[2,4,8].map(n => `<label class="ss-radio"><input type="radio" name="limit" value="${n}" ${ui.limit === n ? "checked" : ""}> ${n} Mbps</label>`).join("")}
+      </div></fieldset>
+      <p class="ss-dim ss-small">540p · 30 FPS。中继使用低带宽上限，这里调高也不会强制跑满。</p>
+      ${notice("直连优先 · 仅网络故障转中继 · 强制加密", "note", "shield-check")}
+      ${btn("save-prefs", "保存偏好", "", "primary fill")}
+    </section>`;
+  }
+  function addContents() {
+    return `<section data-form="add" aria-label="主机信息">
+      <label class="ss-field" for="ss-host-address">主机地址
+        <input id="ss-host-address" name="address" value="new-pc.example" maxlength="80" required autocomplete="off" spellcheck="false">
+      </label>
+      <label class="ss-field" for="ss-host-name">名称
+        <input id="ss-host-name" name="name" placeholder="例如：客厅电脑" maxlength="24" autocomplete="off">
+      </label>
+      <p class="ss-dim ss-small">原型仅演示添加流程，请使用示例地址。</p>
+      ${btn("save-add", "继续配对", "link-2", "primary fill")}
+    </section>`;
+  }
+  function pairContents() {
+    return `<p class="ss-dim">在主机的 Sunshine 管理页输入此配对码。配对完成后才会发起加密串流。</p>
+      <div class="ss-pin" aria-label="演示配对码 4 2 7 6"><b>4</b><b>2</b><b>7</b><b>6</b></div>
+      ${btn("paired", "模拟主机已确认", "link-2", "primary fill")}`;
+  }
+  const sheets = {
+    prefs: ["串流偏好", prefsContents],
+    add: ["添加 Sunshine 主机", addContents],
+    pair: ["配对主机", pairContents],
+    info: ["连接信息", infoContents],
+    disconnect: ["断开串流？", () => `<p class="ss-dim">断开后返回游戏串流，保留已配对主机和偏好。</p>
+      <div class="ss-row">${btn("close", "继续串流", "", "outline")}${btn("confirm-end", "确认断开", "power", "danger")}</div>`]
+  };
+  function openSheet(key) {
+    if (!ui.sheet) sheetTrigger = document.activeElement;
+    ui.sheet = key;
+    const [label, contents] = sheets[key];
+    surface.inert = lab.inert = true;
+    overlay.hidden = false;
+    overlay.innerHTML = `<div class="ss-shade"><section class="ss-sheet" role="dialog" aria-modal="true" aria-labelledby="ss-sheet-title">
+      <div class="ss-sheet-head"><h2 id="ss-sheet-title">${label}</h2>${closeX("close", "关闭")}</div>
+      <div class="ss-sheet-scroll">${contents()}</div>
+    </section></div>`;
+    icons();
+    (overlay.querySelector("input:not([type=radio])") || overlay.querySelector("button"))?.focus({preventScroll:true});
+  }
+  function dismiss(focus = true) {
+    const wasOpen = !!ui.sheet;
+    ui.sheet = "";
+    draft = null;
+    overlay.hidden = true;
+    overlay.replaceChildren();
+    surface.inert = lab.inert = false;
+    if (focus && wasOpen) (sheetTrigger?.isConnected ? sheetTrigger : surface.querySelector(".ss-main button"))?.focus({preventScroll:true});
+    sheetTrigger = null;
+  }
+  const actions = {
+    home() { stop(); ui.screen = "home"; render(); },
+    hub() { toHub(); },
+    start: launch,
+    cancel() { toHub(ui.screen === "connecting" ? "已取消连接" : ""); },
+    add() { openSheet("add"); },
+    prefs() { openSheet("prefs"); },
+    "save-prefs"() {
+      const cap = Number(overlay.querySelector('input[name="limit"]:checked')?.value);
+      if (![2,4,8].includes(cap)) return;
+      ui.limit = cap;
+      toHub("串流偏好已保存");
+      remember();
+    },
+    "save-add"() {
+      const field = overlay.querySelector('input[name="address"]');
+      const name = overlay.querySelector('input[name="name"]');
+      if (!field || !name) return;
+      const address = field.value.trim();
+      if (!address) {
+        field.setCustomValidity("请输入示例主机地址");
+        field.reportValidity();
+        field.addEventListener("input", () => field.setCustomValidity(""), {once:true});
+        return;
+      }
+      const existing = hosts.findIndex((host) => host.address.toLowerCase() === address.toLowerCase());
+      if (existing !== -1) {
+        ui.selected = existing;
+        return toHub("这个主机已配对，已为你选中");
+      }
+      draft = { address, name:name.value.trim() || "新串流主机" };
+      openSheet("pair");
+    },
+    info() { openSheet("info"); },
+    disconnect() { openSheet("disconnect"); },
+    "confirm-end"() { toHub("串流已断开"); },
+    close() { dismiss(); },
+    paired() {
+      if (!draft) return;
+      hosts.push(draft);
+      ui.selected = hosts.length - 1;
+      toHub("主机已配对");
+    }
+  };
+  root.addEventListener("click", (event) => {
+    if (event.target.matches(".ss-shade")) return dismiss();
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const key = button.dataset.action;
+    if (/^host:\d+$/.test(key)) {
+      const index = Number(key.slice(5));
+      if (hosts[index]) { ui.selected = index; toHub(); }
+    } else actions[key]?.();
+  });
+  picker.addEventListener("change", () => {
+    if (!scenarios.has(picker.value)) return;
+    ui.scenario = picker.value;
+    toHub();
+    remember();
+  });
+
+  function restore(saved) {
+    const values = saved?.privateContent;
+    if (!values || ui.screen !== "hub" || ui.sheet) return;
+    let changed = false;
+    if (scenarios.has(values.scenario) && ui.scenario !== values.scenario) {
+      picker.value = ui.scenario = values.scenario;
+      changed = true;
+    }
+    if ([2,4,8].includes(values.limit) && ui.limit !== values.limit) {
+      ui.limit = values.limit;
+      changed = true;
+    }
+    if (changed && ui.screen === "hub" && lastScreen) render();
+  }
+  function remember() {
+    globalThis.openai?.setWidgetState?.({
+      privateContent:{ scenario:ui.scenario, limit:ui.limit }
+    })?.catch(() => {});
+  }
+  globalThis.addEventListener("openai:set_globals", (event) => restore(event.detail?.globals?.widgetState));
+  root.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing && ui.sheet === "add" && event.target.matches("input")) {
+      event.preventDefault();
+      actions["save-add"]();
+    }
+    if (event.key === "Escape" && (ui.sheet || ui.screen === "connecting")) {
+      event.preventDefault();
+      if (ui.sheet) dismiss();
+      else actions.cancel();
+    }
+    if (event.key === "Tab" && ui.sheet) {
+      const controls = [...overlay.querySelectorAll("button:not(:disabled),input:not(:disabled)")];
+      let i = controls.indexOf(document.activeElement);
+      if ((event.shiftKey && i <= 0) || (!event.shiftKey && i === controls.length - 1)) {
+        event.preventDefault();
+        controls[event.shiftKey ? controls.length - 1 : 0].focus();
+      }
+    }
+  });
+
+  // Draw a local surrogate for the video surface. No screenshot, stream, or network call.
+  function drawPreview(canvas) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const polygon = (color, ...points) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      points.forEach(([x,y],i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
+      ctx.closePath();
+      ctx.fill();
+    };
+    const start = performance.now();
+    function draw(t) {
+      if (!canvas.isConnected) return;
+      const seconds = reducedMotion.matches ? 1 : (t - start) / 1000;
+      const sky = ctx.createLinearGradient(0,0,0,350);
+      sky.addColorStop(0,"#13283f"); sky.addColorStop(.62,"#405b7b"); sky.addColorStop(1,"#e49c76");
+      ctx.fillStyle = sky; ctx.fillRect(0,0,960,540);
+      ctx.fillStyle = "#ffcd9c";
+      ctx.beginPath(); ctx.arc(662,148,39,0,Math.PI*2); ctx.fill();
+      polygon("#354c67", [0,226],[126,132],[202,183],[292,102],[405,194],[514,154],[624,228],[719,169],[835,203],[960,130],[960,333],[0,333]);
+      polygon("#243b51", [0,254],[115,208],[212,244],[333,181],[445,255],[548,215],[661,260],[778,210],[960,229],[960,380],[0,380]);
+      polygon("#294451", [0,300],[211,280],[303,295],[490,262],[682,274],[960,291],[960,540],[0,540]);
+      polygon("#233643", [0,362],[224,325],[460,309],[742,334],[960,345],[960,540],[0,540]);
+      polygon("#435c68", [456,298],[512,298],[864,540],[104,540]);
+      polygon("#263747", [461,300],[507,300],[834,540],[134,540]);
+      polygon("#deac89", [460,301],[463,301],[151,540],[140,540]);
+      polygon("#deac89", [505,301],[508,301],[826,540],[815,540]);
+      for (let i=0; i<7; i++) {
+        const q = ((i/7 + seconds*.39) % 1) ** 2;
+        const y = 302 + q*238;
+        const w = 1 + q*7;
+        polygon("#b9c4ce",[483-w,y],[483+w,y],[483+w*1.17,y+4+q*20],[483-w*1.17,y+4+q*20]);
+      }
+      ctx.fillStyle = "#151f2bb3";
+      ctx.beginPath(); ctx.ellipse(483,480,91,16,0,0,Math.PI*2); ctx.fill();
+      polygon("#142331",[408,433],[428,416],[444,381],[515,381],[538,413],[559,428],[568,470],[556,484],[410,484],[398,469]);
+      polygon("#2d536a",[449,391],[511,391],[528,420],[432,420]);
+      polygon("#3bb5af",[414,427],[434,420],[531,420],[553,430],[551,456],[416,456]);
+      polygon("#287d85",[420,447],[548,447],[557,472],[412,472]);
+      ctx.fillStyle="#ff866d"; ctx.fillRect(419,435,31,7); ctx.fillRect(519,435,31,7);
+      ctx.fillStyle="#adcbd1"; ctx.fillRect(468,451,31,7);
+      if (!reducedMotion.matches && seconds < 8) painting = requestAnimationFrame(draw);
+    }
+    draw(start);
+  }
+  restore(globalThis.openai?.widgetState);
+  render();
+})();
+</script>

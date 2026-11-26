@@ -1,9 +1,11 @@
 import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
 import { translate } from '../utils/I18n'
 import { RustDeskTheme } from '../theme/RustDeskTheme'
+import { settingsPalette } from '../theme/SettingsSkin'
+import { SettingsAction } from './SettingsControls'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.11'
-export const RELEASE_NOTES_BUILD: string = '2000011'
+export const RELEASE_NOTES_VERSION: string = '2.0.12'
+export const RELEASE_NOTES_BUILD: string = '2000012'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -12,6 +14,7 @@ export struct ReleaseNotesDialog {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('isDarkMode') isDarkMode: boolean = false
+  @Prop settingsStyle: boolean = false
   controller?: CustomDialogController
   onClose: () => void = () => {}
 
@@ -48,6 +51,12 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.12（2000012）· 虚拟鼠标、设置与账号同步', [
+            '虚拟鼠标左右键按下即响应，抬手才松开；支持长按、拖拽和连点，失焦或隐藏时自动松键。',
+            '设置按功能分类，语言和样式集中到个性化设置，关于与反馈保留在设置首页。',
+            '优化 API 地址簿同步，按账号权限读取连接信息与已共享的密码。',
+            '已保存的 IP 连接可关联设备 ID，通过身份验证和加密连接后可设置信任设备。'
+          ])
           this.buildSection('2.0.11（2000011）· 远控鼠标与触摸优化', [
             '修复普通鼠标箭头尖端与实际点击位置不一致的问题，优化缩放后的定位。',
             '优化手指滑动判定，减少短滑或慢起步时误触发左键、右键。',
@@ -616,7 +625,11 @@ export struct ReleaseNotesDialog {
       .scrollBar(BarState.Auto)
       .edgeEffect(EdgeEffect.Spring)
 
-      Button(translate('知道了', this.uiLanguage))
+      if (this.settingsStyle) {
+        SettingsAction({ label: translate('知道了', this.uiLanguage), tone: 'primary',
+          onAction: () => { this.closeNotes() } }).alignSelf(ItemAlign.End)
+      } else {
+        Button(translate('知道了', this.uiLanguage))
         .constraintSize({ minHeight: 44 })
         .width('100%')
         .fontSize(15)
@@ -624,22 +637,25 @@ export struct ReleaseNotesDialog {
         .fontColor(Color.White)
         .backgroundColor(RustDeskTheme.ACCENT)
         .borderRadius(7)
-        .onClick(() => {
-          this.onClose()
-          if (this.controller !== undefined) {
-            this.controller.close()
-          }
-        })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+          .onClick(() => { this.closeNotes() })
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 7, ButtonType.Capsule))
+      }
     }
     .width('90%')
     .height('78%')
     .constraintSize({ maxWidth: 620 })
     .padding({ left: 22, right: 22, top: 22, bottom: 18 })
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
-    .borderRadius(10)
+    .backgroundColor(this.settingsStyle ? settingsPalette(this.isDarkMode).surface :
+      (this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White))
+    .border({ width: 1, color: this.settingsStyle ? settingsPalette(this.isDarkMode).line :
+      (this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3') })
+    .borderRadius(this.settingsStyle ? 16 : 10)
     .shadow({ radius: 24, color: '#26345A84', offsetX: 0, offsetY: 8 })
+  }
+
+  private closeNotes(): void {
+    this.onClose()
+    this.controller?.close()
   }
 
   @Builder

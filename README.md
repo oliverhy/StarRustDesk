@@ -85,6 +85,9 @@ Release build / Release 构建：
 
 ## Run On Device / 真机运行
 
+游戏串流的[主工程调试构建与实机测试](experiments/sunshine/README.md)使用原芝麻远控调试签名。
+此可选构建在已配对的 Sunshine 画面上提供触屏和软键盘控制；普通构建和应用市场版本不因此开启串流。
+
 List connected devices / 查看已连接设备：
 
 ```powershell

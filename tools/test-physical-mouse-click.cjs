@@ -68,7 +68,7 @@ const methods = [
   'rememberKeyboardInputAnchor', 'selectKeyboardInputAnchor',
   'releaseHeldMouseButtons', 'reconcilePhysicalMouseButtons',
   'updatePointerFromLocal', 'updateCursorOverlayFromPosition', 'markLocalPointerInput',
-  'noteProjectedPhysicalPointer', 'resetPointerDiagnostics'
+  'noteProjectedPhysicalPointer', 'resetPointerDiagnostics', 'cursorOverlayScale'
 ];
 vm.runInContext(ts.transpile(cursorConsts + '\n' + model.replace(/export /g, '') +
   '\nclass Page {' + methods.map(method).join('\n') + cursorBuilder + '}' +
@@ -117,12 +117,20 @@ function hitCandidates(n) {
   return n.children.flatMap(hitCandidates).concat(n.mode === HitTestMode.None ? [] : [n.kind]);
 }
 for (const image of [true, false]) test(`cursor ${image ? 'image' : 'fallback arrow'} and its container ignore input`, () => {
-  const p = page({ cursorPixelMap: image ? {} : undefined });
+  const p = page({ cursorPixelMap: image ? {} : undefined, zoomScale: 4 });
+  if (image) {
+    p.remoteCursorImageWidth = 24; p.remoteCursorImageHeight = 24;
+    p.remoteCursorHotX = 4; p.remoteCursorHotY = 8;
+  }
+  p.updateCursorOverlayFromPosition(100, 100);
   roots.length = 0; p.buildCursorOverlay();
   assert.equal(roots.length, 1);
   const cursor = roots[0];
   assert.deepEqual(cursor.attrs.zIndex, [11], 'keep projected cursor visible above the input layer');
   assert.equal(cursor.kind, image ? 'Image' : 'Shape');
+  const transform = cursor.attrs.scale[0];
+  assert.equal(transform.x, 0.25); assert.equal(transform.y, 0.25);
+  assert.equal(transform.centerX, image ? 2 : 1); assert.equal(transform.centerY, image ? 4 : 1);
   assert.deepEqual(hitCandidates(cursor), []);
   if (!image) {
     assert.equal(cursor.children[0].kind, 'Path');

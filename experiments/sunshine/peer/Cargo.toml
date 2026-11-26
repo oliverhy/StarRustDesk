@@ -1,0 +1,31 @@
+[package]
+name = "sesame_wan_peer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+boringtun = { version = "=0.7.1", default-features = false }
+getrandom = { version = "=0.2.17", optional = true }
+hmac = { version = "=0.12.1", optional = true }
+sha2 = { version = "=0.10.9", optional = true }
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-reno"], optional = true }
+zeroize = { version = "=1.9.2", optional = true }
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+libc = "=0.2.191"
+
+[workspace]
+
+[features]
+lan-bench = []
+long-bench = ["lan-bench"]
+companion-wan = ["lan-bench", "dep:getrandom", "dep:hmac", "dep:sha2", "dep:smoltcp", "dep:zeroize"]
+companion-soak = ["companion-wan", "long-bench"]
+phone-rx-trial = ["companion-soak"]
+phone-reader-qos = ["phone-rx-trial"]
+phone-burst-margin = ["phone-rx-trial"]
+phone-margin-comparison = ["phone-burst-margin"]

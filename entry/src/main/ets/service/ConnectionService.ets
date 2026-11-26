@@ -1,5 +1,5 @@
 import { RustDeskNapi } from './RustDeskNapi'
-import { AccountSession } from './RustDeskApiService'
+import { AccountSession, ApiBook, AddressBookCredential } from './RustDeskApiService'
 import { ConnectionStatus } from '../model/ConnectionModel'
 import { RemoteSessionBackgroundTask } from './RemoteSessionBackgroundTask'
 import { hilog } from '@kit.PerformanceAnalysisKit'
@@ -9,6 +9,7 @@ import { KeyboardRemapConfig, decodeKeyboardRemap, keyboardModifierBit, keyboard
 import { KeyboardLayoutBinding } from '../model/PhysicalKeyboardLayout'
 import { RemoteSecurityOptions } from './RustDeskNapi'
 import { InsecureConsentScope, insecureReasonForError } from '../model/InsecureConsent'
+import { SavedConnectionEditing } from '../model/SavedConnectionEditing'
 import { RemotePeerPreferences } from './RemotePeerPreferences'
 
 interface MappedHardwarePress {
@@ -100,7 +101,10 @@ export class ConnectionService {
   private static rendezvousRetryCount: number = 0
   private static relayFailureRetryCount: number = 0
   private static loginTimeoutRetryUsed: boolean = false
+  private static verifiedIdOnly: boolean = false
   private static insecureRetryUsed: boolean = false
+  private static addressBookCredential?: AddressBookCredential
+  private static retryAddressBook?: ApiBook
   private static insecureRetryReasons: number[] = []
   private static rememberedInsecureSession: boolean = false
   private static discoveryRequiresConsent: boolean = false
@@ -297,6 +301,8 @@ export class ConnectionService {
         return false
       }
       if (!ConnectionService.isDirectAddress(ConnectionService.retryPeer)) await AccountSession.getApi().prepareConnection()
+      const book = ConnectionService.retryAddressBook
+      const credential = book ? await AccountSession.getApi().addressBookCredential(book, ConnectionService.retryPeer) : undefined
       if (epoch !== ConnectionService.recoveryEpoch || generation !== ConnectionService.preparationGeneration ||
         RemoteSessionBackgroundTask.isAppBackground()) return false
       if (ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot() ||
@@ -311,6 +317,7 @@ export class ConnectionService {
       ConnectionService.rendezvousRetryCount = 0
       ConnectionService.relayFailureRetryCount = 0
       ConnectionService.loginTimeoutRetryUsed = false
+      ConnectionService.addressBookCredential = credential
       ConnectionService.recoveryAwaitingConnected = ConnectionService.restartConnection(
         ConnectionService.relayRetryUsed, 'manual_retry', 1, 1)
       return ConnectionService.recoveryAwaitingConnected
@@ -327,7 +334,9 @@ export class ConnectionService {
 
   static async connect(remoteId: string, password: string, performancePreset: string = 'smooth', fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = '', discoveryRequiresConsent: boolean = false): Promise<ConnectionStatus> {
+    osPassword: string = '', discoveryRequiresConsent: boolean = false,
+    addressBook?: ApiBook, verifiedIdOnly: boolean = false): Promise<ConnectionStatus> {
+    if (verifiedIdOnly && !SavedConnectionEditing.validDeviceId(remoteId)) throw new Error('关联设备 ID 无效，请修改连接')
     ConnectionService.cancelRecovery()
     ConnectionService.recoveryAttempts = 0
     ConnectionService.recoveryStartedAt = -1
@@ -336,21 +345,25 @@ export class ConnectionService {
     ConnectionService.sessionAuthenticated = false
     const generation: number = ++ConnectionService.preparationGeneration
     const settings: string = ConnectionService.authNetworkSnapshot()
+    const account = AccountSession.getApi()
     const started: number = Date.now()
     const direct: boolean = ConnectionService.isDirectAddress(remoteId.replace(/[\s\u200B-\u200D\uFEFF]+/g, ''))
     RustDeskNapi.appendDiagnosticLog('connection-auth', `gate_start generation=${generation} direct_ip=${direct}`)
     if (!direct) {
       try {
-        await AccountSession.getApi().prepareConnection()
+        await account.prepareConnection()
       } catch (error) {
         RustDeskNapi.appendDiagnosticLog('connection-auth', `gate_failed generation=${generation} reason=account_unavailable elapsed_ms=${Date.now() - started}`)
         throw error as Error
       }
     }
+    const bookRevision = account.sessionRevision()
+    const credential = addressBook ? await account.addressBookCredential(addressBook, remoteId) : undefined
     if (generation !== ConnectionService.preparationGeneration || settings !== ConnectionService.authNetworkSnapshot()) {
       RustDeskNapi.appendDiagnosticLog('connection-auth', `gate_cancelled generation=${generation} cancelled=${generation !== ConnectionService.preparationGeneration} network_changed=${settings !== ConnectionService.authNetworkSnapshot()} elapsed_ms=${Date.now() - started}`)
       throw new Error('连接已取消或服务器配置已改变，请重试')
     }
+    if (credential && !account.addressBookScopeCurrent(bookRevision)) throw new Error('地址簿账号或网络已改变，请重试')
     RustDeskNapi.appendDiagnosticLog('connection-auth', `gate_ready generation=${generation} elapsed_ms=${Date.now() - started}`)
     ConnectionService.relativeMouse = false
     ConnectionService.keyboardMode = 0
@@ -359,8 +372,11 @@ export class ConnectionService {
     let peerId: string = remoteId.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
     let rendezvousServer: string = RustDeskNapi.getOption('custom-rendezvous-server').trim()
     let relayServer: string = RustDeskNapi.getOption('relay-server').trim()
+    ConnectionService.verifiedIdOnly = verifiedIdOnly
     ConnectionService.retryPeer = peerId
     ConnectionService.retryPassword = password
+    ConnectionService.addressBookCredential = credential
+    ConnectionService.retryAddressBook = addressBook
     ConnectionService.retrySecurity = security
     ConnectionService.retryOsPassword = security.autoUnlock ? osPassword : ''
     ConnectionService.retryRendezvous = rendezvousServer
@@ -395,10 +411,10 @@ export class ConnectionService {
     let result: number
     if (rendezvousServer.length > 0) {
       result = RustDeskNapi.connectWithServer(peerId, password, rendezvousServer, relayServer, false, false, fileOnly,
-        security, ConnectionService.retryOsPassword, 0, ConnectionService.gameTransportAttemptPolicy)
+        security, ConnectionService.retryOsPassword, 0, ConnectionService.gameTransportAttemptPolicy, credential)
     } else {
       result = RustDeskNapi.connect(peerId, password, false, fileOnly, security, ConnectionService.retryOsPassword,
-        0, ConnectionService.gameTransportAttemptPolicy)
+        0, ConnectionService.gameTransportAttemptPolicy, credential)
     }
     let status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
     RemoteSessionBackgroundTask.syncForConnectionStatus(status)
@@ -443,6 +459,8 @@ export class ConnectionService {
     ConnectionService.relativeMouse = false
     ConnectionService.retryPeer = ''
     ConnectionService.retryPassword = ''
+    ConnectionService.addressBookCredential = undefined
+    ConnectionService.retryAddressBook = undefined
     ConnectionService.retryOsPassword = ''
     ConnectionService.retrySecurity = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false }
     ConnectionService.relayRetryUsed = true
@@ -466,6 +484,7 @@ export class ConnectionService {
       return false
     }
     ConnectionService.relayRetryUsed = true
+    if (ConnectionService.verifiedIdOnly || ConnectionService.addressBookCredential) return ConnectionService.restartConnection(true, 'direct_stall', 1, 1)
     ConnectionService.releaseModifiers()
     RustDeskNapi.appendDiagnosticLog('connection-recovery', `direct_stall retry=relay attempt=1 reason=${reason}`)
     RustDeskNapi.disconnect()
@@ -542,6 +561,17 @@ export class ConnectionService {
   }
 
   private static restartConnection(forceRelay: boolean, reason: string, attempt: number, maximum: number): boolean {
+    const credential = ConnectionService.addressBookCredential
+    if (ConnectionService.verifiedIdOnly && ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot()) {
+      ConnectionService.manualRetryError = '服务器配置或账号已改变，请返回首页重新连接'
+      return false
+    }
+    if (credential && (ConnectionService.sessionSettings !== ConnectionService.authNetworkSnapshot() ||
+      !AccountSession.getApi().addressBookScopeCurrent(ConnectionService.sessionAccountRevision))) {
+      ConnectionService.manualRetryError = '地址簿账号或服务器已改变，请返回地址簿重新连接'
+      RustDeskNapi.appendDiagnosticLog('connection-auth', 'address_book_connect phase=retry outcome=scope_changed')
+      return false
+    }
     ConnectionService.releaseModifiers()
     RustDeskNapi.appendDiagnosticLog('connection-recovery',
       `automatic_retry reason=${reason} attempt=${attempt} maximum=${maximum > 0 ? maximum.toString() : 'time_window'} ` +
@@ -552,7 +582,7 @@ export class ConnectionService {
     const result: number = RustDeskNapi.connectWithServer(ConnectionService.retryPeer,
       ConnectionService.retryPassword, ConnectionService.retryRendezvous, ConnectionService.retryRelay, forceRelay,
       false, ConnectionService.fileOnly, ConnectionService.retrySecurity, ConnectionService.retryOsPassword,
-      0, ConnectionService.gameTransportAttemptPolicy)
+      0, ConnectionService.gameTransportAttemptPolicy, credential)
     ConnectionService.resetTransientInputState()
     const status: ConnectionStatus = result === 0 ? ConnectionStatus.CONNECTING : ConnectionStatus.FAILED
     RemoteSessionBackgroundTask.syncForConnectionStatus(status)
@@ -615,7 +645,7 @@ export class ConnectionService {
 
   static canRetryWithoutEncryption(): boolean {
     const message: string = RustDeskNapi.getLastConnectionError()
-    return ConnectionService.retryPeer.length > 0 &&
+    return !ConnectionService.verifiedIdOnly && !ConnectionService.addressBookCredential && ConnectionService.retryPeer.length > 0 &&
       RustDeskNapi.getConnectionStatus() === ConnectionStatus.FAILED &&
       insecureReasonForError(message) !== 0 &&
       !ConnectionService.insecureRetryReasons.includes(insecureReasonForError(message))
@@ -1058,6 +1088,12 @@ export class ConnectionService {
     return RustDeskNapi.sendMouseEvent(x, y, action, ConnectionService.heldModifierMask)
   }
 
+  static sendPassiveMouseMove(x: number, y: number): number | undefined {
+    if (ConnectionService.relativeMouse || !Number.isFinite(x) || !Number.isFinite(y)) return undefined
+    // An inactive window may not relay a button or the focused app's modifiers.
+    return RustDeskNapi.sendMouseEvent(x, y, 0, 0)
+  }
+
   static sendMouseWheel(deltaX: number, deltaY: number): void {
     RustDeskNapi.sendMouseWheel(deltaX, deltaY, ConnectionService.heldModifierMask)
   }
@@ -1110,7 +1146,11 @@ export class ConnectionService {
   }
 
   static getLastConnectionError(): string {
-    return ConnectionService.manualRetryError || RustDeskNapi.getLastConnectionError()
+    const message = ConnectionService.manualRetryError || RustDeskNapi.getLastConnectionError()
+    if (ConnectionService.verifiedIdOnly && insecureReasonForError(message) !== 0) {
+      return '未能验证关联设备的身份，已停止连接，未回退到明文'
+    }
+    return message
   }
 
   private static getModifierBit(keyCode: number): number {

@@ -127,7 +127,7 @@ fn trusted_v2_real_screen_wire_enrolls_then_reconnects_without_secret_logs() {
         let trust = prepare_trusted_session(session_id, Some(scope)).await;
         assert!(install_trusted_session(session_id, &trust));
         let (client, mut peer) = stream_pair().await;
-        spawn_receive_loop(session_id, client, None, trust);
+        spawn_receive_loop(session_id, client, None, trust, None);
         let mut challenge = PeerMessage::new();
         challenge.set_hash(Hash { salt: "test-salt".into(), challenge: "test-challenge".into(), ..Default::default() });
         peer.send(&challenge).await.unwrap();
@@ -161,7 +161,7 @@ fn trusted_v2_real_screen_wire_enrolls_then_reconnects_without_secret_logs() {
         let next = prepare_trusted_session(next_id, Some(scope)).await;
         assert!(install_trusted_session(next_id, &next));
         let (client, mut peer2) = stream_pair().await;
-        spawn_receive_loop(next_id, client, None, next);
+        spawn_receive_loop(next_id, client, None, next, None);
         peer2.send(&challenge).await.unwrap();
         let request = PeerMessage::parse_from_bytes(&peer2.next_timeout(1500).await.unwrap().unwrap()).unwrap();
         let Some(message::Union::LoginRequest(request)) = request.union else { panic!("expected reconnect request"); };
@@ -289,7 +289,7 @@ fn login_challenge_reaches_the_network_and_diagnostics_never_include_secrets() {
         let (client, mut peer) = stream_pair().await;
         let trust = Arc::new(Mutex::new(trusted_device::Session::unavailable(session_id, false)));
         install_trusted_session(session_id, &trust);
-        spawn_receive_loop(session_id, client, None, trust);
+        spawn_receive_loop(session_id, client, None, trust, None);
         // A silent open socket must remain available until the peer supplies its challenge.
         assert!(peer.next_timeout(25).await.is_none());
         let mut challenge = PeerMessage::new();
@@ -1386,4 +1386,37 @@ fn invalid_server_key_downgrades_only_after_explicit_one_time_approval() {
         let message = PeerMessage::parse_from_bytes(&response).unwrap();
         assert!(message.union.is_none());
     });
+}
+#[test]
+fn address_book_challenge_matches_normal_password_without_double_salting() {
+    let password = " synthetic 中文 password ".as_bytes();
+    let hash = Hash { salt: "synthetic-salt".to_string(), challenge: "new-challenge".to_string(), ..Default::default() };
+    let mut stage_one = Sha256::new();
+    stage_one.update(password);
+    stage_one.update(hash.salt.as_bytes());
+    let encoded = base64::encode(stage_one.finalize(), Variant::Original);
+    let personal = BookCredential::parse(1, encoded.as_bytes()).unwrap();
+    let shared = BookCredential::parse(2, password).unwrap();
+    let normal = login_challenge_response(password, false, &hash);
+    assert_eq!(login_challenge_response(&personal.bytes, personal.first_hash, &hash), normal);
+    assert_eq!(login_challenge_response(&shared.bytes, shared.first_hash, &hash), normal);
+    assert_ne!(login_challenge_response(&personal.bytes, false, &hash), normal);
+    let fresh_challenge = Hash { challenge: "other".to_string(), ..hash };
+    assert_ne!(login_challenge_response(&personal.bytes, true, &fresh_challenge), normal);
+    assert!(BookCredential::parse(1, b"malformed").is_none());
+    assert!(BookCredential::parse(1, b"YQ==").is_none());
+    assert!(BookCredential::parse(2, b"").is_none());
+    assert!(BookCredential::parse(3, b"unsupported").is_none());
+}
+
+#[test]
+fn address_book_credentials_reject_ip_direct_before_network_access() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = CString::new(listener.local_addr().unwrap().to_string()).unwrap();
+    let secret = CString::new("synthetic-shared-password").unwrap();
+    let null = std::ptr::null();
+    assert_eq!(rust_connect_with_address_book(endpoint.as_ptr(), null, null, null,
+        null, null, 0, 0, 2, secret.as_ptr()), -37);
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }

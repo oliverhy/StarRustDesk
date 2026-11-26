@@ -126,8 +126,9 @@ async function test(name,run){await run();count++;console.log('PASS '+name);}
   const save=ui.setThemeMode('dark');assert.equal(ui.themePreferenceBusy,true);
   await ui.setThemeMode('system');assert.equal(gates.length,1,'busy selector ignores repeated events');
   gates[0][1].resolve(false);await save;assert.equal(ui.themePreferenceBusy,false);assert.equal(toasts.length,1);
-  assert(settings.includes('.id(\'themeModeSelector\')') && settings.includes('.enabled(!this.themePreferenceBusy)'));
-  for(const mode of ['system','light','dark']) assert(settings.includes(`this.setThemeMode('${mode}')`));
+  assert(settings.includes("controlId: 'themeModeSelector'") && settings.includes('isEnabled: !this.themePreferenceBusy'));
+  assert(settings.includes('items: THEME_OPTIONS, selected: this.themeMode') && settings.includes('this.setThemeMode(value)'));
+  for(const mode of ['system','light','dark']) assert(settings.includes(`{ key: '${mode}', label:`));
   assert(!source.includes('setOption(') && !/\bPersistentStorage\s*\./.test(source),'only the isolated theme preference file is written');
   console.log(`PASS theme preference: ${count} durable/cold-start/failure cases, startup ordering, partial configuration updates and controlled switch`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

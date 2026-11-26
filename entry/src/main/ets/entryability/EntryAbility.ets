@@ -15,11 +15,20 @@ import { LanguageService } from '../utils/LanguageService';
 import { PeerOnlinePreference } from '../service/PeerOnlinePreference';
 import { ThemePreference } from '../service/ThemePreference';
 import { SystemBarTheme } from '../service/SystemBarTheme';
+import { SunshineExperiment } from '../service/SunshineExperiment';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    const info = this.context.applicationInfo;
+    const offer = want.parameters?.['sunshineUiNonce'];
+    let streamTestPackaged = false;
+    if (info.debug) {
+      try { streamTestPackaged = this.context.resourceManager.getBooleanByName('sunshine_stream_test_build'); }
+      catch (_) { /* No streaming test resources in a normal build. */ }
+    }
+    SunshineExperiment.initialize(info.name, info.debug, streamTestPackaged, typeof offer === 'string' ? offer : '');
     LanguageService.initialize();
     RemoteSessionBackgroundTask.initialize(this.context)
     try {
@@ -57,6 +66,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    SunshineExperiment.leaveForeground();
     SystemFaultDiagnostic.stop();
     CommunicationService.dispose();
     RemoteSessionBackgroundTask.shutdown()
@@ -114,6 +124,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    SunshineExperiment.leaveForeground();
     CommunicationService.onBackground();
     RemoteSessionBackgroundTask.syncForConnectionStatus(RustDeskNapi.getConnectionStatus() as ConnectionStatus)
     RemoteSessionBackgroundTask.setAppBackground(true)

@@ -16,6 +16,7 @@ import {
 struct HomePage {
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @State currentTabIndex: number = 0
+  @State settingsCategory: string = 'home'
   @State homePageVisible: boolean = true
   @State showConnectionPasswordDialog: boolean = false
   @State pageWidth: number = 0
@@ -50,6 +51,14 @@ struct HomePage {
 
   onPageHide(): void { this.homePageVisible = false }
 
+  onBackPress(): boolean {
+    if (this.currentTabIndex !== 1 || this.settingsCategory === 'home') return false
+    this.getUIContext().animateTo({ duration: 287, curve: Curve.EaseOut }, () => {
+      this.settingsCategory = 'home'
+    })
+    return true
+  }
+
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
@@ -76,10 +85,11 @@ struct HomePage {
       Swiper(this.swiperController) {
         ConnectionPage({ homeTabActive: this.homePageVisible && this.currentTabIndex === 0,
           showConnectionPasswordDialog: $showConnectionPasswordDialog })
-        SettingsPage()
+        SettingsPage({ settingsCategory: $settingsCategory, tabBarInset: this.tabItemHeight() + 40 })
       }
       .indicator(false)
       .loop(false)
+      .disableSwipe(this.currentTabIndex === 1 && this.settingsCategory !== 'home')
       .duration(280)
       .curve(Curve.EaseInOut)
       .onChange((index: number) => {
@@ -89,7 +99,9 @@ struct HomePage {
       .height('100%')
       .backgroundColor(Color.Transparent)
 
-      if (!this.showConnectionPasswordDialog) this.buildFloatingTabBar()
+      if (!this.showConnectionPasswordDialog && (this.currentTabIndex !== 1 || this.settingsCategory === 'home')) {
+        this.buildFloatingTabBar()
+      }
     }
     .width('100%')
     .height('100%')

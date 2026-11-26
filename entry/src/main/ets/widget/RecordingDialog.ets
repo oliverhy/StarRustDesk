@@ -4,6 +4,8 @@ import { SessionRecording } from '../service/SessionRecording';
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { OperationDiagnostic } from '../service/OperationDiagnostic';
+import { SettingsAction } from './SettingsControls';
+import { settingsPalette } from '../theme/SettingsSkin';
 
 @CustomDialog
 export struct RecordingDialog {
@@ -13,6 +15,7 @@ export struct RecordingDialog {
   @State files: string[] = [];
   @State message: string = '';
   @State busy: boolean = false;
+  @Prop settingsStyle: boolean = false;
   @StorageLink('isDarkMode') dark: boolean = false;
   aboutToAppear(): void { this.files = SessionRecording.files(getContext(this) as common.UIAbilityContext); }
   async exportFile(name: string): Promise<void> {
@@ -38,19 +41,36 @@ export struct RecordingDialog {
           ForEach(this.files, (name: string) => {
             Row({ space: 8 }) {
               Text(name).fontSize(12).layoutWeight(1).wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
-              Button(translate('导出', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12).enabled(!this.busy).onClick(() => { this.exportFile(name); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-              Button(translate('删除', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12).enabled(!this.busy).onClick(() => { this.remove(name); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-            }.width('100%')
+              if (this.settingsStyle) {
+                SettingsAction({ label: translate('导出', this.uiLanguage), icon: 'download',
+                  isEnabled: !this.busy, onAction: () => { this.exportFile(name); } })
+                SettingsAction({ label: translate('删除', this.uiLanguage), tone: 'warn',
+                  isEnabled: !this.busy, onAction: () => { this.remove(name); } })
+              } else {
+                Button(translate('导出', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12)
+                  .enabled(!this.busy).onClick(() => { this.exportFile(name); })
+                  .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+                Button(translate('删除', this.uiLanguage)).constraintSize({ minHeight: 34 }).fontSize(12)
+                  .enabled(!this.busy).onClick(() => { this.remove(name); })
+                  .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+              }
+            }.width('100%').padding(this.settingsStyle ? 9 : 0).borderRadius(11)
+              .backgroundColor(this.settingsStyle ? settingsPalette(this.dark).app : Color.Transparent)
           }, (name: string) => name)
           if (!this.files.length) { Text(translate('暂无已结束的录像', this.uiLanguage)).fontSize(14) }
         }.width('100%')
       }.layoutWeight(1).width('100%')
       Text(translate(this.message, this.uiLanguage)).fontSize(13)
-      Button(translate('关闭', this.uiLanguage)).enabled(!this.busy).onClick(() => { this.controller.close(); })
-      .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-    }.padding(20).width('94%').constraintSize({ maxWidth: 650 }).height('70%').borderRadius(20)
-      .backgroundColor(this.dark ? '#1E2A3A' : '#FFFFFF').foregroundColor(this.dark ? '#EFF4FB' : '#17253D')
+      if (this.settingsStyle) {
+        SettingsAction({ label: translate('关闭', this.uiLanguage), isEnabled: !this.busy,
+          onAction: () => { this.controller.close(); } }).alignSelf(ItemAlign.End)
+      } else {
+        Button(translate('关闭', this.uiLanguage)).enabled(!this.busy).onClick(() => { this.controller.close(); })
+          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
+      }
+    }.padding(this.settingsStyle ? 16 : 20).width('94%').constraintSize({ maxWidth: this.settingsStyle ? 585 : 650 })
+      .height('70%').borderRadius(this.settingsStyle ? 16 : 20)
+      .backgroundColor(this.settingsStyle ? settingsPalette(this.dark).surface : (this.dark ? '#1E2A3A' : '#FFFFFF'))
+      .foregroundColor(this.settingsStyle ? settingsPalette(this.dark).ink : (this.dark ? '#EFF4FB' : '#17253D'))
   }
 }

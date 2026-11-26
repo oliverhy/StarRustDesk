@@ -1,8 +1,11 @@
-import { hapTasks } from '@ohos/hvigor-ohos-plugin';
+import { hapTasks, OhosPluginId, OhosHapContext } from '@ohos/hvigor-ohos-plugin';
 import { hvigor } from '@ohos/hvigor';
 
 const { preserveAppIcon } = require('../tools/preserve-app-icon.cjs');
+const { configureSunshineTest } = require('../tools/sunshine-preview-build.cjs');
 hvigor.afterNodeEvaluate(node => {
+  const context = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext | undefined;
+  if (context && context.getModuleName() === 'entry') configureSunshineTest(context);
   // Preserve the approved opaque source after SDK validation/conversion and
   // before packaging (also covers cached resource tasks on incremental builds).
   // SDK >= 26 runs restool (icon conversion) in `CompileResource`; older SDKs

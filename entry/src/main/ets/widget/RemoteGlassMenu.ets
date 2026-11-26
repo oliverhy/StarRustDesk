@@ -56,6 +56,7 @@ export struct RemoteGlassMenu {
   label(key: string): string {
     switch (key) {
       case 'virtualMouse': return '虚拟鼠标';
+      case 'controlAccess': return '键鼠控制';
       case 'clipboard': return '剪贴板同步';
       case 'gestureHelp': return '手势说明';
       case 'keyboardSettings': return '键盘设置';
@@ -90,11 +91,12 @@ export struct RemoteGlassMenu {
   }
   isToggle(key: string): boolean {
     return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor', 'displaySwipe', 'gameMode', 'highPerformance',
-      'physicalGamepad', 'virtualGamepad'].includes(key);
+      'physicalGamepad', 'virtualGamepad', 'controlAccess'].includes(key);
   }
   isOn(key: string): boolean {
     switch (key) {
       case 'virtualMouse': return this.state.virtualMouse;
+      case 'controlAccess': return this.state.controlAccess;
       case 'clipboard': return this.state.clipboard;
       case 'pan': return this.state.pan;
       case 'edgePan': return this.state.edgePan;
@@ -109,6 +111,7 @@ export struct RemoteGlassMenu {
     }
   }
   actionEnabled(key: string): boolean {
+    if (this.state.disabledActions.includes(key)) return false;
     if (['upload', 'uploadFolder', 'download'].includes(key)) return !this.state.transferBusy;
     if (key === 'privacy') return !this.state.privacyPending;
     if (key === 'adjustWindow') return !this.state.windowBusy && !this.state.fullscreen;
@@ -257,7 +260,9 @@ export struct RemoteGlassMenu {
         Toggle({ type: ToggleType.Switch, isOn: this.isOn(key) }).width(40).height(24)
           .selectedColor(Style.BLUE).switchPointColor('#FFFFFF').focusable(false)
           .accessibilityText(translate(this.label(key), this.language))
-          .onChange((value: boolean) => { if (value !== this.isOn(key)) this.onAction(key); })
+          .id(`glass-switch-${key}`)
+          .hitTestBehavior(this.state.explicitActions ? HitTestMode.None : HitTestMode.Default)
+          .onChange((value: boolean) => { if (!this.state.explicitActions && value !== this.isOn(key)) this.onAction(key); })
       } else {
         if (key === 'orientation') {
           Text(translate(this.state.orientation === 'portrait' ? '竖屏' : this.state.orientation === 'landscape' ? '横屏' : '自动', this.language))
@@ -273,7 +278,14 @@ export struct RemoteGlassMenu {
 
   @Builder
   action(key: string) {
-    if (this.isToggle(key)) {
+    if (this.isToggle(key) && this.state.explicitActions) {
+      Button({ type: ButtonType.Normal }) { this.actionContent(key) }
+        .width('100%').constraintSize({ minHeight: this.metrics.rowHeight }).padding(0).backgroundColor(Color.Transparent)
+        .borderRadius(7).focusable(false).enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
+        .id(`glass-action-${key}`).accessibilityText(translate(this.label(key), this.language))
+        .accessibilityDescription(translate(this.isOn(key) ? '已开启' : '已关闭', this.language))
+        .onClick(() => { if (this.actionEnabled(key)) this.onAction(key); })
+    } else if (this.isToggle(key)) {
       Row() { this.actionContent(key) }.width('100%').constraintSize({ minHeight: this.metrics.rowHeight })
         .enabled(this.actionEnabled(key)).opacity(this.actionEnabled(key) ? 1 : 0.5)
         .id(`glass-action-${key}`)
@@ -338,11 +350,16 @@ export struct RemoteGlassMenu {
           })
       }.width('100%').padding({ top: 4, bottom: 4 })
     }
-    this.divider()
-    this.action('gestureHelp')
-    this.action('keyboardSettings')
-    this.action('mouseSettings')
-    this.action('gamepadSettings')
+    if (!this.state.explicitActions) {
+      this.divider()
+      this.action('gestureHelp')
+      this.action('keyboardSettings')
+      this.action('mouseSettings')
+      this.action('gamepadSettings')
+    } else if (this.state.inputTools.length > 0) {
+      this.divider()
+      ForEach(this.state.inputTools, (key: string) => { this.action(key) }, (key: string) => key)
+    }
   }
 
   @Builder
@@ -375,7 +392,7 @@ export struct RemoteGlassMenu {
         }, (display: number) => `display-${display}`)
       }.alignItems(VerticalAlign.Top)
     }.width('100%').height(this.metrics.screenHeight + 8).scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
-    this.action('displaySwipe')
+    if (!this.state.explicitActions || this.state.items.includes('displaySwipe')) { this.action('displaySwipe') }
   }
 
   @Builder
@@ -494,6 +511,7 @@ export struct RemoteGlassMenu {
             Row({ space: 5 }) {
               ForEach(this.rowKeys(row), (key: string) => { this.keyCap(key) }, (key: string) => key)
               if (this.rowKeys(row).length < (this.metrics.stacked ? 2 : 3)) { Blank().layoutWeight(1) }
+              if (this.state.explicitActions && !this.metrics.stacked && this.rowKeys(row).length === 1) { Blank().layoutWeight(1) }
             }.width('100%').margin({ bottom: 4 })
           }, (row: number) => `row-${row}-${this.state.keyboardTab}`)
           this.divider()
@@ -587,8 +605,14 @@ export struct RemoteGlassMenu {
               if (this.state.category === 'screens') { this.screens() }
               else if (this.state.category === 'input') { this.input() }
               else if (this.state.category === 'view') { this.view() }
-              else if (this.state.category === 'more') { this.more() }
+              else if (this.state.category === 'more' && this.state.explicitActions) {
+                ForEach(this.state.items, (key: string) => { this.action(key) }, (key: string) => key)
+              } else if (this.state.category === 'more') { this.more() }
               else if (this.state.category === 'orientation') { this.orientation() }
+              if (this.state.note) {
+                Text(translate(this.state.note, this.language)).width('100%').fontFamily(Style.FONT).fontSize(12)
+                  .fontColor(Style.SECONDARY).textAlign(TextAlign.Start).wordBreak(WordBreak.BREAK_ALL).margin({ top: 4 })
+              }
             }.width('100%').alignItems(HorizontalAlign.Start).justifyContent(FlexAlign.Start)
           }.width('100%').layoutWeight(1).scrollBar(BarState.Off).align(Alignment.TopStart)
             .onScroll(() => { this.updateMenuScroll(); })

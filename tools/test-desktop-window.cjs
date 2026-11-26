@@ -7,6 +7,7 @@ const ts = require('C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmon
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 const source = read('entry/src/main/ets/pages/RemotePage.ets');
+const connectionSource = read('entry/src/main/ets/service/ConnectionService.ets');
 const geometry = { exports: {} };
 vm.runInNewContext(ts.transpile(read('entry/src/main/ets/model/RemoteDesktopView.ets')), geometry);
 const { desktopFitScale, desktopScalePercent, desktopZoomScale, desktopWindowFrame } = geometry.exports;
@@ -19,14 +20,14 @@ const near = (a, b) => assert(Math.abs(a - b) < 1e-7, `${a} vs ${b}`);
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const windowEnums = {
-  WindowEventType: { WINDOW_ACTIVE: 2, WINDOW_INACTIVE: 3, WINDOW_HIDDEN: 4, WINDOW_SHOWN: 1 },
+  WindowEventType: { WINDOW_ACTIVE: 2, WINDOW_INACTIVE: 3, WINDOW_HIDDEN: 4, WINDOW_SHOWN: 1, WINDOW_DESTROYED: 7 },
   WindowStatusType: { FLOATING: 4, MAXIMIZE: 2, FULL_SCREEN: 1 },
   MaximizePresentation: { ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER: 3 }
 };
 let count = 0;
 async function test(name, run) { await run(); count++; console.log('PASS ' + name); }
 function pageHarness(extra = {}, names = []) {
-  const timers = new Map(), calls = [], logs = []; let nextTimer = 0;
+  const timers = new Map(), calls = [], logs = []; let nextTimer = 0, now = 1000;
   const basic = ['getDesktopFitScale', 'refreshDesktopDensity', 'syncDesktopViewScale', 'selectDesktopViewMode',
     'getDesktopDisplayedPercent', 'setDesktopCustomPercent', 'getDisplayWidth', 'getDisplayHeight',
     'getDisplayLeft', 'getDisplayTop', 'applyZoomAt', 'clampViewportOffset', 'getHorizontalPanLimit',
@@ -34,9 +35,14 @@ function pageHarness(extra = {}, names = []) {
     'adjustZoom', 'handleDesktopWindowEvent', 'cancelPcToolbarAutoCollapse', 'schedulePcToolbarAutoCollapse',
     'togglePcToolbarPinned', 'startDesktopWindowTracking', 'stopDesktopWindowTracking', 'finishRemoteToolbarDrag'];
   const context = { exports: {}, ...geometry.exports, window: windowEnums,
+    Date: { now: () => now }, INPUT_MODE_MOUSE: 'mouse', ConnectionStatus: { CONNECTED: 2 },
+    MouseAction: { Move: 3, Hover: 4, Press: 1, Release: 2 }, MouseButton: { None: 0, Left: 1 },
+    SourceType: { Mouse: 1, TouchScreen: 2, JOYSTICK: 3 }, SourceTool: { MOUSE: 7, TOUCHPAD: 9, Finger: 1, Pen: 2 },
+    isTouchOnlyMouseEvent: (touch, mouse, tool, fingerOrPen) => fingerOrPen || (touch && !mouse && !tool),
     RustDeskNapi: { appendDiagnosticLog: (...a) => logs.push(a), takeNativeInputEvents: () => { calls.push('queue_drain'); return []; },
       getOption: () => '', setOption: (...a) => calls.push(['option', ...a]) },
-    ConnectionService: { releaseModifiers: () => calls.push('modifiers_release') },
+    ConnectionService: { releaseModifiers: () => calls.push('modifiers_release'),
+      sendPassiveMouseMove: (x, y) => { calls.push(['passive_move', x, y]); return 0; } },
     RemoteDisplayPolicy: { getMainWindow: () => extra.main },
     setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout(id) { timers.delete(id); }
   };
@@ -47,7 +53,8 @@ function pageHarness(extra = {}, names = []) {
     remoteWidth: 1920, remoteHeight: 1080, componentWidth: 1000, componentHeight: 600,
     desktopViewMode: 'adaptive', desktopCustomPercent: 100, desktopDensity: 1, zoomScale: 1,
     offsetX: 0, offsetY: 0, pcToolbarPinned: false, remoteToolbarCollapsed: false,
-    desktopWindowActive: true, desktopWindowRequestId: 0, pcToolbarCollapseTimer: -1, clipboardChangeRevision: 0,
+    desktopWindowActive: true, desktopWindowVisible: false, desktopWindowRequestId: 0,
+    pcToolbarCollapseTimer: -1, clipboardChangeRevision: 0,
     controlMenu: '', immersiveWindow: true, isFullScreen: false,
     getUIContext: () => ({ vp2px: n => n }),
     cancelActiveTouchGesture: () => calls.push('gestures_release'), stopEdgeAutoPan() {},
@@ -62,7 +69,8 @@ function pageHarness(extra = {}, names = []) {
     setFloatingPanelCollapsed(_keyboard, collapsed) { this.remoteToolbarCollapsed = collapsed; calls.push('collapse'); },
     ...extra
   });
-  return { page, calls, logs, timers, fire() { const pending = [...timers.values()]; timers.clear(); pending.forEach(f => f()); } };
+  return { page, calls, logs, timers, advance(ms) { now += ms; },
+    fire() { const pending = [...timers.values()]; timers.clear(); pending.forEach(f => f()); } };
 }
 function policyHarness() {
   const calls = [], logs = []; let areaGate, resizeGate, moveFail = false, attached;
@@ -159,12 +167,98 @@ function policyHarness() {
     assert(h.calls.some(call => Array.isArray(call) && call[0] === 'peer-option' && call[1] === 'remote-toolbar-position-v1'));
     assert.equal(h.timers.size, 0, 'inactive windows must not schedule collapse');
   });
-  await test('all forwarding paths and global hardware polling refuse inactive-window input', () => {
+  await test('inactive hidden windows and global hardware polling refuse input', () => {
     const names = ['syncHardwareKeyState', 'handleNativeMouseInput', 'handleNativeKeyInput', 'handleRemoteMouse',
       'handleRemoteKey', 'handleRemoteAxis', 'handleRemoteTouch', 'handleRemoteClickFallback', 'requestRemoteInputFocus'];
     const h = pageHarness({ desktopWindowActive: false }, names);
     for (const name of names) assert.doesNotThrow(() => h.page[name]({}));
     assert.equal(h.page.handleRemoteKey({}), false);
+  });
+  const hoverEvent = { x: 500, y: 300, action: 3, button: 0, pressedButtons: [], source: 1, sourceTool: 7 };
+  const hoverNames = ['handleRemoteMouse', 'handleInactiveDesktopHover', 'handleNativeMouseInput',
+    'handleRemoteAxis', 'handleRemoteKey', 'handleRemoteClickFallback', 'handleRemoteTouch', 'requestRemoteInputFocus'];
+  function hoverHarness(extra = {}) {
+    return pageHarness({ desktopWindowActive: false, desktopWindowVisible: true, lastMoveSentAt: 0,
+      inputMode: 'mouse', connectionStatus: 2, hasVideo: true, showRemoteSurface: true, pointerPassiveHoverQueued: 0,
+      getUIContext: () => ({ getFocusController() { throw Error('inactive hover cannot request focus'); } }),
+      syncModifiersFromPointerEvent() { throw Error('inactive hover cannot read modifiers'); },
+      reconcilePhysicalMouseButtons() { throw Error('inactive hover cannot reconcile mouse buttons'); },
+      updateEdgeAutoPan() { throw Error('inactive hover cannot pan'); },
+      updatePointerFromLocal(x, y) { return { x: x * this.remoteWidth / this.getDisplayWidth(),
+        y: y * this.remoteHeight / this.getDisplayHeight() }; }, ...extra }, hoverNames);
+  }
+  await test('visible inactive canvas forwards only an unpressed move without focus or synthetic events', () => {
+    const h = hoverHarness();
+    h.page.handleRemoteMouse(hoverEvent);
+    assert.equal(h.calls.length, 1); assert.equal(h.calls[0][0], 'passive_move');
+    near(h.calls[0][1], 960); near(h.calls[0][2], 540);
+    assert.equal(h.page.pointerPassiveHoverQueued, 1);
+    assert.equal(h.page.desktopWindowActive, false); assert.equal(h.timers.size, 0);
+    h.page.handleRemoteMouse(hoverEvent);
+    assert.equal(h.calls.length, 1, 'movement is rate-limited');
+    h.advance(10);
+    h.page.handleRemoteMouse({ ...hoverEvent, action: 4, source: 2, sourceTool: 9 });
+    assert.equal(h.calls.length, 2, 'a genuine touchpad hover also qualifies');
+  });
+  await test('inactive hover rejects buttons, unknown press state, drag, keyboard, wheel and native replay', () => {
+    const h = hoverHarness();
+    delete h.page.requestRemoteInputFocus; // Exercise the real focus guard for direct calls in this case.
+    for (const changes of [{ action: 1 }, { action: 2 }, { button: 1 }, { pressedButtons: [1] },
+      { pressedButtons: undefined }, { source: 2, sourceTool: 1 }, { source: 3, sourceTool: 9 }]) {
+      h.page.handleRemoteMouse({ ...hoverEvent, ...changes });
+    }
+    h.page.handleRemoteMouse(hoverEvent, true);
+    h.page.handleRemoteMouse(hoverEvent, false, true);
+    h.page.handleNativeMouseInput({});
+    h.page.handleRemoteAxis({});
+    h.page.handleRemoteClickFallback({});
+    h.page.handleRemoteTouch({});
+    h.page.requestRemoteInputFocus();
+    assert.equal(h.page.handleRemoteKey({}), false);
+    assert.deepEqual(h.calls, []);
+  });
+  await test('no inactive hover on letterbox, while hidden or with an overlay or incompatible session', () => {
+    const h = hoverHarness();
+    for (const arg of [{ x: -1 }, { y: 3 }, { y: 600 }, { x: NaN }]) h.page.handleRemoteMouse({ ...hoverEvent, ...arg });
+    assert.deepEqual(h.calls, []);
+    for (const state of [{ desktopWindowVisible: false }, { hasVideo: false }, { showRemoteSurface: false },
+      { relativeMouseEnabled: true }, { showVirtualMouse: true }, { showKeyboardPanel: true },
+      { showCommunicationPanel: true }, { controlMenu: 'input' }, { leftButtonHeld: true },
+      { connectionStatus: 0 }, { remotePageVisible: false }, { isPcDevice: () => false }]) {
+      const guard = hoverHarness(state); guard.page.handleRemoteMouse(hoverEvent);
+      assert.deepEqual(guard.calls, [], JSON.stringify(state));
+    }
+  });
+  await test('shown and focus are independent; hiding keeps the existing release protection', () => {
+    const h = hoverHarness({ desktopWindowActive: true });
+    const p = h.page;
+    p.handleDesktopWindowEvent(windowEnums.WindowEventType.WINDOW_INACTIVE);
+    assert.equal(p.desktopWindowVisible, true); assert.equal(p.desktopWindowActive, false);
+    assert(h.calls.includes('gestures_release') && h.calls.includes('modifiers_release'));
+    p.handleDesktopWindowEvent(windowEnums.WindowEventType.WINDOW_HIDDEN);
+    assert.equal(p.desktopWindowVisible, false); assert.equal(p.desktopWindowActive, false);
+    h.calls.length = 0;
+    p.handleRemoteMouse(hoverEvent); assert.deepEqual(h.calls, []);
+    p.handleDesktopWindowEvent(windowEnums.WindowEventType.WINDOW_SHOWN);
+    assert.equal(p.desktopWindowVisible, true); assert.equal(p.desktopWindowActive, false);
+    p.handleRemoteMouse(hoverEvent); assert.equal(h.calls[0][0], 'passive_move');
+    p.handleDesktopWindowEvent(windowEnums.WindowEventType.WINDOW_DESTROYED);
+    assert.equal(p.desktopWindowVisible, false);
+  });
+  await test('passive send uses a zero-mask move even if other input has modifiers; never send relative', () => {
+    const start = connectionSource.indexOf('  static sendPassiveMouseMove(');
+    assert(start >= 0);
+    const end = connectionSource.indexOf('\n  }', start) + 4;
+    const sent = [];
+    const ctx = { exports: {}, RustDeskNapi: { sendMouseEvent: (...a) => { sent.push(a); return 0; } } };
+    vm.runInNewContext(ts.transpile('class ConnectionService {' + connectionSource.slice(start, end) +
+      '\n} exports.Service = ConnectionService;'), ctx);
+    const svc = ctx.exports.Service;
+    svc.heldModifierMask = 15; svc.relativeMouse = false;
+    assert.equal(svc.sendPassiveMouseMove(1, 2), 0);
+    svc.relativeMouse = true;
+    assert.equal(svc.sendPassiveMouseMove(1, 2), undefined);
+    assert.deepEqual(sent, [[1, 2, 0, 0]]);
   });
   await test('reactivation keeps the first newly queued mouse press instead of discarding it', () => {
     const h = pageHarness({ desktopWindowActive: false }); h.page.handleDesktopWindowEvent(2);

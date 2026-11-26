@@ -859,6 +859,15 @@ async function confirmLatest(e) {
     assert.equal(e.options.has('saved-connections'), false)
     assert.equal(e.options.has('cloud-sync-last-applied-at'), false)
   })
+  await test('legacy backup cannot remove the secure device ID of an existing IP entry', async () => {
+    const e = fresh(), data = payload(e.clock.now - 1000, ['a'])
+    data.connections[0].remoteId = '192.0.2.1'
+    e.options.set('saved-connections', JSON.stringify([{ ...data.connections[0], linkedDeviceId: 'VerifiedID' }]))
+    e.files.set(e.cloudPath, Buffer.from(JSON.stringify(data)))
+    const preview = await complete(e, e.service.previewRestore(e.context, 'legacy'))
+    assert.equal((await complete(e, e.service.restore(e.context, preview.preview.ticket))).restored, true)
+    assert.equal(JSON.parse(e.options.get('saved-connections'))[0].linkedDeviceId, 'VerifiedID')
+  })
   await test('history preview is read-only, cancel preserves data, explicit older restore survives next sync', async () => {
     const e = fresh()
     const old = JSON.stringify(payload(e.clock.now - 10000, ['old-peer']))
@@ -1017,7 +1026,9 @@ async function confirmLatest(e) {
     const { Page } = e.load(`export class Page { ${method} }`, 'CloudPreviewUI')
     let dialog, cancelled = 0, restores = 0
     e.sandbox.AlertDialog = { show: value => { dialog = value } }
-    e.sandbox.DialogAlignment = { Center: 0 }; e.sandbox.RustDeskTheme = { ACCENT: '#000' }
+    e.sandbox.DialogAlignment = { Center: 0 }
+    e.sandbox.settingsPalette = () => ({ surface: '#fff', ink: '#16243a', pill: '#f0f5fc', blue: '#215bb1', blueSoft: '#e4efff' })
+    e.sandbox.settingsPromptTransition = () => ({})
     e.sandbox.translate = value => value
     const ui = new Page()
     Object.assign(ui, { uiLanguage: 'zh-Hans', cancelCloudRestore() { cancelled++ }, syncCloudNow() { restores++ } })

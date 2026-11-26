@@ -8,6 +8,10 @@
 /.codex-*
 **/build
 /.hvigor
+/experiments/sunshine/.generated/
+/experiments/sunshine/peer/target/
+/experiments/sunshine/**/__pycache__/
+/entry/src/sunshineTest/resources/
 .cxx
 /.clangd
 /.clang-format

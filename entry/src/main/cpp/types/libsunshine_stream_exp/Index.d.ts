@@ -1,0 +1,17 @@
+export const runUiLink: (filesDir: string, nonce: string, kbps: number) => Promise<string>;
+export const readUiLink: () => number;
+export const cancelUiLink: () => void;
+export const runSecureClient: (surfaceId: string, session: string, maxKbps: number, companion?: boolean) => Promise<string>;
+export const secureSnapshot: (includeSampleSequence?: boolean) => string;
+export const secureVideoRatio: () => number;
+export const displayCatalog: () => number;
+export const selectDisplay: (slot: number) => boolean;
+export const cancelSecureClient: () => void;
+export const companionAvailable: () => boolean;
+export const pairCompanion: (invitation: string) => Promise<string>;
+export const newCompanionNonce: () => string;
+export const runCompanionLink: (profile: string, nonce: string, kbps: number) => Promise<string>;
+export const inputOpen: (nonce: string) => boolean;
+export const inputState: (nonce: string) => number;
+export const inputSend: (nonce: string, kind: number, flag: number, a: number, b: number, text: string) => boolean;
+export const inputClose: () => void;

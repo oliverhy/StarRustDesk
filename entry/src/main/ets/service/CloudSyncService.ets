@@ -32,6 +32,7 @@ const CLOUD_RESTORE_KEYS: string[] = ['saved-connections', 'saved-connection-gro
   CLOUD_SYNC_LAST_SUCCESS_OPTION, CLOUD_SYNC_BASELINE_OPTION]
 
 interface SavedConnectionRow {
+  linkedDeviceId?: string
   id: string
   name: string
   remoteId: string
@@ -630,7 +631,7 @@ export class CloudSyncService {
         password: password,
         performancePreset: row.performancePreset,
         groupId: row.groupId,
-        serverScope: row.serverScope
+        serverScope: row.serverScope, linkedDeviceId: row.linkedDeviceId
       })
     }
     let serverConfig: ConnectionBackupServerConfig = {
@@ -734,8 +735,14 @@ export class CloudSyncService {
           (sameId.serverScope !== undefined && item.serverScope !== undefined && sameId.serverScope !== item.serverScope))) {
           throw new CloudSyncFailure(-1008, 'identity_conflict', '备份连接与本机连接标识冲突，本机数据未改动')
         }
+        const previous = oldRows.find((row: SavedConnectionRow) => row.remoteId === item.remoteId &&
+          (row.serverScope === undefined || item.serverScope === undefined || row.serverScope === item.serverScope))
+        if (previous && item.linkedDeviceId !== undefined && previous.linkedDeviceId !== item.linkedDeviceId) {
+          throw new CloudSyncFailure(-1008, 'identity_conflict', '关联设备 ID 与本机记录不同，请先核对连接')
+        }
         newRows.push({ id: item.id, name: item.name, remoteId: item.remoteId, credentialAlias: item.id,
-          performancePreset: item.performancePreset, groupId: item.groupId, serverScope: item.serverScope })
+          performancePreset: item.performancePreset, groupId: item.groupId, serverScope: item.serverScope ?? previous?.serverScope,
+          linkedDeviceId: previous?.linkedDeviceId ?? item.linkedDeviceId })
         let targetPassword: string | undefined = undefined
         if (payload.includesPasswords) {
           // Keep a matching existing asset, otherwise stage a new immutable alias.

@@ -1,6 +1,9 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "nativeLib": {
+      "filter": { "excludes": ["**/libsunshine_stream_exp.so"] }
+    },
     "resOptions": {
       "copyCodeResource": {
         "enable": false
@@ -8,7 +11,7 @@
     },
     "externalNativeOptions": {
       "path": "./src/main/cpp/CMakeLists.txt",
-      "arguments": "",
+      "arguments": "-DSESAME_STREAM_TEST_BUILD:BOOL=OFF",
       "cppFlags": "",
       "abiFilters": [
         "arm64-v8a",
@@ -30,6 +33,7 @@
         }
       },
       "nativeLib": {
+        "filter": { "excludes": ["**/libsunshine_stream_exp.so"] },
         "debugSymbol": {
           "strip": true,
           "exclude": []

@@ -265,6 +265,18 @@ for (const message of ['远端身份签名缺失，无法建立加密连接', '�
     assert.equal(Service.retryWithoutEncryption(),false);
   });
 }
+test('linked IP entry refuses remembered and explicit plaintext consent for all reasons',()=>{
+  const before=insecureConnections;
+  Object.assign(Service,{verifiedIdOnly:true,retryPeer:'LinkedID',insecureRetryReasons:[],sessionSettings:'unchanged',sessionAccountRevision:1});
+  status=3;
+  for(const message of ['服务器密钥无效','远端身份签名缺失，无法建立加密连接']){
+    lastConnectionError=message;
+    assert.equal(Service.insecureConsentScope(),undefined);
+    assert.equal(Service.retryWithoutEncryption(0,true),false);
+    assert.equal(Service.retryWithoutEncryption(0,false),false);
+  }
+  assert.equal(insecureConnections,before);Service.verifiedIdOnly=false;
+});
 test('changed network or account cannot reuse an earlier insecure approval',()=>{
   status=3; lastConnectionError='远端身份签名缺失，无法建立加密连接';
   Object.assign(Service,{retryPeer:'test-peer',insecureRetryUsed:false,insecureRetryReasons:[],sessionSettings:'different',sessionAccountRevision:1});
@@ -355,7 +367,8 @@ test('all connection error codes have Chinese messages',()=>{
   const mapping = cpp.slice(cpp.indexOf('static std::string ConnectionResultToMessage('),
     cpp.indexOf('static napi_value Connect(', cpp.indexOf('static std::string ConnectionResultToMessage(')));
   const cases = [...mapping.matchAll(/case (-\d+): return "([^"]+)";/g)];
-  assert.equal(cases.length, 35);
+  assert.equal(cases.length, 36);
+  assert.match(mapping, /case -37: return "无法安全使用地址簿凭证/);
   for (const [, code, message] of cases) {
     assert.match(message, /[\u4e00-\u9fff]/, `code ${code}`);
   }

@@ -6,7 +6,8 @@ let sequence = 0, localWrites = 0;
 const native = {
   getOption: key => options.get(key) || '',
   setOption: (key, value) => { localWrites++; options.set(key, value); },
-  appendDiagnosticLog() {}
+  appendDiagnosticLog() {},
+  setApiAccountContext() {}
 };
 function load(name) {
   if (cache.has(name)) return cache.get(name);
@@ -15,7 +16,10 @@ function load(name) {
     if (id === './CloudSyncService') return { CloudSyncService: { markLocalChanged() {} } };
     if (id === './ApiAccountStore') return { ApiAccountStore: {} };
     if (id === '@kit.RemoteCommunicationKit') return { rcp: {} };
-    if (id === '@kit.ArkTS') return { url: { URL }, util: { generateRandomUUID: () => `test-${++sequence}` } };
+    if (id === '@kit.ArkTS') return { url: { URL }, util: {
+      generateRandomUUID: () => `test-${++sequence}`,
+      TextEncoder: { create: () => ({ encodeInto: value => new TextEncoder().encode(value) }) }
+    } };
     if (id.startsWith('./')) return load(id.slice(2));
     throw Error(id);
   } };
@@ -137,4 +141,56 @@ async function fetch(replies, strict, count) {
   await Sync.apply(api, book, await Sync.preview(api, book), true);
   assert.equal(remote.length, 0); assert.equal((await Sync.preview(api, book)).changes.length, 0);
   console.log('PASS address-book compatibility: IPv4/IPv6 validation, safe pagination, no partial-list deletion, bidirectional IP convergence and credential preservation');
+
+  // Match the official personal/legacy and shared response shapes. Never
+  // reuse another book's credential even when both contain the same peer ID.
+  const account = new Api();
+  options.set('api-server', 'https://api.example.test');
+  options.set('custom-rendezvous-server', 'id.example.test');
+  options.set('key', 'fixture-public-key');
+  account.configure('https://api.example.test', 'official', false);
+  account.token = 'fixture-token';
+  account.bindTransport(true);
+  const own = { guid: 'personal', legacy: false }, legacy = { guid: '', legacy: true };
+  const shared = { guid: 'shared', legacy: false };
+  const ownHash = Buffer.alloc(32, 23).toString('base64');
+  let personal = { guid: 'personal' };
+  let privatePeer = { id: '123', hash: ownHash, password: 'wrong field', note: 'server memo' };
+  let sharedPeer = { id: '123', password: ' shared-设备 ', hash: ownHash };
+  let profile = { guid: 'shared', rule: 1, info: { password: 'shared-default' } };
+  account.request = async (route, method, body) => {
+    assert.equal(body, undefined, 'lookup is read-only, even when the API uses POST');
+    if (route === '/api/ab/personal') return personal;
+    if (route.startsWith('/api/ab/shared/profiles?')) return { data: [profile], total: 1 };
+    if (route === '/api/ab') return { data: JSON.stringify({ peers: [privatePeer] }) };
+    if (route.endsWith('&ab=personal')) return { total: 1, data: [privatePeer] };
+    if (route.endsWith('&ab=shared')) return { total: 1, data: [sharedPeer] };
+    throw Error('unexpected address-book API lookup');
+  };
+  const credential = await account.addressBookCredential(own, '123');
+  assert.equal(credential.kind, 1); assert.equal(credential.value, ownHash);
+  assert.equal((await account.addressBookCredential(shared, '123')).value, ' shared-设备 ');
+  const browse = (await account.browsePeers(own))[0];
+  assert.equal(browse.note, 'server memo');
+  assert(!('hash' in browse) && !('password' in browse));
+  assert(!('note' in (await account.peers(own, true))[0]));
+  sharedPeer = { id: '123', hash: ownHash };
+  assert.equal((await account.addressBookCredential(shared, '123')).value, 'shared-default');
+  sharedPeer = { id: '123', password: 'x'.repeat(512) };
+  await assert.rejects(account.addressBookCredential(shared, '123'), /没有可用/);
+  sharedPeer = { id: '123', same_server: false };
+  await assert.rejects(account.addressBookCredential(shared, '123'), /不属于/);
+  privatePeer = { id: '123', hash: 'invalid', password: 'wrong field', note: 'server memo' };
+  await assert.rejects(account.addressBookCredential(own, '123'), /没有可用/);
+  privatePeer.hash = ownHash;
+  personal = {};
+  assert.equal((await account.addressBookCredential(legacy, '123')).value, ownHash);
+  await assert.rejects(account.addressBookCredential(own, '123'), /权限或网络/);
+  await assert.rejects(account.addressBookCredential(legacy, '192.0.2.5'), /设备 ID/);
+  options.set('key', 'changed-fixture-key');
+  await assert.rejects(account.addressBookCredential(legacy, '123'), /已关联/);
+  options.set('key', 'fixture-public-key');
+  account.server = 'http://api.example.test';
+  await assert.rejects(account.addressBookCredential(legacy, '123'), /HTTPS/);
+  console.log('PASS scoped personal/legacy/shared credential lookup and priority; private data never enters browsing/import/sync models');
 })().catch(error => { console.error(error); process.exitCode = 1; });

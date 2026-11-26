@@ -1,0 +1,11 @@
+[Unit]
+Description=Sesame game streaming relay (one authorized pair)
+ConditionPathExists=%h/.local/state/sesame-stream-relay/roles.bin
+[Service]
+ExecStart=/usr/bin/python3 -I %h/.local/share/sesame-stream-relay/relay_service.py serve --wire-kbps @CAP@
+NoNewPrivileges=yes
+UMask=0077
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=default.target

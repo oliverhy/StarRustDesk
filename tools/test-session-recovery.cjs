@@ -5,21 +5,23 @@ const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/service/
 const code=ts.transpileModule(source.replace(/^import .*\r?\n/gm,''),
  {compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText;
 function fixture(){
- let now=1000,status=3,revision=1,background=false,id=0,prepared=0,prepare=async()=>{};
+ let now=1000,status=3,revision=1,background=false,id=0,prepared=0,prepare=async()=>{},lookupCount=0,scopeAllowed=true;
  const timers=new Map(),calls=[],logs=[],options={'custom-rendezvous-server':'server','relay-server':'relay',key:'secret-key'};
- const connect=(peer,password,server,relay,forceRelay,insecure,fileOnly,security,osPassword)=>{
-  calls.push({peer,password,server,relay,forceRelay,insecure,fileOnly,security,osPassword});status=1;return 0;
+ const connect=(peer,password,server,relay,forceRelay,insecure,fileOnly,security,osPassword,reason,policy,credential)=>{
+  calls.push({peer,password,server,relay,forceRelay,insecure,fileOnly,security,osPassword,credential});status=1;return 0;
  };
  const c=vm.createContext({exports:{},Date:{now:()=>now},ConnectionStatus:{DISCONNECTED:0,CONNECTING:1,CONNECTED:2,FAILED:3,WAITING_2FA:4},
   RustDeskNapi:{getConnectionStatus:()=>status,getConnectionRoute:()=>2,getConnectionTransport:()=>1,getLastConnectionError:()=> '远端传输中断',getOption:k=>options[k]||'',
    appendDiagnosticLog:(tag,text)=>logs.push([tag,text]),setPerformancePreset(){},setGameMode(){},setHighPerformance(){},connectWithServer:connect,
-   connect:(peer,pw,insecure,fileOnly,security,os)=>connect(peer,pw,'','',false,insecure,fileOnly,security,os),disconnect:()=>{status=0;}},
+   connect:(peer,pw,insecure,fileOnly,security,os,reason,policy,credential)=>connect(peer,pw,'','',false,insecure,fileOnly,security,os,reason,policy,credential),disconnect:()=>{status=0;}},
   RemotePeerPreferences:class {get(){return '';}dispose(){}},
   RemoteSessionBackgroundTask:{isAppBackground:()=>background,syncForConnectionStatus(){},stop(){}},
-  AccountSession:{getApi:()=>({sessionRevision:()=>revision,prepareConnection:async()=>{prepared++;await prepare();}})},
+  AccountSession:{getApi:()=>({sessionRevision:()=>revision,prepareConnection:async()=>{prepared++;await prepare();},
+    addressBookScopeCurrent: v=>scopeAllowed && v===revision,
+    addressBookCredential:async()=>({kind:2,value:'fixture-book-credential-'+(++lookupCount)})})},
   setTimeout:(fn,ms)=>{timers.set(++id,{fn,ms,due:now+ms});return id;},clearTimeout:key=>timers.delete(key)});
  vm.runInContext(code,c);const S=c.exports.ConnectionService;S.releaseModifiers=()=>{};S.resetTransientInputState=()=>{};
- return {S,timers,calls,logs,options,begin:async(peer='peer',fileOnly=false)=>{await S.connect(peer,'secret-password','smooth',fileOnly,
+ return {S,timers,calls,logs,options,scope:v=>{scopeAllowed=v;},begin:async(peer='peer',fileOnly=false)=>{await S.connect(peer,'secret-password','smooth',fileOnly,
    {autoUnlock:true,privacyMode:false,lockAfterDisconnect:false},'secret-os-password');},
   authenticated(){status=2;S.observeSession(2);},fail(){status=3;},background:v=>{background=v;},revision:v=>{revision=v;},time:v=>{now=v;},
   prepared:()=>prepared,prepare:fn=>{prepare=fn;},delay:()=>[...timers.values()][0]?.ms,
@@ -86,6 +88,16 @@ async function test(name,fn){await fn();count++;console.log('PASS '+name);}
  await test('manual IPv6 retry skips account preparation and preserves the direct target',async()=>{
   const f=fixture();await f.begin('[2001:db8::5]:21118');f.fail();const before=f.prepared();assert(await f.S.retryCurrentSession());
   assert.equal(f.prepared(),before);assert.equal(f.calls[1].peer,'[2001:db8::5]:21118');
+ });
+ await test('address-book connection and retries never downgrade; manual retry fetches fresh credentials',async()=>{
+  const f=fixture();const book={guid:'fixture-book',legacy:false};
+  await f.S.connect('peer','',undefined,false,undefined,'',false,book);
+  assert.equal(f.calls[0].credential.value,'fixture-book-credential-1');assert.equal(f.calls[0].password,'');
+  f.fail();assert(!f.S.canRetryWithoutEncryption());
+  assert(await f.S.retryCurrentSession());assert.equal(f.calls[1].credential.value,'fixture-book-credential-2');
+  f.fail();f.scope(false);assert(!await f.S.retryCurrentSession());assert.equal(f.calls.length,2);
+  assert(!JSON.stringify(f.logs).includes('fixture-book-credential'));
+  f.S.disconnect();assert.equal(f.S.addressBookCredential,undefined);assert.equal(f.S.retryAddressBook,undefined);
  });
  await test('changed account/server refuses stale manual retry credentials',async()=>{
   for(const change of [f=>{f.options.key='changed';},f=>f.revision(2)]){const f=fixture();await f.begin();f.fail();change(f);

@@ -1,7 +1,97 @@
 # Chinese source key<TAB>English. Placeholders preserve user data; \n is a line break.
+关联设备 ID（可选）	Linked device ID (optional)
+填写被控端显示的设备 ID	Enter the device ID shown on the remote device
+请先在被控端核对 ID。关联后保留原地址，仅通过 ID 加密连接；验证失败不会改用 IP。	Verify the ID on the remote device. The address is kept, but connections use only the encrypted ID route. There is no IP fallback.
+关联设备 ID 无效，请修改连接	Invalid linked device ID. Edit this connection.
+未能验证关联设备的身份，已停止连接，未回退到明文	Could not verify the linked device. The connection stopped without falling back to plaintext.
+关联设备 ID 与本机记录不同，请先核对连接	The linked device ID differs from the local entry. Verify the connection first.
+关联目标已改变，请在连接选项中重新输入或清除原有密码	The linked target changed. Re-enter or clear saved passwords in connection options.
 已信任此设备	This device is trusted
 登录成功，但未能保存信任，下次仍需验证码	Signed in, but trust could not be saved. A verification code will still be required next time.
 系统安全存储不可用，暂无法保存可信设备	Secure storage is unavailable; this device cannot be trusted right now.
+2.0.12（2000012）· 虚拟鼠标、设置与账号同步	2.0.12 (2000012) · Virtual mouse, settings and account sync
+虚拟鼠标左右键按下即响应，抬手才松开；支持长按、拖拽和连点，失焦或隐藏时自动松键。	Virtual mouse buttons press on touch and release on lift. Hold, drag and tap repeatedly; hiding the controls or losing focus releases the button.
+设置按功能分类，语言和样式集中到个性化设置，关于与反馈保留在设置首页。	Settings are grouped by function. Language and appearance are under Personalization; About and feedback stays on the main settings page.
+优化 API 地址簿同步，按账号权限读取连接信息与已共享的密码。	API address book sync reads connection details and shared passwords according to account permissions.
+已保存的 IP 连接可关联设备 ID，通过身份验证和加密连接后可设置信任设备。	Saved IP connections can link a device ID and trust a device only after identity verification and encryption.
+游戏串流 · 实验	Game streaming · Experimental
+Sunshine · UDP 直连优先	Sunshine · Prefer direct UDP
+游戏串流实验	Experimental game streaming
+开启后在连接页进入游戏串流，连接已配对的 Windows 助手。	When enabled, open game streaming from Connections to connect to a paired Windows helper.
+先在同一个 Wi-Fi 下打开 Windows 游戏串流助手。	Open the Windows streaming helper on the same Wi-Fi network first.
+配对码格式不正确，请重新复制。	Invalid pairing code format. Copy the code again.
+正在核对电脑身份…	Verifying computer identity…
+电脑身份不匹配，已停止。	Computer identity mismatch. Connection stopped.
+连不到电脑助手。请确认两台设备在同一局域网，并保持助手打开。	Cannot reach the helper. Keep it open and connect both devices to the same LAN.
+配对未完成。请从电脑助手获取新的配对码。	Pairing incomplete. Get a new pairing code from the helper.
+无法保存配对，请解锁手机后重新配对。	Could not save pairing. Unlock your phone and pair again.
+已移除这台电脑。	Computer removed.
+暂时无法移除，请重试。	Cannot remove this computer right now. Try again.
+当前窗口未能切换显示模式	Could not change the current window's display mode
+局域网直连	Direct LAN
+公网 UDP 直连	Direct UDP over the internet
+UDP 中继	UDP relay
+是否断开当前游戏串流？	Disconnect this game stream?
+配对 Windows 电脑	Pair a Windows PC
+粘贴电脑助手的配对码	Paste the pairing code from the PC helper
+正在配对…	Pairing…
+配对电脑	Pair computer
+返回已配对电脑	Back to paired computer
+忘记这台电脑	Forget this computer
+正在刷新串流画面…	Refreshing stream…
+游戏串流实验未开启	Experimental game streaming is off
+返回连接	Back to connections
+无法打开地址簿连接，请重试。	Could not open the address book connection. Try again.
+已获取 {0} 台设备，可直接连接或勾选导入	Found {0} devices. Connect directly or select devices to import.
+从地址簿点「连接」可使用该记录的凭证。导入到本地只保存设备信息，不导入密码或密码哈希；也不会自动上传本地密码。	Connect from the address book to use that entry's credentials. Local imports save only device information, never passwords or password hashes. Local passwords are not uploaded automatically.
+键鼠控制	Keyboard and mouse control
+已开启	Enabled
+内容未发送，请检查连接或分段输入	Content not sent. Check the connection or split your input.
+这次编辑未发送，请用退格后重新输入	This edit was not sent. Press Backspace and enter it again.
+已开启，本次有效	Enabled for this session
+正在核对授权…	Checking permission…
+电脑助手未允许本次键鼠控制	The PC helper did not allow keyboard and mouse control for this session
+输入连接已中断，需手动重新开启	Input disconnected. Enable it again manually.
+现在只看画面	View only
+当前串流来源：Windows 主屏	Streaming source: Windows primary display
+当前串流来源：屏幕 	Streaming source: display 
+当前只看画面，没有按键需要释放	View only. No keys need to be released.
+拖动控栏	Drag toolbar
+轻点画面，在对应位置单击。手指按下后拖动，可拖拽目标。	Tap to click at that position. Touch and drag to move an item.
+滑动移动指针，轻点单击；轻点一次，再按住并移动可拖拽。	Slide to move the pointer and tap to click. Tap once, then press and move to drag.
+双指滑动	Two-finger swipe
+上下滑动滚动窗口；双指轻点为右键。	Swipe up or down to scroll; tap with two fingers to right-click.
+在“画面”中放大并开启“移动画面”，单指拖动只平移本地画面，不操作远端。	Zoom in under Display and enable Pan view. Drag with one finger to pan locally without interacting with the remote device.
+移动速度仅影响相对鼠标和虚拟鼠标，不改变触摸的落点。	Pointer speed affects only relative and virtual mouse movement, not touch positions.
+慢速	Slow
+标准	Standard
+快速	Fast
+仅在成功发送回车后生效；正在选词或未发送的内容不会触发回车。	Only applies after Enter is sent. Choosing candidates or unsent input will not trigger Enter.
+连续输入，保持键盘	Continuous input: keep keyboard open
+调整键盘“更多”页的普通按键，自动保存到这台电脑。组合键保留在单独分组。	Customize standard keys on the keyboard's More page. Changes are saved for this computer. Shortcuts stay in their own group.
+ 上移	 Move up
+ 下移	 Move down
+可拖动	Draggable
+已加密	Encrypted
+网络往返	Network round-trip time
+画面接收	Video received
+初始视频请求	Initial video request
+已应用视频码率	Applied video bitrate
+累计视频帧缺口	Cumulative missing video frames
+最近采样	Latest sample
+鼠标中键	Middle mouse button
+⠿  移动	⠿  Move
+画面已平移	View panned
+画面居中	Center view
+输入已中断	Input interrupted
+地址簿账号或网络已改变，请重试	The address book account or network changed. Try again.
+地址簿账号或服务器已改变，请返回地址簿重新连接	The account or server changed. Go back to the address book and reconnect.
+地址簿凭证仅用于 HTTPS 登录且已关联当前 ID 服务器的账号。自建服务器请先启用连接权限认证并登录。	Address book credentials require an HTTPS account linked to the current ID server. For a self-hosted server, enable connection authorization and sign in first.
+只能对经过身份验证的设备 ID 使用地址簿凭证，请手动连接此设备。	Address book credentials require a verified device ID. Connect to this device manually.
+地址簿权限或网络已改变，请刷新后重试。	Address book permissions or network changed. Refresh and try again.
+设备已不可用或不属于当前 ID 网络，请刷新地址簿后重试。	Device unavailable or outside the current ID network. Refresh the address book and try again.
+这条记录没有可用的地址簿凭证，请在首页输入远端密码连接。	This entry has no usable credential. Enter the remote password on the home page to connect.
+无法安全使用地址簿凭证，请检查当前服务器和设备身份	Cannot use address book credentials securely. Check the server and device identity.
 2.0.11（2000011）· 远控鼠标与触摸优化	2.0.11 (2000011) · Remote mouse and touch improvements
 修复普通鼠标箭头尖端与实际点击位置不一致的问题，优化缩放后的定位。	Fixed misalignment between the standard cursor tip and the actual click position, including while zoomed.
 优化手指滑动判定，减少短滑或慢起步时误触发左键、右键。	Improved touch gesture detection to reduce accidental clicks during short or slow-starting swipes.
@@ -1761,3 +1851,32 @@ StarRustDesk 正式更名为“芝麻远控”，更新应用名称、远控窗�
 剪贴板同步失败，请重试	Clipboard sync failed. Please try again.
 屏幕 {0} / {1}	Display {0} / {1}
 在“控 → 屏幕”中设置“三指切屏”，默认开启，按远端独立保存。远端有多个屏幕时，在远控画面上三指左滑切换下一屏、右滑切换上一屏，首尾循环。每次抬手只切换一次；双指滚动、捏合缩放和全屏三指上滑打开键盘保持不变。\n适用于触控屏。系统可能接管平板或电脑的多指手势；触控板三指事件未开放给应用时，请使用“控 → 屏幕”按钮切换。	Enable Three-finger display swipe in Controls > Displays. It is on by default and saved separately for each remote device. With multiple remote displays, swipe left with three fingers on the remote view for the next display, or right for the previous one, wrapping at either end. Each release switches once. Two-finger scrolling, pinch zoom and the fullscreen three-finger swipe up for the keyboard are unchanged.\nFor touchscreens. The system may intercept multi-finger gestures on tablets or computers. If touchpad three-finger events are not delivered to the app, use the buttons in Controls > Displays.
+常用设置	Common settings
+数据与支持	Data and support
+个性化设置	Personalization
+语言、按钮样式与外观	Language, button style and appearance
+远控体验	Remote experience
+分辨率、帧率、鼠标指针与声音	Resolution, frame rate, pointer and audio
+网络与账号	Network and accounts
+ID / 中继服务器、在线查询与地址簿	ID / relay, online status and address book
+备份与恢复	Backup and restore
+华为云空间、加密备份与恢复	Huawei Cloud, encrypted backup and restore
+诊断与记录	Diagnostics and history
+诊断日志、文件传输历史与会话录像	Diagnostic logs, transfers and recordings
+关于与反馈	About and feedback
+返回设置	Back to Settings
+选择界面配色	Choose the interface colors
+登录设置	Sign-in settings
+使用记录	Activity history
+只清理本机已记录的日志	Clears only logs stored on this device
+查看或导出已结束的远控会话录像	View or export recordings of ended remote sessions
+查看 / 导出	View / export
+应用备案号	App filing number
+网络服务	Network services
+ID / 中继服务器	ID / relay server
+配置自建服务器地址和密钥	Set the self-hosted server address and key
+配置	Configure
+备份密码	Backup password
+查看	View
+加入	Join
+更多操作	More actions

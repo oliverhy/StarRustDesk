@@ -82,7 +82,9 @@ assert.doesNotMatch(homePage, /\.padding\(\{ bottom: 78 \}\)/,
   'home pages should render behind the floating navigation surface');
 assert.equal((page.match(/\.padding\(\{ bottom: 94 \}\)/g) || []).length, 4,
   'connection scroll areas should preserve a tappable bottom safe space');
-assert.match(settingsPage, /bottom: 94/,
-  'settings scroll content should preserve a tappable bottom safe space');
+assert.match(homePage, /SettingsPage\(\{ settingsCategory: \$settingsCategory, tabBarInset: this\.tabItemHeight\(\) \+ 40 \}\)/,
+  'Settings uses the measured font-aware navigation height plus its margins');
+assert.match(settingsPage, /bottom: category === 'home' \? this\.tabBarInset : 16/,
+  'the Settings landing list leaves room for the bottom navigation without wasting space in detail pages');
 
 console.log('PASS compact reference home layout and preserved actions');

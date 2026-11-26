@@ -1,6 +1,7 @@
 import rustdeskNapi from 'libentry.so'
 import { pasteboard, deviceInfo, BusinessError } from '@kit.BasicServicesKit';
 import { RELEASE_NOTES_VERSION, RELEASE_NOTES_BUILD } from '../widget/ReleaseNotesDialog'
+import type { AddressBookCredential } from './RustDeskApiService'
 
 export interface RemoteSecurityOptions {
   lockAfterDisconnect: boolean
@@ -205,17 +206,21 @@ export class RustDeskNapi {
 
   static connect(peerId: string, password: string, allowInsecureFallback: boolean = false, fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0): number {
+    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0,
+    addressBook?: AddressBookCredential): number {
     return rustdeskNapi.connect(peerId, password, '', '', false, allowInsecureFallback, fileOnly,
-      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy)
+      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy,
+      addressBook?.kind ?? 0, addressBook?.value ?? '')
   }
 
   static connectWithServer(peerId: string, password: string, rendezvousServer: string, relayServer: string,
     forceRelay: boolean = false, allowInsecureFallback: boolean = false, fileOnly: boolean = false,
     security: RemoteSecurityOptions = { lockAfterDisconnect: false, privacyMode: false, autoUnlock: false },
-    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0): number {
+    osPassword: string = '', insecureReason: number = 0, transportPolicy: number = 0,
+    addressBook?: AddressBookCredential): number {
     return rustdeskNapi.connect(peerId, password, rendezvousServer, relayServer, forceRelay, allowInsecureFallback, fileOnly,
-      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy)
+      security.lockAfterDisconnect, security.privacyMode, security.autoUnlock ? osPassword : '', insecureReason, transportPolicy,
+      addressBook?.kind ?? 0, addressBook?.value ?? '')
   }
 
   static restartVideoDecoder(): number {

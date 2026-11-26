@@ -18,8 +18,10 @@ function slice(start, end) {
 }
 
 const card = slice('  buildCloudSyncCard() {', '  setCloudSyncEnabled(');
-assert.match(card, /Toggle\(\{ type: ToggleType\.Switch, isOn: this\.cloudSecretsSwitchOn \}\)/);
-assert.match(card, /\.switchPointColor\(this\.cloudSecretsSwitchOn \?/);
+assert.match(card, /checked: this\.cloudSecretsSwitchOn/);
+assert.match(card, /enabled: this\.cloudSyncEnabled && !this\.cloudSyncBusy && !this\.cloudSecretsPending/);
+assert.match(source, /buildSwitch\(\$\$: SettingsSwitchArgs\)[\s\S]*?Toggle\(\{ type: ToggleType\.Switch, isOn: \$\$\.checked \}\)/,
+  'the switch reads the draft by reference so cancel and rollback update its visual state');
 assert.match(card, /this\.onCloudSecretsSwitchChanged\(isOn\)/);
 assert.match(source, /onCancel: \(\) => \{\s*this\.cancelCloudPassword\(\)/);
 

@@ -1,7 +1,10 @@
 import { readableInputHeight } from '../theme/ReadableLayout'
-import { ReadableButtonModifier } from '../theme/ReadableButtonModifier'
-import { ButtonShapeModifier } from '../theme/ButtonShapeModifier'
-﻿import { RustDeskTheme } from '../theme/RustDeskTheme'
+import { RustDeskTheme } from '../theme/RustDeskTheme'
+import { settingsPalette } from '../theme/SettingsSkin'
+import {
+  SETTINGS_DIALOG_CLOSE, SETTINGS_DIALOG_OPEN, SETTINGS_RELEASE, SettingsAction, SettingsCategoryItem, SettingsChoice,
+  SettingsIcon, settingsPromptTransition
+} from '../widget/SettingsControls'
 import { translate } from '../utils/I18n'
 import { LanguageService } from '../utils/LanguageService'
 import { ServerConfigDialog } from '../widget/ServerConfigDialog'
@@ -16,7 +19,7 @@ import { RustDeskNapi } from '../service/RustDeskNapi'
 import { SystemFaultDiagnostic } from '../service/SystemFaultDiagnostic'
 import { common } from '@kit.AbilityKit'
 import { pasteboard } from '@kit.BasicServicesKit'
-import { promptAction } from '@kit.ArkUI'
+import { curves, promptAction } from '@kit.ArkUI'
 import { fileIo, picker } from '@kit.CoreFileKit'
 import { FileTransferHistoryDialog } from '../widget/FileTransferHistoryDialog'
 import { RecordingDialog } from '../widget/RecordingDialog'
@@ -28,22 +31,85 @@ import { ThemePreference } from '../service/ThemePreference'
 import { InsecureConsentStore } from '../service/InsecureConsentStore'
 
 const QQ_GROUP_NUMBER: string = '221568948'
+const LANGUAGE_OPTIONS: SettingsChoice[] = [
+  { key: 'system', label: '跟随系统' }, { key: 'zh-Hans', label: '简体中文', literal: true },
+  { key: 'zh-Hant', label: '繁體中文', literal: true }, { key: 'en', label: 'English', literal: true }
+]
+const BUTTON_OPTIONS: SettingsChoice[] = [
+  { key: 'classic', label: '经典圆润' }, { key: 'rectangle', label: '圆角长方形' }
+]
+const THEME_OPTIONS: SettingsChoice[] = [
+  { key: 'system', label: '跟随系统' }, { key: 'light', label: '浅色' }, { key: 'dark', label: '深色' }
+]
+const RESOLUTION_OPTIONS: SettingsChoice[] = [
+  { key: 'Auto', label: 'Auto' }, { key: '720p', label: '720p' },
+  { key: '1080p', label: '1080p' }, { key: '4K', label: '4K' }
+]
+const FRAME_RATE_OPTIONS: SettingsChoice[] = [
+  { key: '15', label: '15 FPS' }, { key: '30', label: '30 FPS' }, { key: '60', label: '60 FPS' }
+]
+const SETTINGS_IN = curves.cubicBezierCurve(0.19, 0.76, 0.28, 1)
+const SETTINGS_OUT = curves.cubicBezierCurve(0.26, 0.57, 0.41, 1)
+
+interface SettingsCategory {
+  id: string
+  title: string
+  description: string
+  icon: string
+}
+
+interface SettingsRowCopy {
+  title: string
+  detail?: string
+  activeStatus?: boolean
+}
+
+interface SettingsSwitchArgs {
+  label: string
+  checked: boolean
+  enabled: boolean
+  controlId: string
+  onChange: (checked: boolean) => void
+}
+
+interface SettingsDetail {
+  text: string
+}
+
+const SETTINGS_CATEGORIES: SettingsCategory[] = [
+  { id: 'home', title: '设置', description: '连接质量、网络服务与外观', icon: 'sliders' },
+  { id: 'personal', title: '个性化设置', description: '语言、按钮样式与外观', icon: 'sliders' },
+  { id: 'remote', title: '远控体验', description: '分辨率、帧率、鼠标指针与声音', icon: 'screen' },
+  { id: 'network', title: '网络与账号', description: 'ID / 中继服务器、在线查询与地址簿', icon: 'server' },
+  { id: 'backup', title: '备份与恢复', description: '华为云空间、加密备份与恢复', icon: 'cloud' },
+  { id: 'diagnostics', title: '诊断与记录', description: '诊断日志、文件传输历史与会话录像', icon: 'activity' },
+]
+
+function settingsCategoryMeta(id: string): SettingsCategory {
+  return SETTINGS_CATEGORIES.find((category: SettingsCategory) => category.id === id) ?? SETTINGS_CATEGORIES[0]
+}
+
+@Extend(Column)
+function settingsCard(dark: boolean, compact: boolean) {
+  .width('100%').padding(compact ? 10 : { left: 13, right: 13, top: 12, bottom: 12 })
+  .backgroundColor(settingsPalette(dark).surface)
+  .border({ width: 1, color: settingsPalette(dark).line }).borderRadius(compact ? 12 : 15)
+}
 
 @Component
 export struct SettingsPage {
+  @StorageLink('sunshineTestAvailable') private sunshineAvailable: boolean = false
+  @StorageLink('sunshineTestEnabled') private sunshineEnabled: boolean = false
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
   @StorageLink('uiLanguagePreference') uiLanguagePreference: string = 'system'
   @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('isDarkMode') isDarkMode: boolean = false
-  @StorageLink('isDarkModeManual') isDarkModeManual: boolean = false
   @StorageLink('themeMode') themeMode: string = 'system'
   @State themePreferenceBusy: boolean = false
   @StorageLink('peerOnlineQueryEnabled') peerOnlineQueryEnabled: boolean = true
   @State resolution: string = 'Auto'
   @State frameRate: number = 30
-  @State showResolutionPicker: boolean = false
-  @State showFrameRatePicker: boolean = false
   @State showLocalCursor: boolean = true
   @State remoteAudioEnabled: boolean = true
   @State diagnosticLogEnabled: boolean = false
@@ -82,37 +148,44 @@ export struct SettingsPage {
     }),
     autoCancel: false,
     customStyle: true,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
+  @Link settingsCategory: string
+  @Prop tabBarInset: number = 94
   @State pageWidth: number = 0
+  @State pageHeight: number = 0
   private apiAccountDialogController: CustomDialogController = new CustomDialogController({
     builder: ApiAccountDialog(),
     autoCancel: false,
     customStyle: true,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
   private serverConfigDialogController: CustomDialogController = new CustomDialogController({
     builder: ServerConfigDialog(),
     autoCancel: true,
     customStyle: true,
-    cornerRadius: 8,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
   private releaseNotesDialogController: CustomDialogController = new CustomDialogController({
     builder: ReleaseNotesDialog({
+      settingsStyle: true,
       onClose: () => {
         RustDeskNapi.setOption(RELEASE_NOTES_SHOWN_OPTION, RELEASE_NOTES_SHOWN_ID)
       },
     }),
     autoCancel: false,
     customStyle: true,
-    cornerRadius: 10,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
   private fileTransferHistoryDialogController: CustomDialogController = new CustomDialogController({
-    builder: FileTransferHistoryDialog(),
+    builder: FileTransferHistoryDialog({ settingsStyle: true }),
     autoCancel: true,
     customStyle: true,
-    cornerRadius: 10,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
   private recordingDialogController: CustomDialogController = new CustomDialogController({
-    builder: RecordingDialog(), customStyle: true,
+    builder: RecordingDialog({ settingsStyle: true }), customStyle: true,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
   private cloudPasswordDialogController: CustomDialogController = new CustomDialogController({
     builder: SettingsPasswordDialog({
@@ -127,7 +200,7 @@ export struct SettingsPage {
     }),
     autoCancel: false,
     customStyle: true,
-    cornerRadius: 10,
+    openAnimation: SETTINGS_DIALOG_OPEN, closeAnimation: SETTINGS_DIALOG_CLOSE,
   })
 
   aboutToAppear(): void {
@@ -172,110 +245,261 @@ export struct SettingsPage {
 
   build() {
     Column() {
-      Row() {
-        Column({ space: 4 }) {
-          Text(translate('设置', this.uiLanguage))
-            .fontSize(this.pageWidth >= 820 ? 30 : 26)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
+      this.buildHeader()
+      Stack({ alignContent: Alignment.Top }) {
+        // The key changes only when entering/leaving a section. This animates
+        // the viewport without remounting SettingsPage or resetting its data.
+        ForEach([this.settingsCategory], (category: string) => {
+          Scroll() {
+            Column({ space: this.compact() ? 8 : 10 }) {
+              this.buildCategoryContent(category)
+            }
             .width('100%')
-          Text(translate('连接质量、网络服务与外观', this.uiLanguage))
-            .fontSize(14)
-            .fontColor(this.isDarkMode ? '#B7C0CF' : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .alignItems(HorizontalAlign.Start)
+            .constraintSize({ maxWidth: 720 })
+            .padding({
+              left: this.compact() ? 8 : 13, right: this.compact() ? 8 : 13, top: this.compact() ? 8 : 13,
+              bottom: category === 'home' ? this.tabBarInset : 16
+            })
+          }
+          .width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Auto)
+          .id('settings-page-' + category)
+          .transition(this.categoryTransition(category))
+        }, (category: string) => category)
       }
-      .width('100%')
-      .constraintSize({ minHeight: this.pageWidth >= 820 ? 116 : 104 })
-      .padding({ left: this.pageWidth >= 820 ? 32 : 16, right: this.pageWidth >= 820 ? 32 : 16, top: 24, bottom: 18 })
+      .width('100%').layoutWeight(1).clip(true)
+    }
+    .width('100%').height('100%')
+    .backgroundColor(settingsPalette(this.isDarkMode).app)
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      this.pageWidth = newValue.width as number
+      this.pageHeight = newValue.height as number
+    })
+  }
 
-      Scroll() {
-        Column({ space: 16 }) {
-          this.buildLanguageCard()
-          this.buildButtonShapeCard()
-          this.buildDisplayCard()
-          this.buildInputCard()
-          this.buildAudioCard()
-          this.buildServerConfigCard()
-          this.buildApiAccountEntry()
-          this.buildCloudSyncCard()
-          this.buildDiagnosticsCard()
-          this.buildThemeToggle()
-          this.buildAboutCard()
+  private compact(): boolean {
+    return this.pageWidth <= 530
+  }
+
+  private actionWidth(): number {
+    const width = this.pageWidth > 0 ? this.pageWidth : 360
+    return Math.min(192, Math.max(94, Math.floor(width * 0.45)))
+  }
+
+  private groupedActionWidth(): number {
+    const width = this.pageWidth > 0 ? this.pageWidth : 360
+    const available = Math.min(width, 720) - (this.compact() ? 38 : 54)
+    return Math.min(this.actionWidth(), Math.max(72, Math.floor((available - 14) / 2)))
+  }
+
+  private menuHeight(): number {
+    return this.pageHeight > 0 ? Math.max(88, Math.min(276, this.pageHeight * 0.62)) : 276
+  }
+
+  private openCategory(category: string): void {
+    if (category === this.settingsCategory || settingsCategoryMeta(category).id !== category) return
+    this.getUIContext().animateTo({ duration: 287, curve: SETTINGS_IN }, () => {
+      this.settingsCategory = category
+    })
+  }
+
+  private categoryTransition(category: string): TransitionEffect {
+    const direction = category === 'home' ? -1 : 1
+    return TransitionEffect.asymmetric(
+      TransitionEffect.translate({ x: direction * 25 })
+        .animation({ duration: 287, curve: SETTINGS_RELEASE })
+        .combine(TransitionEffect.scale({ x: 0.982, y: 0.982 }))
+        .combine(TransitionEffect.opacity(0).animation({ duration: 198, curve: SETTINGS_IN })),
+      TransitionEffect.translate({ x: direction * 22 })
+        .animation({ duration: 176, curve: SETTINGS_OUT })
+        .combine(TransitionEffect.scale({ x: 0.989, y: 0.989 }))
+        .combine(TransitionEffect.opacity(0)))
+  }
+
+  @Builder
+  buildHeader() {
+    Column() {
+      Row({ space: this.compact() ? 7 : 10 }) {
+        if (this.settingsCategory !== 'home') {
+          SettingsAction({ icon: 'back', accessibleLabel: translate('返回设置', this.uiLanguage), tone: 'neutral',
+            controlId: 'settings-category-back', onAction: () => { this.openCategory('home') } })
         }
-        .width(this.pageWidth >= 820 ? 720 : '100%')
-        .padding({
-          left: RustDeskTheme.PAGE_PADDING,
-          right: RustDeskTheme.PAGE_PADDING,
-          top: RustDeskTheme.PAGE_PADDING,
-          bottom: 94
-        })
+        Column({ space: 4 }) {
+          Text(translate(settingsCategoryMeta(this.settingsCategory).title, this.uiLanguage))
+            .fontSize(24).lineHeight('32fp').fontWeight(700).fontColor(settingsPalette(this.isDarkMode).ink)
+            .width('100%').wordBreak(WordBreak.BREAK_WORD)
+            .accessibilityLevel('yes')
+          Text(translate(settingsCategoryMeta(this.settingsCategory).description, this.uiLanguage))
+            .fontSize(13).lineHeight('20fp').fontColor(settingsPalette(this.isDarkMode).muted)
+            .width('100%').wordBreak(WordBreak.BREAK_WORD)
+        }
+        .layoutWeight(1).alignItems(HorizontalAlign.Start)
+
+        Row() {
+          SettingsIcon({ icon: settingsCategoryMeta(this.settingsCategory).icon, iconSize: 18,
+            ink: settingsPalette(this.isDarkMode).subtle })
+        }
+        .width(35).height(35).justifyContent(FlexAlign.Center)
+        .backgroundColor(settingsPalette(this.isDarkMode).pill)
+        .border({ width: 1, color: settingsPalette(this.isDarkMode).pillEdge }).borderRadius(12)
+        .accessibilityLevel('no')
       }
-      .width('100%')
-      .layoutWeight(1)
+      .width('100%').constraintSize({ maxWidth: 720 })
+      .padding({ left: this.compact() ? 12 : 19, right: this.compact() ? 12 : 19,
+        top: this.compact() ? 13 : 19, bottom: this.compact() ? 11 : 15 })
     }
     .width('100%')
-    .height('100%')
-    .alignItems(HorizontalAlign.Center)
-    .onAreaChange((oldValue: Area, newValue: Area) => {
-      this.pageWidth = newValue.width as number
-    })
+    .radialGradient({ center: ['0%', '0%'], radius: '77%',
+      colors: [[settingsPalette(this.isDarkMode).sky, 0], [settingsPalette(this.isDarkMode).app, 1]] })
+    .border({ width: { bottom: 1 }, color: settingsPalette(this.isDarkMode).line })
+  }
+
+  @Builder
+  buildCategoryContent(category: string) {
+    if (category === 'home') {
+      this.buildCategoryGroup('常用设置', ['personal', 'remote', 'network'])
+      this.buildCategoryGroup('数据与支持', ['backup', 'diagnostics'])
+      this.buildSunshineExperiment()
+      this.buildAboutCard()
+    } else if (category === 'personal') {
+      this.buildLanguageCard()
+      this.buildButtonShapeCard()
+      this.buildThemeToggle()
+    } else if (category === 'remote') {
+      this.buildDisplayCard()
+      this.buildInputCard()
+      this.buildAudioCard()
+    } else if (category === 'network') {
+      this.buildServerConfigCard()
+      this.buildApiAccountEntry()
+    } else if (category === 'backup') {
+      this.buildCloudSyncCard()
+    } else if (category === 'diagnostics') {
+      this.buildDiagnosticsCard()
+      this.buildRecordsCard()
+    }
+  }
+
+  @Builder
+  buildSunshineExperiment() {
+    if (this.sunshineAvailable) {
+      Column() {
+        Row({ space: 8 }) {
+          this.rowCopy({
+            title: this.uiLanguage === 'en' ? 'Game streaming experiment' : '游戏串流实验',
+            detail: this.uiLanguage === 'en' ? 'Show Sunshine in Connections. Connect to your paired Windows helper.' :
+              '开启后在连接页进入游戏串流，连接已配对的 Windows 助手。'
+          })
+          this.buildSwitch({
+            label: this.uiLanguage === 'en' ? 'Game streaming experiment' : '游戏串流实验',
+            checked: this.sunshineEnabled,
+            enabled: true,
+            controlId: 'sunshine-experiment-toggle',
+            onChange: (isOn: boolean) => { this.sunshineEnabled = isOn }
+          })
+        }
+        .width('100%')
+      }
+      .settingsCard(this.isDarkMode, this.compact())
+    }
+  }
+
+  @Builder
+  buildCategoryGroup(title: string, categories: string[]) {
+    Column() {
+      Text(translate(title, this.uiLanguage))
+        .width('100%').padding({ left: 7, right: 7, top: 2, bottom: 6 }).fontSize(12).fontWeight(650)
+        .lineHeight('18fp')
+        .fontColor(settingsPalette(this.isDarkMode).muted).wordBreak(WordBreak.BREAK_WORD)
+      ForEach(categories, (category: string, index: number) => {
+        if (index > 0) {
+          Divider().color(settingsPalette(this.isDarkMode).hair).strokeWidth(1)
+            .margin({ left: this.compact() ? 47 : 56, right: 8 })
+        }
+        SettingsCategoryItem({
+          title: translate(settingsCategoryMeta(category).title, this.uiLanguage),
+          description: translate(settingsCategoryMeta(category).description, this.uiLanguage),
+          icon: settingsCategoryMeta(category).icon, compact: this.compact(), featured: index === 0,
+          itemId: 'settings-category-' + category, onAction: () => { this.openCategory(category) }
+        })
+      }, (category: string) => category)
+    }
+    .width('100%').alignItems(HorizontalAlign.Start)
+    .padding({ left: this.compact() ? 7 : 12, right: this.compact() ? 7 : 12,
+      top: this.compact() ? 7 : 10, bottom: this.compact() ? 4 : 6 })
+    .backgroundColor(settingsPalette(this.isDarkMode).surface)
+    .border({ width: 1, color: settingsPalette(this.isDarkMode).line }).borderRadius(this.compact() ? 12 : 15)
+  }
+
+  @Builder
+  sectionTitle(label: string, icon: string) {
+    Row({ space: 8 }) {
+      SettingsIcon({ icon: icon, iconSize: 17, ink: settingsPalette(this.isDarkMode).blue })
+      Text(label).layoutWeight(1).fontSize(16).lineHeight('24fp').fontWeight(700).fontColor(settingsPalette(this.isDarkMode).ink)
+        .wordBreak(WordBreak.BREAK_WORD)
+    }
+    .width('100%').padding({ bottom: 3 })
+  }
+
+  @Builder
+  rowCopy($$: SettingsRowCopy) {
+    Column({ space: 2 }) {
+      Text($$.title).fontSize(14).lineHeight('21fp').fontWeight(650).fontColor(settingsPalette(this.isDarkMode).ink)
+        .width('100%').wordBreak(WordBreak.BREAK_WORD)
+      if ($$.detail) {
+        Row({ space: 5 }) {
+          if ($$.activeStatus) Circle().width(6).height(6).fill(settingsPalette(this.isDarkMode).green)
+          Text($$.detail).layoutWeight(1).fontSize(13).lineHeight('19.5fp').wordBreak(WordBreak.BREAK_WORD)
+            .fontColor($$.activeStatus ? settingsPalette(this.isDarkMode).green : settingsPalette(this.isDarkMode).muted)
+        }
+        .width('100%')
+      }
+    }
+    .layoutWeight(1).alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  detailText($$: SettingsDetail) {
+    Text($$.text).fontSize(13).lineHeight('19.5fp').fontColor(settingsPalette(this.isDarkMode).muted)
+      .width('100%').wordBreak(WordBreak.BREAK_WORD)
+  }
+
+  @Builder
+  rowDivider() {
+    Divider().strokeWidth(1).color(settingsPalette(this.isDarkMode).hair)
+  }
+
+  @Builder
+  buildSwitch($$: SettingsSwitchArgs) {
+    Row() {
+      Toggle({ type: ToggleType.Switch, isOn: $$.checked })
+        .id($$.controlId).width(40).height(23).responseRegion({ x: -4, y: -10, width: 49, height: 44 })
+        .selectedColor(settingsPalette(this.isDarkMode).switchOn)
+        .switchPointColor(settingsPalette(this.isDarkMode).thumb)
+        .switchStyle({ unselectedColor: settingsPalette(this.isDarkMode).switchOff, pointRadius: 8.5, trackBorderRadius: 12 })
+        .enabled($$.enabled).accessibilityText($$.label)
+        .onChange((value: boolean) => { $$.onChange(value) })
+    }
+    .width(49).height(44).justifyContent(FlexAlign.Center)
   }
 
   @Builder
   buildLanguageCard() {
-    Column({ space: 12 }) {
-      Row({ space: 12 }) {
-        Text(translate('Language', this.uiLanguage))
-          .fontSize(17)
-          .wordBreak(WordBreak.BREAK_ALL)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .layoutWeight(1)
-        Button() {
-          Row({ space: 8 }) {
-            Text(this.languagePreferenceLabel())
-              .fontSize(14)
-              .wordBreak(WordBreak.BREAK_ALL)
-              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-              .layoutWeight(1)
-            Text('▾')
-              .fontSize(14)
-              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          }
-          .width('100%')
-        }
-        .id('language-selector')
-        .layoutWeight(1.4)
-        .constraintSize({ minHeight: this.buttonShapeOptionHeight() })
-        .padding({ left: 16, right: 12, top: 10, bottom: 10 })
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-        .border({ width: 1,
-          color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER })
-        .accessibilityText(translate('Language', this.uiLanguage) + ': ' + this.languagePreferenceLabel())
-        .bindMenu([
-          { value: this.languageMenuLabel('system', '跟随系统'),
-            action: () => { LanguageService.setPreference('system') } },
-          { value: this.languageMenuLabel('zh-Hans', '简体中文'),
-            action: () => { LanguageService.setPreference('zh-Hans') } },
-          { value: this.languageMenuLabel('zh-Hant', '繁體中文'),
-            action: () => { LanguageService.setPreference('zh-Hant') } },
-          { value: this.languageMenuLabel('en', 'English'),
-            action: () => { LanguageService.setPreference('en') } }
-        ], { placement: Placement.BottomRight, enableArrow: true })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+    Column() {
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('Language', this.uiLanguage),
+          detail: translate('界面语言立即生效，不影响远控连接；系统权限提示在下次启动时应用。', this.uiLanguage)
+        })
+        SettingsAction({
+          controlId: 'language-selector', label: this.languagePreferenceLabel(),
+          accessibleLabel: translate('Language', this.uiLanguage) + ': ' + this.languagePreferenceLabel(),
+          items: LANGUAGE_OPTIONS, selected: this.uiLanguagePreference, maxWidth: this.actionWidth(),
+          menuMaxHeight: this.menuHeight(), onSelect: (value: string) => { LanguageService.setPreference(value) }
+        })
       }
       .width('100%')
-      Text(translate('界面语言立即生效，不影响远控连接；系统权限提示在下次启动时应用。', this.uiLanguage))
-        .fontSize(12)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
     }
-    .padding(16).width('100%')
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   languagePreferenceLabel(): string {
@@ -285,206 +509,91 @@ export struct SettingsPage {
     return translate('跟随系统', this.uiLanguage)
   }
 
-  languageMenuLabel(value: string, label: string): string {
-    // Keep language self-names recognizable even when the current UI language changes.
-    const text: string = value === 'system' ? translate('跟随系统', this.uiLanguage) : label
-    return text + (this.uiLanguagePreference === value ? '  ✓' : '')
-  }
-
   @Builder
   buildApiAccountEntry() {
-    Button() {
-      Row({ space: 12 }) {
-        Column({ space: 5 }) {
-          Text(translate('服务器账号', this.uiLanguage))
-            .fontSize(17)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? '#F2F6FF' : '#17253D')
-            .width('100%')
-            .textAlign(TextAlign.Start)
-          Text(translate('API 登录与地址簿', this.uiLanguage))
-            .fontSize(14)
-            .fontColor(this.isDarkMode ? '#C5D5EB' : '#445B78')
-            .width('100%')
-            .textAlign(TextAlign.Start)
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Text('›')
-          .fontSize(28)
-          .fontColor(this.isDarkMode ? '#B9D8FF' : '#2763AC')
-          .width(24)
-          .textAlign(TextAlign.Center)
+    Column() {
+      Row({ space: 8 }) {
+        this.rowCopy({ title: translate('服务器账号', this.uiLanguage), detail: translate('API 登录与地址簿', this.uiLanguage) })
+        SettingsAction({ label: translate('登录设置', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          maxWidth: this.actionWidth(), onAction: () => { this.apiAccountDialogController.open() } })
       }
       .width('100%')
-      .padding({ left: 20, right: 16, top: 15, bottom: 15 })
     }
-    .width('100%')
-    .constraintSize({ minHeight: 80 })
-    .padding(0)
-    .backgroundColor(this.isDarkMode ? '#24364D' : '#EDF4FF')
-    .border({ width: 1, color: this.isDarkMode ? '#516B8B' : '#CDDEF4' })
-    .accessibilityText(translate('服务器账号，API 登录与地址簿', this.uiLanguage))
-    .onClick(() => { this.apiAccountDialogController.open() })
-    .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   @Builder
   buildDisplayCard() {
     Column() {
-      Text(translate('Display', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 8 })
-
-      Row() {
-        Text(translate('Resolution', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Text(translate(this.resolution, this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        Text('>')
-          .fontSize(16)
-          .fontColor(RustDeskTheme.DARK_GRAY)
-          .margin({ left: 4 })
+      this.sectionTitle(translate('Display', this.uiLanguage), 'screen')
+      Row({ space: 8 }) {
+        this.rowCopy({ title: translate('Resolution', this.uiLanguage) })
+        SettingsAction({
+          controlId: 'settings-resolution', label: translate(this.resolution, this.uiLanguage),
+          accessibleLabel: translate('Resolution', this.uiLanguage) + ': ' + translate(this.resolution, this.uiLanguage),
+          items: RESOLUTION_OPTIONS, selected: this.resolution, maxWidth: this.actionWidth(), menuMaxHeight: this.menuHeight(),
+          onSelect: (value: string) => { this.selectResolution(value) }
+        })
       }
-      .width('100%')
-      .padding({ top: 8, bottom: 8 })
-      .onClick(() => {
-        this.showResolutionPicker = !this.showResolutionPicker
-        this.showFrameRatePicker = false
-      })
-
-      if (this.showResolutionPicker) {
-        Column({ space: 4 }) {
-          this.buildOptionItem('Auto', () => { this.selectResolution('Auto') })
-          this.buildOptionItem('720p', () => { this.selectResolution('720p') })
-          this.buildOptionItem('1080p', () => { this.selectResolution('1080p') })
-          this.buildOptionItem('4K', () => { this.selectResolution('4K') })
-        }
-        .width('100%')
-        .padding({ left: 8 })
+      .width('100%').padding({ top: 6, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({ title: translate('Frame Rate', this.uiLanguage) })
+        SettingsAction({
+          controlId: 'settings-frame-rate', label: this.frameRate.toString() + ' FPS',
+          accessibleLabel: translate('Frame Rate', this.uiLanguage) + ': ' + this.frameRate.toString() + ' FPS',
+          items: FRAME_RATE_OPTIONS, selected: this.frameRate.toString(), maxWidth: this.actionWidth(),
+          menuMaxHeight: this.menuHeight(), onSelect: (value: string) => { this.selectFrameRate(parseInt(value)) }
+        })
       }
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-        .margin({ top: 4, bottom: 4 })
-
-      Row() {
-        Text(translate('Frame Rate', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Text(translate(this.frameRate.toString(), this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        Text('>')
-          .fontSize(16)
-          .fontColor(RustDeskTheme.DARK_GRAY)
-          .margin({ left: 4 })
-      }
-      .width('100%')
-      .padding({ top: 8, bottom: 8 })
-      .onClick(() => {
-        this.showFrameRatePicker = !this.showFrameRatePicker
-        this.showResolutionPicker = false
-      })
-
-      if (this.showFrameRatePicker) {
-        Column({ space: 4 }) {
-          this.buildOptionItem('15', () => { this.selectFrameRate(15) })
-          this.buildOptionItem('30', () => { this.selectFrameRate(30) })
-          this.buildOptionItem('60', () => { this.selectFrameRate(60) })
-        }
-        .width('100%')
-        .padding({ left: 8 })
-      }
+      .width('100%').padding({ top: 9 })
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   selectResolution(res: string): void {
     this.resolution = res
-    this.showResolutionPicker = false
     RustDeskNapi.setOption('resolution', res)
   }
 
   selectFrameRate(fps: number): void {
     this.frameRate = fps
-    this.showFrameRatePicker = false
     RustDeskNapi.setOption('frame-rate', fps.toString())
   }
 
   @Builder
-  buildOptionItem(label: string, onClick: () => void) {
-    Text(translate(label, this.uiLanguage))
-      .fontSize(14)
-      .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-      .padding({ top: 6, bottom: 6, left: 8 })
-      .width('100%')
-      .backgroundColor(label === this.resolution || label === this.frameRate.toString() ?
-        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG) :
-        (this.isDarkMode ? RustDeskTheme.HOME_SURFACE_DARK : RustDeskTheme.HOME_SURFACE))
-      .border({ width: 1, color: label === this.resolution || label === this.frameRate.toString() ?
-        (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER) : Color.Transparent })
-      .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-      .onClick(() => { onClick() })
-  }
-
-  @Builder
   buildInputCard() {
-    Column({ space: 4 }) {
-      Row() {
-        Column({ space: 4 }) {
-          Text(translate('显示本地鼠标指针', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate('仅控制本机连接的物理鼠标指针，远端真实光标始终显示', this.uiLanguage))
-            .fontSize(12)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.showLocalCursor })
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.showLocalCursor ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            this.showLocalCursor = isOn
-            RustDeskNapi.setOption('show-local-cursor', isOn ? '1' : '0')
-          })
+    Column() {
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('显示本地鼠标指针', this.uiLanguage),
+          detail: translate('仅控制本机连接的物理鼠标指针，远端真实光标始终显示', this.uiLanguage)
+        })
+        this.buildSwitch({
+          label: translate('显示本地鼠标指针', this.uiLanguage),
+          checked: this.showLocalCursor,
+          enabled: true,
+          controlId: 'settings-local-cursor',
+          onChange: (isOn: boolean) => {
+              this.showLocalCursor = isOn
+              RustDeskNapi.setOption('show-local-cursor', isOn ? '1' : '0')
+            }
+        })
       }
       .width('100%')
-
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   confirmClearInsecureConsent(): void {
+    const palette = settingsPalette(this.isDarkMode)
     AlertDialog.show({
       title: translate('清除未加密连接免提醒', this.uiLanguage),
       message: translate('清除后，本机所有远端将在下次遇到未加密连接时重新提示。不会删除连接、密码或服务器设置。', this.uiLanguage),
-      primaryButton: { value: translate('取消', this.uiLanguage), action: () => {} },
-      secondaryButton: { value: translate('清除', this.uiLanguage), fontColor: RustDeskTheme.ERROR,
+      backgroundColor: palette.surface, cornerRadius: 16, transition: settingsPromptTransition(),
+      primaryButton: { value: translate('取消', this.uiLanguage), fontColor: palette.ink, backgroundColor: palette.pill,
+        action: () => {} },
+      secondaryButton: { value: translate('清除', this.uiLanguage), fontColor: palette.red, backgroundColor: palette.redSoft,
         action: () => { this.clearInsecureConsent() } },
     })
   }
@@ -498,190 +607,100 @@ export struct SettingsPage {
 
   @Builder
   buildAudioCard() {
-    Column({ space: 4 }) {
-      Row() {
-        Column({ space: 4 }) {
-          Text(translate('播放远端声音', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate('播放远端设备的系统声音；有真实音频时接入系统播控中心', this.uiLanguage))
-            .fontSize(12)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.remoteAudioEnabled })
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.remoteAudioEnabled ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            this.remoteAudioEnabled = isOn
-            RustDeskNapi.setOption('remote-audio-enabled', isOn ? '1' : '0')
-            RustDeskNapi.setRemoteAudioEnabled(isOn)
-            if (!isOn) {
-              RemoteSessionBackgroundTask.setAudioPlaybackActive(false)
+    Column() {
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('播放远端声音', this.uiLanguage),
+          detail: translate('播放远端设备的系统声音；有真实音频时接入系统播控中心', this.uiLanguage)
+        })
+        this.buildSwitch({
+          label: translate('播放远端声音', this.uiLanguage),
+          checked: this.remoteAudioEnabled,
+          enabled: true,
+          controlId: 'settings-audio',
+          onChange: (isOn: boolean) => {
+              this.remoteAudioEnabled = isOn
+              RustDeskNapi.setOption('remote-audio-enabled', isOn ? '1' : '0')
+              RustDeskNapi.setRemoteAudioEnabled(isOn)
+              if (!isOn) RemoteSessionBackgroundTask.setAudioPlaybackActive(false)
             }
-          })
+        })
       }
       .width('100%')
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   @Builder
   buildCloudSyncCard() {
-    Column({ space: 4 }) {
-      Text(translate('华为云空间', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 4 })
-
-      Text(translate('在同一华为账号的设备间备份和恢复已保存连接、分组与服务器地址。', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-        .lineHeight(19)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
-        .margin({ bottom: 6 })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('个人云空间同步', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate(this.cloudSyncStatus, this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.cloudSyncEnabled })
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.cloudSyncEnabled ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            this.setCloudSyncEnabled(isOn)
-          })
+    Column() {
+      this.sectionTitle(translate('华为云空间', this.uiLanguage), 'cloud')
+      this.detailText({ text: translate('在同一华为账号的设备间备份和恢复已保存连接、分组与服务器地址。', this.uiLanguage) })
+      Divider().strokeWidth(1).color(settingsPalette(this.isDarkMode).hair).margin({ top: 8 })
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('个人云空间同步', this.uiLanguage),
+          detail: translate(this.cloudSyncStatus, this.uiLanguage),
+          activeStatus: this.cloudSyncEnabled
+        })
+        this.buildSwitch({
+          label: translate('个人云空间同步', this.uiLanguage),
+          checked: this.cloudSyncEnabled,
+          enabled: true,
+          controlId: 'settings-cloud-sync',
+          onChange: (isOn: boolean) => { this.setCloudSyncEnabled(isOn) }
+        })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
 
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('同步连接密码和服务器密钥', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate(this.cloudSyncIncludesSecrets ? '同步时使用 AES-256-GCM 加密敏感信息' : '默认不上传敏感信息', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.cloudSecretsSwitchOn })
-          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy && !this.cloudSecretsPending)
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.cloudSecretsSwitchOn ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            this.onCloudSecretsSwitchChanged(isOn)
-          })
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('同步连接密码和服务器密钥', this.uiLanguage),
+          detail: translate(this.cloudSyncIncludesSecrets ? '同步时使用 AES-256-GCM 加密敏感信息' : '默认不上传敏感信息',
+              this.uiLanguage)
+        })
+        this.buildSwitch({
+          label: translate('同步连接密码和服务器密钥', this.uiLanguage),
+          checked: this.cloudSecretsSwitchOn,
+          enabled: this.cloudSyncEnabled && !this.cloudSyncBusy && !this.cloudSecretsPending,
+          controlId: 'settings-cloud-secrets',
+          onChange: (isOn: boolean) => { this.onCloudSecretsSwitchChanged(isOn) }
+        })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .opacity(this.cloudSyncEnabled ? 1 : 0.55)
+      .width('100%').padding({ top: 9, bottom: 9 }).opacity(this.cloudSyncEnabled ? 1 : 0.55)
 
       if (this.cloudSyncEnabled && this.cloudSyncIncludesSecrets) {
-        Row() {
-          Text(translate('备份密码仅保存在本机', this.uiLanguage))
-            .fontSize(11)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-          Blank()
-          Text(translate('更换密码', this.uiLanguage))
-            .fontSize(12)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-            .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-            .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-            .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-            .onClick(() => {
+        this.rowDivider()
+        Row({ space: 8 }) {
+          this.rowCopy({ title: translate('备份密码', this.uiLanguage), detail: translate('备份密码仅保存在本机', this.uiLanguage) })
+          SettingsAction({ label: translate('更换密码', this.uiLanguage), maxWidth: this.actionWidth(),
+            onAction: () => {
               this.cloudPasswordAction = 'enable-secrets'
               this.cloudPasswordDialogController.open()
-            })
+            } })
         }
-        .width('100%')
-        .padding({ bottom: 8 })
+        .width('100%').padding({ top: 9, bottom: 9 })
       }
 
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row({ space: 10 }) {
-        Button(translate(this.cloudSyncBusy ? '同步中…' : '立即同步', this.uiLanguage))
-          .fontSize(14)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .layoutWeight(1)
-          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
-          .onClick(() => {
-            this.syncCloudNow(false, false)
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
-        Button(translate('从云端恢复', this.uiLanguage))
-          .fontSize(14)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-          .layoutWeight(1)
-          .enabled(this.cloudSyncEnabled && !this.cloudSyncBusy)
-          .onClick(() => {
-            this.confirmCloudRestore()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, RustDeskTheme.HOME_CONTROL_RADIUS, ButtonType.Capsule))
+      this.rowDivider()
+      Row({ space: 3 }) {
+        SettingsAction({ label: translate(this.cloudSyncBusy ? '同步中…' : '立即同步', this.uiLanguage),
+          icon: 'sync', tone: 'primary', grouped: true, maxWidth: this.groupedActionWidth(),
+          isEnabled: this.cloudSyncEnabled && !this.cloudSyncBusy, onAction: () => { this.syncCloudNow(false, false) } })
+        Divider().vertical(true).height(19).strokeWidth(1).color(settingsPalette(this.isDarkMode).pillEdge)
+        SettingsAction({ label: translate('从云端恢复', this.uiLanguage), icon: 'restore', grouped: true,
+          maxWidth: this.groupedActionWidth(), isEnabled: this.cloudSyncEnabled && !this.cloudSyncBusy,
+          onAction: () => { this.confirmCloudRestore() } })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 6 })
+      .padding(2).margin({ top: 9, bottom: 9 }).alignSelf(ItemAlign.Start)
+      .backgroundColor(settingsPalette(this.isDarkMode).pill)
+      .border({ width: 1, color: settingsPalette(this.isDarkMode).pillEdge })
+      .borderRadius(this.roundedRectButtons ? 15 : 26)
 
-      Text(translate('还需在系统“设置 > 华为账号 > 云空间”中允许 芝麻远控 同步。', this.uiLanguage))
-        .fontSize(11)
-        .lineHeight(17)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
+      this.detailText({ text: translate('还需在系统“设置 > 华为账号 > 云空间”中允许 芝麻远控 同步。', this.uiLanguage) })
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW,
-      offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   setCloudSyncEnabled(enabled: boolean): void {
@@ -934,19 +953,22 @@ export struct SettingsPage {
       (!serverConflict && preview.connectionCount === 0 ? translate('此备份没有连接，恢复后本机连接列表将为空。可取消并选择更早的备份。', this.uiLanguage) + '\n\n' : '') +
       translate(serverConflict ? '本次不会恢复连接、分组或服务器配置。' :
         '云端连接和分组将覆盖本机对应内容；服务器配置按上述说明处理。未加密备份不会覆盖本机已有密码。', this.uiLanguage)
+    const palette = settingsPalette(this.isDarkMode)
     AlertDialog.show({
       title: translate('确认恢复此备份', this.uiLanguage),
       message: details,
       autoCancel: false,
       cancel: () => { this.cancelCloudRestore() },
       alignment: DialogAlignment.Center,
+      backgroundColor: palette.surface, cornerRadius: 16, transition: settingsPromptTransition(),
       primaryButton: {
         value: translate('取消', this.uiLanguage),
+        fontColor: palette.ink, backgroundColor: palette.pill,
         action: () => { this.cancelCloudRestore() },
       },
       secondaryButton: {
         value: translate(serverConflict ? '知道了' : '恢复', this.uiLanguage),
-        fontColor: RustDeskTheme.ACCENT,
+        fontColor: palette.blue, backgroundColor: palette.blueSoft,
         action: () => {
           if (serverConflict) { this.cancelCloudRestore(false); return }
           CloudSyncService.recordUi('restore_confirmed', { cloudTime: preview.time, connections: preview.connectionCount,
@@ -979,110 +1001,80 @@ export struct SettingsPage {
 
   @Builder
   buildDiagnosticsCard() {
-    Column({ space: 4 }) {
-      Text(translate('问题诊断', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 4 })
-
-      Text(translate('诊断默认关闭。开启后记录连接、网络通道、视频编码和解码状态；不会记录密码、验证码、剪贴板内容或密钥。', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-        .lineHeight(19)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
-        .margin({ bottom: 6 })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('诊断日志', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate(this.diagnosticLogEnabled ? '本地记录运行及系统故障日志，不自动上传；关闭时清除已采集的系统故障记录' : '已关闭，不会在后台写入诊断日志', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.diagnosticLogEnabled })
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.diagnosticLogEnabled ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            this.setDiagnosticLogEnabled(isOn)
-          })
-      }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate(this.diagnosticLogBusy ? '正在导出…' : '导出诊断日志', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate('包含已采集的崩溃/卡死记录；闪退后请重新打开应用，稍候再导出', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Text(translate('导出', this.uiLanguage))
-          .fontSize(14)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.ACCENT_SOFT_DARK : RustDeskTheme.ACCENT_SOFT)
-          .borderRadius(RustDeskTheme.HOME_CONTROL_RADIUS)
-      }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .enabled(!this.diagnosticLogBusy)
-      .opacity(this.diagnosticLogBusy ? 0.6 : 1)
-      .onClick(() => {
-        this.exportDiagnosticLog()
+    Column() {
+      this.sectionTitle(translate('问题诊断', this.uiLanguage), 'activity')
+      this.detailText({
+        text: translate('诊断默认关闭。开启后记录连接、网络通道、视频编码和解码状态；不会记录密码、验证码、剪贴板内容或密钥。',
+          this.uiLanguage)
       })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Text(translate('清除诊断日志', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? '#FF9A9A' : RustDeskTheme.ERROR)
-        Blank()
-        Text('>')
-          .fontSize(16)
-          .fontColor(this.isDarkMode ? '#FF9A9A' : RustDeskTheme.ERROR)
+      Divider().strokeWidth(1).color(settingsPalette(this.isDarkMode).hair).margin({ top: 8 })
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('诊断日志', this.uiLanguage),
+          detail: translate(this.diagnosticLogEnabled ? '本地记录运行及系统故障日志，不自动上传；关闭时清除已采集的系统故障记录' :
+              '已关闭，不会在后台写入诊断日志', this.uiLanguage)
+        })
+        this.buildSwitch({
+          label: translate('诊断日志', this.uiLanguage),
+          checked: this.diagnosticLogEnabled,
+          enabled: true,
+          controlId: 'settings-diagnostics',
+          onChange: (isOn: boolean) => { this.setDiagnosticLogEnabled(isOn) }
+        })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 8 })
-      .onClick(() => {
-        this.confirmClearDiagnosticLog()
-      })
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate(this.diagnosticLogBusy ? '正在导出…' : '导出诊断日志', this.uiLanguage),
+          detail: translate('包含已采集的崩溃/卡死记录；闪退后请重新打开应用，稍候再导出', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('导出', this.uiLanguage), icon: 'download', maxWidth: this.actionWidth(),
+          isEnabled: !this.diagnosticLogBusy, onAction: () => { this.exportDiagnosticLog() } })
+      }
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('清除诊断日志', this.uiLanguage),
+          detail: translate('只清理本机已记录的日志', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('清除', this.uiLanguage), icon: 'trash', tone: 'warn',
+          accessibleLabel: translate('清除诊断日志', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.confirmClearDiagnosticLog() } })
+      }
+      .width('100%').padding({ top: 9 })
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
+  }
+
+  @Builder
+  buildRecordsCard() {
+    Column() {
+      this.sectionTitle(translate('使用记录', this.uiLanguage), 'clock')
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('文件传输历史', this.uiLanguage),
+          detail: translate('查看发送、取回、失败和取消记录', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('查看', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          accessibleLabel: translate('文件传输历史', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.fileTransferHistoryDialogController.open() } })
+      }
+      .width('100%').padding({ top: 6, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('会话录像', this.uiLanguage),
+          detail: translate('查看或导出已结束的远控会话录像', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('查看 / 导出', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          accessibleLabel: translate('会话录像', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.recordingDialogController.open() } })
+      }
+      .width('100%').padding({ top: 9 })
+    }
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   setDiagnosticLogEnabled(enabled: boolean): void {
@@ -1139,19 +1131,22 @@ export struct SettingsPage {
   }
 
   confirmClearDiagnosticLog(): void {
+    const palette = settingsPalette(this.isDarkMode)
     AlertDialog.show({
       title: translate('清除诊断日志', this.uiLanguage),
       message: translate('清除后，当前、上一份诊断日志和已采集的系统故障记录都无法恢复。确定继续吗？', this.uiLanguage),
       autoCancel: true,
       alignment: DialogAlignment.Center,
+      backgroundColor: palette.surface, cornerRadius: 16, transition: settingsPromptTransition(),
       primaryButton: {
         value: translate('取消', this.uiLanguage),
+        fontColor: palette.ink, backgroundColor: palette.pill,
         action: () => {
         },
       },
       secondaryButton: {
         value: translate('清除', this.uiLanguage),
-        fontColor: RustDeskTheme.ERROR,
+        fontColor: palette.red, backgroundColor: palette.redSoft,
         action: () => {
           RustDeskNapi.clearDiagnosticLog()
           SystemFaultDiagnostic.clear()
@@ -1164,148 +1159,49 @@ export struct SettingsPage {
   @Builder
   buildAboutCard() {
     Column() {
-      Text(translate('About', this.uiLanguage))
-        .fontSize(RustDeskTheme.FONT_SIZE_TITLE)
-        .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-        .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        .width('100%')
-        .margin({ bottom: 8 })
-
-      Row() {
-        Text(translate('Version', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Text(translate(RELEASE_NOTES_VERSION, this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
+      this.sectionTitle(translate('关于与反馈', this.uiLanguage), 'info')
+      Row({ space: 8 }) {
+        this.rowCopy({ title: translate('Version', this.uiLanguage) })
+        Text('v' + RELEASE_NOTES_VERSION).fontSize(13).fontColor(settingsPalette(this.isDarkMode).subtle)
+          .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+          .backgroundColor(settingsPalette(this.isDarkMode).pill).borderRadius(9)
       }
-      .width('100%')
-      .padding({ top: 8, bottom: 8 })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('更新日志', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate(`查看 v${RELEASE_NOTES_VERSION} 的更新内容`, this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Text('>')
-          .fontSize(16)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .margin({ left: 4 })
+      .width('100%').padding({ top: 6, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('更新日志', this.uiLanguage),
+          detail: translate(`查看 v${RELEASE_NOTES_VERSION} 的更新内容`, this.uiLanguage)
+        })
+        SettingsAction({ label: translate('查看', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          accessibleLabel: translate('更新日志', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.releaseNotesDialogController.open() } })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .onClick(() => {
-        this.releaseNotesDialogController.open()
-      })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('文件传输历史', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate('查看发送、取回、失败和取消记录', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Text('>')
-          .fontSize(16)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .margin({ left: 4 })
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('加入 QQ 群', this.uiLanguage),
+          detail: translate(`群号 ${QQ_GROUP_NUMBER}`, this.uiLanguage)
+        })
+        SettingsAction({ label: translate('加入', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          accessibleLabel: translate('加入 QQ 群', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.openQQGroup() } })
       }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .onClick(() => {
-        this.fileTransferHistoryDialogController.open()
-      })
-
-      Row() {
-        Text(translate('会话录像', this.uiLanguage)).fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .layoutWeight(1)
-        Text(translate('查看 / 导出  >', this.uiLanguage)).fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('应用备案号', this.uiLanguage),
+          detail: translate('浙ICP备2026058556号-2A', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('查看', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          accessibleLabel: translate('应用备案号', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.openFilingWebsite() } })
       }
-      .width('100%').padding({ top: 14, bottom: 14 })
-      .onClick(() => { this.recordingDialogController.open() })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('加入 QQ 群', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate(`群号 ${QQ_GROUP_NUMBER}`, this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Text('>')
-          .fontSize(16)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .margin({ left: 4 })
-      }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .onClick(() => {
-        this.openQQGroup()
-      })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-
-      Row() {
-        Text(translate('APP Filing Number', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Text(translate('浙ICP备2026058556号-2A', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-        Text('>')
-          .fontSize(16)
-          .fontColor(this.isDarkMode ? '#76A9FF' : RustDeskTheme.ACCENT)
-          .margin({ left: 4 })
-      }
-      .width('100%')
-      .padding({ top: 10, bottom: 10 })
-      .onClick(() => {
-        this.openFilingWebsite()
-      })
+      .width('100%').padding({ top: 9 })
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   async openFilingWebsite(): Promise<void> {
@@ -1340,154 +1236,80 @@ export struct SettingsPage {
   @Builder
   buildServerConfigCard() {
     Column() {
-      Row() {
-        Column() {
-          Text(translate('ID/Relay Server', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          Text(translate('Configure custom server', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        }
-        .alignItems(HorizontalAlign.Start)
-
-        Blank()
-
-        Text('>')
-          .fontSize(18)
-          .fontColor(RustDeskTheme.DARK_GRAY)
+      this.sectionTitle(translate('网络服务', this.uiLanguage), 'server')
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('ID / 中继服务器', this.uiLanguage),
+          detail: translate('配置自建服务器地址和密钥', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('配置', this.uiLanguage), tone: 'quiet', trailing: 'next',
+          maxWidth: this.actionWidth(), onAction: () => { this.serverConfigDialogController.open() } })
       }
-      .width('100%')
-      .onClick(() => {
-        this.serverConfigDialogController.open()
-      })
-
-      Divider()
-        .height(1)
-        .color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-        .margin({ top: 12, bottom: 12 })
-
-      Row() {
-        Column({ space: 3 }) {
-          Text(translate('查询服务器/设备在线状态', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-            .width('100%')
-          Text(translate('默认开启；定期查询已保存设备，可手动关闭，手动连接不受影响', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL)
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-            .width('100%')
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-        Toggle({ type: ToggleType.Switch, isOn: this.peerOnlineQueryEnabled })
-          .id('peerOnlineQueryToggle')
-          .selectedColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .switchPointColor(this.peerOnlineQueryEnabled ?
-            (this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT) :
-            (this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : Color.White))
-          .onChange((isOn: boolean) => {
-            if (PeerOnlinePreference.setEnabled(isOn)) {
-              this.peerOnlineQueryEnabled = isOn
-            } else {
-              promptAction.showToast({ message: translate('保存设置失败，请重试', this.uiLanguage) })
+      .width('100%').padding({ top: 6, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('查询服务器/设备在线状态', this.uiLanguage),
+          detail: translate('默认开启；定期查询已保存设备，可手动关闭，手动连接不受影响', this.uiLanguage)
+        })
+        this.buildSwitch({
+          label: translate('查询服务器/设备在线状态', this.uiLanguage),
+          checked: this.peerOnlineQueryEnabled,
+          enabled: true,
+          controlId: 'peerOnlineQueryToggle',
+          onChange: (isOn: boolean) => {
+              if (PeerOnlinePreference.setEnabled(isOn)) {
+                this.peerOnlineQueryEnabled = isOn
+              } else {
+                promptAction.showToast({ message: translate('保存设置失败，请重试', this.uiLanguage) })
+              }
             }
-          })
+        })
       }
-      .width('100%')
-
-      Divider().height(1).color(this.isDarkMode ? RustDeskTheme.DIVIDER_DARK : RustDeskTheme.DIVIDER)
-        .margin({ top: 12, bottom: 12 })
-      Row({ space: 12 }) {
-        Column({ space: 3 }) {
-          Text(translate('未加密连接免提醒', this.uiLanguage)).fontSize(RustDeskTheme.FONT_SIZE_BODY)
-            .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-            .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY).width('100%')
-          Text(translate('清除本机7天免提醒授权，不影响连接、密码和服务器设置', this.uiLanguage))
-            .fontSize(RustDeskTheme.FONT_SIZE_SMALL).width('100%')
-            .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Button(translate('清除', this.uiLanguage)).constraintSize({ minHeight: 40 })
-          .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
-          .onClick(() => { this.confirmClearInsecureConsent() })
-      }.width('100%')
+      .width('100%').padding({ top: 9, bottom: 9 })
+      this.rowDivider()
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('未加密连接免提醒', this.uiLanguage),
+          detail: translate('清除本机7天免提醒授权，不影响连接、密码和服务器设置', this.uiLanguage)
+        })
+        SettingsAction({ label: translate('清除', this.uiLanguage), tone: 'warn', icon: 'trash',
+          accessibleLabel: translate('清除未加密连接免提醒', this.uiLanguage), maxWidth: this.actionWidth(),
+          onAction: () => { this.confirmClearInsecureConsent() } })
+      }
+      .width('100%').padding({ top: 9 })
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   @Builder
   buildButtonShapeCard() {
-    Column({ space: 12 }) {
-      Row({ space: 12 }) {
-        Text(translate('按钮样式', this.uiLanguage))
-          .fontSize(16)
-          .wordBreak(WordBreak.BREAK_ALL)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-          .layoutWeight(1)
-        Button() {
-          Row({ space: 8 }) {
-            Text(this.buttonShapeLabel())
-              .fontSize(14)
-              .wordBreak(WordBreak.BREAK_ALL)
-              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-              .layoutWeight(1)
-            Text('▾')
-              .fontSize(14)
-              .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          }
-          .width('100%')
-        }
-        .id('button-shape-selector')
-        .layoutWeight(1.4)
-        .constraintSize({ minHeight: this.buttonShapeOptionHeight() })
-        .padding({ left: 16, right: 12, top: 10, bottom: 10 })
-        .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-        .border({ width: 1,
-          color: this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BORDER_DARK : RustDeskTheme.CONTROL_SELECTED_BORDER })
-        .accessibilityText(translate('按钮样式', this.uiLanguage) + ': ' + this.buttonShapeLabel())
-        .bindMenu([
-          { value: this.buttonShapeMenuLabel(true), action: () => { this.setButtonShape(true) } },
-          { value: this.buttonShapeMenuLabel(false), action: () => { this.setButtonShape(false) } }
-        ], { placement: Placement.BottomRight, enableArrow: true })
-        .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+    Column() {
+      Row({ space: 8 }) {
+        this.rowCopy({
+          title: translate('按钮样式', this.uiLanguage),
+          detail: translate('应用到连接、设置、远控功能栏和弹窗，立即生效并记住选择', this.uiLanguage)
+        })
+        SettingsAction({
+          controlId: 'button-shape-selector', label: this.buttonShapeLabel(),
+          accessibleLabel: translate('按钮样式', this.uiLanguage) + ': ' + this.buttonShapeLabel(),
+          items: BUTTON_OPTIONS, selected: this.roundedRectButtons ? 'rectangle' : 'classic',
+          maxWidth: this.actionWidth(), menuMaxHeight: this.menuHeight(),
+          onSelect: (value: string) => { this.setButtonShape(value === 'rectangle') }
+        })
       }
       .width('100%')
-      Text(translate('应用到连接、设置、远控功能栏和弹窗，立即生效并记住选择', this.uiLanguage))
-        .fontSize(12)
-        .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_SECONDARY_DARK : RustDeskTheme.TEXT_SECONDARY)
-        .width('100%')
     }
-    .padding(16)
-    .width('100%')
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
   buttonShapeLabel(): string {
     return translate(this.roundedRectButtons ? '圆角长方形' : '经典圆润', this.uiLanguage)
   }
 
-  buttonShapeMenuLabel(rectangular: boolean): string {
-    return translate(rectangular ? '圆角长方形' : '经典圆润', this.uiLanguage) +
-      (this.roundedRectButtons === rectangular ? '  ✓' : '')
-  }
-
   setButtonShape(rectangular: boolean): void {
     RustDeskNapi.setOption('button-shape', rectangular ? 'rectangle' : 'classic')
     this.roundedRectButtons = rectangular
-  }
-
-  buttonShapeOptionHeight(): number {
-    return Math.ceil(44 + Math.max(0, this.uiFontScale - 1) * 18)
   }
 
   async setThemeMode(mode: string): Promise<void> {
@@ -1506,33 +1328,21 @@ export struct SettingsPage {
   @Builder
   buildThemeToggle() {
     Column() {
-      Row() {
-        Text(translate('外观', this.uiLanguage))
-          .fontSize(RustDeskTheme.FONT_SIZE_BODY)
-          .fontWeight(RustDeskTheme.FONT_WEIGHT_SEMI_BOLD)
-          .fontColor(this.isDarkMode ? Color.White : RustDeskTheme.TEXT_PRIMARY)
-        Blank()
-        Button(translate(this.themeMode === 'dark' ? '深色' : this.themeMode === 'light' ? '浅色' : '跟随系统', this.uiLanguage))
-          .id('themeModeSelector')
-          .enabled(!this.themePreferenceBusy)
-          .fontSize(14).constraintSize({ minHeight: 40 })
-          .fontColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_TEXT_DARK : RustDeskTheme.CONTROL_SELECTED_TEXT)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.CONTROL_SELECTED_BG_DARK : RustDeskTheme.CONTROL_SELECTED_BG)
-          .bindMenu([
-            { value: translate('跟随系统', this.uiLanguage) + (this.themeMode === 'system' ? '  ✓' : ''), action: () => { this.setThemeMode('system') } },
-            { value: translate('浅色', this.uiLanguage) + (this.themeMode === 'light' ? '  ✓' : ''), action: () => { this.setThemeMode('light') } },
-            { value: translate('深色', this.uiLanguage) + (this.themeMode === 'dark' ? '  ✓' : ''), action: () => { this.setThemeMode('dark') } }
-          ], { placement: Placement.BottomRight })
-          .attributeModifier(new ButtonShapeModifier(this.roundedRectButtons, 12, ButtonType.Capsule))
+      Row({ space: 8 }) {
+        this.rowCopy({ title: translate('外观', this.uiLanguage), detail: translate('选择界面配色', this.uiLanguage) })
+        SettingsAction({
+          controlId: 'themeModeSelector',
+          label: translate(this.themeMode === 'dark' ? '深色' : this.themeMode === 'light' ? '浅色' : '跟随系统', this.uiLanguage),
+          accessibleLabel: translate('外观', this.uiLanguage) + ': ' +
+            translate(this.themeMode === 'dark' ? '深色' : this.themeMode === 'light' ? '浅色' : '跟随系统', this.uiLanguage),
+          items: THEME_OPTIONS, selected: this.themeMode, isEnabled: !this.themePreferenceBusy,
+          maxWidth: this.actionWidth(), menuMaxHeight: this.menuHeight(),
+          onSelect: (value: string) => { this.setThemeMode(value) }
+        })
       }
       .width('100%')
     }
-    .padding(16)
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.HOME_CARD_DARK : RustDeskTheme.HOME_CARD)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.HOME_BORDER_DARK : RustDeskTheme.HOME_BORDER })
-    .borderRadius(RustDeskTheme.HOME_CARD_RADIUS)
-    .shadow({ radius: 18, color: this.isDarkMode ? RustDeskTheme.HOME_SHADOW_DARK : RustDeskTheme.HOME_SHADOW, offsetX: 0, offsetY: 5 })
-    .width('100%')
+    .settingsCard(this.isDarkMode, this.compact())
   }
 
 }
@@ -1541,7 +1351,6 @@ export struct SettingsPage {
 struct SettingsPasswordDialog {
   @StorageLink('uiFontScale') uiFontScale: number = 1
   @StorageLink('uiLanguage') uiLanguage: string = 'zh-Hans'
-  @StorageLink('roundedRectButtons') roundedRectButtons: boolean = true
   @StorageLink('isDarkMode') isDarkMode: boolean = false
   @State password: string = ''
   @State passwordConfirm: string = ''
@@ -1551,6 +1360,29 @@ struct SettingsPasswordDialog {
   onCancel: () => void = () => {}
   controller?: CustomDialogController
   @State errorMsg: string = ''
+
+  private cancel(): void {
+    this.password = ''
+    this.passwordConfirm = ''
+    this.errorMsg = ''
+    this.onCancel()
+  }
+
+  private submit(): void {
+    if (this.password.length < 8) {
+      this.errorMsg = '备份密码至少需要 8 位'
+      return
+    }
+    if (this.password !== this.passwordConfirm) {
+      this.errorMsg = translate('Passwords do not match', this.uiLanguage)
+      return
+    }
+    const password = this.password
+    this.password = ''
+    this.passwordConfirm = ''
+    this.errorMsg = ''
+    this.onSave(password)
+  }
 
   build() {
     Column({ space: 12 }) {
@@ -1606,49 +1438,18 @@ struct SettingsPasswordDialog {
           .width('100%')
       }
 
-      Row({ space: 12 }) {
-        Button(translate('Cancel', this.uiLanguage))
-          .fontColor(this.isDarkMode ? RustDeskTheme.TEXT_PRIMARY_DARK : RustDeskTheme.TEXT_PRIMARY)
-          .backgroundColor(this.isDarkMode ? RustDeskTheme.SURFACE_MUTED_DARK : RustDeskTheme.BG_LIGHT)
-          .borderRadius(8)
-          .layoutWeight(1)
-          .onClick(() => {
-            this.password = ''
-            this.passwordConfirm = ''
-            this.errorMsg = ''
-            this.onCancel()
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
-
-        Button(translate('Save', this.uiLanguage))
-          .fontColor(Color.White)
-          .backgroundColor(RustDeskTheme.ACCENT)
-          .borderRadius(8)
-          .layoutWeight(1)
-          .onClick(() => {
-            if (this.password.length < 8) {
-              this.errorMsg = '备份密码至少需要 8 位'
-              return
-            }
-            if (this.password !== this.passwordConfirm) {
-              this.errorMsg = translate('Passwords do not match', this.uiLanguage)
-              return
-            }
-            let password: string = this.password
-            this.password = ''
-            this.passwordConfirm = ''
-            this.errorMsg = ''
-            this.onSave(password)
-          })
-        .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons, 8, ButtonType.Capsule))
+      Row({ space: 8 }) {
+        SettingsAction({ label: translate('Cancel', this.uiLanguage), onAction: () => { this.cancel() } })
+        SettingsAction({ label: translate('Save', this.uiLanguage), tone: 'primary', icon: 'check',
+          onAction: () => { this.submit() } })
       }
-      .width('100%')
-      .padding({ top: 8 })
+      .width('100%').justifyContent(FlexAlign.End).padding({ top: 8 })
     }
-    .padding(24)
+    .padding(16)
     .width('85%')
-    .backgroundColor(this.isDarkMode ? RustDeskTheme.CARD_DARK : Color.White)
-    .border({ width: 1, color: this.isDarkMode ? RustDeskTheme.BORDER_DARK : '#E4EAF3' })
-    .borderRadius(8)
+    .constraintSize({ maxWidth: 428 })
+    .backgroundColor(settingsPalette(this.isDarkMode).surface)
+    .border({ width: 1, color: settingsPalette(this.isDarkMode).line })
+    .borderRadius(16)
   }
 }

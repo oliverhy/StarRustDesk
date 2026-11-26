@@ -3,6 +3,13 @@
 export class RemoteGlassMenuState {
   category: string = 'screens';
   items: string[] = [];
+  // Other transports can provide an exact capability list. The default keeps
+  // the RustDesk menu, including its implicit actions and section ordering.
+  explicitActions: boolean = false;
+  inputTools: string[] = [];
+  disabledActions: string[] = [];
+  controlAccess: boolean = false;
+  note: string = '';
   keyboardItems: string[] = [];
   displayCount: number = 1;
   currentDisplay: number = 0;
@@ -73,7 +80,9 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
   const margin = Math.min(8, Math.min(vw, vh) / 4);
   const padding = 12;
   const baselineRow = state.category === 'more' ? 25 : state.category === 'keyboard' ? 28 : state.category === 'view' ? 32 : 36;
-  const rowHeight = Math.ceil(baselineRow + 22 * (scale - 1));
+  // A normal HarmonyOS button can measure 40vp even when its minHeight is
+  // smaller. Reserve its actual touch height in capability-filtered panels.
+  const rowHeight = Math.ceil((state.explicitActions ? Math.max(40, baselineRow) : baselineRow) + 22 * (scale - 1));
   const headerHeight = Math.ceil(Math.max(26, 20 * scale + 6));
   const segmentHeight = Math.ceil((state.category === 'keyboard' ? 32 : 40) + 24 * (scale - 1));
   const screenHeight = Math.ceil(Math.max(state.canExtendDisplay ? 88 : 62, 28 * scale + (state.canExtendDisplay ? 60 : 34)));
@@ -114,6 +123,15 @@ export function glassMenuMetrics(state: RemoteGlassMenuState, width: number, hei
       if (!state.followSystem || state.projection) content += stacked ? segmentHeight * 3 + 4 : segmentHeight;
       content += 10 + footerHeight + (state.orientationError ? Math.max(rowHeight * 2, Math.ceil(72 * scale)) : 0);
       break;
+  }
+  if (state.explicitActions) {
+    if (state.category === 'screens') content = headerHeight + screenHeight + 8 +
+      (state.items.includes('displaySwipe') ? rowHeight : 0);
+    if (state.category === 'input') content = headerHeight + (stacked ? 2 * segmentHeight + 4 : segmentHeight) +
+      8 + state.items.filter((k: string) => k !== 'input').length * rowHeight +
+      (state.inputTools.length > 0 ? 9 + state.inputTools.length * rowHeight : 0);
+    if (state.category === 'more') content = headerHeight + state.items.length * rowHeight;
+    if (state.note) content += Math.ceil(32 * scale) + 4;
   }
   const contentHeight = content;
   const maxHeight = Math.max(1, vh - margin * 2 - 8);

@@ -579,6 +579,13 @@ static void OnRustVideoFrame(const unsigned char* data, int length, int width, i
 }
 
 static bool IsSafeRustLifecycleEvent(const std::string& text) {
+    // Restrict address-book events to fixed labels: never export a credential
+    // or a value supplied by the server under this category.
+    if (text == "address-book-auth phase=credential outcome=invalid" ||
+        text == "address-book-auth phase=identity outcome=direct_endpoint_blocked" ||
+        text == "address-book-auth phase=identity outcome=unverified" ||
+        text == "address-book-auth phase=challenge source=personal" ||
+        text == "address-book-auth phase=challenge source=shared") return true;
     const char* prefixes[] = {
         "file-session:",
         "rust_connect entered",
@@ -897,13 +904,14 @@ static std::string ConnectionResultToMessage(int result) {
         case -34: return "远端身份签名缺失，无法建立加密连接";
         case -35: return "直连无法验证远端身份，连接未加密";
         case -36: return "UDP 直连失败，准备重新协商 TCP";
+        case -37: return "无法安全使用地址簿凭证，请检查当前服务器和设备身份";
         default: return "连接失败（错误码：" + std::to_string(result) + "）";
     }
 }
 
 static napi_value Connect(napi_env env, napi_callback_info info) {
-    size_t argc = 12;
-    napi_value args[12] = {nullptr};
+    size_t argc = 14;
+    napi_value args[14] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     bool forceRelay = false;
     bool allowInsecureFallback = false;
@@ -913,6 +921,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
     if (argc >= 11) napi_get_value_int32(env, args[10], &insecureReason);
     int32_t transportPolicy = 0;
     if (argc >= 12) napi_get_value_int32(env, args[11], &transportPolicy);
+    int32_t addressBookKind = 0;
+    if (argc >= 13) napi_get_value_int32(env, args[12], &addressBookKind);
     if (transportPolicy < 0 || transportPolicy > 2) transportPolicy = 0;
     if (!allowInsecureFallback || insecureReason < 1 || insecureReason > 3) insecureReason = 0;
     bool fileOnly = false;
@@ -947,9 +957,27 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         ? GetOrCreateClientHwid() : "";
     std::string clientId = GetOrCreateClientId();
 
-    if (peer.empty()) {
+    std::string bookCredential;
+    if (addressBookKind != 0) {
+        char buffer[512] = {};
+        size_t size = 0;
+        napi_status read = argc < 14 ? napi_invalid_arg :
+            napi_get_value_string_utf8(env, args[13], nullptr, 0, &size);
+        if (read == napi_ok && size > 0 && size < sizeof(buffer)) {
+            size_t copied = 0;
+            if (napi_get_value_string_utf8(env, args[13], buffer, sizeof(buffer), &copied) == napi_ok &&
+                copied == size && std::find(buffer, buffer + size, '\0') == buffer + size) {
+                bookCredential.assign(buffer, size);
+            }
+        }
+        std::fill(std::begin(buffer), std::end(buffer), 0);
+    }
+    if (peer.empty() || (addressBookKind != 0 &&
+        ((addressBookKind != 1 && addressBookKind != 2) || bookCredential.empty() || !pass.empty() ||
+         allowInsecureFallback || fileOnly || lockAfterDisconnect || privacyMode || !osPass.empty()))) {
         napi_value ret;
-        napi_create_int32(env, -1, &ret);
+        if (addressBookKind != 0) SetLastConnectionMessage(ConnectionResultToMessage(-37));
+        napi_create_int32(env, addressBookKind != 0 ? -37 : -1, &ret);
         return ret;
     }
     uint64_t generation = g_connectionGeneration.fetch_add(1) + 1;
@@ -972,6 +1000,7 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         "connect_requested generation=" + std::to_string(generation) +
         " peer=" + MaskPeerId(peer) +
         " password_configured=" + std::string(pass.empty() ? "no" : "yes") +
+        " address_book_credential=" + std::string(addressBookKind != 0 ? "scoped" : "none") +
         " rendezvous=" + std::string(rendezvous.empty() ? "default" : "custom") +
         " relay=" + std::string(relay.empty() ? "default" : "custom") +
         " key=" + std::string(serverKey.empty() ? "empty" : "set") +
@@ -982,7 +1011,8 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         " transport_policy=" + std::to_string(transportPolicy));
     std::thread([peer, pass, rendezvous, relay, serverKey, clientHwid, clientId,
                  osPass = std::move(osPass), generation, forceRelay, insecureReason,
-                 fileOnly, lockAfterDisconnect, privacyMode, transportPolicy]() mutable {
+                 fileOnly, lockAfterDisconnect, privacyMode, transportPolicy,
+                 addressBookKind, bookCredential = std::move(bookCredential)]() mutable {
         {
             std::unique_lock<std::mutex> lock(g_connectionLifecycleMutex);
             g_disconnectFinished.wait(lock, []() { return !g_disconnectInProgress.load(); });
@@ -996,16 +1026,20 @@ static napi_value Connect(napi_env env, napi_callback_info info) {
         }
         VideoRender::instance().resetSession();
         if (g_connectionGeneration.load() != generation) return;
-        OH_LOG_INFO(LOG_APP, "Starting rust_connect peer=%{private}s password_len=%{public}zu server=%{private}s key=%{public}s",
-                    peer.c_str(), pass.size(), rendezvous.c_str(), serverKey.empty() ? "empty" : "set");
+        OH_LOG_INFO(LOG_APP, "Starting rust_connect");
         OH_LOG_INFO(LOG_APP, "rust_connect thread entered generation=%{public}llu", static_cast<unsigned long long>(generation));
         DiagnosticLog::instance().append("I", "connection",
             "rust_connect_started generation=" + std::to_string(generation));
-        int result = rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
+        int result = addressBookKind != 0
+            ? rust_connect_with_address_book(peer.c_str(), rendezvous.c_str(), relay.c_str(),
+                  serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0,
+                  transportPolicy, addressBookKind, bookCredential.c_str())
+            : rust_connect(peer.c_str(), pass.c_str(), rendezvous.c_str(), relay.c_str(),
                                   serverKey.c_str(), clientHwid.c_str(), clientId.c_str(), forceRelay ? 1 : 0,
                                   insecureReason, fileOnly ? 1 : 0,
                                   lockAfterDisconnect ? 1 : 0, privacyMode ? 1 : 0, osPass.c_str(),
                                   transportPolicy);
+        std::fill(bookCredential.begin(), bookCredential.end(), '\0');
         std::fill(osPass.begin(), osPass.end(), '\0');
         osPass.clear();
         OH_LOG_INFO(LOG_APP, "rust_connect finished result=%{public}d", result);

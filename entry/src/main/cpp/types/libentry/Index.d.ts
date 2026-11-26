@@ -104,7 +104,7 @@ export const clearDiagnosticLog: () => number;
 export const connect: (peerId: string, password: string, rendezvousServer?: string, relayServer?: string,
   forceRelay?: boolean, allowInsecureFallback?: boolean, fileOnly?: boolean,
   lockAfterDisconnect?: boolean, privacyMode?: boolean, osPassword?: string, insecureReason?: number,
-  transportPolicy?: number) => number;
+  transportPolicy?: number, addressBookKind?: number, addressBookValue?: string) => number;
 export const disconnect: () => number;
 export const setGameMode: (enabled: boolean) => number;
 export const setHighPerformance: (enabled: boolean) => number;

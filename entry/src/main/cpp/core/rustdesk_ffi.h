@@ -15,6 +15,10 @@ int rust_connect(const char* peer_id, const char* password,
                  int allow_insecure_fallback, int file_only,
                  int lock_after_disconnect, int privacy_mode, const char* os_password,
                  int transport_policy);
+int rust_connect_with_address_book(const char* peer_id, const char* rendezvous_server,
+                 const char* relay_server, const char* server_key, const char* client_hwid,
+                 const char* client_id, int force_relay, int transport_policy,
+                 int credential_kind, const char* credential_value);
 const char* rust_get_build_id(void);
 void rust_set_video_codec_support(int h264_supported, int vp9_supported,
                                   int vp8_supported, int av1_supported, int h265_supported);

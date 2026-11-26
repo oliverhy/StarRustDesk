@@ -129,16 +129,18 @@ assert.doesNotMatch(language, /disconnect|resetVideo|unbindSurface|router\.|load
   'language changes must not recreate the remote session');
 const settings = read('entry/src/main/ets/pages/SettingsPage.ets');
 for (const option of ['system', 'zh-Hans', 'zh-Hant', 'en']) {
-  assert(settings.includes(`languageMenuLabel('${option}'`));
-  assert(settings.includes(`LanguageService.setPreference('${option}')`));
+  assert(settings.includes(`{ key: '${option}', label:`));
 }
 const cardStart = settings.indexOf('  buildLanguageCard()');
 const cardEnd = settings.indexOf('  languagePreferenceLabel()', cardStart);
 const languageCard = settings.slice(cardStart, cardEnd);
-assert.equal((languageCard.match(/Button\(/g) || []).length, 1, 'one compact language selector, not four permanent buttons');
-assert(languageCard.includes(".id('language-selector')") && languageCard.includes('.bindMenu(['));
-assert(languageCard.includes('Text(this.languagePreferenceLabel())'));
-assert(languageCard.includes('.wordBreak(WordBreak.BREAK_ALL)') && !languageCard.includes('.maxLines('),
+assert.equal((languageCard.match(/SettingsAction\(/g) || []).length, 1, 'one compact language selector, not four permanent buttons');
+assert(languageCard.includes("controlId: 'language-selector'") && languageCard.includes('items: LANGUAGE_OPTIONS'));
+assert(languageCard.includes('label: this.languagePreferenceLabel()'));
+assert(languageCard.includes('selected: this.uiLanguagePreference'));
+assert(languageCard.includes('LanguageService.setPreference(value)'));
+const settingsControl = read('entry/src/main/ets/widget/SettingsControls.ets');
+assert(settingsControl.includes('WordBreak.BREAK_WORD') && !settingsControl.includes('.maxLines('),
   'selector wraps larger system fonts without an arbitrary line cap');
 assert(!settings.includes('buildLanguageChoice('));
 const labelEnd = settings.indexOf('  @Builder', cardEnd);
@@ -151,13 +153,9 @@ for (const locale of ['zh-Hans', 'zh-Hant', 'en']) {
   for (const [preference, label] of [['zh-Hans', '简体中文'], ['zh-Hant', '繁體中文'], ['en', 'English']]) {
     selector.uiLanguagePreference = preference;
     assert.equal(selector.languagePreferenceLabel(), label, 'current language uses recognizable self-name');
-    assert.equal(selector.languageMenuLabel(preference, label), label + '  ✓', 'current choice is marked after the label');
-    selector.uiLanguagePreference = 'system';
-    assert.equal(selector.languageMenuLabel(preference, label), label, 'other choices stay unmarked');
   }
   selector.uiLanguagePreference = 'system';
   assert.equal(selector.languagePreferenceLabel(), translate('跟随系统', locale));
-  assert.equal(selector.languageMenuLabel('system', '跟随系统'), translate('跟随系统', locale) + '  ✓');
 }
 const home = read('entry/src/main/ets/pages/HomePage.ets');
 assert(home.includes("this.buildTabItem(0, 'Connection')"), 'builders must receive stable source labels, not previous-locale text');

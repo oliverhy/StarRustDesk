@@ -74,8 +74,8 @@ expect(remotePage, /applyRemoteCursorPosition[\s\S]*alignVirtualMouseToRemotePos
   'authoritative remote cursor samples must recalibrate the virtual mouse')
 expect(remotePage, /updateVirtualMouseMove[\s\S]*updatePointerFromVirtualMouse\(\)/,
   'virtual mouse dragging must not reuse accelerated touchpad deltas')
-expect(remotePage, /handleVirtualMouseButtonTouch[\s\S]*TouchType\.Move[\s\S]*VIRTUAL_MOUSE_BUTTON_DRAG_THRESHOLD[\s\S]*beginVirtualMouseButtonDrag[\s\S]*TouchType\.Up[\s\S]*clickVirtualMouseButton/,
-  'virtual mouse buttons must distinguish taps from drag selection in one touch path')
+expect(remotePage, /handleVirtualMouseButtonTouch[\s\S]*TouchType\.Down[\s\S]*beginVirtualMouseButtonDrag[\s\S]*TouchType\.Move[\s\S]*VIRTUAL_MOUSE_BUTTON_DRAG_THRESHOLD[\s\S]*TouchType\.Up[\s\S]*finishVirtualMouseButtonDrag/,
+  'virtual button press starts on contact; threshold gates motion, not down')
 expect(remotePage, /Button\(translate\('左键'[\s\S]*?handleVirtualMouseButtonTouch\('left'[\s\S]*?Button\(translate\('右键'[\s\S]*?handleVirtualMouseButtonTouch\('right'/,
   'both virtual mouse buttons must use the conflict-free touch handler')
 expect(remotePage, /clickVirtualMouseButtonFallback[\s\S]*virtualMouseLastTouchResolvedAt[\s\S]*clickVirtualMouseButton[\s\S]*handleVirtualMouseButtonTouch\('left'[\s\S]*clickVirtualMouseButtonFallback\('left'/,

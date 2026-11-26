@@ -25,7 +25,8 @@ const context = vm.createContext({
   image: { PixelMapFormat: { RGBA_8888: 1 }, createPixelMapSync: () => ({}) }
 });
 const names = ['getDisplayWidth', 'getDisplayHeight', 'getDisplayLeft', 'getDisplayTop',
-  'refreshCursorOverlayGeometry', 'updateCursorOverlayFromPosition', 'pollRemoteCursorImage', 'remotePointToVisual'];
+  'refreshCursorOverlayGeometry', 'updateCursorOverlayFromPosition', 'pollRemoteCursorImage', 'remotePointToVisual',
+  'cursorOverlayScale'];
 const cursorConsts = source.match(/^const FALLBACK_CURSOR_[^;]+;/gm).join('\n');
 vm.runInContext(ts.transpile(`${cursorConsts}\nclass Page {${names.map(method).join('\n')}\n${areaMethod}} globalThis.Page=Page;`), context);
 const near = (actual, expected) => assert(Math.abs(actual - expected) < 1e-7, `${actual} != ${expected}`);
@@ -97,25 +98,41 @@ test('cursor shape and hotspot update even with local prediction only', () => {
   assert.equal(p.pointerShapeCursorReflows, 1); assert.equal(p.hasAuthoritativeRemoteCursor, false);
   assert.deepEqual(sent, []);
 });
-test('fallback arrow cancels its visible hotspot through zoom, pan and rotation', () => {
-  const p = page({ remoteCursorImageWidth: 0, remoteCursorImageHeight: 0, offsetX: -40, offsetY: 18 });
-  const builder = method('buildCursorOverlay');
-  const [, tipX, tipY] = builder.match(/\.commands\('M (\d+) (\d+) /).map(Number);
-  assert.match(builder, /Shape\(\)[\s\S]*viewPort\(\{ x: 0, y: 0, width: FALLBACK_CURSOR_WIDTH, height: FALLBACK_CURSOR_HEIGHT \}\)/);
-  for (const size of [[844, 363], [391, 777]]) {
-    p.handleViewportArea({}, { width: size[0], height: size[1] });
-    for (const zoom of [1, 2, 3.5]) {
-      p.zoomScale = zoom;
-      p.updateCursorOverlayFromPosition(p.lastAbsX, p.lastAbsY);
-      const centerX = p.componentWidth / 2, centerY = p.componentHeight / 2;
-      const expected = p.remotePointToVisual(p.lastAbsX, p.lastAbsY);
-      near(centerX + (p.cursorX + tipX - centerX) * zoom + p.offsetX, expected.x);
-      near(centerY + (p.cursorY + tipY - centerY) * zoom + p.offsetY, expected.y);
-      assert.equal(p.cursorImageWidth, 24); assert.equal(p.cursorImageHeight, 25);
+for (const useBitmap of [false, true]) {
+  test(`${useBitmap ? 'peer bitmap' : 'fallback arrow'} retains its size and hotspot through zoom, pan and rotation`, () => {
+    const p = page({ remoteCursorImageWidth: 0, remoteCursorImageHeight: 0, offsetX: -40, offsetY: 18 });
+    p.updateCursorOverlayFromPosition(p.lastAbsX, p.lastAbsY);
+    const builder = method('buildCursorOverlay');
+    const [, tipX, tipY] = builder.match(/\.commands\('M (\d+) (\d+) /).map(Number);
+    assert.match(builder, /Shape\(\)[\s\S]*viewPort\(\{ x: 0, y: 0, width: FALLBACK_CURSOR_WIDTH, height: FALLBACK_CURSOR_HEIGHT \}\)/);
+    if (useBitmap) {
+      cursorData = { valid: true, sequence: 7, id: 8, width: 40, height: 48, hotx: 12, hoty: 18, colors: [] };
+      p.pollRemoteCursorImage();
     }
-  }
-  assert.deepEqual(sent, []);
-});
+    for (const size of [[844, 363], [391, 777]]) {
+      p.handleViewportArea({}, { width: size[0], height: size[1] });
+      const parentCenterX = p.componentWidth / 2, parentCenterY = p.componentHeight / 2;
+      const bitmapScale = p.getDisplayWidth() / p.remoteWidth;
+      const clickX = useBitmap ? cursorData.hotx * bitmapScale : tipX;
+      const clickY = useBitmap ? cursorData.hoty * bitmapScale : tipY;
+      const width = useBitmap ? cursorData.width * bitmapScale : 24;
+      const height = useBitmap ? cursorData.height * bitmapScale : 25;
+      for (const zoom of [0.5, 1, 2, 3.5, 5]) {
+        // Change only the canvas transform (e.g. pinch while the remote mouse is idle).
+        p.zoomScale = zoom;
+        const local = p.cursorOverlayScale();
+        const expected = p.remotePointToVisual(p.lastAbsX, p.lastAbsY);
+        const afterChildX = p.cursorX + local.centerX + (clickX - local.centerX) * local.x;
+        const afterChildY = p.cursorY + local.centerY + (clickY - local.centerY) * local.y;
+        near(parentCenterX + (afterChildX - parentCenterX) * zoom + p.offsetX, expected.x);
+        near(parentCenterY + (afterChildY - parentCenterY) * zoom + p.offsetY, expected.y);
+        near(p.cursorImageWidth * local.x * zoom, width);
+        near(p.cursorImageHeight * local.y * zoom, height);
+      }
+    }
+    assert.deepEqual(sent, []);
+  });
+}
 test('invalid or offscreen positions never produce a cursor or send input', () => {
   for (const override of [{ pointerInitialized: false }, { remoteWidth: 0 },
     { lastAbsX: NaN }, { lastAbsX: 1920 }, { lastAbsY: -1 }]) {

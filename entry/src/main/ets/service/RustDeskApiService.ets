@@ -9,6 +9,7 @@ export interface ApiPeer {
   name: string;
   platform: string;
   tags: string[];
+  note?: string;
 }
 export interface ApiBook {
   guid: string;
@@ -16,10 +17,16 @@ export interface ApiBook {
   legacy: boolean;
   writable?: boolean;
 }
+export interface AddressBookCredential {
+  kind: number; // 1: personal salted hash; 2: shared password
+  value: string;
+}
 interface ApiUser { name?: string; display_name?: string; }
+interface SharedBookInfo { password?: string; }
 interface ApiRow {
   id?: string; alias?: string; hostname?: string; platform?: string; tags?: string[];
   guid?: string; name?: string; owner?: string; rule?: number;
+  hash?: string; password?: string; info?: SharedBookInfo; same_server?: boolean; note?: string;
 }
 interface ApiReply {
   code?: string; url?: string; loginOptions?: string[];
@@ -518,6 +525,10 @@ export class RustDeskApiService {
   }
 
   async books(): Promise<ApiBook[]> {
+    return this.listBooks();
+  }
+
+  private async listBooks(onShared?: (row: ApiRow) => void): Promise<ApiBook[]> {
     const books: ApiBook[] = [];
     let personal: ApiReply = {};
     try { personal = await this.request('/api/ab/personal', 'POST'); }
@@ -534,6 +545,7 @@ export class RustDeskApiService {
       if (!Array.isArray(result.data)) throw new ApiFailure('共享地址簿格式不兼容');
       let added = 0;
       for (const row of result.data) {
+        if (row && row.guid !== books[0].guid) onShared?.(row);
         if (row && typeof row.guid === 'string' && row.guid && !seen.includes(row.guid)) {
           seen.push(row.guid); added++;
           books.push({ guid: row.guid, name: (typeof row.name === 'string' ? row.name : '共享地址簿').slice(0, 100), legacy: false,
@@ -591,22 +603,85 @@ export class RustDeskApiService {
     return /^[A-Za-z0-9_.\-]+$/.test(id);
   }
 
-  static parsePeers(rows: ApiRow[]): ApiPeer[] {
+  static parsePeers(rows: ApiRow[], showNotes: boolean = false): ApiPeer[] {
     const peers: ApiPeer[] = [];
     for (const row of rows) {
       if (!row || typeof row.id !== 'string' || !RustDeskApiService.validPeerId(row.id)) continue;
       if (peers.some((peer: ApiPeer) => peer.id === row.id)) continue;
       const name = typeof row.alias === 'string' && row.alias ? row.alias :
         (typeof row.hostname === 'string' ? row.hostname : row.id);
-      peers.push({ id: row.id, name: name.slice(0, 100), platform: typeof row.platform === 'string' ? row.platform.slice(0, 32) : '',
-        tags: Array.isArray(row.tags) ? row.tags.filter((tag: string) => typeof tag === 'string').slice(0, 20) : [] });
+      const peer: ApiPeer = { id: row.id, name: name.slice(0, 100),
+        platform: typeof row.platform === 'string' ? row.platform.slice(0, 32) : '',
+        tags: Array.isArray(row.tags) ? row.tags.filter((tag: string) => typeof tag === 'string').slice(0, 20) : [] };
+      if (showNotes && typeof row.note === 'string' && row.note.trim()) peer.note = row.note.slice(0, 2000);
+      peers.push(peer);
     }
     return peers;
   }
 
   sessionRevision(): number { return this.epoch; }
 
+  addressBookScopeCurrent(revision: number): boolean {
+    return revision === this.epoch && this.isLoggedIn() && this.server.startsWith('https://') &&
+      this.bindingMatchesCurrentNetwork();
+  }
+
+  // Fetch from the selected book using the current account. Credential fields
+  // never enter the public peer model, sync plan, import or local store.
+  async addressBookCredential(book: ApiBook, id: string): Promise<AddressBookCredential> {
+    const revision = this.epoch;
+    if (!this.addressBookScopeCurrent(revision)) {
+      this.trace('address_book_connect phase=scope outcome=unbound_or_insecure');
+      throw new ApiFailure('地址簿凭证仅用于 HTTPS 登录且已关联当前 ID 服务器的账号。自建服务器请先启用连接权限认证并登录。');
+    }
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      throw new ApiFailure('只能对经过身份验证的设备 ID 使用地址簿凭证，请手动连接此设备。');
+    }
+    const matchingProfiles: ApiRow[] = [];
+    const currentBooks = await this.listBooks((row: ApiRow) => {
+      if (row.guid === book.guid) matchingProfiles.push(row);
+    });
+    const selected = currentBooks.find((item: ApiBook) => item.guid === book.guid && item.legacy === book.legacy);
+    if (!selected || matchingProfiles.length > 1 || !this.addressBookScopeCurrent(revision)) {
+      throw new ApiFailure('地址簿权限或网络已改变，请刷新后重试。');
+    }
+    const matchingPeers: ApiRow[] = [];
+    await this.readPeers(selected, true, (row: ApiRow) => {
+      if (row.id === id) matchingPeers.push(row);
+    });
+    const selectedRow = matchingPeers[0];
+    if (matchingPeers.length !== 1 || !selectedRow || selectedRow.same_server === false || !this.addressBookScopeCurrent(revision)) {
+      this.trace('address_book_connect phase=lookup outcome=peer_or_scope_changed');
+      throw new ApiFailure('设备已不可用或不属于当前 ID 网络，请刷新地址簿后重试。');
+    }
+    const profile = matchingProfiles.length === 1 ? matchingProfiles[0] : undefined;
+    const credential = RustDeskApiService.selectAddressBookCredential(selectedRow, profile);
+    this.trace(`address_book_connect phase=lookup outcome=${credential ? 'available' : 'unavailable'}`);
+    if (!credential) throw new ApiFailure('这条记录没有可用的地址簿凭证，请在首页输入远端密码连接。');
+    return credential;
+  }
+
+  private static selectAddressBookCredential(peer: ApiRow, shared?: ApiRow): AddressBookCredential | undefined {
+    if (!shared) {
+      return typeof peer.hash === 'string' && /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(peer.hash)
+        ? { kind: 1, value: peer.hash } : undefined;
+    }
+    const password = typeof peer.password === 'string' && peer.password.length > 0
+      ? peer.password : shared.info?.password;
+    return typeof password === 'string' && password.length > 0 && !password.includes('\u0000') &&
+      util.TextEncoder.create().encodeInto(password).length < 512 ? { kind: 2, value: password } : undefined;
+  }
+
   async peers(book: ApiBook, strict: boolean = false): Promise<ApiPeer[]> {
+    return this.readPeers(book, strict);
+  }
+
+  async browsePeers(book: ApiBook): Promise<ApiPeer[]> {
+    return this.readPeers(book, false, undefined, true);
+  }
+
+  private async readPeers(book: ApiBook, strict: boolean, onRow?: (row: ApiRow) => void,
+    showNotes: boolean = false): Promise<ApiPeer[]> {
     if (book.legacy) {
       const result = await this.request('/api/ab', 'GET');
       if (result.data === undefined || result.data === null || result.data === '') {
@@ -621,8 +696,9 @@ export class RustDeskApiService {
         return [];
       }
       if (!Array.isArray(data.peers)) throw new ApiFailure('地址簿设备列表无效');
-      const parsed = RustDeskApiService.parsePeers(data.peers);
+      const parsed = RustDeskApiService.parsePeers(data.peers, showNotes);
       if (strict && parsed.length !== data.peers.length) throw new ApiFailure('设备列表含无效或重复记录，已取消同步');
+      if (onRow) data.peers.forEach(onRow);
       return parsed;
     }
     const peers: ApiPeer[] = [];
@@ -640,8 +716,9 @@ export class RustDeskApiService {
         throw new ApiFailure('服务器未正确分页，设备列表不完整，请升级 API 服务');
       }
       if (total < 0 && pageTotal >= 0) total = pageTotal;
-      const rows = RustDeskApiService.parsePeers(result.data);
+      const rows = RustDeskApiService.parsePeers(result.data, showNotes);
       if (strict && rows.length !== result.data.length) throw new ApiFailure('设备列表含无效或重复记录，已取消同步');
+      if (onRow) result.data.forEach(onRow);
       let added = 0;
       for (const row of rows) {
         if (!peers.some((peer: ApiPeer) => peer.id === row.id)) { peers.push(row); added++; }

@@ -1,4 +1,5 @@
 export interface SavedConnectionDraft {
+  linkedDeviceId?: string
   remoteId: string
   name: string
   groupId: string
@@ -18,6 +19,14 @@ export interface ConnectionEditorGroup { id: string; name: string }
 export interface ConnectionEditResult { success: boolean; message: string }
 
 export class SavedConnectionEditing {
+  static addressEntry(value: string): boolean {
+    return value.includes(':') || /^(\d{1,3}\.){3}\d{1,3}$/.test(value)
+  }
+
+  // Deliberately exclude every endpoint, route suffix and server override.
+  static validDeviceId(value: string): boolean {
+    return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value)
+  }
   static endpoint(value: string): string {
     // Keep custom IDs and displayed/saved addresses exactly as entered, apart from spacing.
     return value.replace(/[\s\u200B-\u200D\uFEFF]+/g, '')

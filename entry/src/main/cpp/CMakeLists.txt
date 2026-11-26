@@ -8,6 +8,15 @@ if(DEFINED PACKAGE_FIND_FILE)
     include(${PACKAGE_FIND_FILE})
 endif()
 
+# Ordinary debug and release builds do not link the test transport or its dependencies.
+option(SESAME_STREAM_TEST_BUILD "Include the paired Sunshine phone test" OFF)
+if(SESAME_STREAM_TEST_BUILD)
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        message(FATAL_ERROR "Sunshine phone testing is restricted to Debug builds.")
+    endif()
+    add_subdirectory(sunshine)
+endif()
+
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)

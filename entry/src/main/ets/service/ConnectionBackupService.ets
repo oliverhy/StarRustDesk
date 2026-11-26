@@ -1,4 +1,5 @@
 import { cryptoFramework } from '@kit.CryptoArchitectureKit'
+import { SavedConnectionEditing } from '../model/SavedConnectionEditing'
 import { util } from '@kit.ArkTS'
 
 const PLAIN_BACKUP_FORMAT: string = 'StarRustDeskConnectionBackup'
@@ -13,6 +14,7 @@ export interface ConnectionBackupGroup {
 }
 
 export interface ConnectionBackupItem {
+  linkedDeviceId?: string
   id: string
   name: string
   remoteId: string
@@ -212,6 +214,8 @@ export class ConnectionBackupService {
       if (typeof item.id !== 'string' || typeof item.name !== 'string' ||
         typeof item.remoteId !== 'string' || typeof item.password !== 'string' ||
         typeof item.performancePreset !== 'string' || typeof item.groupId !== 'string' ||
+        (item.linkedDeviceId !== undefined && (!SavedConnectionEditing.addressEntry(item.remoteId) ||
+          !SavedConnectionEditing.validDeviceId(item.linkedDeviceId))) ||
         item.id.length > 200 || item.name.length > 200 || item.remoteId.length > 100 ||
         item.password.length > 1000 || item.performancePreset.length > 50 || item.groupId.length > 160) {
         throw new Error('备份中的连接信息无效')
