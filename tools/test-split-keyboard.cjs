@@ -71,6 +71,7 @@ const names = ['isHandheldDevice', 'isHandheldLandscape', 'getVisibleControlMenu
   'handleGlassMenuAction', 'toolbarOrderLabel', 'readToolbarOrder',
   'loadSplitKeyboardPreference', 'setSplitKeyboardEnabled', 'isSplitKeyboardActive',
   'getEffectiveKeyboardViewportHeight', 'getSplitKeyboardFullPageHeight', 'refreshSplitKeyboardLine',
+  'refreshSplitKeyboardLineIfPageChanged',
   'getSplitKeyboardViewportHeight', 'getRemoteCanvasHeight', 'getKeyboardViewportMaxHeight',
   'getKeyboardAvoidance', 'getKeyboardCanvasShiftY', 'snapshotRemoteKeyboardViewport', 'selectKeyboardInputAnchor',
   'onAreaChangeCallback', 'openRemoteKeyboard', 'closeRemoteKeyboard', 'restoreKeyboardAvoidMode',
@@ -97,6 +98,7 @@ function page(overrides = {}) {
     keyboardWindowWidth: 0, keyboardWindowHeight: 0, controlMenuKeyboardInset: 0, controlMenuPageOriginY: 0,
     keyboardManualPan: false, keyboardManualShiftY: 0, keyboardAvoidModeChanged: false, viewportPanFramePending: false,
     splitKeyboardEnabled: false, splitKeyboardLineVp: 0, remoteExternalDisplay: false,
+    splitKeyboardLinePageWidth: 0, splitKeyboardLinePageHeight: 0,
     remoteKeyboardWindow: { getWindowProperties: () => ({ windowRect }) },
     remoteKeyboardFocusGeneration: 0, remoteKeyboardEditing: false, remoteKeyboardVisible: false,
     remoteKeyboardVisibilityKnown: false, remoteKeyboardPointerHandoffUntil: 0, remoteKeyboardCloseTimer: -1,
@@ -195,6 +197,8 @@ test('TC-002 switching on opens the IME immediately in split layout and is saved
   // Existing gates in openRemoteKeyboard still apply (not connected: no capture).
   const r = page({ connectionStatus: 0 }); r.setSplitKeyboardEnabled(true);
   assert.equal(r.showKeyboardPanel, false); assert.equal(r.splitKeyboardEnabled, true);
+  // The picture moves above the line even when a gate keeps the IME closed.
+  assert.equal(r.isSplitKeyboardActive(), true); near(r.splitKeyboardLineVp, 500); near(r.getDisplayTop(), 0);
 });
 
 // covers: TC-003
@@ -213,6 +217,8 @@ test('TC-003 switching off closes the IME and restores the full picture', () => 
   q.setSplitKeyboardEnabled(true);
   q.toggleRemoteKeyboard(); // user hides the IME with the keyboard button
   assert.equal(q.showKeyboardPanel, false);
+  assert.equal(q.isSplitKeyboardActive(), true); // picture still above the line
+  near(q.getDisplayTop(), 0); near(q.getDisplayHeight(), 450);
   setOptionCalls.length = 0; q.calls.close = 0;
   q.controlMenu = 'view';
   q.handleGlassMenuAction('splitKeyboard');
@@ -223,6 +229,9 @@ test('TC-003 switching off closes the IME and restores the full picture', () => 
   assert.equal(q.getGlassMenuState().splitKeyboard, false);
   assert.equal(q.showKeyboardPanel, false);
   assert.equal(q.getRemoteCanvasHeight(), '100%');
+  // Off: the picture is centred in the full viewport again.
+  assert.equal(q.isSplitKeyboardActive(), false);
+  near(q.getDisplayTop(), (1000 - 450) / 2);
 });
 
 // covers: TC-004
@@ -375,7 +384,7 @@ test('TC-010 blank below the split picture is black viewport and a trackpad in m
 });
 
 // covers: TC-006
-test('TC-006 closing the IME keeps the switch on; reopening returns to split layout', () => {
+test('TC-006 closing the IME keeps the switch on and the picture above the line', () => {
   for (const via of ['button', 'ime']) {
     const p = page();
     p.setSplitKeyboardEnabled(true); setOptionCalls.length = 0;
@@ -387,23 +396,43 @@ test('TC-006 closing the IME keeps the switch on; reopening returns to split lay
     }
     assert.equal(p.showKeyboardPanel, false, via);
     assert.equal(p.getRemoteCanvasHeight(), '100%');
-    assert.equal(p.isSplitKeyboardActive(), false);
+    // Split layout stays: picture top-aligned above the line, black viewport below.
+    assert.equal(p.isSplitKeyboardActive(), true, via);
+    assert.equal(p.getKeyboardAvoidance().shiftY, 0);
+    near(p.getKeyboardViewportMaxHeight(), 1000);
+    near(p.getDisplayTop(), 0); near(p.getDisplayHeight(), 450);
+    assert(p.getDisplayHeight() <= p.getSplitKeyboardViewportHeight());
     assert.equal(p.splitKeyboardEnabled, true);
     assert(!setOptionCalls.some(call => call[1] === '0'), via);
     p.toggleRemoteKeyboard();
     assert.equal(p.showKeyboardPanel, true);
     assert.equal(p.isSplitKeyboardActive(), true);
   }
+  // IME hidden: rotation/fold changes the page size and the line follows it once.
+  const p = page();
+  p.setSplitKeyboardEnabled(true); p.toggleRemoteKeyboard();
+  const before = logs.filter(entry => entry[1].startsWith('split-keyboard line=')).length;
+  p.refreshSplitKeyboardLineIfPageChanged();
+  assert.equal(logs.filter(entry => entry[1].startsWith('split-keyboard line=')).length, before, 'unchanged size');
+  p.pageWidth = 1000; p.pageHeight = 800; p.refreshSplitKeyboardLineIfPageChanged();
+  near(p.splitKeyboardLineVp, 400);
+  // While the IME is up the page is resized by RESIZE mode: no crease queries.
+  p.toggleRemoteKeyboard(); const line = p.splitKeyboardLineVp;
+  p.pageHeight = 500; p.refreshSplitKeyboardLineIfPageChanged(); near(p.splitKeyboardLineVp, line);
+  assert(/this\.handleHandheldLayoutChange\(\);\n\s+this\.refreshSplitKeyboardLineIfPageChanged\(\);/.test(source));
 });
 
 // covers: TC-007
-test('TC-007 saved switch survives a new session but does not open the IME by itself', () => {
+test('TC-007 saved switch keeps the picture on top in a new session without opening the IME', () => {
   options.set('remote-split-keyboard', '1');
   const p = page();
   p.loadSplitKeyboardPreference();
   assert.equal(p.splitKeyboardEnabled, true);
   assert.equal(p.calls.open, 0); assert.equal(p.showKeyboardPanel, false);
   assert.equal(p.getGlassMenuState().splitKeyboard, true);
+  // New session: picture already above the line, IME still closed.
+  p.refreshSplitKeyboardLineIfPageChanged();
+  assert.equal(p.isSplitKeyboardActive(), true); near(p.splitKeyboardLineVp, 500); near(p.getDisplayTop(), 0);
   assert(/this\.loadEdgeAutoPanPreference\(\);\n\s+this\.loadSplitKeyboardPreference\(\);/.test(method('aboutToAppear')));
   assert(!method('loadSplitKeyboardPreference').includes('openRemoteKeyboard'));
   p.toggleRemoteKeyboard();

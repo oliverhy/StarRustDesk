@@ -322,6 +322,9 @@ struct RemotePage {
   // Local-device "picture above keyboard" switch; layout applies only while the IME capture is open.
   @State splitKeyboardEnabled: boolean = false;
   @State splitKeyboardLineVp: number = 0;
+  // Page size the cached split line was computed for (keyboard hidden only).
+  private splitKeyboardLinePageWidth: number = 0;
+  private splitKeyboardLinePageHeight: number = 0;
   private keyboardLayoutWidth: number = 0;
   private keyboardLayoutHeight: number = 0;
   private keyboardWindowWidth: number = 0;
@@ -2287,6 +2290,7 @@ struct RemotePage {
         this.closeRemoteKeyboard();
       }
       this.handleHandheldLayoutChange();
+      this.refreshSplitKeyboardLineIfPageChanged();
       this.mobileActionsOffsetX = this.clampMobileActionsOffsetX(this.mobileActionsOffsetX);
       this.mobileActionsOffsetY = this.clampMobileActionsOffsetY(this.mobileActionsOffsetY);
       this.keyboardToolsOffsetX = this.clampKeyboardToolsOffsetX(this.keyboardToolsOffsetX);
@@ -6770,8 +6774,21 @@ struct RemotePage {
     return height > 0 ? height : '100%';
   }
 
+  // The picture stays above the line while the switch is on, whether or not
+  // the IME is currently shown; only the switch returns to full screen.
   isSplitKeyboardActive(): boolean {
-    return this.splitKeyboardEnabled && this.showKeyboardPanel && this.isHandheldDevice() && !this.remoteExternalDisplay;
+    return this.splitKeyboardEnabled && this.isHandheldDevice() && !this.remoteExternalDisplay;
+  }
+
+  // With the IME hidden the page has its full height. Recompute the line when
+  // that size changes (first layout, rotation, fold/unfold), not per IME frame.
+  refreshSplitKeyboardLineIfPageChanged(): void {
+    if (!this.isSplitKeyboardActive() || this.showKeyboardPanel || this.pageWidth <= 0 || this.pageHeight <= 0) return;
+    if (Math.abs(this.pageWidth - this.splitKeyboardLinePageWidth) <= 0.5 &&
+      Math.abs(this.pageHeight - this.splitKeyboardLinePageHeight) <= 0.5) return;
+    this.splitKeyboardLinePageWidth = this.pageWidth;
+    this.splitKeyboardLinePageHeight = this.pageHeight;
+    this.refreshSplitKeyboardLine();
   }
 
   // The split layout fits the picture into the area above the line instead of
@@ -7547,15 +7564,21 @@ struct RemotePage {
     RustDeskNapi.appendDiagnosticLog('input-keyboard',
       `split-keyboard enabled=${enabled ? 1 : 0} keyboard_open=${this.showKeyboardPanel ? 1 : 0}`);
     if (enabled) {
+      // The layout applies even if a gate below keeps the IME closed.
+      this.refreshSplitKeyboardLine();
+      this.splitKeyboardLinePageWidth = this.showKeyboardPanel ? 0 : this.pageWidth;
+      this.splitKeyboardLinePageHeight = this.showKeyboardPanel ? 0 : this.pageHeight;
       if (!this.showKeyboardPanel) {
         // User action: keep openRemoteKeyboard's pending text/Wayland/connection gates.
         this.openRemoteKeyboard();
       } else {
-        this.refreshSplitKeyboardLine();
         this.traceRemoteKeyboardState('split_keyboard_on');
       }
-    } else if (this.showKeyboardPanel) {
-      this.closeRemoteKeyboard();
+    } else {
+      this.splitKeyboardLinePageWidth = 0;
+      this.splitKeyboardLinePageHeight = 0;
+      if (this.showKeyboardPanel) this.closeRemoteKeyboard();
+      this.clampViewportOffset();
     }
   }
 
