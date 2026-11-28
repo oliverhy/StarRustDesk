@@ -21,6 +21,7 @@ export class RemoteGlassMenuState {
   clipboard: boolean = false;
   pan: boolean = false;
   edgePan: boolean = false;
+  splitKeyboard: boolean = false;
   zoom: number = 100;
   fullscreen: boolean = false;
   pip: boolean = false;

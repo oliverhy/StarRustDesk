@@ -19,7 +19,7 @@ export function remoteControlCategoryItems(category: string, order: string[]): s
   switch (category) {
     case 'screens': keys = ['displays']; break;
     case 'input': keys = ['input', 'virtualMouse', 'physicalGamepad', 'virtualGamepad', 'mobileActions', 'gestureHelp', 'clipboard']; break;
-    case 'view': keys = ['gameMode', 'highPerformance', 'edgePan', 'pan', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation']; break;
+    case 'view': keys = ['gameMode', 'highPerformance', 'edgePan', 'pan', 'splitKeyboard', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation']; break;
     case 'more': keys = ['chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'privacy']; break;
   }
   return order.filter((item: string) => keys.includes(item));
@@ -31,6 +31,7 @@ function remoteControlMenuItemWidthLabels(item: string): string[] {
     case 'highPerformance': return ['高性能优先'];
     case 'edgePan': return ['边缘跟随', '边缘跟随开'];
     case 'pan': return ['移动画面', '结束移动'];
+    case 'splitKeyboard': return ['上画面下键盘'];
     case 'zoomIn': return ['+'];
     case 'zoomOut': return ['-'];
     case 'fullscreen': return ['全屏', '退出全屏', '切换中…'];

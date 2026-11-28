@@ -26,7 +26,10 @@ import { isNavigationControlKey, navigationKeyName, NAVIGATION_LOCAL, RemoteNavi
 import { RustDeskTheme } from '../theme/RustDeskTheme';
 import { CommunicationService } from '../service/CommunicationService';
 import { CommunicationPanel } from '../widget/CommunicationPanel';
-import { FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { display, FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { FoldHoverLayout, RemoteSplitInputMode, MANUAL_SPLIT_KEYBOARD_OPTION, foldHoverLayout, isFoldHoverPosture,
+  manualSplitKeyboardLayout } from '../model/FoldHoverLayout';
+import { FoldHoverInput } from '../widget/FoldHoverInput';
 import { BusinessError, deviceInfo, zlib } from '@kit.BasicServicesKit';
 import { translate } from '../utils/I18n';
 import { ConnectionStatus } from '../model/ConnectionModel';
@@ -222,7 +225,7 @@ const KEYBOARD_CAPTURE_SENTINEL: string =
   '1111111111111111111111111111111111111111111111111111111111111111';
 const CONTROL_TOOLBAR_DEFAULT_ORDER: string[] = [
   'displays', 'input', 'virtualMouse', 'physicalGamepad', 'virtualGamepad', 'gameMode', 'highPerformance', 'edgePan', 'keyboard', 'mobileActions', 'gestureHelp',
-  'pan', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
+  'pan', 'splitKeyboard', 'chat', 'upload', 'uploadFolder', 'download', 'recording', 'recordings', 'clipboard', 'privacy', 'zoomIn', 'zoomOut', 'fullscreen', 'pip', 'orientation', 'disconnect'
 ];
 const KEYBOARD_TOOLBAR_DEFAULT_ORDER: string[] = [
   'ctrl', 'alt', 'shift', 'meta', 'function', 'more', 'release'
@@ -528,6 +531,25 @@ struct RemotePage {
   private videoDecoderRestartRequested: boolean = false;
   @State pageWidth: number = 0;
   @State pageHeight: number = 0;
+  @State foldHoverTop: number = 0;
+  @State foldHoverLowerStart: number = 0;
+  @State foldHoverLowerHeight: number = 0;
+  @State foldHoverPadOpen: boolean = false;
+  @State remoteSplitInputMode: RemoteSplitInputMode = 'none';
+  @State manualSplitKeyboardEnabled: boolean = false;
+  private foldHoverListening: boolean = false;
+  private foldHoverTimer: number = -1;
+  private foldAngles: number[] = [];
+  private foldPadTouchId: number = -1;
+  private foldPadSecondId: number = -1;
+  private foldPadScroll: boolean = false;
+  private foldPadMoved: boolean = false;
+  private foldPadLastX: number = 0;
+  private foldPadLastY: number = 0;
+  private foldPadStartX: number = 0;
+  private foldPadStartY: number = 0;
+  private foldPadButton: number = 0;
+  private foldPadButtonTouchId: number = -1;
   @State clipboardSyncEnabled: boolean = true;
   @State showRemoteFileBrowser: boolean = false;
   @State remoteDirectoryPath: string = '';
@@ -854,6 +876,7 @@ struct RemotePage {
       this.pipPhase = phase;
       this.pipSurfaceOwned = phase !== 'idle';
       if (this.pipSurfaceOwned) this.clearDisplaySwitchTransition();
+      if (this.foldHoverListening || this.manualSplitKeyboardEnabled) this.refreshFoldHoverLayout();
     }, () => { this.restoreSurfaceAfterPictureInPicture(); }, (stage: string, _code: number) => {
       if (this.remotePageVisible && !this.isLeavingAfterDisconnect) {
         this.showFileToast(stage === 'unsupported' ? '当前设备不支持系统画中画' :
@@ -862,6 +885,8 @@ struct RemotePage {
       }
     });
     this.fileOnly = ConnectionService.isFileOnly();
+    this.manualSplitKeyboardEnabled = this.isHandheldDevice() &&
+      RustDeskNapi.getOption(MANUAL_SPLIT_KEYBOARD_OPTION) === '1';
     RemoteDisplayPolicy.setActive(!this.fileOnly);
     RustDeskNapi.appendDiagnosticLog('remote-page', 'about_to_appear')
     this.connectedPeerId = AppStorage.get<string>('connectedPeerId') ?? '';
@@ -911,6 +936,8 @@ struct RemotePage {
     this.startRemoteKeyboardTracking();
     if (this.isHandheldDevice() && !this.remoteExternalDisplay) this.navigationBarPolicy.enter(this.remoteKeyboardWindow);
     this.startDesktopWindowTracking();
+    this.startFoldHoverTracking();
+    if (this.manualSplitKeyboardEnabled) this.refreshFoldHoverLayout();
     this.startRemoteCursorPolling();
     this.startNativeMousePolling();
     CommunicationService.start(() => {
@@ -920,6 +947,9 @@ struct RemotePage {
   }
 
   aboutToDisappear(): void {
+    this.remotePageVisible = false;
+    this.stopFoldHoverTracking();
+    if (this.foldHoverTop > 0) this.applyFoldHoverLayout(undefined, 'none');
     this.pendingKeyboardText = '';
     this.pendingKeyboardContextText = '';
     this.pendingKeyboardRevision++;
@@ -1100,7 +1130,13 @@ struct RemotePage {
           status = ConnectionStatus.CONNECTING;
         }
       }
+      if (this.connectionStatus !== status && status !== ConnectionStatus.CONNECTED &&
+        this.foldHoverTop > 0) this.applyFoldHoverLayout(undefined, 'none');
+      const oldConnectionStatus = this.connectionStatus;
       this.connectionStatus = status as ConnectionStatus;
+      if (oldConnectionStatus !== status && (this.foldHoverListening || this.manualSplitKeyboardEnabled)) {
+        this.refreshFoldHoverLayout();
+      }
       if (status !== ConnectionStatus.CONNECTED && this.displaySwitchActive) {
         this.clearDisplaySwitchTransition();
       }
@@ -1215,7 +1251,7 @@ struct RemotePage {
   onAreaChangeCallback(oldValue: Area, newValue: Area): void {
     this.relativePointerSampleValid = false;
     this.componentWidth = newValue.width as number;
-    this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
+    this.componentHeight = this.foldHoverTop <= 0 && this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
       this.keyboardViewportHeight : newValue.height as number;
     if (this.lastSurfaceWidth <= 0 || this.lastSurfaceHeight <= 0) {
       this.bindSurfaceIfReady();
@@ -1298,6 +1334,7 @@ struct RemotePage {
     ConnectionService.recordNetworkSnapshot();
     const status: ConnectionStatus = RustDeskNapi.getConnectionStatus() as ConnectionStatus;
     this.connectionStatus = status;
+    if (this.foldHoverListening || this.manualSplitKeyboardEnabled) this.refreshFoldHoverLayout();
     RemoteSessionBackgroundTask.syncForConnectionStatus(status);
     if (status !== ConnectionStatus.CONNECTED) {
       return;
@@ -1600,6 +1637,7 @@ struct RemotePage {
     this.resetPointerDiagnostics();
     if (!this.remotePageVisible) return;
     if (!this.fileOnly) this.startRemoteKeyboardTracking();
+    if (this.foldHoverListening || this.manualSplitKeyboardEnabled) this.refreshFoldHoverLayout();
     this.releaseHeldMouseButtons('projection_display_changed');
     RustDeskNapi.appendDiagnosticLog('projection',
       `input_display_changed display=${this.remoteProjectionDisplayId} external=${this.remoteExternalDisplay} ` +
@@ -2217,7 +2255,8 @@ struct RemotePage {
       .attributeModifier(new ReadableButtonModifier(this.roundedRectButtons))
         }.padding(20).borderRadius(16).backgroundColor(this.isDarkMode ? '#202B3A' : '#FFFFFF')
       }
-      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && !this.keyboardToolsCollapsed) {
+      if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly &&
+        this.foldHoverTop === 0 && !this.keyboardToolsCollapsed) {
         this.buildKeyboardShortcutOverlay();
       }
       if (this.showKeyboardPanel && this.connectionStatus === ConnectionStatus.CONNECTED) {
@@ -2242,6 +2281,7 @@ struct RemotePage {
         this.buildFloatingToolbar();
       }
       if (this.connectionStatus === ConnectionStatus.CONNECTED && !this.fileOnly && this.isHandheldDevice() &&
+        this.foldHoverTop === 0 &&
         !this.showGestureHelp && !this.showKeyboardSettings && !this.showMouseSettings && !this.showKeyboardCalibration &&
         !this.showRemoteFileBrowser && !this.showMobileActions &&
         !this.showToolbarOrderEditor && !this.showCommunicationPanel) {
@@ -2284,6 +2324,7 @@ struct RemotePage {
       if (this.showOrientationDialog) this.syncOrientationMenuViewport();
       this.controlMenuPageOriginX = Number(newValue.globalPosition.x) || 0;
       this.controlMenuPageOriginY = Number(newValue.globalPosition.y) || 0;
+      if (this.foldHoverListening || this.manualSplitKeyboardEnabled) this.refreshFoldHoverLayout();
       // IME resizing is not folding/rotation. Also detect height-only changes
       // against the owning window, rather than its keyboard-resized content.
       if (this.hasKeyboardViewportSizeChanged()) {
@@ -2496,7 +2537,7 @@ struct RemotePage {
   buildRemoteScreen() {
       // Keep the viewport and XComponent in one stable branch. Only the
       // toolbar siblings change when entering/exiting immersive mode.
-      Stack({ alignContent: Alignment.Bottom }) {
+      Stack({ alignContent: this.foldHoverTop > 0 ? Alignment.Top : Alignment.Bottom }) {
         Row() {
         Column() {
           this.buildRemoteViewportWithQualityMonitor();
@@ -2504,8 +2545,23 @@ struct RemotePage {
         .layoutWeight(1)
         .height('100%')
         }
-        .width('100%').height('100%')
+        .width('100%').height(this.foldHoverTop > 0 ? this.foldHoverTop : '100%')
 
+        if (this.foldHoverTop > 0) {
+          Column() {
+            FoldHoverInput({
+              widthVp: this.pageWidth, language: this.uiLanguage, padOpen: this.foldHoverPadOpen,
+              manual: this.remoteSplitInputMode === 'manual',
+              imeOpen: this.showKeyboardPanel,
+              modifierMask: this.getVirtualModifierMask(),
+              onKey: (key: string) => { this.handleFoldHoverKey(key); },
+              onIme: () => { this.setFoldHoverPadOpen(false); this.openRemoteKeyboard(); },
+              onPadOpen: (open: boolean) => { this.setFoldHoverPadOpen(open); },
+              onPadTouch: (event: TouchEvent) => { this.handleFoldPadTouch(event); },
+              onMouseButton: (button: number, event: TouchEvent) => { this.handleFoldPadButton(button, event); }
+            })
+          }.width('100%').height(this.foldHoverLowerHeight).position({ x: 0, y: this.foldHoverLowerStart })
+        }
       }
       .width('100%')
       .height('100%')
@@ -3196,7 +3252,7 @@ struct RemotePage {
       }
       .width('100%')
       .height(this.getRemoteCanvasHeight())
-      .constraintSize({ minHeight: this.keyboardViewportHeight })
+      .constraintSize({ minHeight: this.foldHoverTop > 0 ? 0 : this.keyboardViewportHeight })
       .align(Alignment.TopStart)
       .translate({ y: this.getKeyboardCanvasShiftY() })
       .backgroundColor('#090D14')
@@ -3445,7 +3501,7 @@ struct RemotePage {
       let previousWidth: number = this.componentWidth;
       let previousHeight: number = this.componentHeight;
       this.componentWidth = newValue.width as number;
-      this.componentHeight = this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
+      this.componentHeight = this.foldHoverTop <= 0 && this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 ?
         this.keyboardViewportHeight : newValue.height as number;
       if (Math.abs(this.componentWidth - previousWidth) > 0.5 ||
         Math.abs(this.componentHeight - previousHeight) > 0.5) {
@@ -3713,12 +3769,14 @@ struct RemotePage {
       if (item === 'virtualMouse' || item === 'orientation') return this.isHandheldDevice();
       if (item === 'mobileActions') return this.isPeerAndroid;
       if (item === 'pan' || item === 'edgePan') return this.canPanViewport();
+      if (item === 'splitKeyboard') return this.canUseManualSplitKeyboard() && this.remoteSplitInputMode !== 'hover';
       if (item === 'privacy') return !this.isPeerAndroid;
       return true;
     });
   }
 
   getControlMenuViewportHeight(): number {
+    if (this.foldHoverTop > 0) return this.foldHoverTop;
     const height = this.pageHeight > 0 ? this.pageHeight : 640;
     if (this.showKeyboardPanel && this.controlMenuKeyboardInset > 0 && this.keyboardLayoutHeight > 0) {
       return Math.min(height, Math.max(1, this.keyboardLayoutHeight - this.controlMenuKeyboardInset));
@@ -3830,6 +3888,7 @@ struct RemotePage {
     state.displaySwipe = this.displaySwipeEnabled;
     state.inputMode = this.inputMode; state.virtualMouse = this.showVirtualMouse;
     state.clipboard = this.clipboardSyncEnabled; state.pan = this.isPanMode; state.edgePan = this.edgeAutoPanEnabled;
+    state.splitKeyboard = this.manualSplitKeyboardEnabled && this.remoteSplitInputMode !== 'hover';
     state.zoom = this.isPcDevice() ? this.getDesktopDisplayedPercent() : Math.round(this.zoomScale * 100);
     state.fullscreen = this.isFullScreen;
     state.pip = this.pipPhase === 'active'; state.recording = this.recordingActive;
@@ -3950,6 +4009,7 @@ struct RemotePage {
       case 'clipboard-paste-denied': this.showFileToast('无法读取剪贴板，请检查系统权限后重试'); return;
       case 'pan': if (this.canPanViewport()) this.setPanMode(!this.isPanMode); return;
       case 'edgePan': if (this.canPanViewport()) this.setEdgeAutoPanEnabled(!this.edgeAutoPanEnabled); return;
+      case 'splitKeyboard': this.toggleManualSplitKeyboard(); return;
       case 'monitor': this.showQualityMonitor = !this.showQualityMonitor; return;
       case 'gameMode': this.setGameMode(!this.gameModeEnabled); return;
       case 'highPerformance': this.setHighPerformance(!this.highPerformanceEnabled); return;
@@ -4200,6 +4260,9 @@ struct RemotePage {
         this.privacyModeState === 2, false, this.privacyModeState !== 1, () => {
           this.togglePrivacyMode();
         }, item)
+    } else if (item === 'splitKeyboard' && this.canUseManualSplitKeyboard() && this.remoteSplitInputMode !== 'hover') {
+      this.buildToolbarButton('上画面下键盘', vertical ? 96 : 107,
+        this.manualSplitKeyboardEnabled, false, true, () => { this.toggleManualSplitKeyboard(); }, item)
     } else if (item === 'zoomIn') {
       this.buildToolbarButton('+', vertical ? 80 : 40, false, false, true, () => {
         this.adjustZoom(0.25);
@@ -4271,6 +4334,7 @@ struct RemotePage {
       case 'mobileActions': return '手机操作';
       case 'gestureHelp': return '手势说明';
       case 'pan': return '移动画面';
+      case 'splitKeyboard': return '上画面下键盘';
       case 'chat': return '聊天与语音';
       case 'upload': return '发送文件';
       case 'download': return '取回文件';
@@ -6796,6 +6860,7 @@ struct RemotePage {
   }
 
   getRemoteCanvasHeight(): number | string {
+    if (this.foldHoverTop > 0) return '100%';
     return this.keyboardViewportHeight > 0 ? this.keyboardViewportHeight : '100%';
   }
 
@@ -6925,10 +6990,12 @@ struct RemotePage {
   }
 
   getKeyboardCanvasShiftY(): number {
+    if (this.foldHoverTop > 0) return 0;
     return this.getKeyboardAvoidance().shiftY;
   }
 
   getKeyboardViewportMaxHeight(): number {
+    if (this.foldHoverTop > 0) return this.foldHoverTop;
     if (this.showKeyboardPanel && this.isHandheldDevice() && this.keyboardViewportHeight > 0 &&
       this.controlMenuKeyboardInset > 0) {
       // Use the original canvas, not an already resized height: no double inset.
@@ -6953,6 +7020,315 @@ struct RemotePage {
       RustDeskNapi.appendDiagnosticLog('remote-ui',
         `handheld_orientation=${landscape ? 'landscape' : 'portrait'} keyboard_positions_reset=1 control_position_preserved=1`);
     }
+  }
+
+  private readonly foldStatusListener = (status: display.FoldStatus): void => {
+    if (status !== display.FoldStatus.FOLD_STATUS_HALF_FOLDED) this.foldAngles = [];
+    this.refreshFoldHoverLayout();
+  };
+  private readonly foldDisplayListener = (_mode: display.FoldDisplayMode): void => { this.refreshFoldHoverLayout(); };
+  private readonly foldDisplayGeometryListener = (_id: number): void => { this.refreshFoldHoverLayout(); };
+  private readonly foldAngleListener = (angles: number[]): void => {
+    this.foldAngles = angles.slice();
+    this.refreshFoldHoverLayout();
+  };
+
+  startFoldHoverTracking(): void {
+    if (this.foldHoverListening || !this.isHandheldDevice()) return;
+    try {
+      if (!display.isFoldable()) return;
+      this.foldHoverListening = true;
+      display.on('foldStatusChange', this.foldStatusListener);
+      display.on('foldDisplayModeChange', this.foldDisplayListener);
+      display.on('change', this.foldDisplayGeometryListener);
+    } catch (_error) {
+      this.stopFoldHoverTracking();
+      return;
+    }
+    // Some devices only report discrete postures. Use the crease and inner
+    // window guards even when no angle samples are delivered.
+    try { display.on('foldAngleChange', this.foldAngleListener); } catch (_error) {}
+    this.refreshFoldHoverLayout();
+  }
+
+  stopFoldHoverTracking(): void {
+    if (!this.foldHoverListening) return;
+    this.foldHoverListening = false;
+    try { display.off('foldStatusChange', this.foldStatusListener); } catch (_error) {}
+    try { display.off('foldDisplayModeChange', this.foldDisplayListener); } catch (_error) {}
+    try { display.off('change', this.foldDisplayGeometryListener); } catch (_error) {}
+    try { display.off('foldAngleChange', this.foldAngleListener); } catch (_error) {}
+    this.foldAngles = [];
+    this.refreshFoldHoverLayout();
+  }
+
+  readFoldHoverLayout(): FoldHoverLayout | undefined {
+    if (!this.foldHoverListening || !this.remotePageVisible || this.connectionStatus !== ConnectionStatus.CONNECTED ||
+      this.fileOnly || this.remoteExternalDisplay || this.pipSurfaceOwned) return undefined;
+    try {
+      const half = display.getFoldStatus() === display.FoldStatus.FOLD_STATUS_HALF_FOLDED;
+      const inner = display.getFoldDisplayMode() === display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL;
+      if (!isFoldHoverPosture(half, inner, this.foldAngles, this.remoteSplitInputMode === 'hover')) return undefined;
+      return this.readHorizontalFoldLayout(this.getSplitInputPageHeight());
+    } catch (_error) { return undefined; }
+  }
+
+  readHorizontalFoldLayout(height: number): FoldHoverLayout | undefined {
+    if (!this.foldHoverListening) return undefined;
+    try {
+      const host = this.remoteKeyboardWindow?.getWindowProperties();
+      if (!host) return undefined;
+      let crease: display.FoldCreaseRegion | undefined;
+      try { crease = display.getDisplayByIdSync(host.displayId).getLiveCreaseRegion(); } catch (_error) {}
+      if (!crease || crease.creaseRects.length === 0) crease = display.getCurrentFoldCreaseRegion();
+      if (!crease || host.displayId !== crease.displayId || crease.creaseRects.length !== 1) return undefined;
+      const rect = crease.creaseRects[0];
+      const ui = this.getUIContext();
+      return foldHoverLayout(this.pageWidth, height, {
+        x: ui.px2vp(rect.left - host.windowRect.left) - this.controlMenuPageOriginX,
+        y: ui.px2vp(rect.top - host.windowRect.top) - this.controlMenuPageOriginY,
+        width: ui.px2vp(rect.width), height: ui.px2vp(rect.height)
+      });
+    } catch (_error) { return undefined; }
+  }
+
+  canUseManualSplitKeyboard(): boolean {
+    return this.isHandheldDevice() && !this.fileOnly && !this.remoteExternalDisplay && !this.pipSurfaceOwned &&
+      this.pageWidth >= 240 && this.getSplitInputPageHeight() >= 200;
+  }
+
+  getSplitInputPageHeight(): number {
+    return this.showKeyboardPanel ? Math.max(this.pageHeight, this.keyboardLayoutHeight) : this.pageHeight;
+  }
+
+  readManualSplitKeyboardLayout(): FoldHoverLayout | undefined {
+    if (!this.manualSplitKeyboardEnabled || !this.remotePageVisible ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED || !this.canUseManualSplitKeyboard()) return undefined;
+    const height = this.getSplitInputPageHeight();
+    const inset = this.showKeyboardPanel ? this.controlMenuKeyboardInset : 0;
+    return manualSplitKeyboardLayout(this.pageWidth, height, inset, this.readHorizontalFoldLayout(height));
+  }
+
+  toggleManualSplitKeyboard(): void {
+    if (this.remoteSplitInputMode === 'hover' || !this.canUseManualSplitKeyboard() ||
+      this.connectionStatus !== ConnectionStatus.CONNECTED) return;
+    this.manualSplitKeyboardEnabled = !this.manualSplitKeyboardEnabled;
+    RustDeskNapi.setOption(MANUAL_SPLIT_KEYBOARD_OPTION, this.manualSplitKeyboardEnabled ? '1' : '0');
+    this.setControlMenu('');
+    this.refreshFoldHoverLayout();
+    if (this.manualSplitKeyboardEnabled && this.remoteSplitInputMode === 'manual' && !this.showKeyboardPanel) {
+      this.openRemoteKeyboard();
+    }
+  }
+
+  refreshFoldHoverLayout(): void {
+    const next = this.readFoldHoverLayout();
+    if (!next) {
+      if (this.foldHoverTimer !== -1) clearTimeout(this.foldHoverTimer);
+      this.foldHoverTimer = -1;
+    } else {
+      if (this.remoteSplitInputMode === 'hover') {
+        this.applyFoldHoverLayout(next, 'hover');
+        return;
+      }
+      if (this.foldHoverTimer === -1) {
+        this.foldHoverTimer = setTimeout(() => {
+          this.foldHoverTimer = -1;
+          const stable = this.readFoldHoverLayout();
+          if (stable) this.applyFoldHoverLayout(stable, 'hover');
+        }, 300);
+      }
+    }
+    const manual = this.readManualSplitKeyboardLayout();
+    if (manual) this.applyFoldHoverLayout(manual, 'manual');
+    else if (this.foldHoverTop > 0) this.applyFoldHoverLayout(undefined, 'none');
+  }
+
+  applyFoldHoverLayout(next: FoldHoverLayout | undefined, mode: RemoteSplitInputMode = 'hover'): void {
+    const selected: RemoteSplitInputMode = next ? mode : 'none';
+    const previous = this.remoteSplitInputMode;
+    const switching = previous !== selected;
+    // Changing the layout from the menu must not discard composing IME text.
+    const retainIme = this.showKeyboardPanel && switching && previous === 'none' && selected === 'manual';
+    if (switching) {
+      this.foldHoverPadOpen = false;
+      this.releaseFoldHoverInputs();
+      this.cancelActiveTouchGesture();
+      this.ignoreTouchUntilNextDown = true;
+      this.relativePointerSampleValid = false;
+      RustDeskNapi.appendDiagnosticLog('remote-ui', `split_input mode=${selected}`);
+    } else if (next && (this.foldHoverTop !== next.top || this.foldHoverLowerStart !== next.lowerStart ||
+      this.foldHoverLowerHeight !== next.lowerHeight)) {
+      this.releaseFoldPadPointer();
+    }
+    this.remoteSplitInputMode = selected;
+    this.foldHoverTop = next?.top ?? 0;
+    this.foldHoverLowerStart = next?.lowerStart ?? 0;
+    this.foldHoverLowerHeight = next?.lowerHeight ?? 0;
+    if (switching && this.showKeyboardPanel) {
+      if (retainIme) {
+        // Preserve the originally saved avoid mode, so closing restores it.
+        try { this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.NONE); } catch (_error) {}
+      } else {
+        this.closeRemoteKeyboard();
+      }
+    }
+  }
+
+  releaseFoldHoverInputs(): void {
+    this.clearTapTimer();
+    this.clearLongPressTimer();
+    this.stopEdgeAutoPan();
+    this.releaseFoldPadPointer();
+    this.releaseVirtualModifiers();
+    this.releaseRemoteNavigationKeys('fold_hover_release');
+  }
+
+  releaseFoldPadPointer(): void {
+    if (this.foldPadButton === 1) this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+    else if (this.foldPadButton === 2) this.sendRightUp(this.lastAbsX, this.lastAbsY);
+    this.foldPadButton = 0;
+    this.foldPadButtonTouchId = -1;
+    if (this.foldPadTouchId >= 0 || this.foldPadScroll) this.endLocalPointerGesture();
+    this.foldPadTouchId = -1;
+    this.foldPadSecondId = -1;
+    this.foldPadScroll = false;
+    this.foldPadMoved = false;
+  }
+
+  setFoldHoverPadOpen(open: boolean): void {
+    if (this.foldHoverPadOpen === open) return;
+    this.foldHoverPadOpen = open;
+    if (!open) this.releaseFoldHoverInputs();
+  }
+
+  foldHoverCanInput(): boolean {
+    return this.foldHoverTop > 0 && !this.showKeyboardPanel && !this.virtualMouseWindowInactive &&
+      this.connectionStatus === ConnectionStatus.CONNECTED;
+  }
+
+  splitTrackpadCanInput(): boolean {
+    return this.foldHoverCanInput() && (this.foldHoverPadOpen || this.remoteSplitInputMode === 'manual') &&
+      this.remoteWidth > 0 && this.remoteHeight > 0 && !this.displaySwitchActive && !this.pipSurfaceOwned &&
+      !this.controlMenu && !this.showRemoteFileBrowser && !this.showCommunicationPanel;
+  }
+
+  handleFoldHoverKey(key: string): void {
+    if (!this.foldHoverCanInput()) return;
+    if (key === 'Ctrl') { this.toggleVirtualModifier(VIRTUAL_MODIFIER_CTRL); return; }
+    if (key === 'Alt') { this.toggleVirtualModifier(VIRTUAL_MODIFIER_ALT); return; }
+    if (key === 'Shift') { this.toggleVirtualModifier(VIRTUAL_MODIFIER_SHIFT); return; }
+    if (key === 'Win/Cmd') { this.toggleVirtualModifier(VIRTUAL_MODIFIER_META); return; }
+    const control = key === '↵' ? 13 : key === '⌫' ? 8 : key === 'Esc' ? 27 : key === 'Tab' ? 9 :
+      key === 'Home' ? 36 : key === 'End' ? 35 : key === 'Delete' ? 46 : key === '←' ? 37 :
+      key === '↑' ? 38 : key === '→' ? 39 : key === '↓' ? 40 : key === ' ' ? 32 : 0;
+    if (control > 0) { ConnectionService.sendKeyEvent(control, 2); return; }
+    const fn = key.startsWith('F') ? Number(key.slice(1)) : 0;
+    if (fn >= 1 && fn <= 12) { ConnectionService.sendKeyEvent(111 + fn, 2); return; }
+    if (key.length !== 1) return;
+    const vk = this.getPrintableShortcutKeyCode(key);
+    if (this.virtualCtrlSelected || this.virtualAltSelected || this.virtualMetaSelected) {
+      if (vk > 0) ConnectionService.sendShortcutKey(vk, this.getVirtualModifierMask());
+      return;
+    }
+    if (this.virtualShiftSelected && vk > 0 && key >= '0' && key <= '9') {
+      ConnectionService.sendShortcutKey(vk, this.getVirtualModifierMask());
+      return;
+    }
+    this.sendKeyboardTextSegment(this.virtualShiftSelected ? key : key.toLowerCase());
+  }
+
+  syncFoldPadPointer(): void {
+    if (!this.relativeMouseEnabled) ConnectionService.sendMouseEvent(this.lastAbsX, this.lastAbsY, 0);
+  }
+
+  handleFoldPadButton(button: number, event: TouchEvent): void {
+    event.stopPropagation();
+    if (!this.splitTrackpadCanInput()) return;
+    if (event.type === TouchType.Down && this.foldPadButton === 0 && !this.leftButtonHeld && !this.rightButtonHeld) {
+      const point = event.changedTouches[0] ?? event.touches[0];
+      if (!point) return;
+      this.ensurePointerInitialized();
+      this.foldPadButton = button;
+      this.foldPadButtonTouchId = point.id;
+      this.foldPadMoved = true;
+      this.syncFoldPadPointer();
+      if (button === 1) this.sendLeftDown(this.lastAbsX, this.lastAbsY, false);
+      else this.sendRightDown(this.lastAbsX, this.lastAbsY);
+    } else if (this.foldPadButton === button && (event.type === TouchType.Up || event.type === TouchType.Cancel) &&
+      (event.changedTouches.some((point: TouchObject) => point.id === this.foldPadButtonTouchId) ||
+        (event.type === TouchType.Cancel && event.changedTouches.length === 0))) {
+      if (event.type === TouchType.Up) this.syncFoldPadPointer();
+      if (button === 1) this.sendLeftUp(this.lastAbsX, this.lastAbsY);
+      else this.sendRightUp(this.lastAbsX, this.lastAbsY);
+      this.foldPadButton = 0;
+      this.foldPadButtonTouchId = -1;
+    }
+  }
+
+  handleFoldPadTouch(event: TouchEvent): void {
+    event.stopPropagation();
+    if (event.type === TouchType.Cancel) { this.releaseFoldPadPointer(); return; }
+    if (!this.splitTrackpadCanInput()) return;
+    const touches = event.touches;
+    if (event.type === TouchType.Down) {
+      const incoming = event.changedTouches[0] ?? (touches.length === 1 ? touches[0] : undefined);
+      if (!incoming) return;
+      if (this.foldPadTouchId < 0 && !this.foldPadScroll) {
+        this.beginLocalPointerGesture();
+        this.ensurePointerInitialized();
+        this.foldPadTouchId = incoming.id;
+        this.foldPadStartX = this.foldPadLastX = incoming.windowX;
+        this.foldPadStartY = this.foldPadLastY = incoming.windowY;
+        this.foldPadMoved = this.foldPadButton !== 0;
+      } else if (!this.foldPadScroll && this.foldPadButton === 0 && incoming.id !== this.foldPadTouchId) {
+        const first = touches.find((p: TouchObject) => p.id === this.foldPadTouchId);
+        if (!first) return;
+        this.foldPadSecondId = incoming.id;
+        this.foldPadScroll = true;
+        this.foldPadMoved = true;
+        this.foldPadLastX = (first.windowX + incoming.windowX) / 2;
+        this.foldPadLastY = (first.windowY + incoming.windowY) / 2;
+      }
+      return;
+    }
+    const point = touches.find((p: TouchObject) => p.id === this.foldPadTouchId);
+    const second = touches.find((p: TouchObject) => p.id === this.foldPadSecondId);
+    if (event.type === TouchType.Move && this.foldPadScroll && point && second) {
+      const x = (point.windowX + second.windowX) / 2;
+      const y = (point.windowY + second.windowY) / 2;
+      this.sendTouchScroll(x - this.foldPadLastX, y - this.foldPadLastY);
+      this.foldPadLastX = x;
+      this.foldPadLastY = y;
+    } else if (event.type === TouchType.Move && !this.foldPadScroll) {
+      const owner = point;
+      if (!owner) return;
+      if (!this.foldPadMoved && Math.hypot(owner.windowX - this.foldPadStartX, owner.windowY - this.foldPadStartY) < 5) return;
+      this.foldPadMoved = true;
+      const dx = owner.windowX - this.foldPadLastX;
+      const dy = owner.windowY - this.foldPadLastY;
+      this.foldPadLastX = owner.windowX;
+      this.foldPadLastY = owner.windowY;
+      if (this.relativeMouseEnabled) ConnectionService.sendRelativeMouseDelta(dx, dy);
+      else {
+        this.updatePointerFromDelta(dx / Math.max(0.01, this.zoomScale), dy / Math.max(0.01, this.zoomScale));
+        this.syncFoldPadPointer();
+      }
+    }
+    if (event.type !== TouchType.Up) return;
+    if (this.foldPadTouchId < 0 && this.foldPadSecondId < 0) return;
+    if (point && !event.changedTouches.some((p: TouchObject) => p.id === this.foldPadTouchId)) return;
+    this.foldPadTouchId = -1;
+    if (this.foldPadScroll && second && !event.changedTouches.some((p: TouchObject) => p.id === this.foldPadSecondId)) return;
+    if (!this.foldPadMoved && this.foldPadButton === 0 && !this.leftButtonHeld && !this.rightButtonHeld) {
+      this.syncFoldPadPointer();
+      this.sendLeftClick(this.lastAbsX, this.lastAbsY);
+    }
+    this.foldPadTouchId = -1;
+    this.foldPadSecondId = -1;
+    this.foldPadScroll = false;
+    this.foldPadMoved = false;
+    this.endLocalPointerGesture();
   }
 
   startToolbarTimer(): void {
@@ -9000,6 +9376,7 @@ struct RemotePage {
   }
 
   releaseHeldMouseButtons(reason: string): void {
+    if (this.foldPadButton > 0 || this.foldPadTouchId >= 0 || this.foldPadScroll) this.releaseFoldPadPointer();
     if (this.virtualMouseButtonTouchActive) this.releaseVirtualMouseButtons();
     let released: boolean = false;
     if (this.leftButtonHeld) {
@@ -10463,6 +10840,7 @@ struct RemotePage {
           if (event === window.WindowEventType.WINDOW_INACTIVE || event === window.WindowEventType.WINDOW_HIDDEN ||
             event === window.WindowEventType.WINDOW_DESTROYED) {
             this.virtualMouseWindowInactive = true;
+            if (this.foldHoverTop > 0) this.releaseFoldHoverInputs();
             this.releaseVirtualMouseButtons();
           }
         };
@@ -10518,6 +10896,9 @@ struct RemotePage {
     const wasKnown: boolean = this.remoteKeyboardVisibilityKnown;
     this.remoteKeyboardVisibilityKnown = true;
     this.remoteKeyboardVisible = height > 0;
+    if (this.remoteSplitInputMode === 'manual' && Math.abs(previousInset - this.controlMenuKeyboardInset) > 0.5) {
+      this.refreshFoldHoverLayout();
+    }
     if (this.remoteKeyboardVisible) {
       this.cancelRemoteKeyboardClose();
       this.stopEdgeAutoPan();
@@ -10631,6 +11012,10 @@ struct RemotePage {
       return;
     }
     if (!this.remoteKeyboardWindow) this.startRemoteKeyboardTracking();
+    if (this.foldHoverTop > 0) {
+      this.releaseFoldPadPointer();
+      this.setFoldHoverPadOpen(false);
+    }
     this.releaseRemoteNavigationKeys('keyboard_open');
     this.cancelRemoteKeyboardClose();
     this.cancelRemoteKeyboardRefocus();
@@ -10690,7 +11075,7 @@ struct RemotePage {
     try {
       const uiContext = this.getUIContext();
       this.keyboardAvoidModeBeforePanel = uiContext.getKeyboardAvoidMode();
-      uiContext.setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+      uiContext.setKeyboardAvoidMode(this.foldHoverTop > 0 ? KeyboardAvoidMode.NONE : KeyboardAvoidMode.RESIZE);
       this.keyboardAvoidModeChanged = true;
       RustDeskNapi.appendDiagnosticLog('input-shortcut', 'keyboard_avoid_mode=resize');
     } catch (_e) {
@@ -11007,7 +11392,11 @@ struct RemotePage {
   }
 
   getRemoteToolbarDisplayX(): number { return this.gamepadFloatingControlsPlan().toolbar.x; }
-  getRemoteToolbarDisplayY(): number { return this.gamepadFloatingControlsPlan().toolbar.y; }
+  getRemoteToolbarDisplayY(): number {
+    const proposed = this.gamepadFloatingControlsPlan().toolbar.y;
+    return this.foldHoverTop > 0 ? Math.min(proposed, Math.max(0,
+      this.foldHoverTop - this.getRemoteToolbarCurrentHeight() - 4)) : proposed;
+  }
   getKeyboardLauncherDisplayX(): number { return this.gamepadFloatingControlsPlan().keyboard.x; }
   getKeyboardLauncherDisplayY(): number { return this.gamepadFloatingControlsPlan().keyboard.y; }
 

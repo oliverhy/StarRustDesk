@@ -9,6 +9,17 @@
 已信任此设备	This device is trusted
 登录成功，但未能保存信任，下次仍需验证码	Signed in, but trust could not be saved. A verification code will still be required next time.
 系统安全存储不可用，暂无法保存可信设备	Secure storage is unavailable; this device cannot be trusted right now.
+空格	Space
+触控板	Trackpad
+系统输入法	System keyboard
+符号	Symbols
+收起触控板	Hide trackpad
+‹ 触控板	‹ Trackpad
+上画面下键盘	Picture above keyboard
+2.0.13（2000013）· 折叠屏与键盘分屏	2.0.13 (2000013) · Foldable and split keyboard
+支持折叠屏横向半折时自动进入悬停布局：上半屏显示远控画面，下半屏显示键盘，右侧可拉出触控板。	Supported foldables automatically enter hover layout when half-folded in landscape: remote view above, keyboard below, with a slide-out trackpad.
+手机和平板可在「控 → 画面 → 上画面下键盘」手动分屏，支持系统中文输入法；收起输入法后，下方仍可用作触控板。	On phones and tablets, use Controls > View > Picture above keyboard for a manual split. The system Chinese keyboard is supported, and the lower area remains a trackpad after it is dismissed.
+开合或切换布局时保持远控会话，恢复原有布局选择，并释放仍按住的按键，减少卡键和误触。	Changing posture or layout keeps the remote session connected, restores the previous layout choice, and releases held keys to reduce stuck input and accidental clicks.
 2.0.12（2000012）· 虚拟鼠标、设置与账号同步	2.0.12 (2000012) · Virtual mouse, settings and account sync
 虚拟鼠标左右键按下即响应，抬手才松开；支持长按、拖拽和连点，失焦或隐藏时自动松键。	Virtual mouse buttons press on touch and release on lift. Hold, drag and tap repeatedly; hiding the controls or losing focus releases the button.
 设置按功能分类，语言和样式集中到个性化设置，关于与反馈保留在设置首页。	Settings are grouped by function. Language and appearance are under Personalization; About and feedback stays on the main settings page.

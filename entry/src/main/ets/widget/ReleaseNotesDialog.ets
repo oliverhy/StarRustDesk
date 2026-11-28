@@ -4,8 +4,8 @@ import { RustDeskTheme } from '../theme/RustDeskTheme'
 import { settingsPalette } from '../theme/SettingsSkin'
 import { SettingsAction } from './SettingsControls'
 
-export const RELEASE_NOTES_VERSION: string = '2.0.12'
-export const RELEASE_NOTES_BUILD: string = '2000012'
+export const RELEASE_NOTES_VERSION: string = '2.0.13'
+export const RELEASE_NOTES_BUILD: string = '2000013'
 export const RELEASE_NOTES_SHOWN_ID: string = `${RELEASE_NOTES_VERSION}-${RELEASE_NOTES_BUILD}`
 export const RELEASE_NOTES_SHOWN_OPTION: string = 'release-notes-shown-version'
 
@@ -51,6 +51,11 @@ export struct ReleaseNotesDialog {
 
       Scroll() {
         Column({ space: 16 }) {
+          this.buildSection('2.0.13（2000013）· 折叠屏与键盘分屏', [
+            '支持折叠屏横向半折时自动进入悬停布局：上半屏显示远控画面，下半屏显示键盘，右侧可拉出触控板。',
+            '手机和平板可在「控 → 画面 → 上画面下键盘」手动分屏，支持系统中文输入法；收起输入法后，下方仍可用作触控板。',
+            '开合或切换布局时保持远控会话，恢复原有布局选择，并释放仍按住的按键，减少卡键和误触。'
+          ])
           this.buildSection('2.0.12（2000012）· 虚拟鼠标、设置与账号同步', [
             '虚拟鼠标左右键按下即响应，抬手才松开；支持长按、拖拽和连点，失焦或隐藏时自动松键。',
             '设置按功能分类，语言和样式集中到个性化设置，关于与反馈保留在设置首页。',

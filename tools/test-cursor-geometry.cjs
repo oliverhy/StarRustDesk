@@ -39,7 +39,7 @@ function page(overrides = {}) {
     hasAuthoritativeRemoteCursor: false, remoteCursorImageWidth: 32, remoteCursorImageHeight: 32,
     remoteCursorHotX: 4, remoteCursorHotY: 8, pointerViewportCursorReflows: 0, pointerShapeCursorReflows: 0,
     lastRemoteCursorImageSequence: -1, cursorPixelMapCache: new Map(),
-    showKeyboardPanel: false, keyboardViewportHeight: 0, displaySwitchActive: false,
+    showKeyboardPanel: false, keyboardViewportHeight: 0, displaySwitchActive: false, foldHoverTop: 0,
     zoomScale: 1, offsetX: 0, offsetY: 0,
     isHandheldDevice: () => true, stopEdgeAutoPan() {}, syncDesktopViewScale() {},
     clampViewportOffset() {}, syncVirtualMouseToCurrentPointer() {}, scheduleSurfaceRebindIfSizeChanged() {},
@@ -77,6 +77,15 @@ test('keyboard viewport retains the original canvas dimensions and scale', () =>
   p.handleViewportArea({}, { width: 844, height: 150 });
   assert.deepEqual([p.cursorX, p.cursorY, p.cursorImageWidth, p.cursorImageHeight], before);
   assert.equal(p.pointerViewportCursorReflows, 0); assert.deepEqual(sent, []);
+});
+test('split keyboard viewport uses the top pane for cursor geometry even with an IME snapshot', () => {
+  const p = page({ foldHoverTop: 228, showKeyboardPanel: true, keyboardViewportHeight: 363 });
+  p.handleViewportArea({}, { width: 844, height: 228 });
+  assert.equal(p.componentHeight, 228);
+  const scale = 228 / 1080;
+  near(p.cursorX, (844 - 1920 * scale) / 2 + (628 - 4) * scale);
+  near(p.cursorY, (1036 - 8) * scale);
+  assert.deepEqual(sent, []);
 });
 test('reflow uses local prediction unless the active drag is following the remote cursor', () => {
   const p = page({ lastAbsX: 800, lastAbsY: 300, remoteCursorAbsX: 100, remoteCursorAbsY: 200,

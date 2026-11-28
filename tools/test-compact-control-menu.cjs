@@ -57,12 +57,13 @@ const source = read('entry/src/main/ets/pages/RemotePage.ets');
 const method = name => { const start=source.indexOf('\n  '+name+'('); assert(start>=0,name); return source.slice(start,source.indexOf('\n  }',start)+4); };
 const methods = ['getControlMenuMetrics','getVisibleControlMenuItems','getControlMenuViewportHeight','getControlMenuAnchor',
   'getControlMenuX','getControlMenuY','getControlMenuWidth','getControlMenuHeight','isControlMenuBesideToolbar',
-  'recordControlMenuAnchor','getControlMenuRowWidth','getControlActionWidth','getControlActionHeight','getControlActionPadding'];
+  'recordControlMenuAnchor','getControlMenuRowWidth','getControlActionWidth','getControlActionHeight','getControlActionPadding',
+  'canUseManualSplitKeyboard','getSplitInputPageHeight'];
 const pageContext = { exports: {}, compactControlMenuMetrics:metrics, placeCompactControlMenu:place, remoteControlCategoryItems };
 vm.runInNewContext(ts.transpile('class Page {'+methods.map(method).join('\n')+'} exports.Page=Page;'),pageContext);
 const p = Object.assign(new pageContext.exports.Page(), {
   pageWidth:396,pageHeight:780,controlMenu:'screens',displayCount:3,uiFontScale:1,
-  controlToolbarOrder:['displays','input','virtualMouse','mobileActions','gestureHelp','clipboard','edgePan','pan','zoomIn','zoomOut','fullscreen','pip','privacy','orientation'],
+  controlToolbarOrder:['displays','input','virtualMouse','mobileActions','gestureHelp','clipboard','edgePan','pan','splitKeyboard','zoomIn','zoomOut','fullscreen','pip','privacy','orientation'],
   isPcDevice:()=>false,isHandheldDevice:()=>true,isHandheldLandscape:()=>false,isLargeLayout:()=>false,
   canPanViewport:()=>false,isPeerAndroid:false,desktopViewMode:'adaptive',isFullScreen:false,immersiveWindow:false,
   controlMenuAnchors:[],controlMenuPageOriginX:0,controlMenuPageOriginY:24,
@@ -82,12 +83,17 @@ p.controlMenu='input';
 assert.equal(p.getControlActionPadding(),12,'input retains its existing padding');
 assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['input','virtualMouse','gestureHelp','clipboard']);
 p.controlMenu='view';
-assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['zoomIn','zoomOut','fullscreen','pip','orientation']);
-assert.equal(p.getControlMenuMetrics().contentHeight,5*44+4*2,
-  'unzoomed menu height includes exactly five rendered actions');
+assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['splitKeyboard','zoomIn','zoomOut','fullscreen','pip','orientation']);
+assert.equal(p.getControlMenuMetrics().contentHeight,6*44+5*2,
+  'unzoomed menu includes the manual split action');
+p.remoteSplitInputMode='hover';
+assert(!p.getVisibleControlMenuItems().includes('splitKeyboard'),'automatic hover hides the redundant manual action');
+p.remoteSplitInputMode='none';p.remoteExternalDisplay=true;
+assert(!p.getVisibleControlMenuItems().includes('splitKeyboard'),'projected sessions do not expose the manual action');
+p.remoteExternalDisplay=false;
 p.canPanViewport=()=>true;
-assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['edgePan','pan','zoomIn','zoomOut','fullscreen','pip','orientation']);
-assert.equal(p.getControlMenuMetrics().contentHeight,7*44+6*2);
+assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['edgePan','pan','splitKeyboard','zoomIn','zoomOut','fullscreen','pip','orientation']);
+assert.equal(p.getControlMenuMetrics().contentHeight,8*44+7*2);
 p.canPanViewport=()=>false;p.controlMenu='input';
 p.isHandheldDevice=()=>false;p.isPeerAndroid=true;
 assert.deepEqual(Array.from(p.getVisibleControlMenuItems()),['input','mobileActions','gestureHelp','clipboard']);

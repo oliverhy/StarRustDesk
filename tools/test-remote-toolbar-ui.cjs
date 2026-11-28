@@ -86,10 +86,10 @@ expect(remotePage, /VIRTUAL_MOUSE_WHEEL_BUTTON_STEP:\s*number\s*=\s*1[\s\S]*send
   'virtual wheel buttons must send a precise single detent, not a multi-step jump')
 expect(remotePage, /buildVirtualMouseWheelIcon\(1\)[\s\S]*?\.position\(\{ x: 29, y: 0 \}\)[\s\S]*?\.zIndex\(2\)/,
   'virtual wheel controls must stay above the overlapping mouse drag body')
-expect(remotePage, /setKeyboardAvoidMode\(KeyboardAvoidMode\.RESIZE\)/,
-  'the keyboard must resize the available area for floating controls')
-expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.keyboardViewportHeight[\s\S]*?\.align\(Alignment.TopStart\)/,
-  'the landscape canvas keeps its full height and moves upward inside the clipped available area')
+expect(remotePage, /setKeyboardAvoidMode\(this\.foldHoverTop > 0 \? KeyboardAvoidMode\.NONE : KeyboardAvoidMode\.RESIZE\)/,
+  'the keyboard resizes the normal viewport but must not move the fold hover upper pane')
+expect(remotePage, /\.height\(this\.getRemoteCanvasHeight\(\)\)[\s\S]*?minHeight: this\.foldHoverTop > 0 \? 0 : this\.keyboardViewportHeight[\s\S]*?\.align\(Alignment.TopStart\)/,
+  'normal canvas keeps the pre-IME height; split canvas stays inside the top pane')
 expect(remotePage, /keyboardViewportHeight = this\.isHandheldDevice\(\) \?[\s\S]*?this\.componentHeight/,
   'opening the keyboard must preserve the unscaled canvas on all handheld aspect ratios')
 expect(remotePage, /openRemoteKeyboard\(\)[\s\S]*?this\.snapshotRemoteKeyboardViewport\(\)/,

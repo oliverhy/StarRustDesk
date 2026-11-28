@@ -64,6 +64,7 @@ export struct RemoteGlassMenu {
       case 'displaySwipe': return '三指切屏';
       case 'pan': return '移动画面';
       case 'edgePan': return '边缘跟随';
+      case 'splitKeyboard': return '上画面下键盘';
       case 'gameMode': return '游戏模式';
       case 'highPerformance': return '高性能优先';
       case 'physicalGamepad': return '实体手柄映射';
@@ -90,7 +91,7 @@ export struct RemoteGlassMenu {
     }
   }
   isToggle(key: string): boolean {
-    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'privacy', 'monitor', 'displaySwipe', 'gameMode', 'highPerformance',
+    return ['virtualMouse', 'clipboard', 'pan', 'edgePan', 'splitKeyboard', 'privacy', 'monitor', 'displaySwipe', 'gameMode', 'highPerformance',
       'physicalGamepad', 'virtualGamepad', 'controlAccess'].includes(key);
   }
   isOn(key: string): boolean {
@@ -100,6 +101,7 @@ export struct RemoteGlassMenu {
       case 'clipboard': return this.state.clipboard;
       case 'pan': return this.state.pan;
       case 'edgePan': return this.state.edgePan;
+      case 'splitKeyboard': return this.state.splitKeyboard;
       case 'privacy': return this.state.privacy;
       case 'monitor': return this.state.monitor;
       case 'displaySwipe': return this.state.displaySwipe;
@@ -466,11 +468,11 @@ export struct RemoteGlassMenu {
   view() {
     if (this.state.desktop) { this.desktop() }
     this.zoom()
-    ForEach(this.state.items.filter((key: string) => key === 'gameMode' || key === 'highPerformance' || key === 'pan' || key === 'edgePan'), (key: string) => {
+    ForEach(this.state.items.filter((key: string) => ['gameMode', 'highPerformance', 'pan', 'edgePan', 'splitKeyboard'].includes(key)), (key: string) => {
       this.action(key)
     }, (key: string) => key)
     this.divider()
-    ForEach(this.state.items.filter((key: string) => !['gameMode', 'highPerformance', 'pan', 'edgePan', 'zoomIn', 'zoomOut'].includes(key)), (key: string) => {
+    ForEach(this.state.items.filter((key: string) => !['gameMode', 'highPerformance', 'pan', 'edgePan', 'splitKeyboard', 'zoomIn', 'zoomOut'].includes(key)), (key: string) => {
       this.action(key)
     }, (key: string) => key)
   }
